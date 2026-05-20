@@ -76,6 +76,8 @@ jobs:
             PSAT_SITE_ORIGIN="${{ steps.fly.outputs.url }}" \
             ETHERSCAN_API_KEY="${{ secrets.ETHERSCAN_API_KEY }}" \
             ETH_RPC="${{ secrets.ETH_RPC }}" \
+            ERPC_BASE_URL="${{ secrets.ERPC_BASE_URL }}" \
+            ERPC_SECRET="${{ secrets.ERPC_SECRET }}" \
             ENVIO_API_TOKEN="${{ secrets.ENVIO_API_TOKEN }}" \
             TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
             PSAT_TAVILY_CACHE="1" \
