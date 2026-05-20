@@ -31,12 +31,28 @@ from services.resolution.capability_resolver import (
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
 from utils.logging import record_degraded
+from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.resolution_worker")
 
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", "https://ethereum-rpc.publicnode.com")
+DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
+
+
+def _rpc_url_for_job(job: Job) -> str:
+    request = job.request if isinstance(job.request, dict) else {}
+    explicit = request.get("rpc_url")
+    chain = request.get("chain")
+    return (
+        default_rpc_url(
+            explicit_rpc_url=explicit if isinstance(explicit, str) else None,
+            chain_id=request.get("chain_id"),
+            chain=chain if isinstance(chain, str) else None,
+            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
+        )
+        or DEFAULT_RPC_URL
+    )
 
 
 def _build_root_artifacts(
@@ -65,9 +81,7 @@ class ResolutionWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
-        rpc_url = DEFAULT_RPC_URL
-        if job.request and isinstance(job.request, dict):
-            rpc_url = job.request.get("rpc_url") or rpc_url
+        rpc_url = _rpc_url_for_job(job)
 
         # Read control_tracking_plan from DB
         tracking_plan = get_artifact(session, job.id, "control_tracking_plan")

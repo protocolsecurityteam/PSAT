@@ -30,13 +30,29 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from utils.concurrency import parallel_map
 from utils.logging import record_degraded
+from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.policy_worker")
 
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", "https://ethereum-rpc.publicnode.com")
+DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
+
+
+def _rpc_url_for_job(job: Job) -> str:
+    request = job.request if isinstance(job.request, dict) else {}
+    explicit = request.get("rpc_url")
+    chain = request.get("chain")
+    return (
+        default_rpc_url(
+            explicit_rpc_url=explicit if isinstance(explicit, str) else None,
+            chain_id=request.get("chain_id"),
+            chain=chain if isinstance(chain, str) else None,
+            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
+        )
+        or DEFAULT_RPC_URL
+    )
 
 
 def _root_artifacts(
@@ -240,9 +256,7 @@ class PolicyWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
-        rpc_url = DEFAULT_RPC_URL
-        if job.request and isinstance(job.request, dict):
-            rpc_url = job.request.get("rpc_url") or rpc_url
+        rpc_url = _rpc_url_for_job(job)
 
         # Load required artifacts from DB
         contract_analysis = get_artifact(session, job.id, "contract_analysis")

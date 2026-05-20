@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 from eth_utils.crypto import keccak
@@ -20,6 +20,28 @@ JSON_RPC_TIMEOUT_SECONDS = 10
 MAX_BATCH_SIZE = 500
 
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
+DEFAULT_ERPC_PROJECT_ID = "main"
+DEFAULT_ERPC_ARCHITECTURE = "evm"
+PUBLIC_ETH_RPC_URL = "https://ethereum-rpc.publicnode.com"
+COMMON_CHAIN_IDS = {
+    "ethereum": 1,
+    "mainnet": 1,
+    "arbitrum": 42161,
+    "optimism": 10,
+    "polygon": 137,
+    "base": 8453,
+    "avalanche": 43114,
+    "bsc": 56,
+    "linea": 59144,
+    "scroll": 534352,
+    "zksync": 324,
+    "blast": 81457,
+    "mode": 34443,
+    "bera": 80094,
+    "berachain": 80094,
+}
 
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
 _GETCODE_CACHE: dict[tuple[str, str], tuple[str, str, float]] = {}
@@ -222,12 +244,135 @@ def _get_session() -> requests.Session:
     return s
 
 
+def erpc_url_for_chain_id(
+    chain_id: int | str | None,
+    *,
+    base_url: str | None = None,
+    project_id: str | None = None,
+    architecture: str | None = None,
+) -> str | None:
+    """Build the configured eRPC URL for an EVM chain id."""
+    if chain_id is None:
+        return None
+    try:
+        chain_id_int = int(chain_id)
+    except (TypeError, ValueError):
+        return None
+    if chain_id_int <= 0:
+        return None
+
+    base = (base_url if base_url is not None else os.getenv("ERPC_BASE_URL")) or ""
+    if not base.strip():
+        return None
+    project = project_id or os.getenv("ERPC_PROJECT_ID") or DEFAULT_ERPC_PROJECT_ID
+    arch = architecture or os.getenv("ERPC_ARCHITECTURE") or DEFAULT_ERPC_ARCHITECTURE
+    return f"{base.rstrip('/')}/{project.strip('/')}/{arch.strip('/')}/{chain_id_int}"
+
+
+def rpc_url_for_chain_id(chain_id: int | str | None, explicit_rpc_url: str | None = None) -> str | None:
+    """Return an explicit RPC URL when provided, otherwise the configured eRPC URL."""
+    if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
+        return explicit_rpc_url
+    return erpc_url_for_chain_id(chain_id)
+
+
+def chain_id_for_chain_name(chain: str | None) -> int | None:
+    if not isinstance(chain, str) or not chain.strip():
+        return None
+    return COMMON_CHAIN_IDS.get(chain.lower().strip())
+
+
+def default_rpc_url(
+    *,
+    explicit_rpc_url: str | None = None,
+    chain_id: int | str | None = None,
+    chain: str | None = None,
+    fallback_url: str | None = None,
+    default_chain_id: int | None = 1,
+    public_fallback: bool = True,
+) -> str | None:
+    """Resolve the RPC URL PSAT should use for a job.
+
+    Explicit URLs win so local Anvil/tests keep working. Otherwise, use eRPC
+    when a chain id can be resolved, then fall back to the legacy ETH_RPC
+    default. Unknown explicit chain names do not get silently mapped to mainnet.
+    """
+    if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
+        return explicit_rpc_url
+
+    effective_chain_id = None
+    if chain_id is not None:
+        try:
+            parsed = int(chain_id)
+            if parsed > 0:
+                effective_chain_id = parsed
+        except (TypeError, ValueError):
+            effective_chain_id = None
+    if effective_chain_id is None:
+        effective_chain_id = chain_id_for_chain_name(chain)
+    if effective_chain_id is None and not (isinstance(chain, str) and chain.strip()):
+        effective_chain_id = default_chain_id
+
+    erpc_url = erpc_url_for_chain_id(effective_chain_id)
+    if erpc_url:
+        return erpc_url
+    if isinstance(fallback_url, str) and fallback_url.strip():
+        return fallback_url
+    env_rpc = os.getenv("ETH_RPC")
+    if env_rpc:
+        return env_rpc
+    if public_fallback:
+        return PUBLIC_ETH_RPC_URL
+    return None
+
+
+def _is_configured_erpc_url(rpc_url: str) -> bool:
+    base = os.getenv("ERPC_BASE_URL")
+    if not base:
+        return False
+    normalized_url = rpc_url.rstrip("/")
+    normalized_base = base.rstrip("/")
+    return normalized_url == normalized_base or normalized_url.startswith(f"{normalized_base}/")
+
+
+def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return JSON-RPC headers, adding eRPC auth only for configured eRPC URLs."""
+    headers = {"Content-Type": "application/json"}
+    if _is_configured_erpc_url(rpc_url):
+        secret = os.getenv("ERPC_SECRET")
+        if secret:
+            headers[ERPC_SECRET_HEADER] = secret
+    if extra_headers:
+        headers.update({str(key): str(value) for key, value in extra_headers.items()})
+    return headers
+
+
+def erpc_healthcheck_url(chain_id: int | str | None = None, *, eval_chain_id: bool = False) -> str | None:
+    """Build an eRPC healthcheck URL for deployment smoke checks."""
+    base = (os.getenv("ERPC_BASE_URL") or "").rstrip("/")
+    if not base:
+        return None
+    if chain_id is None:
+        return f"{base}/healthcheck"
+    rpc_url = erpc_url_for_chain_id(chain_id)
+    if rpc_url is None:
+        return None
+    healthcheck = f"{rpc_url}/healthcheck"
+    return f"{healthcheck}?eval=all:evm:eth_chainId" if eval_chain_id else healthcheck
+
+
 def normalize_address(address: str) -> str:
     """Normalize an Ethereum address to lowercase with a single 0x prefix."""
     return "0x" + address.lower().replace("0x", "", 1)
 
 
-def rpc_request(rpc_url: str, method: str, params: list[Any], retries: int = 1) -> Any:
+def rpc_request(
+    rpc_url: str,
+    method: str,
+    params: list[Any],
+    retries: int = 1,
+    headers: Mapping[str, str] | None = None,
+) -> Any:
     session = _get_session()
     for attempt in range(retries + 1):
         try:
@@ -235,7 +380,7 @@ def rpc_request(rpc_url: str, method: str, params: list[Any], retries: int = 1) 
                 rpc_url,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                 timeout=JSON_RPC_TIMEOUT_SECONDS,
-                headers={"Content-Type": "application/json"},
+                headers=rpc_headers(rpc_url, headers),
             )
             if response.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
                 time.sleep(0.3 * (2**attempt))
@@ -410,7 +555,11 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
     return out
 
 
-def rpc_batch_request(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[Any]:
+def rpc_batch_request(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    headers: Mapping[str, str] | None = None,
+) -> list[Any]:
     """Send a JSON-RPC batch and return results in call order; per-call errors yield ``None``."""
     if not calls:
         return []
@@ -429,7 +578,7 @@ def rpc_batch_request(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[
                 rpc_url,
                 json=batch,
                 timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-                headers={"Content-Type": "application/json"},
+                headers=rpc_headers(rpc_url, headers),
             )
             response.raise_for_status()
         except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as exc:
@@ -451,7 +600,11 @@ def rpc_batch_request(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[
     return results
 
 
-def rpc_batch_request_with_status(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[tuple[Any, bool]]:
+def rpc_batch_request_with_status(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    headers: Mapping[str, str] | None = None,
+) -> list[tuple[Any, bool]]:
     """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
     legitimate ``None`` result."""
     if not calls:
@@ -474,7 +627,7 @@ def rpc_batch_request_with_status(rpc_url: str, calls: list[tuple[str, list[Any]
                 rpc_url,
                 json=batch,
                 timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-                headers={"Content-Type": "application/json"},
+                headers=rpc_headers(rpc_url, headers),
             )
             response.raise_for_status()
             payload = response.json()

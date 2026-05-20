@@ -543,12 +543,15 @@ def test_check_proxy_cache_no_rpc_url(db_session):
     import os
 
     old_rpc = os.environ.pop("ETH_RPC", None)
+    old_erpc = os.environ.pop("ERPC_BASE_URL", None)
     try:
         result = _check_proxy_cache(db_session, job, contract)
         assert result is None
     finally:
         if old_rpc is not None:
             os.environ["ETH_RPC"] = old_rpc
+        if old_erpc is not None:
+            os.environ["ERPC_BASE_URL"] = old_erpc
 
 
 # ---------------------------------------------------------------------------
