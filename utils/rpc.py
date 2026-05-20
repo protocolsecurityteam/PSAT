@@ -22,8 +22,6 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-DEFAULT_ERPC_PROJECT_ID = "main"
-DEFAULT_ERPC_ARCHITECTURE = "evm"
 PUBLIC_ETH_RPC_URL = "https://ethereum-rpc.publicnode.com"
 COMMON_CHAIN_IDS = {
     "ethereum": 1,
@@ -248,8 +246,6 @@ def erpc_url_for_chain_id(
     chain_id: int | str | None,
     *,
     base_url: str | None = None,
-    project_id: str | None = None,
-    architecture: str | None = None,
 ) -> str | None:
     """Build the configured eRPC URL for an EVM chain id."""
     if chain_id is None:
@@ -264,9 +260,7 @@ def erpc_url_for_chain_id(
     base = (base_url if base_url is not None else os.getenv("ERPC_BASE_URL")) or ""
     if not base.strip():
         return None
-    project = project_id or os.getenv("ERPC_PROJECT_ID") or DEFAULT_ERPC_PROJECT_ID
-    arch = architecture or os.getenv("ERPC_ARCHITECTURE") or DEFAULT_ERPC_ARCHITECTURE
-    return f"{base.rstrip('/')}/{project.strip('/')}/{arch.strip('/')}/{chain_id_int}"
+    return f"{base.rstrip('/')}/main/evm/{chain_id_int}"
 
 
 def rpc_url_for_chain_id(chain_id: int | str | None, explicit_rpc_url: str | None = None) -> str | None:

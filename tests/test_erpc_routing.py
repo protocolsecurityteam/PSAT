@@ -24,8 +24,6 @@ def _response(payload):
 
 def test_erpc_url_for_chain_id_uses_configured_route(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    monkeypatch.delenv("ERPC_PROJECT_ID", raising=False)
-    monkeypatch.delenv("ERPC_ARCHITECTURE", raising=False)
 
     assert rpc.erpc_url_for_chain_id(8453) == "https://erpc-proxy.example/main/evm/8453"
 
