@@ -8,17 +8,20 @@ import JobDetailPanel from "./JobDetailPanel.jsx";
 export const PIPELINE_STAGES = ["discovery", "dapp_crawl", "defillama_scan", "selection", "static", "resolution", "policy", "coverage"];
 export const ALL_STAGES = [...PIPELINE_STAGES, "done"];
 
-// Time-window selector universe. Active jobs (queued/processing/failed/
-// failed_terminal) are always shown regardless of window — the window only
-// scopes *history* (completed and the recently-completed tape). "all" means
-// no upper bound; the cutoff is just 0.
+// Time-window selector universe. Only truly live work (queued/processing)
+// is exempt from the window filter — those represent the current state of
+// the worker fleet and have no useful "stale" interpretation. failed and
+// failed_terminal flow through the window like completed jobs: a terminal
+// failure from 4 hours ago shouldn't crowd a 1h dashboard view; admins can
+// widen the window or open "All" to triage older red dots. "all" means no
+// upper bound; the cutoff is just 0.
 const TIME_WINDOWS = [
   { id: "1h", label: "1h", ms: 60 * 60 * 1000 },
   { id: "24h", label: "24h", ms: 24 * 60 * 60 * 1000 },
   { id: "7d", label: "7d", ms: 7 * 24 * 60 * 60 * 1000 },
   { id: "all", label: "All", ms: Infinity },
 ];
-const ACTIVE_STATUSES = new Set(["queued", "processing", "failed", "failed_terminal"]);
+const ACTIVE_STATUSES = new Set(["queued", "processing"]);
 
 function windowCutoff(windowId, now) {
   if (windowId === "all") return 0;
@@ -137,8 +140,10 @@ export default function PipelineDashboard() {
       if (j.is_proxy && !isRunning) return false;
       if (!j.is_proxy && j.address && implProxyAddresses.has(j.address.toLowerCase()) && !isRunning) return false;
       if (j.company && hasChildJobs && j.status === "completed") return false;
-      // Time window: active jobs always visible (they're the live state we
-      // care about); historical jobs only if updated within the window.
+      // Time window: live work (queued/processing) is always visible — it's
+      // the current state of the fleet. Everything else (completed, failed,
+      // failed_terminal) is window-scoped so old red dots don't persist
+      // forever.
       if (!isActive) {
         const t = new Date(j.updated_at || j.created_at).getTime();
         if (t < cutoff) return false;

@@ -211,6 +211,33 @@ describe("PipelineDashboard", () => {
 });
 
 describe("PipelineDashboard — time window", () => {
+  it("filters old failed_terminal jobs out of the dot view", async () => {
+    // 5h-old terminal failure: outside 1h, inside 7d. Live jobs (queued/
+    // processing) would still show regardless; failed_terminal should not.
+    const oldTerminal = makeJob({
+      job_id: "old-terminal",
+      name: "Old Terminal",
+      status: "failed_terminal",
+      stage: "policy",
+      retry_count: 3,
+      last_failure_kind: "terminal",
+      updated_at: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+    });
+    installJobMocks([oldTerminal]);
+    render(<PipelineDashboard />);
+    // Default 1h: terminal chip should be absent because the only terminal
+    // job is outside the window.
+    await waitFor(() => {
+      expect(screen.getByText(/Pipeline Status/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/1 terminal/i)).not.toBeInTheDocument();
+    // Switch to 7d → the terminal job is back in scope and the chip appears.
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+    await waitFor(() => {
+      expect(screen.getByText(/1 terminal/i)).toBeInTheDocument();
+    });
+  });
+
   it("switching the window updates the completion tape", async () => {
     const recent = makeJob({
       job_id: "recent", name: "Recent Done", status: "completed", stage: "done",
