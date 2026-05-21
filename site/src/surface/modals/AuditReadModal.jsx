@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { formatAuditDate } from "../../auditUi.jsx";
-import { dedupeShas } from "../format.js";
+import { dedupeShas, shortAddr } from "../format.js";
 
 function AuditCommitChips({ detail, maxShown = 4 }) {
   if (!detail) return null;
@@ -261,7 +261,7 @@ export function AuditReadModal({ audit, addresses, machines, shaByAddr, onClose 
                     type={hasJump ? "button" : undefined}
                   >
                     <div className="ps-audit-modal-aside-row-main">
-                      <div className="ps-audit-modal-aside-name">{m?.name || "unknown"}</div>
+                      <div className="ps-audit-modal-aside-name">{m?.name || shortAddr(addr)}</div>
                       <div className="ps-audit-modal-aside-addr">{addr}</div>
                     </div>
                     <div className="ps-audit-modal-aside-badges">

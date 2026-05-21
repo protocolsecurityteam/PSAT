@@ -84,6 +84,25 @@ export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, load
   if (error) return <section className="ps-principal-section"><div className="ps-inspector-empty">Failed: {error}</div></section>;
   if (!coverageData) return null;
 
+  // Resolve lowercase addresses → { name, address } using the machines map
+  // so covered contracts are legible instead of just raw hex.
+  const contractByAddr = new Map();
+  if (Array.isArray(machines)) {
+    for (const m of machines) {
+      const a = (m.address || "").toLowerCase();
+      if (a) contractByAddr.set(a, m);
+    }
+  }
+
+  // `/api/company/{name}` deduplicates impls under their proxy, but
+  // `/audit_coverage` returns one row per Contract DB entity — including
+  // the impl and any historical impls. Without filtering, a single
+  // audit covering one logical contract emits 2+ entries here, and the
+  // ones that aren't on the canvas render as "unknown". Skip any
+  // address that isn't in `machines` so the audit's covered list
+  // collapses to one entry per logical contract.
+  const isOnCanvas = (addr) => contractByAddr.has(addr);
+
   // Invert: audit_id → { audit, addresses: Set<lowercase>, shaByAddr: Map<addr, sha> }
   // Each coverage row has per-(contract, audit) match metadata — notably
   // matched_commit_sha (Tier 2). Capture it here so the modal can render
@@ -92,6 +111,7 @@ export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, load
   for (const entry of coverageData.coverage || []) {
     const addr = (entry.address || "").toLowerCase();
     if (!addr) continue;
+    if (!isOnCanvas(addr)) continue;
     for (const a of entry.audits || []) {
       if (!isBytecodeVerifiedAudit(a)) continue;
       const id = a.audit_id;
@@ -118,16 +138,6 @@ export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, load
   const activeEntry = activeAuditId != null
     ? entries.find((e) => e.audit.audit_id === activeAuditId)
     : null;
-
-  // Resolve lowercase addresses → { name, address } using the machines map
-  // so covered contracts are legible instead of just raw hex.
-  const contractByAddr = new Map();
-  if (Array.isArray(machines)) {
-    for (const m of machines) {
-      const a = (m.address || "").toLowerCase();
-      if (a) contractByAddr.set(a, m);
-    }
-  }
 
   return (
     <>
@@ -156,7 +166,7 @@ export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, load
                 const m = contractByAddr.get(addr);
                 return (
                   <div key={addr} className="ps-audits-covered-row">
-                    <span className="ps-audits-covered-name">{m?.name || "unknown"}</span>
+                    <span className="ps-audits-covered-name">{m?.name || shortAddr(addr)}</span>
                     <span className="ps-audits-covered-addr">{shortAddr(addr)}</span>
                   </div>
                 );
