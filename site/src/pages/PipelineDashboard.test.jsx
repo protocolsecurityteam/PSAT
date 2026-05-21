@@ -336,6 +336,45 @@ describe("buildLogsDeeplink", () => {
     expect(left.queries[0].expr).toContain('service_name=~');
     expect(left.queries[0].expr).not.toContain("fly_app_name");
   });
+
+  it("derives the time range from the job span when timestamps are provided", () => {
+    // Job ran 3 days ago — the old hardcoded now-24h would have produced an
+    // empty Explore view even though Loki still holds the logs (~14d).
+    const now = new Date("2026-05-21T12:00:00Z").getTime();
+    const createdAt = new Date("2026-05-18T12:00:00Z").toISOString();
+    const updatedAt = new Date("2026-05-18T12:05:00Z").toISOString();
+    const href = buildLogsDeeplink("abc123", { now, createdAt, updatedAt });
+    const left = JSON.parse(decodeURIComponent(href.split("left=")[1]));
+    const fromMs = Number(left.range.from);
+    const toMs = Number(left.range.to);
+    // 1h pad on either side of the job span.
+    expect(fromMs).toBe(new Date("2026-05-18T11:00:00Z").getTime());
+    expect(toMs).toBe(new Date("2026-05-18T13:05:00Z").getTime());
+  });
+
+  it("clamps `from` to the 14-day Loki retention floor", () => {
+    // Stale job from 30 days ago: Loki dropped its logs long ago, but the
+    // deeplink should still produce a window that at least covers what
+    // retention can serve rather than scanning into the void.
+    const now = new Date("2026-05-21T00:00:00Z").getTime();
+    const createdAt = new Date("2026-04-21T00:00:00Z").toISOString();
+    const updatedAt = new Date("2026-04-21T00:10:00Z").toISOString();
+    const href = buildLogsDeeplink("abc123", { now, createdAt, updatedAt });
+    const left = JSON.parse(decodeURIComponent(href.split("left=")[1]));
+    const fromMs = Number(left.range.from);
+    const toMs = Number(left.range.to);
+    expect(fromMs).toBe(now - 14 * 24 * 60 * 60 * 1000);
+    // Both job timestamps are pre-retention, so `to` falls back to now too.
+    expect(toMs).toBe(now);
+  });
+
+  it("falls back to a 14-day window when no timestamps are provided", () => {
+    const now = new Date("2026-05-21T00:00:00Z").getTime();
+    const href = buildLogsDeeplink("abc123", { now });
+    const left = JSON.parse(decodeURIComponent(href.split("left=")[1]));
+    expect(Number(left.range.from)).toBe(now - 14 * 24 * 60 * 60 * 1000);
+    expect(Number(left.range.to)).toBe(now);
+  });
 });
 
 describe("inferFlyApp", () => {

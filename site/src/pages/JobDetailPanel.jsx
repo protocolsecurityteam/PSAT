@@ -10,6 +10,15 @@ import { shortenAddress } from "../graph.js";
 // the env scope Loki would scan every PR preview's logs for every lookup.
 const GRAFANA_LOGS_BASE = "https://protocolsectool.grafana.net";
 
+// Grafana Cloud free-tier Loki retention. Probed 2026-05-21: data present
+// at day-13, gone by day-16. Clamping the deeplink range to this floor
+// avoids scanning a window where nothing can ever exist.
+const LOKI_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+// 1h padding around the job span so a log line written a few minutes before
+// the job row was created (e.g. submission queueing) or after it landed in a
+// terminal state still falls inside the window.
+const LOKI_RANGE_BUFFER_MS = 60 * 60 * 1000;
+
 // Map a browser hostname back to the Fly app that produced the page.
 //   psat.fly.dev         → "psat"          (prod)
 //   psat-pr-90.fly.dev   → "psat-pr-90"    (preview)
@@ -20,6 +29,12 @@ export function inferFlyApp(hostname) {
   return m ? m[1] : null;
 }
 
+function parseIsoMs(value) {
+  if (!value) return null;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
 export function buildLogsDeeplink(traceId, opts = {}) {
   if (!traceId) return null;
   const hostname = opts.hostname ?? (typeof window !== "undefined" ? window.location.hostname : null);
@@ -28,10 +43,27 @@ export function buildLogsDeeplink(traceId, opts = {}) {
   // resolve to the same trace because trace_id is a substring filter on
   // the line, but the scoped variant is dramatically cheaper for Loki.
   const selector = flyApp ? `{fly_app_name="${flyApp}"}` : `{service_name=~".+"}`;
+
+  // Derive the time range from the job span when caller provides it, so
+  // an old terminal failure still produces a useful Explore link (the
+  // hardcoded now-24h missed anything older than a day even though Loki
+  // holds ~14 days). Clamp to the retention floor either way.
+  const now = opts.now ?? Date.now();
+  const createdMs = parseIsoMs(opts.createdAt);
+  const updatedMs = parseIsoMs(opts.updatedAt);
+  const retentionFloor = now - LOKI_RETENTION_MS;
+  let fromMs = createdMs != null ? Math.max(createdMs - LOKI_RANGE_BUFFER_MS, retentionFloor) : retentionFloor;
+  let toMs = updatedMs != null ? Math.min(updatedMs + LOKI_RANGE_BUFFER_MS, now) : now;
+  // Defensive: clock skew / bad timestamps could invert the range.
+  if (fromMs >= toMs) {
+    fromMs = retentionFloor;
+    toMs = now;
+  }
+
   const left = {
     datasource: "grafanacloud-logs",
     queries: [{ refId: "A", expr: `${selector} |= "${traceId}"` }],
-    range: { from: "now-24h", to: "now" },
+    range: { from: String(fromMs), to: String(toMs) },
   };
   return `${GRAFANA_LOGS_BASE}/explore?left=${encodeURIComponent(JSON.stringify(left))}`;
 }
@@ -136,7 +168,10 @@ export default function JobDetailPanel({ job, stageColors, statusColors, onClose
   const statusColor = statusColors?.[statusKey] || "#94a3b8";
 
   const traceId = job.trace_id || errors?.trace_id || null;
-  const logsHref = buildLogsDeeplink(traceId);
+  const logsHref = buildLogsDeeplink(traceId, {
+    createdAt: job.created_at,
+    updatedAt: job.updated_at,
+  });
 
   async function handleRetry() {
     setRetrying(true);
