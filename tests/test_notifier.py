@@ -1,7 +1,7 @@
 """Integration tests for the Discord notification pipeline.
 
 Tests the full chain: scan/poll detects upgrade → notifier queries subscriptions
-→ Discord webhook POST. Also tests subscription CRUD via the API endpoints.
+→ Discord webhook POST. Also covers protocol subscription event_filter validation.
 
 All tests run without live services — PostgreSQL for DB, mocked RPC
 and mocked requests.post for Discord.
@@ -15,9 +15,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from conftest import ADDR, _add_proxy, _add_subscription, _make_log, _topic_for, requires_postgres
-from sqlalchemy import select
 
-from db.models import ProxySubscription, ProxyUpgradeEvent, WatchedProxy
+from db.models import ProxySubscription, ProxyUpgradeEvent
 from services.discovery.upgrade_history import UPGRADED_TOPIC0
 from services.monitoring.notifier import notify_upgrades
 from services.monitoring.proxy_watcher import poll_for_upgrades, scan_for_upgrades
@@ -248,7 +247,7 @@ def test_embed_format_complete(mock_rpc, mock_discord, db_session):
 
 
 # ---------------------------------------------------------------------------
-# API: subscription CRUD
+# Protocol subscription event_filter validation
 # ---------------------------------------------------------------------------
 
 
@@ -260,110 +259,12 @@ def api_client(db_session):
     def fake_session_local():
         yield db_session
 
-    classifier_patch = "services.discovery.classifier.classify_single"
-    resolve_patch = "services.monitoring.proxy_watcher.resolve_current_implementation"
-    block_patch = "services.monitoring.proxy_watcher.get_latest_block"
-    with (
-        patch("routers.deps.SessionLocal", fake_session_local),
-        patch(classifier_patch, return_value={"type": "proxy", "proxy_type": "eip1967"}),
-        patch(resolve_patch, return_value=ADDR(99).lower()),
-        patch(block_patch, return_value=1000),
-    ):
+    with patch("routers.deps.SessionLocal", fake_session_local):
         from fastapi.testclient import TestClient
 
         import api
 
         yield TestClient(api.app)
-
-
-def test_api_watch_proxy_with_discord_creates_subscription(api_client, db_session):
-    """POST /api/watched-proxies with discord_webhook_url creates both proxy and subscription."""
-    resp = api_client.post(
-        "/api/watched-proxies",
-        json={"address": ADDR(1), "label": "Test", "discord_webhook_url": "https://discord.com/api/webhooks/t/h"},
-    )
-    assert resp.status_code == 200
-    assert "subscription_id" in resp.json()
-
-    subs = db_session.execute(select(ProxySubscription)).scalars().all()
-    assert len(subs) == 1
-    assert subs[0].discord_webhook_url == "https://discord.com/api/webhooks/t/h"
-
-
-def test_api_watch_proxy_without_discord_no_subscription(api_client, db_session):
-    """POST without discord_webhook_url creates proxy but no subscription."""
-    resp = api_client.post("/api/watched-proxies", json={"address": ADDR(2)})
-    assert resp.status_code == 200
-    assert "subscription_id" not in resp.json()
-    assert db_session.execute(select(ProxySubscription)).scalars().all() == []
-
-
-def test_api_second_watch_adds_subscription_only(api_client, db_session):
-    """Same proxy watched twice — one WatchedProxy, two subscriptions."""
-    api_client.post("/api/watched-proxies", json={"address": ADDR(3), "discord_webhook_url": "https://d.co/1"})
-    api_client.post("/api/watched-proxies", json={"address": ADDR(3), "discord_webhook_url": "https://d.co/2"})
-
-    assert len(db_session.execute(select(WatchedProxy)).scalars().all()) == 1
-    subs = db_session.execute(select(ProxySubscription)).scalars().all()
-    assert len(subs) == 2
-    assert {s.discord_webhook_url for s in subs} == {"https://d.co/1", "https://d.co/2"}
-
-
-def test_api_list_subscriptions(api_client, db_session):
-    proxy = _add_proxy(db_session, ADDR(4))
-    _add_subscription(db_session, proxy, "https://discord.com/api/webhooks/list/test", label="my alerts")
-
-    resp = api_client.get(f"/api/watched-proxies/{proxy.id}/subscriptions")
-    assert resp.status_code == 200
-    assert len(resp.json()) == 1
-    assert resp.json()[0]["label"] == "my alerts"
-
-
-def test_api_list_subscriptions_404_for_missing_proxy(api_client):
-    assert api_client.get(f"/api/watched-proxies/{uuid.uuid4()}/subscriptions").status_code == 404
-
-
-def test_api_add_subscription_to_existing_proxy(api_client, db_session):
-    proxy = _add_proxy(db_session, ADDR(5))
-    resp = api_client.post(
-        f"/api/watched-proxies/{proxy.id}/subscriptions",
-        json={"discord_webhook_url": "https://discord.com/api/webhooks/add/test", "label": "added later"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["watched_proxy_id"] == str(proxy.id)
-
-
-def test_api_add_subscription_404_for_missing_proxy(api_client):
-    resp = api_client.post(
-        f"/api/watched-proxies/{uuid.uuid4()}/subscriptions",
-        json={"discord_webhook_url": "https://discord.com/api/webhooks/x/y"},
-    )
-    assert resp.status_code == 404
-
-
-def test_api_delete_subscription(api_client, db_session):
-    proxy = _add_proxy(db_session, ADDR(6))
-    sub = _add_subscription(db_session, proxy, "https://discord.com/api/webhooks/del/test")
-
-    assert api_client.delete(f"/api/subscriptions/{sub.id}").status_code == 200
-    assert db_session.execute(select(ProxySubscription)).scalars().all() == []
-
-
-def test_api_delete_subscription_404_for_missing(api_client):
-    assert api_client.delete(f"/api/subscriptions/{uuid.uuid4()}").status_code == 404
-
-
-def test_api_delete_proxy_cascades_subscriptions(api_client, db_session):
-    proxy = _add_proxy(db_session, ADDR(7))
-    _add_subscription(db_session, proxy, "https://discord.com/api/webhooks/cascade/test")
-
-    assert api_client.delete(f"/api/watched-proxies/{proxy.id}").status_code == 200
-    assert db_session.execute(select(ProxySubscription)).scalars().all() == []
-
-
-# ---------------------------------------------------------------------------
-# Protocol subscription event_filter validation
-# ---------------------------------------------------------------------------
 
 
 def _create_protocol(session, name="__test_proto__"):

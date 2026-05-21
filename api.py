@@ -29,7 +29,6 @@ from routers import (
     predicate_capabilities,
     protocols,
     spa,
-    watched_proxies,
 )
 from utils.logging import bind_trace_context, configure_logging
 
@@ -107,7 +106,6 @@ app.include_router(jobs.router)
 app.include_router(analyses.router)
 app.include_router(company.router)
 app.include_router(audits.router)
-app.include_router(watched_proxies.router)
 app.include_router(protocols.router)
 app.include_router(monitored.router)
 app.include_router(address_labels.router)

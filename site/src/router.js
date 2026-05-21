@@ -37,10 +37,6 @@ export function parseLocationPath(pathname) {
     return { mode: "company", value: segments[1], tab: "summary", companyTab };
   }
 
-  if (segments[0] === "proxies") {
-    return { mode: "proxies", value: null, tab: "summary" };
-  }
-
   if (segments[0] === "runs" && segments[1]) {
     return {
       mode: "run",

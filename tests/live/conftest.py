@@ -199,11 +199,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    def list_proxy_events(self) -> list[dict[str, Any]]:
-        r = self._session.get(self._url("/api/proxy-events"), timeout=15)
-        r.raise_for_status()
-        return r.json()
-
     def contract_audit_timeline(self, contract_id: int) -> dict[str, Any]:
         r = self._session.get(self._url(f"/api/contracts/{contract_id}/audit_timeline"), timeout=30)
         r.raise_for_status()
@@ -274,46 +269,6 @@ class LiveClient:
             time.sleep(interval)
         raise TimeoutError(f"Audit {audit_id} did not finish scope extraction within {timeout}s")
 
-    # -- watched proxies -----------------------------------------------------
-
-    def add_watched_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
-        r = self._session.post(
-            self._url("/api/watched-proxies"),
-            json=payload,
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
-
-    def list_watched_proxies(self) -> list[dict[str, Any]]:
-        r = self._session.get(self._url("/api/watched-proxies"), timeout=15)
-        r.raise_for_status()
-        return r.json()
-
-    def delete_watched_proxy(self, proxy_id: str) -> dict[str, Any]:
-        r = self._session.delete(self._url(f"/api/watched-proxies/{proxy_id}"), timeout=15)
-        r.raise_for_status()
-        return r.json()
-
-    def list_subscriptions(self, proxy_id: str) -> list[dict[str, Any]]:
-        r = self._session.get(self._url(f"/api/watched-proxies/{proxy_id}/subscriptions"), timeout=15)
-        r.raise_for_status()
-        return r.json()
-
-    def add_subscription(self, proxy_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        r = self._session.post(
-            self._url(f"/api/watched-proxies/{proxy_id}/subscriptions"),
-            json=payload,
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
-
-    def delete_subscription(self, subscription_id: str) -> dict[str, Any]:
-        r = self._session.delete(self._url(f"/api/subscriptions/{subscription_id}"), timeout=15)
-        r.raise_for_status()
-        return r.json()
-
     # -- monitored contracts (PATCH) ----------------------------------------
 
     def list_monitored_contracts(
@@ -343,6 +298,15 @@ class LiveClient:
 
     def protocol_monitoring(self, protocol_id: int) -> list[dict[str, Any]]:
         r = self._session.get(self._url(f"/api/protocols/{protocol_id}/monitoring"), timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    def upsert_protocol_monitoring(self, protocol_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        r = self._session.post(
+            self._url(f"/api/protocols/{protocol_id}/monitoring"),
+            json=payload,
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
 
