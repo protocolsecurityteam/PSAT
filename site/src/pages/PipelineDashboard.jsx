@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client.js";
 import { getPipeline as getAuditPipeline } from "../api/audits.js";
 import { shortenAddress } from "../graph.js";
+import JobDetailPanel from "./JobDetailPanel.jsx";
 
 export const PIPELINE_STAGES = ["discovery", "dapp_crawl", "defillama_scan", "selection", "static", "resolution", "policy", "coverage"];
 export const ALL_STAGES = [...PIPELINE_STAGES, "done"];
@@ -54,6 +55,11 @@ export default function PipelineDashboard() {
   const [loaded, setLoaded] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [expandedError, setExpandedError] = useState(null);
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  // Bumped each top-level poll tick so the open detail panel knows to
+  // re-fetch its /errors + /stage_timings — keeps the panel live without
+  // making it run its own interval.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,6 +75,7 @@ export default function PipelineDashboard() {
           setStats(s);
           setAuditPipeline(audits);
           setLoaded(true);
+          setRefreshTick((n) => n + 1);
         }
       } catch {}
     }
@@ -105,7 +112,11 @@ export default function PipelineDashboard() {
 
   const buckets = useMemo(() => {
     const b = {};
-    for (const s of ALL_STAGES) b[s] = { queued: [], processing: [], completed: [], failed: [] };
+    // failed_terminal is a distinct bucket from failed — terminal jobs
+    // need operator intervention, transient failures keep retrying. Until
+    // this branch they fell through to the implicit `else` and were silently
+    // dropped from the SVG entirely.
+    for (const s of ALL_STAGES) b[s] = { queued: [], processing: [], completed: [], failed: [], failed_terminal: [] };
     for (const j of visiblePipelineJobs) {
       const stage = j.stage || "discovery";
       const status = j.status || "queued";
@@ -115,7 +126,7 @@ export default function PipelineDashboard() {
   }, [visiblePipelineJobs]);
 
   const totals = useMemo(() => {
-    const t = { queued: 0, processing: 0, completed: 0, failed: 0, total: 0 };
+    const t = { queued: 0, processing: 0, completed: 0, failed: 0, failed_terminal: 0, total: 0 };
     for (const j of visiblePipelineJobs) {
       t[j.status] = (t[j.status] || 0) + 1; t.total++;
     }
@@ -206,7 +217,7 @@ export default function PipelineDashboard() {
   }
 
   const stageColors = { discovery: "#0f766e", dapp_crawl: "#0e7490", defillama_scan: "#0891b2", selection: "#6366f1", static: "#d97706", resolution: "#2563eb", policy: "#7c3aed", coverage: "#059669", done: "#16a34a" };
-  const statusColors = { queued: "#94a3b8", processing: "#f59e0b", completed: "#22c55e", failed: "#ef4444" };
+  const statusColors = { queued: "#94a3b8", processing: "#f59e0b", completed: "#22c55e", failed: "#ef4444", failed_terminal: "#b91c1c" };
   const colW = 160, gapW = 80, headerH = 64, dotR = 6;
   const totalW = ALL_STAGES.length * colW + (ALL_STAGES.length - 1) * gapW;
   const dotsPerRow = Math.floor((colW - 20) / (dotR * 2 + 4));
@@ -218,10 +229,45 @@ export default function PipelineDashboard() {
     return jobs.map((j, i) => {
       const cx = startX + 10 + (i % dotsPerRow) * (dotR * 2 + 4) + dotR;
       const cy = startY + Math.floor(i / dotsPerRow) * (dotR * 2 + 4) + dotR;
+      const fill = statusColors[j.status] || "#94a3b8";
+      const hasRetries = (j.retry_count || 0) > 0;
+      const isTerminal = j.status === "failed_terminal";
+      // Terminal failures get a thicker pale-red ring so they read as
+      // "needs operator action" even though the fill is the same red family
+      // as the transient `failed` state. Retry stroke is amber and narrower.
+      const stroke = isTerminal ? "#fca5a5" : hasRetries ? "#fbbf24" : null;
+      const strokeWidth = isTerminal ? 2 : hasRetries ? 1.5 : 0;
+      const titleLines = [
+        j.name || j.company || j.address || j.job_id,
+        `${j.status} / ${j.stage}`,
+      ];
+      if (hasRetries) {
+        titleLines.push(
+          `Retried ${j.retry_count}×${j.last_failure_kind ? ` (${j.last_failure_kind})` : ""}`,
+        );
+      }
+      if (j.error) {
+        titleLines.push(`Last error: ${shortFailReason(j.error)}`);
+      }
+      titleLines.push("Click for details");
+      const isSelected = selectedJobId === j.job_id;
       return (
-        <g key={j.job_id}>
-          <title>{`${j.name || j.company || j.address || j.job_id}\n${j.status} / ${j.stage}`}</title>
-          <circle cx={cx} cy={cy} r={dotR} fill={statusColors[j.status] || "#94a3b8"} opacity={j.status === "processing" ? 1 : 0.8}>
+        <g
+          key={j.job_id}
+          style={{ cursor: "pointer" }}
+          onClick={() => setSelectedJobId(j.job_id)}
+        >
+          <title>{titleLines.join("\n")}</title>
+          {isSelected && (
+            <circle cx={cx} cy={cy} r={dotR + 3} fill="none" stroke="#e2e8f0" strokeWidth="1.5" opacity="0.7" />
+          )}
+          <circle
+            cx={cx} cy={cy} r={dotR}
+            fill={fill}
+            stroke={stroke || "none"}
+            strokeWidth={strokeWidth}
+            opacity={j.status === "processing" ? 1 : 0.85}
+          >
             {j.status === "processing" && <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite" />}
           </circle>
         </g>
@@ -240,13 +286,20 @@ export default function PipelineDashboard() {
             {totals.processing > 0 && <span className="chip" style={{ background: "#fef3c7", color: "#92400e" }}>{totals.processing} running</span>}
             {totals.queued > 0 && <span className="chip" style={{ background: "#f1f5f9", color: "#475569" }}>{totals.queued} queued</span>}
             {totals.failed > 0 && <span className="chip" style={{ background: "#fee2e2", color: "#991b1b" }}>{totals.failed} failed</span>}
+            {totals.failed_terminal > 0 && <span className="chip chip-terminal" style={{ background: "#fef2f2", color: "#7f1d1d", border: "1px solid #fecaca" }}>{totals.failed_terminal} terminal</span>}
           </div>
         </div>
         <svg viewBox={`0 0 ${totalW + 40} ${totalH}`} style={{ width: "100%", height: "auto", marginTop: 16 }}>
           {ALL_STAGES.map((stage, i) => {
             const x = 20 + i * (colW + gapW);
             const b = buckets[stage];
-            const all = [...(b.processing || []), ...(b.queued || []), ...(b.failed || []), ...(b.completed || [])];
+            const all = [...(b.processing || []), ...(b.queued || []), ...(b.failed || []), ...(b.failed_terminal || []), ...(b.completed || [])];
+            // Aggregate badges: jobs in this stage that are mid-retry (any
+            // status with retry_count > 0) and jobs that hit failed_terminal
+            // here. Surfaced on the column header so admins don't have to
+            // hover individual dots to spot trouble.
+            const retryCount = all.reduce((n, j) => n + ((j.retry_count || 0) > 0 ? 1 : 0), 0);
+            const terminalCount = (b.failed_terminal || []).length;
             return (
               <g key={stage}>
                 <rect x={x} y={0} width={colW} height={totalH} rx="12" fill={stageColors[stage]} opacity="0.06" />
@@ -264,6 +317,12 @@ export default function PipelineDashboard() {
                     </text>
                   </>
                 )}
+                {(retryCount > 0 || terminalCount > 0) && (
+                  <text x={x + colW - 8} y={18} textAnchor="end" fontSize="9" fontWeight="700" fontFamily="JetBrains Mono, monospace">
+                    {retryCount > 0 && <tspan fill="#fbbf24">↻{retryCount} </tspan>}
+                    {terminalCount > 0 && <tspan fill="#fca5a5">✕{terminalCount}</tspan>}
+                  </text>
+                )}
                 {renderDots(all, x, headerH + 10)}
                 {i < ALL_STAGES.length - 1 && <line x1={x + colW + 8} y1={totalH / 2} x2={x + colW + gapW - 8} y2={totalH / 2} stroke="#cbd5e1" strokeWidth="2" markerEnd="url(#pipeline-arrow)" />}
               </g>
@@ -275,7 +334,9 @@ export default function PipelineDashboard() {
           <span className="chip" style={{ background: "#fef3c7", color: "#92400e", fontSize: 10 }}>Processing</span>
           <span className="chip" style={{ background: "#f1f5f9", color: "#475569", fontSize: 10 }}>Queued</span>
           <span className="chip" style={{ background: "#dcfce7", color: "#166534", fontSize: 10 }}>Completed</span>
-          <span className="chip" style={{ background: "#fee2e2", color: "#991b1b", fontSize: 10 }}>Failed</span>
+          <span className="chip" style={{ background: "#fee2e2", color: "#991b1b", fontSize: 10 }}>Failed (retrying)</span>
+          <span className="chip" style={{ background: "#fef2f2", color: "#7f1d1d", border: "1px solid #fecaca", fontSize: 10 }}>Terminal</span>
+          <span className="chip" style={{ background: "rgba(251,191,36,0.12)", color: "#92400e", fontSize: 10 }}>↻ Has retries</span>
         </div>
       </section>
 
@@ -301,6 +362,16 @@ export default function PipelineDashboard() {
             ))}
           </div>
         </section>
+      )}
+
+      {selectedJobId && (
+        <JobDetailPanel
+          job={allJobs.find((j) => j.job_id === selectedJobId) || null}
+          stageColors={stageColors}
+          statusColors={statusColors}
+          onClose={() => setSelectedJobId(null)}
+          refreshTick={refreshTick}
+        />
       )}
 
       <section className="panel" style={{ marginTop: 16 }}>
