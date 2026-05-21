@@ -741,6 +741,12 @@ def _config_control_label(policies: Any) -> str:
         return "Safe"
     if "timelock" in label:
         return "Timelock"
+    if "proxy admin" in label:
+        return "Proxy admin"
+    # Solady ``Auth`` pattern — common in BoringVault / etherfi-liquid
+    # deployments. Surfaced from the semantic ``control_snapshot``.
+    if "authority" in label:
+        return "Roles authority"
     if "owner" in label:
         return "Owner"
     if "delegate" in label:

@@ -140,6 +140,7 @@ class ResolutionWorker(BaseWorker):
                 bridge_runtime_context = resolve_bridge_runtime(
                     rpc_url,
                     {**contract_analysis, "bridge_static_context": bridge_static_context},
+                    control_snapshot=snapshot,
                 )
                 bridge_runtime_context = queue_bridge_peer_analysis(
                     session,

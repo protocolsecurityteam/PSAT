@@ -99,3 +99,76 @@ def test_bridge_runtime_reports_unsupported_protocol() -> None:
 
     assert resolved["status"] == "unsupported"
     assert resolved["protocol"] == "Bridge"
+
+
+def test_layerzero_runtime_prefers_control_snapshot_over_owner_probe(monkeypatch) -> None:
+    """When a ``control_snapshot`` is supplied (production path), the resolver
+    sources policies from the semantic layer instead of doing its own narrow
+    ``owner()`` probe — which is the only way to pick up Solady ``Auth.authority()``
+    contracts (etherfi-liquid LayerZero teller), where ``owner()`` is zero."""
+    oapp = "0x" + "11" * 20
+    endpoint = "0x" + "22" * 20
+    authority_addr = "0x" + "aa" * 20
+    safe_addr = "0x" + "bb" * 20
+
+    monkeypatch.setattr(runtime, "layerzero_eid_entries", lambda: ())
+    monkeypatch.setattr(runtime, "rpc_batch_request", lambda *_args, **_kwargs: [])
+
+    def fake_request(_rpc_url: str, method: str, params: list[Any], **_kwargs: Any) -> str | None:
+        assert method == "eth_call"
+        target = params[0]["to"]
+        selector = params[0]["data"][:10]
+        if target == oapp and selector == runtime._selector("endpoint()"):
+            return _encoded_address(endpoint)
+        if target == endpoint and selector == runtime._selector("eid()"):
+            return "0x" + encode(["uint32"], [30101]).hex()
+        if target == endpoint and selector == runtime._selector("delegates(address)"):
+            return _encoded_address(runtime.ZERO_ADDRESS)
+        # Crucially, owner() returns zero. Without the snapshot path the
+        # resolver would emit no policies and the UI would show "Unknown".
+        if target == oapp and selector == runtime._selector("owner()"):
+            return _encoded_address(runtime.ZERO_ADDRESS)
+        return None
+
+    monkeypatch.setattr(runtime, "rpc_request", fake_request)
+
+    snapshot = {
+        "controller_values": {
+            "external_contract:authority": {
+                "source": "authority",
+                "value": authority_addr,
+                "resolved_type": "contract",
+                "details": {"address": authority_addr},
+            },
+            # Owner here is the RolesAuthority's owner — a Safe. The resolver
+            # should rank "safe" ahead of plain "authority" so the card label
+            # surfaces the multisig.
+            "state_variable:_owner": {
+                "source": "_owner",
+                "value": safe_addr,
+                "resolved_type": "safe",
+                "details": {
+                    "address": safe_addr,
+                    "owners": ["0x" + "cc" * 20, "0x" + "dd" * 20, "0x" + "ee" * 20],
+                    "threshold": 2,
+                },
+            },
+        }
+    }
+
+    resolved = runtime.resolve_bridge_runtime(
+        "https://rpc.invalid",
+        {
+            "subject": {"address": oapp},
+            "bridge_static_context": {"is_bridge": True, "protocols": ["LayerZero"]},
+        },
+        control_snapshot=snapshot,
+    )
+
+    assert resolved["status"] == "partial"
+    # Safe sorts first (strongest signal) so the card-level config_control
+    # label becomes "2-of-3 Safe" via the existing _config_control_label logic.
+    assert [p["address"] for p in resolved["policies"]] == [safe_addr, authority_addr]
+    assert resolved["policies"][0]["resolved_type"] == "safe"
+    assert "safe" in resolved["policies"][0]["label"].lower()
+    assert "authority" in resolved["policies"][1]["label"].lower()
