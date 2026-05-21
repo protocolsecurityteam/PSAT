@@ -8,6 +8,30 @@ import JobDetailPanel from "./JobDetailPanel.jsx";
 export const PIPELINE_STAGES = ["discovery", "dapp_crawl", "defillama_scan", "selection", "static", "resolution", "policy", "coverage"];
 export const ALL_STAGES = [...PIPELINE_STAGES, "done"];
 
+// Time-window selector universe. Active jobs (queued/processing/failed/
+// failed_terminal) are always shown regardless of window — the window only
+// scopes *history* (completed and the recently-completed tape). "all" means
+// no upper bound; the cutoff is just 0.
+const TIME_WINDOWS = [
+  { id: "1h", label: "1h", ms: 60 * 60 * 1000 },
+  { id: "24h", label: "24h", ms: 24 * 60 * 60 * 1000 },
+  { id: "7d", label: "7d", ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "all", label: "All", ms: Infinity },
+];
+const ACTIVE_STATUSES = new Set(["queued", "processing", "failed", "failed_terminal"]);
+
+function windowCutoff(windowId, now) {
+  if (windowId === "all") return 0;
+  const w = TIME_WINDOWS.find((x) => x.id === windowId);
+  return w ? now - w.ms : 0;
+}
+
+function windowLabel(windowId) {
+  if (windowId === "all") return "All time";
+  const w = TIME_WINDOWS.find((x) => x.id === windowId);
+  return w ? `Last ${w.label}` : "Last 1h";
+}
+
 function shortFailReason(error) {
   if (!error) return "Unknown";
   if (error.includes("No verified source")) return "Not Verified";
@@ -54,8 +78,11 @@ export default function PipelineDashboard() {
   const [auditPipeline, setAuditPipeline] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [expandedError, setExpandedError] = useState(null);
   const [selectedJobId, setSelectedJobId] = useState(null);
+  // Time-window selector. Default "1h" matches the old hardcoded behavior of
+  // the Recently Completed tape, but now also scopes which historical jobs
+  // get drawn in protocol cards and the DONE-column counter.
+  const [timeWindow, setTimeWindow] = useState("1h");
   // Bumped each top-level poll tick so the open detail panel knows to
   // re-fetch its /errors + /stage_timings — keeps the panel live without
   // making it run its own interval.
@@ -99,16 +126,26 @@ export default function PipelineDashboard() {
   const implProxyAddresses = useMemo(() =>
     new Set(allJobs.map((j) => (j.request?.proxy_address || "").toLowerCase()).filter(Boolean)),
   [allJobs]);
-  const visiblePipelineJobs = useMemo(() =>
-    allJobs.filter((j) => {
-      // Always show jobs that are still actively running
-      const isActive = j.status === "queued" || j.status === "processing";
-      if (j.is_proxy && !isActive) return false;
-      if (!j.is_proxy && j.address && implProxyAddresses.has(j.address.toLowerCase()) && !isActive) return false;
+  const visiblePipelineJobs = useMemo(() => {
+    const cutoff = windowCutoff(timeWindow, now);
+    return allJobs.filter((j) => {
+      const isActive = ACTIVE_STATUSES.has(j.status);
+      // Dedup: hide proxy + company shells once their real work has spawned
+      // (these checks predate the time window — they're structural, not
+      // historical).
+      const isRunning = j.status === "queued" || j.status === "processing";
+      if (j.is_proxy && !isRunning) return false;
+      if (!j.is_proxy && j.address && implProxyAddresses.has(j.address.toLowerCase()) && !isRunning) return false;
       if (j.company && hasChildJobs && j.status === "completed") return false;
+      // Time window: active jobs always visible (they're the live state we
+      // care about); historical jobs only if updated within the window.
+      if (!isActive) {
+        const t = new Date(j.updated_at || j.created_at).getTime();
+        if (t < cutoff) return false;
+      }
       return true;
-    }),
-  [allJobs, hasChildJobs, implProxyAddresses]);
+    });
+  }, [allJobs, hasChildJobs, implProxyAddresses, timeWindow, now]);
 
   const buckets = useMemo(() => {
     const b = {};
@@ -198,16 +235,21 @@ export default function PipelineDashboard() {
     return groups;
   }, [visiblePipelineJobs, auditPipeline]);
 
-  // Completed-in-the-last-hour feed — replaces the old "Recent Activity"
-  // table, which duplicated the processing/queued information shown above.
-  const RECENT_WINDOW_MS = 60 * 60 * 1000;
+  // Recently completed/failed tape, scoped to the global time window. Cap at
+  // 100 entries — at 7d this can balloon, and admins drilling into history
+  // beyond that should narrow the window or use the panel's trace link.
   const recentlyCompleted = useMemo(() => {
-    const cutoff = now - RECENT_WINDOW_MS;
+    const cutoff = windowCutoff(timeWindow, now);
     return allJobs
-      .filter((j) => (j.status === "completed" || j.status === "failed") && j.updated_at && new Date(j.updated_at).getTime() >= cutoff)
+      .filter(
+        (j) =>
+          (j.status === "completed" || j.status === "failed" || j.status === "failed_terminal") &&
+          j.updated_at &&
+          new Date(j.updated_at).getTime() >= cutoff,
+      )
       .sort(sortByUpdatedAtDesc)
-      .slice(0, 20);
-  }, [allJobs, now]);
+      .slice(0, 100);
+  }, [allJobs, now, timeWindow]);
 
   if (!loaded) {
     return <div className="page"><section className="panel"><p style={{ textAlign: "center", padding: "2rem 0", color: "#64748b" }}>Loading pipeline status...</p></section></div>;
@@ -221,7 +263,16 @@ export default function PipelineDashboard() {
   const colW = 160, gapW = 80, headerH = 64, dotR = 6;
   const totalW = ALL_STAGES.length * colW + (ALL_STAGES.length - 1) * gapW;
   const dotsPerRow = Math.floor((colW - 20) / (dotR * 2 + 4));
-  const maxDots = Math.max(1, ...ALL_STAGES.map((s) => { const b = buckets[s]; return (b.processing?.length || 0) + (b.queued?.length || 0) + (b.completed?.length || 0) + (b.failed?.length || 0); }));
+  // Only count in-flight dots when sizing the area — completed jobs are no
+  // longer rendered as dots (they live in the DONE column counter and the
+  // completion tape below).
+  const maxDots = Math.max(
+    1,
+    ...ALL_STAGES.filter((s) => s !== "done").map((s) => {
+      const b = buckets[s];
+      return (b.processing?.length || 0) + (b.queued?.length || 0) + (b.failed?.length || 0) + (b.failed_terminal?.length || 0);
+    }),
+  );
   const dotsAreaH = Math.max(60, Math.ceil(maxDots / dotsPerRow) * (dotR * 2 + 4) + 20);
   const totalH = headerH + dotsAreaH + 40;
 
@@ -281,6 +332,20 @@ export default function PipelineDashboard() {
         <div className="panel-header">
           <div><p className="eyebrow">Pipeline Status</p><h2>{totals.total} Jobs</h2></div>
           <div className="chips">
+            <div className="window-selector" role="group" aria-label="Time window">
+              <span className="window-selector-label">window</span>
+              {TIME_WINDOWS.map((w) => (
+                <button
+                  key={w.id}
+                  type="button"
+                  className={`window-chip${timeWindow === w.id ? " active" : ""}`}
+                  onClick={() => setTimeWindow(w.id)}
+                  aria-pressed={timeWindow === w.id}
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
             {stats && <span className="chip" style={{ background: "#e0e7ff", color: "#3730a3" }}>{stats.unique_addresses} addresses</span>}
             <span className="chip" style={{ background: "#dcfce7", color: "#166534" }}>{totals.completed} done</span>
             {totals.processing > 0 && <span className="chip" style={{ background: "#fef3c7", color: "#92400e" }}>{totals.processing} running</span>}
@@ -293,21 +358,24 @@ export default function PipelineDashboard() {
           {ALL_STAGES.map((stage, i) => {
             const x = 20 + i * (colW + gapW);
             const b = buckets[stage];
-            const all = [...(b.processing || []), ...(b.queued || []), ...(b.failed || []), ...(b.failed_terminal || []), ...(b.completed || [])];
-            // Aggregate badges: jobs in this stage that are mid-retry (any
-            // status with retry_count > 0) and jobs that hit failed_terminal
-            // here. Surfaced on the column header so admins don't have to
-            // hover individual dots to spot trouble.
-            const retryCount = all.reduce((n, j) => n + ((j.retry_count || 0) > 0 ? 1 : 0), 0);
+            const isDone = stage === "done";
+            // Completed jobs no longer appear as dots — they collapse into
+            // the DONE column counter and the completion tape below.
+            const dotJobs = [...(b.processing || []), ...(b.queued || []), ...(b.failed || []), ...(b.failed_terminal || [])];
+            // Aggregate badges: jobs in this stage that are mid-retry or
+            // landed in failed_terminal. Surfaced on the column header so
+            // admins don't have to hover individual dots to spot trouble.
+            const retryCount = dotJobs.reduce((n, j) => n + ((j.retry_count || 0) > 0 ? 1 : 0), 0);
             const terminalCount = (b.failed_terminal || []).length;
+            const headerCount = isDone ? (b.completed?.length || 0) : dotJobs.length;
             return (
               <g key={stage}>
                 <rect x={x} y={0} width={colW} height={totalH} rx="12" fill={stageColors[stage]} opacity="0.06" />
                 <rect x={x} y={0} width={colW} height={headerH} rx="12" fill={stageColors[stage]} opacity="0.12" />
                 <rect x={x} y={headerH - 12} width={colW} height={12} fill={stageColors[stage]} opacity="0.12" />
                 <text x={x + colW / 2} y={24} textAnchor="middle" fontSize="12" fontWeight="700" fill={stageColors[stage]}>{formatStageLabel(stage)}</text>
-                <text x={x + colW / 2} y={40} textAnchor="middle" fontSize="11" fill={stageColors[stage]} opacity="0.7">{all.length}</text>
-                {b.processing.length > 0 && (
+                <text x={x + colW / 2} y={40} textAnchor="middle" fontSize="11" fill={stageColors[stage]} opacity="0.7">{headerCount}</text>
+                {!isDone && b.processing.length > 0 && (
                   <>
                     <circle cx={x + colW / 2 - 28} cy={54} r="4" fill={statusColors.processing}>
                       <animate attributeName="opacity" values="1;0.35;1" dur="1.4s" repeatCount="indefinite" />
@@ -317,13 +385,41 @@ export default function PipelineDashboard() {
                     </text>
                   </>
                 )}
-                {(retryCount > 0 || terminalCount > 0) && (
+                {!isDone && (retryCount > 0 || terminalCount > 0) && (
                   <text x={x + colW - 8} y={18} textAnchor="end" fontSize="9" fontWeight="700" fontFamily="JetBrains Mono, monospace">
                     {retryCount > 0 && <tspan fill="#fbbf24">↻{retryCount} </tspan>}
                     {terminalCount > 0 && <tspan fill="#fca5a5">✕{terminalCount}</tspan>}
                   </text>
                 )}
-                {renderDots(all, x, headerH + 10)}
+                {isDone ? (
+                  <>
+                    <text
+                      x={x + colW / 2}
+                      y={headerH + Math.max(28, dotsAreaH / 2)}
+                      textAnchor="middle"
+                      fontSize="34"
+                      fontWeight="800"
+                      fill={stageColors.done}
+                      fontFamily="JetBrains Mono, monospace"
+                    >
+                      {b.completed?.length || 0}
+                    </text>
+                    <text
+                      x={x + colW / 2}
+                      y={headerH + Math.max(28, dotsAreaH / 2) + 18}
+                      textAnchor="middle"
+                      fontSize="9"
+                      fontWeight="700"
+                      letterSpacing="0.2em"
+                      fill={stageColors.done}
+                      opacity="0.65"
+                    >
+                      COMPLETED · {windowLabel(timeWindow).toUpperCase()}
+                    </text>
+                  </>
+                ) : (
+                  renderDots(dotJobs, x, headerH + 10)
+                )}
                 {i < ALL_STAGES.length - 1 && <line x1={x + colW + 8} y1={totalH / 2} x2={x + colW + gapW - 8} y2={totalH / 2} stroke="#cbd5e1" strokeWidth="2" markerEnd="url(#pipeline-arrow)" />}
               </g>
             );
@@ -356,8 +452,7 @@ export default function PipelineDashboard() {
                 now={now}
                 stageColors={stageColors}
                 statusColors={statusColors}
-                expandedError={expandedError}
-                setExpandedError={setExpandedError}
+                onOpenJob={setSelectedJobId}
               />
             ))}
           </div>
@@ -378,22 +473,22 @@ export default function PipelineDashboard() {
         <div className="panel-header">
           <div>
             <p className="eyebrow">Recently Completed</p>
-            <h2>Last hour</h2>
+            <h2>{windowLabel(timeWindow)}</h2>
           </div>
           <div className="chips">
             <span className="chip" style={{ background: "rgba(34,197,94,0.12)", color: "#4ade80" }}>
               {recentlyCompleted.filter((j) => j.status === "completed").length} done
             </span>
-            {recentlyCompleted.some((j) => j.status === "failed") && (
+            {recentlyCompleted.some((j) => j.status === "failed" || j.status === "failed_terminal") && (
               <span className="chip" style={{ background: "rgba(239,68,68,0.12)", color: "#fca5a5" }}>
-                {recentlyCompleted.filter((j) => j.status === "failed").length} failed
+                {recentlyCompleted.filter((j) => j.status === "failed" || j.status === "failed_terminal").length} failed
               </span>
             )}
           </div>
         </div>
         {recentlyCompleted.length === 0 ? (
           <p className="empty" style={{ textAlign: "center", padding: "16px 0" }}>
-            No jobs have completed in the last hour.
+            No jobs have completed in {timeWindow === "all" ? "the recorded history" : `the last ${TIME_WINDOWS.find((w) => w.id === timeWindow)?.label || timeWindow}`}.
           </p>
         ) : (
           <div className="completion-tape">
@@ -401,47 +496,35 @@ export default function PipelineDashboard() {
               const done = new Date(j.updated_at).getTime();
               const ago = now - done;
               const label = j.name || j.company || (j.address ? shortenAddress(j.address) : "Job");
-              const isFailed = j.status === "failed";
+              const isFailed = j.status === "failed" || j.status === "failed_terminal";
+              const isTerminal = j.status === "failed_terminal";
               return (
-                <React.Fragment key={j.job_id}>
-                  <div
-                    className={`completion-row ${isFailed ? "failed" : ""}`}
-                    onClick={() => isFailed && setExpandedError(expandedError === j.job_id ? null : j.job_id)}
-                    style={{ cursor: isFailed ? "pointer" : "default" }}
-                  >
-                    <span className={`completion-dot ${isFailed ? "failed" : ""}`} />
-                    <span className="completion-name">{label}</span>
-                    <span className="completion-stage" style={{ color: stageColors[j.stage] || "#94a3b8" }}>
-                      {formatStageLabel(j.stage)}
-                    </span>
-                    <span className="completion-detail">
-                      {isFailed
-                        ? <span style={{ color: "#fca5a5" }}>{shortFailReason(j.error)}</span>
-                        : (j.detail || "")}
-                    </span>
-                    <span className="completion-time">{formatElapsed(ago)} ago</span>
-                  </div>
-                  {isFailed && expandedError === j.job_id && (
-                    <pre
-                      style={{
-                        margin: "2px 0 8px",
-                        padding: "10px 14px",
-                        background: "rgba(239,68,68,0.06)",
-                        color: "#fca5a5",
-                        fontSize: 11,
-                        fontFamily: "monospace",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-all",
-                        maxHeight: 260,
-                        overflow: "auto",
-                        borderRadius: 8,
-                        border: "1px solid rgba(239,68,68,0.18)",
-                      }}
-                    >
-                      {j.error || "No error details available"}
-                    </pre>
-                  )}
-                </React.Fragment>
+                <div
+                  key={j.job_id}
+                  className={`completion-row${isFailed ? " failed" : ""}${isTerminal ? " terminal" : ""}`}
+                  onClick={() => setSelectedJobId(j.job_id)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      setSelectedJobId(j.job_id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  style={{ cursor: "pointer" }}
+                >
+                  <span className={`completion-dot${isFailed ? " failed" : ""}${isTerminal ? " terminal" : ""}`} />
+                  <span className="completion-name">{label}</span>
+                  <span className="completion-stage" style={{ color: stageColors[j.stage] || "#94a3b8" }}>
+                    {formatStageLabel(j.stage)}
+                  </span>
+                  <span className="completion-detail">
+                    {isFailed
+                      ? <span style={{ color: "#fca5a5" }}>{shortFailReason(j.error)}{isTerminal ? " · terminal" : ""}</span>
+                      : (j.detail || "")}
+                  </span>
+                  <span className="completion-time">{formatElapsed(ago)} ago</span>
+                </div>
               );
             })}
           </div>
@@ -453,12 +536,14 @@ export default function PipelineDashboard() {
 
 // ── Protocol card: shows all running work for a single protocol in one place,
 // including per-stage counts for its jobs and the audit extraction sidecar
-// that runs in parallel with the main pipeline.
-function ProtocolCard({ group, now, stageColors, statusColors, expandedError, setExpandedError }) {
+// that runs in parallel with the main pipeline. Per-job rows route through
+// onOpenJob → JobDetailPanel so the inline-expand error pattern is gone;
+// the panel handles the full drill-in for any clicked job.
+function ProtocolCard({ group, now, stageColors, statusColors, onOpenJob }) {
   const { company, jobs, audits } = group;
   const running = jobs.filter((j) => j.status === "processing");
   const queued = jobs.filter((j) => j.status === "queued");
-  const failed = jobs.filter((j) => j.status === "failed");
+  const failed = jobs.filter((j) => j.status === "failed" || j.status === "failed_terminal");
   const completedChildren = jobs.filter((j) => j.status === "completed").length;
 
   // Stage pills — every stage the protocol has jobs in, with running/queued counts.
@@ -563,13 +648,27 @@ function ProtocolCard({ group, now, stageColors, statusColors, expandedError, se
         </div>
       )}
 
-      {/* Inline children: up to 3 running jobs with their detail */}
+      {/* Inline children: every row routes to onOpenJob — same drill-in as
+          clicking a dot in the SVG above. */}
       {(running.length > 0 || failed.length > 0) && (
         <div className="protocol-children">
           {running.slice(0, 3).map((job) => {
             const created = new Date(job.created_at).getTime();
             return (
-              <div className="protocol-child" key={job.job_id}>
+              <div
+                key={job.job_id}
+                className="protocol-child"
+                onClick={() => onOpenJob?.(job.job_id)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    onOpenJob?.(job.job_id);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                style={{ cursor: "pointer" }}
+              >
                 <span className="protocol-child-dot processing" />
                 <span className="protocol-child-name">{monitorJobLabel(job)}</span>
                 <span className="protocol-child-stage" style={{ color: stageColors[job.stage] }}>
@@ -583,26 +682,33 @@ function ProtocolCard({ group, now, stageColors, statusColors, expandedError, se
           {running.length > 3 && (
             <div className="protocol-child-more">+{running.length - 3} more running</div>
           )}
-          {failed.slice(0, 2).map((job) => (
-            <React.Fragment key={job.job_id}>
+          {failed.slice(0, 2).map((job) => {
+            const isTerminal = job.status === "failed_terminal";
+            return (
               <div
-                className="protocol-child failed"
-                onClick={() => setExpandedError(expandedError === job.job_id ? null : job.job_id)}
+                key={job.job_id}
+                className={`protocol-child failed${isTerminal ? " terminal" : ""}`}
+                onClick={() => onOpenJob?.(job.job_id)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    onOpenJob?.(job.job_id);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
               >
-                <span className="protocol-child-dot failed" />
+                <span className={`protocol-child-dot failed${isTerminal ? " terminal" : ""}`} />
                 <span className="protocol-child-name">{monitorJobLabel(job)}</span>
                 <span className="protocol-child-stage" style={{ color: stageColors[job.stage] }}>
                   {formatStageLabel(job.stage)}
                 </span>
                 <span className="protocol-child-detail" style={{ color: "#fca5a5" }}>
-                  {shortFailReason(job.error)}
+                  {shortFailReason(job.error)}{isTerminal ? " · terminal" : ""}
                 </span>
               </div>
-              {expandedError === job.job_id && (
-                <pre className="protocol-child-error">{job.error || "No error details available"}</pre>
-              )}
-            </React.Fragment>
-          ))}
+            );
+          })}
         </div>
       )}
     </article>

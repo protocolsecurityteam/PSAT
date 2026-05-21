@@ -5,10 +5,15 @@
 //   - clicking a dot opens the side panel, /errors + /stage_timings populate
 //   - ESC closes the panel
 //   - logs deeplink builder shape
+//   - completed jobs no longer render as dots (collapse into DONE counter
+//     and the completion tape)
+//   - time window selector filters historical jobs visible in the tape
+//   - completion tape rows and protocol-card rows route through the same
+//     drill-in panel as the SVG dots
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import PipelineDashboard from "./PipelineDashboard.jsx";
 import { buildLogsDeeplink } from "./JobDetailPanel.jsx";
@@ -137,11 +142,14 @@ describe("PipelineDashboard", () => {
     fireEvent.click(group);
     // Panel header shows the job name; the error log section populates from
     // the /errors mock above.
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(await screen.findByText("TimeoutError")).toBeInTheDocument();
-    expect(await screen.findByText(/Failed \(terminal\)/i)).toBeInTheDocument();
-    // Retry button only shown for failed_terminal status.
-    expect(screen.getByRole("button", { name: /Retry job/i })).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(await within(dialog).findByText("TimeoutError")).toBeInTheDocument();
+    expect(await within(dialog).findByText(/Failed \(terminal\)/i)).toBeInTheDocument();
+    // Retry button only shown for failed_terminal status. Scope to the
+    // dialog because protocol-card rows now also have role="button" and one
+    // of them is the "Retry Job" fixture, which collides with the regex.
+    expect(within(dialog).getByRole("button", { name: /Retry job/i })).toBeInTheDocument();
   });
 
   it("closes the detail panel on ESC", async () => {
@@ -176,6 +184,95 @@ describe("PipelineDashboard", () => {
       return found.parentNode.querySelector("circle");
     });
     expect(retryDot.getAttribute("stroke")).toBe("#fbbf24");
+  });
+
+  it("does not render completed jobs as dots in the SVG", async () => {
+    const completed = makeJob({
+      job_id: "done-1",
+      name: "Done Job",
+      status: "completed",
+      stage: "done",
+      updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    installJobMocks([RUNNING_JOB, completed]);
+    const { container } = render(<PipelineDashboard />);
+    await waitFor(() => {
+      expect(container.querySelectorAll("circle").length).toBeGreaterThan(0);
+    });
+    // Completed jobs collapse into the DONE-column counter; no green dot
+    // should be drawn. statusColors.completed is #22c55e.
+    const completedDots = Array.from(container.querySelectorAll("circle")).filter(
+      (c) => c.getAttribute("fill") === "#22c55e",
+    );
+    expect(completedDots).toHaveLength(0);
+    // The DONE column instead carries the count text and a "completed" label.
+    expect(screen.getByText(/COMPLETED · LAST 1H/i)).toBeInTheDocument();
+  });
+});
+
+describe("PipelineDashboard — time window", () => {
+  it("switching the window updates the completion tape", async () => {
+    const recent = makeJob({
+      job_id: "recent", name: "Recent Done", status: "completed", stage: "done",
+      updated_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+    });
+    const older = makeJob({
+      job_id: "older", name: "Older Done", status: "completed", stage: "done",
+      updated_at: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+    });
+    installJobMocks([recent, older]);
+    render(<PipelineDashboard />);
+    // Default 1h: only the 30-min-old one shows.
+    await waitFor(() => {
+      expect(screen.getByText("Recent Done")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Older Done")).not.toBeInTheDocument();
+    // Switch to 7d → both jobs appear.
+    fireEvent.click(screen.getByRole("button", { name: "7d" }));
+    await waitFor(() => {
+      expect(screen.getByText("Older Done")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Recent Done")).toBeInTheDocument();
+  });
+});
+
+describe("PipelineDashboard — drill-in parity", () => {
+  it("clicking a completion tape row opens the same detail panel as a dot", async () => {
+    const recent = makeJob({
+      job_id: "recent",
+      name: "Recent Done",
+      status: "completed",
+      stage: "done",
+      updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    installJobMocks([recent]);
+    render(<PipelineDashboard />);
+    const nameNode = await screen.findByText("Recent Done");
+    const row = nameNode.closest(".completion-row");
+    expect(row).toBeTruthy();
+    fireEvent.click(row);
+    // Same dialog landmark as the dot-click path.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("clicking a running protocol-card row opens the detail panel", async () => {
+    // ProtocolCard renders inline children for running/failed jobs grouped
+    // by company. A row click should route through onOpenJob = setSelectedJobId.
+    const job = makeJob({
+      job_id: "proc-1",
+      name: "Active Proc",
+      company: "AcmeCo",
+      status: "processing",
+      stage: "static",
+      detail: "Building",
+    });
+    installJobMocks([job]);
+    render(<PipelineDashboard />);
+    const nameNode = await screen.findByText("Active Proc");
+    const row = nameNode.closest(".protocol-child");
+    expect(row).toBeTruthy();
+    fireEvent.click(row);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
   });
 });
 
