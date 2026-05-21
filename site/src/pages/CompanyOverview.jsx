@@ -67,7 +67,14 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
       }
     : data;
   const { axes, composite, grade } = computeProtocolScore(dataForScore, auditCoverage);
-  const coveredContracts = Object.values(coverageByAddr).filter((r) => bytecodeVerifiedAudits(r.audits).length > 0).length;
+  // Coverage rows include past implementations linked by audit-matcher even
+  // after a proxy upgrade, so the raw count overshoots the contract count
+  // (e.g. 56 covered of 32 contracts). Intersect with the current contract
+  // set so the denominator and numerator are comparable.
+  const activeAddrs = new Set(contracts.map((c) => (c.address || "").toLowerCase()));
+  const coveredContracts = Object.values(coverageByAddr)
+    .filter((r) => activeAddrs.has((r.address || "").toLowerCase()))
+    .filter((r) => bytecodeVerifiedAudits(r.audits).length > 0).length;
 
   const proxyCount = contracts.filter((c) => c.is_proxy).length;
   const openRadarExample = (example) => {
