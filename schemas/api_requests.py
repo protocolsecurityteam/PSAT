@@ -38,22 +38,6 @@ class AnalyzeRequest(BaseModel):
         return self
 
 
-class WatchProxyRequest(BaseModel):
-    address: str = Field(min_length=42, max_length=42)
-    chain: str = "ethereum"
-    label: str | None = None
-    rpc_url: str | None = None
-    from_block: int | None = Field(
-        default=None, ge=0, description="Block to start scanning from. Defaults to current block."
-    )
-    discord_webhook_url: str | None = Field(default=None, description="Discord webhook URL for upgrade notifications.")
-
-
-class SubscribeRequest(BaseModel):
-    discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for upgrade notifications.")
-    label: str | None = None
-
-
 class ProtocolSubscribeRequest(BaseModel):
     discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")
     label: str | None = None
@@ -126,8 +110,6 @@ __all__ = [
     "AddressLabelUpsert",
     "AnalyzeRequest",
     "ProtocolSubscribeRequest",
-    "SubscribeRequest",
     "UpdateMonitoredContractRequest",
     "UpsertMonitoredContractRequest",
-    "WatchProxyRequest",
 ]

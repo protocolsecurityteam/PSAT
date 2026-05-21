@@ -19,7 +19,6 @@ import PrincipalsTab from "./tabs/PrincipalsTab.jsx";
 import UpgradesTab from "./tabs/UpgradesTab.jsx";
 import RawTab from "./tabs/RawTab.jsx";
 import GraphTab from "./tabs/GraphTab.jsx";
-import ProxyWatcherPage from "./pages/ProxyWatcherPage.jsx";
 import PipelineDashboard from "./pages/PipelineDashboard.jsx";
 import ProtocolMonitoringPage from "./pages/ProtocolMonitoringPage.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
@@ -262,7 +261,6 @@ export default function App() {
   const isDetail = viewMode === "run" || viewMode === "address";
   const isMonitor = viewMode === "monitor";
   const isCompany = viewMode === "company";
-  const isProxies = viewMode === "proxies";
 
   const detailContent = selectedDetail ? {
     summary: <SummaryTab detail={selectedDetail} />,
@@ -323,7 +321,6 @@ export default function App() {
 
       {/* Page content */}
       {isMonitor && <PipelineDashboard />}
-      {isProxies && <ProxyWatcherPage />}
 
       {isDetail && selectedDetail && (
         <div className="page">
@@ -401,7 +398,7 @@ export default function App() {
         </Suspense>
       )}
 
-      {!isDetail && !isMonitor && !isCompany && !isProxies && (
+      {!isDetail && !isMonitor && !isCompany && (
         <>
           <ProductHero form={form} setForm={setForm} onSubmit={submit} loading={loading} />
           <RunsPage

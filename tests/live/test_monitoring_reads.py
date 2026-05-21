@@ -21,11 +21,3 @@ def test_list_monitored_events_shape(live_client: LiveClient):
     for row in rows:
         for key in ("id", "monitored_contract_id", "event_type", "detected_at"):
             assert key in row, f"monitored event row missing {key!r}: {row}"
-
-
-def test_list_proxy_events_shape(live_client: LiveClient):
-    rows = live_client.list_proxy_events()
-    assert isinstance(rows, list)
-    for row in rows:
-        for key in ("id", "watched_proxy_id", "block_number", "tx_hash", "new_implementation"):
-            assert key in row, f"proxy event row missing {key!r}: {row}"
