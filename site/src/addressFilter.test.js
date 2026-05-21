@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   HIGH_SOURCES,
+  bulkAnalyzeCandidates,
   computeCurrentImplAddrs,
   isPureHistorical,
   splitHistorical,
@@ -85,6 +86,60 @@ describe("addressFilter", () => {
       row({ is_proxy: false, implementation_address: CURRENT_IMPL }),
     ];
     expect(computeCurrentImplAddrs(rows).size).toBe(0);
+  });
+
+  describe("bulkAnalyzeCandidates", () => {
+    it("picks up unanalyzed active rows", () => {
+      const rows = [
+        row({ address: STANDALONE, analyzed: false, discovery_sources: ["deployer_expansion"] }),
+      ];
+      const result = bulkAnalyzeCandidates(rows, new Set());
+      expect(result.map((r) => r.address)).toEqual([STANDALONE]);
+    });
+
+    it("excludes already-analyzed rows", () => {
+      const rows = [
+        row({ address: STANDALONE, analyzed: true, discovery_sources: ["deployer_expansion"] }),
+      ];
+      expect(bulkAnalyzeCandidates(rows, new Set())).toEqual([]);
+    });
+
+    it("excludes pure-historical rows even when they slip into the input view", () => {
+      const rows = [
+        row({
+          address: STALE_IMPL,
+          analyzed: false,
+          discovery_sources: ["upgrade_history"],
+        }),
+      ];
+      // simulates the case where the user toggled "Show historical" and the
+      // row is visible — the bulk action must still skip it.
+      expect(bulkAnalyzeCandidates(rows, new Set())).toEqual([]);
+    });
+
+    it("includes the live impl even when its only source is upgrade_history", () => {
+      const rows = [
+        row({
+          address: CURRENT_IMPL,
+          analyzed: false,
+          discovery_sources: ["upgrade_history"],
+        }),
+      ];
+      const result = bulkAnalyzeCandidates(rows, new Set([CURRENT_IMPL]));
+      expect(result.map((r) => r.address)).toEqual([CURRENT_IMPL]);
+    });
+
+    it("skips compare-mode synthesized rows", () => {
+      const rows = [
+        row({
+          address: STANDALONE,
+          analyzed: false,
+          discovery_sources: ["deployer_expansion"],
+          _compareStatus: "matched",
+        }),
+      ];
+      expect(bulkAnalyzeCandidates(rows, new Set())).toEqual([]);
+    });
   });
 
   it("splits a realistic payload into active vs historical", () => {

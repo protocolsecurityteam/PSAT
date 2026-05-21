@@ -48,6 +48,27 @@
   color: #e2e8f0;
 }
 
+.ps-addresses-modal-bulk-analyze {
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  background: rgba(45, 212, 191, 0.10);
+  color: #2dd4bf;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ps-addresses-modal-bulk-analyze:hover:not(:disabled) {
+  background: rgba(45, 212, 191, 0.22);
+}
+
+.ps-addresses-modal-bulk-analyze:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .ps-addresses-modal-search {
   flex: 1;
   min-width: 0;

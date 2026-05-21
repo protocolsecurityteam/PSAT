@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api/client.js";
 import { listAddressLabels } from "./api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
-import { computeCurrentImplAddrs, isPureHistorical } from "./addressFilter.js";
+import {
+  bulkAnalyzeCandidates,
+  computeCurrentImplAddrs,
+  isPureHistorical,
+} from "./addressFilter.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
@@ -45,6 +49,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
   const [compareInput, setCompareInput] = useState("");
   const [busyAddr, setBusyAddr] = useState(null); // address currently being deleted/analyzed
   const [showHistorical, setShowHistorical] = useState(false);
+  const [bulkAnalyzing, setBulkAnalyzing] = useState(false);
 
   const refresh = useCallback(() => {
     let cancelled = false;
@@ -215,6 +220,47 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
     }
   };
 
+  // Bulk-analyze every discovered-but-not-analyzed row in the current
+  // view. `bulkAnalyzeCandidates` re-applies the historical filter so it
+  // stays safe even when the user toggled "Show N historical" — those
+  // never get auto-queued.
+  const bulkPendingRows = useMemo(
+    () => (compareOpen ? [] : bulkAnalyzeCandidates(rows, currentImplAddrs)),
+    [rows, currentImplAddrs, compareOpen],
+  );
+
+  const onBulkAnalyzePending = async () => {
+    if (bulkPendingRows.length === 0) return;
+    const ok = window.confirm(
+      `Queue analysis for ${bulkPendingRows.length} pending address`
+        + `${bulkPendingRows.length === 1 ? "" : "es"}`
+        + ` in the current view?`,
+    );
+    if (!ok) return;
+    setBulkAnalyzing(true);
+    try {
+      for (const r of bulkPendingRows) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await api("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              address: r.address,
+              company: companyName,
+              name: r.name || null,
+            }),
+          });
+        } catch (err) {
+          console.error("Queue failed for", r.address, err);
+        }
+      }
+      setTimeout(refresh, 2000);
+    } finally {
+      setBulkAnalyzing(false);
+    }
+  };
+
   const onAnalyzeAllMissing = async () => {
     if (!compareSummary || compareSummary.missing === 0) return;
     const ok = window.confirm(
@@ -368,6 +414,19 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                 <option value="address">Address</option>
               </select>
             </div>
+            {bulkPendingRows.length > 0 && (
+              <button
+                type="button"
+                className="ps-addresses-modal-bulk-analyze"
+                disabled={bulkAnalyzing}
+                onClick={onBulkAnalyzePending}
+                title="Queue analysis for every discovered-but-not-analyzed row in the current view. Historical impls are never included."
+              >
+                {bulkAnalyzing
+                  ? "Queuing…"
+                  : `Analyze ${bulkPendingRows.length} pending`}
+              </button>
+            )}
           </div>
         )}
 

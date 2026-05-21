@@ -54,3 +54,20 @@ export function splitHistorical(rows) {
   }
   return { active, historical, currentImplAddrs: current };
 }
+
+// Rows eligible for the bulk "Analyze pending" action: discovered-but-not-
+// analyzed addresses that survive the historical filter. The caller passes
+// the current view (already filtered/searched/sorted), but we re-apply the
+// historical guard here so a user with "Show historical" toggled on can't
+// accidentally enqueue 90 stale impls.
+export function bulkAnalyzeCandidates(rows, currentImplAddrs) {
+  const out = [];
+  for (const r of rows || []) {
+    if (!r || !r.address) continue;
+    if (r.analyzed) continue;
+    if (r._compareStatus) continue; // compare-mode synthesized rows
+    if (isPureHistorical(r, currentImplAddrs)) continue;
+    out.push(r);
+  }
+  return out;
+}
