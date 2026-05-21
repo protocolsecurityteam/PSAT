@@ -490,12 +490,19 @@ def _finalize_upgrade_history(
                 # the impls land as orphans so a foreign proxy doesn't
                 # multiply itself into N "owned" rows. See
                 # services/discovery/source_confidence.py.
+                #
+                # parent_proxy_current_impl_address lets the gate consult
+                # the current impl when the proxy is itself LOW-sourced
+                # (e.g. ``structural_adoption`` post-3a8f4d1c9b07). The
+                # impl is the authoritative HIGH anchor in the LRTSquare*
+                # shape — same one-hop discipline as 4d72e9b1f035 branch B.
                 backfill_historical_impl_contracts(
                     session,
                     protocol_id=contract_row.protocol_id,
                     chain=contract_row.chain,
                     impl_addrs=stats["impl_addrs"],
                     parent_proxy_sources=contract_row.discovery_sources,
+                    parent_proxy_current_impl_address=contract_row.implementation,
                 )
         except Exception as exc:
             record_degraded(

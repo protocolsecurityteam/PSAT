@@ -591,6 +591,7 @@ def backfill_historical_impl_contracts(
     chain: str | None,
     impl_addrs: set[str],
     parent_proxy_sources: list[str] | None,
+    parent_proxy_current_impl_address: str | None = None,
 ) -> None:
     """Ensure a Contract row exists for each historical impl address.
 
@@ -607,6 +608,17 @@ def backfill_historical_impl_contracts(
     proxy (EigenLayer, OP-Stack) that snuck into inventory via a low-
     confidence source must not multiply itself into N "owned" impls. See
     services/discovery/source_confidence.py.
+
+    ``parent_proxy_current_impl_address`` is the proxy's
+    ``Contract.implementation`` field — the CURRENT impl address. Pass
+    it when the proxy is itself LOW-sourced (e.g. ``structural_adoption``
+    after 3a8f4d1c9b07's branch 4 adopted it) so the gate can consult
+    the impl's sources too. If the current impl is HIGH-sourced and
+    shares the protocol_id, that's the same one-hop-from-HIGH evidence
+    that 4d72e9b1f035's branch B uses against the historical orphan
+    set. Runtime counterpart to the migration: the LRTSquare* shape
+    (LOW UUPSProxy + HIGH LRTSquaredCore impl) gets handled at write
+    time instead of only at the next catch-up migration.
 
     For each address, three cases (when ownership IS asserted):
       1. No Contract row exists → create one tagged
@@ -628,7 +640,7 @@ def backfill_historical_impl_contracts(
     so re-analyzing a protocol re-hits only new impls. Per-address errors
     are swallowed so one flaky lookup doesn't wreck the whole backfill.
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from db.models import Contract
     from services.discovery.source_confidence import asserts_ownership
@@ -646,6 +658,28 @@ def backfill_historical_impl_contracts(
     # the structural relationship is fixed and ``parent_owns`` carries
     # the parent's direct-evidence state.
     parent_owns = asserts_ownership(parent_proxy_sources)
+
+    # Anchor on the proxy's CURRENT impl when the proxy itself is LOW.
+    # Mirrors 4d72e9b1f035 branch B: the impl is the authoritative HIGH
+    # source in the LRTSquare* shape (LOW-adopted UUPSProxy with
+    # HIGH-sourced LRTSquaredCore implementation). Belt-and-suspenders
+    # mismatch guard: if the impl belongs to a different protocol, the
+    # chain isn't ours — leave the historical impls orphan.
+    if not parent_owns and parent_proxy_current_impl_address:
+        chain_filter_impl = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
+        impl_row = session.execute(
+            select(Contract).where(
+                func.lower(Contract.address) == parent_proxy_current_impl_address.lower(),
+                chain_filter_impl,
+            )
+        ).scalar_one_or_none()
+        if (
+            impl_row is not None
+            and (impl_row.protocol_id is None or impl_row.protocol_id == protocol_id)
+            and asserts_ownership(impl_row.discovery_sources)
+        ):
+            parent_owns = True
+
     owns = asserts_ownership(None, parent_owns=parent_owns, parent_relationship="implementation")
     owning_protocol_id = protocol_id if owns else None
 
