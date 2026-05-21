@@ -88,7 +88,18 @@ class GovernanceView:
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
     """Find the protocol row + jobs that belong to ``name``.
 
-    Modern data: ``Protocol`` row exists, every job carries ``protocol_id``.
+    Modern data: ``Protocol`` row exists, every job carries ``protocol_id``,
+    AND its subject ``Contract`` row carries the same id. We filter on
+    Contract.protocol_id (not Job.protocol_id) because the Contract row is
+    the authoritative ownership signal — gated by
+    services/discovery/source_confidence on every write. Jobs inherit
+    protocol_id from their parent at spawn time (selection / resolution /
+    static), which means a dependency-expansion job for WstETH spawned
+    while analyzing an etherfi contract carries Job.protocol_id=etherfi
+    even though the WstETH Contract row is correctly orphan. Filtering by
+    Contract.protocol_id keeps the surface page consistent with what the
+    discovery-source gate already enforces for ownership.
+
     Legacy fallback: no Protocol row but a Job has ``company == name``;
     we walk ``request.parent_job_id`` chains across all completed jobs to
     backfill the company graph.
@@ -96,10 +107,19 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
     protocol_row = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
 
     if protocol_row:
+        # Join Jobs to Contracts on the natural key. The address column on
+        # contracts is already stored lowercased (see db/queue.py); jobs
+        # store the address as-provided, so lowercase the job side for the
+        # join. Chain is not part of the join — a Contract row keyed by
+        # (address, chain) belongs to the protocol regardless of which
+        # chain the job ran on, and adding chain to the join would drop
+        # legitimate rows when chain is NULL on one side.
         company_jobs = (
             session.execute(
-                select(Job).where(
-                    Job.protocol_id == protocol_row.id,
+                select(Job)
+                .join(Contract, Contract.address == func.lower(Job.address))
+                .where(
+                    Contract.protocol_id == protocol_row.id,
                     Job.status == JobStatus.completed,
                     Job.address.isnot(None),
                 )

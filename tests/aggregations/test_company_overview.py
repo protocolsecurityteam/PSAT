@@ -124,15 +124,55 @@ def _add_contract(
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
-    """Modern data: Protocol row exists and jobs carry ``protocol_id``."""
+    """Modern data: Protocol row exists, jobs carry ``protocol_id``, AND
+    the analyzed subject has a Contract row whose ``protocol_id`` matches.
+
+    The Contract row is the authoritative ownership signal (gated by
+    services/discovery/source_confidence on every write); ``Job.protocol_id``
+    alone is insufficient because dependency-expansion jobs inherit
+    protocol_id from their parent without proving ownership.
+    """
     p = _add_protocol(db_session, f"alpha-{uuid.uuid4().hex[:8]}")
-    j1 = _add_job(db_session, address=_addr("a1"), protocol_id=p.id)
+    addr_a1 = _addr("a1")
+    j1 = _add_job(db_session, address=addr_a1, protocol_id=p.id)
+    _add_contract(db_session, address=addr_a1, job=j1, protocol_id=p.id, contract_name="A1")
     _add_job(db_session, address=_addr("a2"), protocol_id=p.id, status=JobStatus.queued)
 
     protocol, jobs = resolve_company_jobs(db_session, p.name)
     assert protocol is not None and protocol.id == p.id
-    # Only completed + has-address jobs are returned
+    # Only completed + has-address + has owned-Contract jobs are returned
     assert {j.id for j in jobs} == {j1.id}
+
+
+def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
+    """Regression for the surface-page leak: an analyzed job whose subject
+    Contract row is orphan (protocol_id=NULL) must NOT show under the
+    protocol — even when the job itself carries protocol_id.
+
+    Repro: static analysis of a confirmed etherfi contract spawns a
+    dependency-expansion job for WstETH; the job inherits
+    protocol_id=etherfi from its parent, but the WstETH Contract row
+    stays orphan (only dapp_crawl as a source) because the discovery-
+    source gate refuses to stamp ownership from a low-confidence signal.
+    Pre-fix, the surface page joined on Job.protocol_id and rendered
+    WstETH as an etherfi contract.
+    """
+    p = _add_protocol(db_session, f"orphan-{uuid.uuid4().hex[:8]}")
+    owned_addr = _addr("aa")
+    orphan_addr = _addr("bb")
+
+    j_owned = _add_job(db_session, address=owned_addr, protocol_id=p.id)
+    _add_contract(db_session, address=owned_addr, job=j_owned, protocol_id=p.id, contract_name="Owned")
+
+    # Dependency-expansion shape: job has protocol_id, Contract does not.
+    j_orphan = _add_job(db_session, address=orphan_addr, protocol_id=p.id)
+    _add_contract(db_session, address=orphan_addr, job=j_orphan, protocol_id=None, contract_name="WstETH")
+
+    _protocol, jobs = resolve_company_jobs(db_session, p.name)
+    assert {j.id for j in jobs} == {j_owned.id}, (
+        "orphan Contract leaked into resolve_company_jobs — the surface page "
+        "would render the dependency as a protocol contract"
+    )
 
 
 def test_resolve_company_jobs_legacy_fallback_with_parent_chain(db_session):

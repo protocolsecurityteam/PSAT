@@ -60,6 +60,11 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     # root_job_id falls back to the parent job's id when no upstream
     # cascade was set on the request — preserves the within-cascade
     # dedup semantics for top-level calls too.
+    # ``discovery_relationship`` + ``parent_owns_high`` carry the
+    # structural-ownership signal to the child's discovery worker.
+    # ``parent_owns_high`` is False here because session.execute returns
+    # None (no parent Contract row in this mock setup), so the parent
+    # has no discovery_sources to evaluate.
     assert created_jobs == [
         {
             "address": "0x2222222222222222222222222222222222222222",
@@ -69,6 +74,8 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
             "root_job_id": "job-1",
             "proxy_address": "0x1111111111111111111111111111111111111111",
             "proxy_type": "unknown",
+            "discovery_relationship": "implementation",
+            "parent_owns_high": False,
         }
     ]
 

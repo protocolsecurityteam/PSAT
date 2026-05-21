@@ -868,6 +868,324 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
 # ---------------------------------------------------------------------------
 
 
+class TestStructuralOwnershipPropagation:
+    """``_queue_discovered_contracts`` looks up the parent's stored
+    ``implementation`` / ``beacon`` fields plus its dep edges to decide
+    whether each cascade child inherits structural ownership. Mocks
+    fall short for this — multiple session.execute calls return
+    different result sets — so we use a real Postgres session.
+
+    These tests pin the exact behaviour the PR-87 review surfaced as
+    correct: only edges whose recorded proxy/beacon fields actually
+    link parent and dep grant structural propagation. The Lido stETH
+    shape (HIGH parent has a ``relationship_type='proxy'`` dep edge,
+    but the parent's ``implementation`` field doesn't point to the
+    dep) must NOT propagate ownership.
+    """
+
+    @staticmethod
+    def _make_parent(
+        db_session,
+        *,
+        protocol_id: int | None,
+        sources: list[str] | None,
+        implementation: str | None = None,
+        beacon: str | None = None,
+        chain: str | None = None,
+    ):
+        from db.models import Contract
+
+        addr = "0x" + uuid.uuid4().hex[:40].zfill(40)
+        parent = Contract(
+            address=addr,
+            chain=chain,
+            protocol_id=protocol_id,
+            contract_name="StructParent",
+            discovery_sources=sources,
+            is_proxy=bool(implementation or beacon),
+            implementation=implementation,
+            beacon=beacon,
+        )
+        db_session.add(parent)
+        db_session.commit()
+        return parent
+
+    @staticmethod
+    def _make_dep_edge(db_session, *, parent, dep_addr: str, relationship_type: str):
+        from db.models import ContractDependency
+
+        db_session.add(
+            ContractDependency(
+                contract_id=parent.id,
+                dependency_address=dep_addr,
+                relationship_type=relationship_type,
+                source=["dynamic"],
+            )
+        )
+        db_session.commit()
+
+    @staticmethod
+    def _make_proxy_orphan(db_session, *, addr: str, implementation: str | None = None, chain: str | None = None):
+        """Pre-seed the dep address as an existing Contract row whose
+        ``implementation`` points back at the parent — the proxy-direction
+        check requires the dep's row to exist with the back-link."""
+        from db.models import Contract
+
+        row = Contract(
+            address=addr,
+            chain=chain,
+            protocol_id=None,
+            contract_name="DepProxy",
+            is_proxy=True,
+            implementation=implementation,
+        )
+        db_session.add(row)
+        db_session.commit()
+        return row
+
+    @staticmethod
+    def _link_parent_to_real_job(db_session, parent) -> Any:
+        """Create a real Job row and attach the parent Contract to it.
+        ``_queue_discovered_contracts`` selects the parent via
+        ``Contract.job_id == job.id``; without a real Job the FK fails."""
+        from db.models import Job, JobStage, JobStatus
+
+        real_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.resolution,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        db_session.add(real_job)
+        db_session.commit()
+        parent.job_id = real_job.id
+        db_session.commit()
+        return _job(id=real_job.id, request={"rpc_url": "rpc"})
+
+    @requires_postgres
+    def test_implementation_edge_grants_structural_ownership(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HIGH parent + ``relationship_type='implementation'`` edge +
+        ``parent.implementation == dep_addr`` → child request carries
+        ``discovery_relationship='implementation'`` and
+        ``parent_owns_high=True``. This is the strongest case for
+        propagation."""
+        session = db_session_for_resolution
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        parent = self._make_parent(
+            session,
+            protocol_id=None,
+            sources=["deployer_expansion"],
+            implementation=dep_addr,
+        )
+        self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="implementation")
+
+        # Parent's Contract row is found via Contract.job_id == job.id, so
+        # create a real Job row to satisfy the FK and let the lookup hit.
+        from db.models import Job, JobStage, JobStatus
+
+        real_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.resolution,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        session.add(real_job)
+        session.commit()
+        parent.job_id = real_job.id
+        session.commit()
+        job = _job(id=real_job.id, request={"rpc_url": "rpc"})
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert create_calls[0]["discovery_relationship"] == "implementation"
+        assert create_calls[0]["parent_owns_high"] is True
+
+    @requires_postgres
+    def test_beacon_edge_grants_structural_ownership(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HIGH parent + ``relationship_type='beacon'`` edge +
+        ``parent.beacon == dep_addr`` → child inherits."""
+        session = db_session_for_resolution
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        parent = self._make_parent(
+            session,
+            protocol_id=None,
+            sources=["ai_inventory"],
+            beacon=dep_addr,
+        )
+        self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="beacon")
+
+        job = self._link_parent_to_real_job(session, parent)
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert create_calls[0]["discovery_relationship"] == "beacon"
+        assert create_calls[0]["parent_owns_high"] is True
+
+    @requires_postgres
+    def test_proxy_edge_grants_when_dep_implementation_back_links(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proxy direction: parent is the impl, dep is a proxy whose
+        ``implementation`` is the parent. The structural check requires
+        a Contract row for the dep with that back-link — exercises the
+        batched dep-Contract lookup path in the worker."""
+        session = db_session_for_resolution
+        parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+
+        from db.models import Contract, ContractDependency
+
+        parent = Contract(
+            address=parent_addr,
+            protocol_id=None,
+            contract_name="ImplParent",
+            discovery_sources=["defillama"],
+        )
+        session.add(parent)
+        session.commit()
+        # Dep is a proxy that points back at the parent impl.
+        session.add(
+            Contract(
+                address=dep_addr,
+                protocol_id=None,
+                contract_name="DepProxy",
+                is_proxy=True,
+                implementation=parent_addr,
+            )
+        )
+        session.add(
+            ContractDependency(
+                contract_id=parent.id,
+                dependency_address=dep_addr,
+                relationship_type="proxy",
+                source=["dynamic"],
+            )
+        )
+        session.commit()
+
+        from db.models import Job, JobStage, JobStatus
+
+        real_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.resolution,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        session.add(real_job)
+        session.commit()
+        parent.job_id = real_job.id
+        session.commit()
+        job = _job(id=real_job.id, request={"rpc_url": "rpc"})
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert create_calls[0]["discovery_relationship"] == "proxy"
+        assert create_calls[0]["parent_owns_high"] is True
+
+    @requires_postgres
+    def test_relationship_type_alone_does_not_propagate(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for the PR-87 review bug: HIGH parent has an edge
+        with ``relationship_type='proxy'`` but the parent's stored
+        ``implementation`` does NOT equal the dep address (Lido stETH
+        shape — etherfi calls stETH, stETH is *a* proxy, but stETH is
+        not etherfi's proxy). The child must NOT receive
+        ``discovery_relationship`` or ``parent_owns_high``."""
+        session = db_session_for_resolution
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        unrelated_impl = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        # Parent has SOME implementation set but it's not dep_addr.
+        parent = self._make_parent(
+            session,
+            protocol_id=None,
+            sources=["deployer_expansion"],
+            implementation=unrelated_impl,
+        )
+        self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="proxy")
+
+        job = self._link_parent_to_real_job(session, parent)
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert "discovery_relationship" not in create_calls[0], (
+            "structural propagation fired on relationship_type alone — Lido stETH shape is no longer being filtered out"
+        )
+        assert "parent_owns_high" not in create_calls[0]
+
+    @requires_postgres
+    def test_low_confidence_parent_blocks_propagation(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Parent has only LOW discovery sources. Even with a perfect
+        structural link, ``parent_owns_high`` lands False — the
+        downstream gate's structural branch needs that flag, so a
+        structurally-adopted parent can't seed further propagation.
+        This is the one-hop limit pinned at the spawn site."""
+        session = db_session_for_resolution
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        parent = self._make_parent(
+            session,
+            protocol_id=None,
+            sources=["dapp_crawl"],  # LOW
+            implementation=dep_addr,
+        )
+        self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="implementation")
+
+        job = self._link_parent_to_real_job(session, parent)
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        # The relationship is still passed (parent IS structurally linked),
+        # but parent_owns_high is False — gate's structural branch will
+        # decline to adopt.
+        assert create_calls[0].get("parent_owns_high") is False
+
+
 class TestResolvedGraphEmpty:
     """When resolve_control_graph returns an empty graph the artifact is skipped."""
 
