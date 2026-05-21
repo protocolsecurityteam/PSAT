@@ -5,15 +5,32 @@ import { shortenAddress } from "../graph.js";
 
 // Grafana Cloud instance. The worker fleet writes structured JSON logs that
 // include `"trace_id":"<hex>"` inside the log line — trace_id is *not* a
-// stream label, so the deeplink filters via `|=` across all service streams
-// instead of a label matcher.
+// stream label, so the deeplink filters via `|=` on the line and scopes the
+// stream via fly_app_name (prod = "psat", preview = "psat-pr-<N>"). Without
+// the env scope Loki would scan every PR preview's logs for every lookup.
 const GRAFANA_LOGS_BASE = "https://protocolsectool.grafana.net";
 
-export function buildLogsDeeplink(traceId) {
+// Map a browser hostname back to the Fly app that produced the page.
+//   psat.fly.dev         → "psat"          (prod)
+//   psat-pr-90.fly.dev   → "psat-pr-90"    (preview)
+//   anything else        → null            (fall back to wildcard query)
+export function inferFlyApp(hostname) {
+  if (!hostname) return null;
+  const m = hostname.match(/^(psat(?:-pr-\d+)?)\.fly\.dev$/);
+  return m ? m[1] : null;
+}
+
+export function buildLogsDeeplink(traceId, opts = {}) {
   if (!traceId) return null;
+  const hostname = opts.hostname ?? (typeof window !== "undefined" ? window.location.hostname : null);
+  const flyApp = inferFlyApp(hostname);
+  // Tight selector when we know the env; broad wildcard otherwise. Both
+  // resolve to the same trace because trace_id is a substring filter on
+  // the line, but the scoped variant is dramatically cheaper for Loki.
+  const selector = flyApp ? `{fly_app_name="${flyApp}"}` : `{service_name=~".+"}`;
   const left = {
     datasource: "grafanacloud-logs",
-    queries: [{ refId: "A", expr: `{service_name=~".+"} |= "${traceId}"` }],
+    queries: [{ refId: "A", expr: `${selector} |= "${traceId}"` }],
     range: { from: "now-24h", to: "now" },
   };
   return `${GRAFANA_LOGS_BASE}/explore?left=${encodeURIComponent(JSON.stringify(left))}`;
@@ -318,6 +335,21 @@ export default function JobDetailPanel({ job, stageColors, statusColors, onClose
             )}
           </dl>
         </section>
+
+        {job.request && Object.keys(job.request).length > 0 && (
+          <section className="job-panel-section">
+            <h3 className="job-panel-section-title">Request</h3>
+            <details className="job-panel-request">
+              <summary>
+                {Object.keys(job.request).length} field{Object.keys(job.request).length === 1 ? "" : "s"}
+                {job.request.dapp_urls ? " · from dapp_crawl" : ""}
+                {job.request.defillama_protocol ? " · from defillama_scan" : ""}
+                {job.request.proxy_address ? " · spawned for proxy impl" : ""}
+              </summary>
+              <pre className="job-panel-request-body">{JSON.stringify(job.request, null, 2)}</pre>
+            </details>
+          </section>
+        )}
 
         {isTerminal && (
           <footer className="job-panel-actions">

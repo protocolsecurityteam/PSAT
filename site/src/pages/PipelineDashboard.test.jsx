@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import PipelineDashboard from "./PipelineDashboard.jsx";
-import { buildLogsDeeplink } from "./JobDetailPanel.jsx";
+import { buildLogsDeeplink, inferFlyApp } from "./JobDetailPanel.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
 
 const NOW_ISO = new Date().toISOString();
@@ -310,11 +310,44 @@ describe("buildLogsDeeplink", () => {
   });
 
   it("builds a Grafana explore URL that filters on the trace_id", () => {
+    // jsdom hostname is "localhost" so the default call falls back to the
+    // wildcard selector — both behaviors are covered separately below.
     const href = buildLogsDeeplink("abc123def456");
     expect(href).toMatch(/^https:\/\/protocolsectool\.grafana\.net\/explore\?left=/);
     const left = JSON.parse(decodeURIComponent(href.split("left=")[1]));
     expect(left.datasource).toBe("grafanacloud-logs");
     expect(left.queries[0].expr).toContain("abc123def456");
     expect(left.queries[0].expr).toContain('|=');
+  });
+
+  it("scopes the Loki stream to fly_app_name when hostname matches prod or a preview", () => {
+    const prod = buildLogsDeeplink("abc123", { hostname: "psat.fly.dev" });
+    const prodLeft = JSON.parse(decodeURIComponent(prod.split("left=")[1]));
+    expect(prodLeft.queries[0].expr).toBe('{fly_app_name="psat"} |= "abc123"');
+
+    const preview = buildLogsDeeplink("xyz789", { hostname: "psat-pr-90.fly.dev" });
+    const previewLeft = JSON.parse(decodeURIComponent(preview.split("left=")[1]));
+    expect(previewLeft.queries[0].expr).toBe('{fly_app_name="psat-pr-90"} |= "xyz789"');
+  });
+
+  it("falls back to a wildcard selector when the hostname is unrecognized", () => {
+    const href = buildLogsDeeplink("abc123", { hostname: "example.com" });
+    const left = JSON.parse(decodeURIComponent(href.split("left=")[1]));
+    expect(left.queries[0].expr).toContain('service_name=~');
+    expect(left.queries[0].expr).not.toContain("fly_app_name");
+  });
+});
+
+describe("inferFlyApp", () => {
+  it("recognizes prod and PR preview hostnames; returns null otherwise", () => {
+    expect(inferFlyApp("psat.fly.dev")).toBe("psat");
+    expect(inferFlyApp("psat-pr-1.fly.dev")).toBe("psat-pr-1");
+    expect(inferFlyApp("psat-pr-123.fly.dev")).toBe("psat-pr-123");
+    expect(inferFlyApp("psat-pr-90.fly.dev")).toBe("psat-pr-90");
+    expect(inferFlyApp("localhost")).toBeNull();
+    expect(inferFlyApp("example.com")).toBeNull();
+    expect(inferFlyApp("evil-psat.fly.dev.attacker.com")).toBeNull();
+    expect(inferFlyApp("")).toBeNull();
+    expect(inferFlyApp(null)).toBeNull();
   });
 });
