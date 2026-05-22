@@ -12,7 +12,14 @@ import requests
 
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
 
-DEFAULT_SINGLE_TIMEOUT = 600
+# 30 min, not 10. Single-contract analyses are seconds of actual work,
+# but the live suite runs single-contract fixtures alongside a
+# company-wide run that floods the queue with peer/dependency jobs.
+# Multichain bridge work in alex/feat-add-multichain compounds this:
+# every LayerZero teller spawns per-peer jobs across Optimism/Scroll/Base.
+# A WETH fixture has been observed waiting 49 min in queue behind the
+# company-run cascade before its 15-second pipeline runs.
+DEFAULT_SINGLE_TIMEOUT = 1800
 # Company runs on a cold preview (shared-cpu-2x, 2GB RAM) spend ~2 min
 # in selection alone because ranking calls Etherscan per candidate and
 # inventories grow past 400 rows after the first run. The multichain
