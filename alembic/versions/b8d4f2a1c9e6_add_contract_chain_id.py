@@ -1,7 +1,7 @@
 """add contract chain_id
 
 Revision ID: b8d4f2a1c9e6
-Revises: 9e1f4c2d8a77
+Revises: 67bd81b64faa
 Create Date: 2026-05-20 02:15:00.000000
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b8d4f2a1c9e6"
-down_revision: Union[str, Sequence[str], None] = "9e1f4c2d8a77"
+down_revision: Union[str, Sequence[str], None] = "67bd81b64faa"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

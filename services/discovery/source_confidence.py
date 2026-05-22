@@ -65,6 +65,11 @@ HIGH_CONFIDENCE_SOURCES: frozenset[str] = frozenset(
         "inventory",  # admin/discovery-pipeline curated entry
         "spa_override",  # admin override entry
         "dependency_two_pass",  # static dependency from a confirmed contract
+        # On-chain peer of a confirmed bridge: the protocol's bridge
+        # contract has the peer's address registered in its LayerZero
+        # config (set by the protocol's owner). The cryptographic peer
+        # attestation is stronger than any off-chain registry.
+        "bridge_runtime",
     }
 )
 
