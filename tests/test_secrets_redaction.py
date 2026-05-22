@@ -61,6 +61,79 @@ class TestSanitizeUrl:
         assert "<redacted>" in out
         assert "123456789012345678" in out
 
+    def test_discord_versioned_webhook_token_is_masked(self):
+        # Discord's documented API base is /api/v{N}/...; the unversioned
+        # /api/webhooks/ path is just a convenience alias.
+        versioned = "https://discord.com/api/v10/webhooks/123456789012345678/VERSIONED_TOKEN_VAL"
+        out = sanitize_url(versioned)
+        assert "VERSIONED_TOKEN_VAL" not in out
+        assert "<redacted>" in out
+        assert "123456789012345678" in out
+        assert "/api/v10/webhooks/" in out
+
+    def test_discord_canary_subdomain_webhook_is_masked(self):
+        out = sanitize_url("https://canary.discord.com/api/webhooks/123456789012345678/CANARY_TOK")
+        assert "CANARY_TOK" not in out
+        assert "<redacted>" in out
+
+    def test_discord_ptb_subdomain_on_legacy_host_is_masked(self):
+        out = sanitize_url("https://ptb.discordapp.com/api/webhooks/123456789012345678/PTB_TOK")
+        assert "PTB_TOK" not in out
+        assert "<redacted>" in out
+
+    def test_basic_auth_userinfo_stripped_from_netloc(self):
+        out = sanitize_url("https://alice:secret_123@private-eth-node.example.com/jsonrpc")
+        assert "alice" not in out
+        assert "secret_123" not in out
+        assert "private-eth-node.example.com" in out
+
+    def test_basic_auth_stripped_even_when_path_already_masked(self):
+        # Userinfo and path-key are independent leak channels; both must
+        # be scrubbed on the same URL.
+        out = sanitize_url("https://u:pwd@eth-mainnet.g.alchemy.com/v2/SECRETKEY")
+        assert "pwd" not in out
+        assert "SECRETKEY" not in out
+        assert "<redacted>" in out
+        assert "eth-mainnet.g.alchemy.com" in out
+
+    def test_basic_auth_preserves_port(self):
+        out = sanitize_url("https://u:p@eth.example.com:8545/jsonrpc")
+        assert "u:p" not in out
+        assert "eth.example.com:8545" in out
+
+    def test_basic_auth_ipv6_host_preserves_brackets(self):
+        # Bare IPv6 without brackets would be re-parsed as host:port garbage,
+        # so the bracketed form must survive netloc rebuild.
+        out = sanitize_url("https://u:p@[::1]:8545/jsonrpc")
+        assert "u:p" not in out
+        assert "[::1]:8545" in out
+
+    def test_v10_plus_path_segment_caught_by_shape(self):
+        # Same defense-in-depth as /v2/, but for double-digit versions.
+        out = sanitize_url("https://newprovider.example/v10/super_long_key_value_here_xyz")
+        assert "super_long_key_value_here_xyz" not in out
+        assert "/v10/<redacted>" in out
+
+    def test_blockpi_host_path_is_masked(self):
+        # BlockPI's /v1/rpc/<key> layout has a short separator segment
+        # that escapes the generic /vN/<long> fallback; host-list entry
+        # is what catches it.
+        out = sanitize_url("https://ethereum.blockpi.network/v1/rpc/abc123XYZdef456GHI789jkl")
+        assert "abc123XYZdef456GHI789jkl" not in out
+        assert "<redacted>" in out
+
+    def test_dwellir_bare_key_path_is_masked(self):
+        # Dwellir places the key directly under the host with no version
+        # segment, so it relies entirely on the host list.
+        out = sanitize_url("https://api-ethereum-mainnet.n.dwellir.com/abc123XYZdef456GHI789jkl")
+        assert "abc123XYZdef456GHI789jkl" not in out
+        assert "<redacted>" in out
+
+    def test_nownodes_bare_key_path_is_masked(self):
+        out = sanitize_url("https://eth.nownodes.io/abc123XYZdef456GHI789jkl")
+        assert "abc123XYZdef456GHI789jkl" not in out
+        assert "<redacted>" in out
+
     def test_public_rpc_pass_through(self):
         # No path-key, no query-key — nothing to redact.
         assert sanitize_url(_PUBLIC_RPC) == _PUBLIC_RPC
@@ -96,6 +169,15 @@ class TestSanitizeString:
 
     def test_no_url_pass_through(self):
         assert sanitize_string("nothing to see") == "nothing to see"
+
+    def test_wss_url_embedded_in_text_is_scrubbed(self):
+        # RPC providers also expose wss:// endpoints; the URL extractor
+        # must reach into ws/wss schemes, not just http(s).
+        wss_url = _ALCHEMY.replace("https://", "wss://")
+        msg = f"failed to connect to {wss_url}: timeout"
+        out = sanitize_string(msg)
+        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
+        assert "<redacted>" in out
 
 
 class TestSanitizeObj:

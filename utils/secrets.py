@@ -33,8 +33,11 @@ _SECRET_PATH_HOST_PARTS = (
     "ankr.com",
     "blockdaemon.com",
     "blastapi.io",
+    "blockpi.network",
     "drpc.org",
+    "dwellir.com",
     "nodereal.io",
+    "nownodes.io",
     "tenderly.co",
     "pokt.network",
     "omniatech.io",
@@ -61,11 +64,16 @@ _SECRET_QUERY_KEYS = frozenset(
 
 # URL matcher for free-form strings. Stops at whitespace/quote/``>`` so
 # trailing prose ("...: connection reset") is not consumed.
-_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+_URL_RE = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+")
 
 # Generic ``/vN/<opaque>`` path-segment shape — catches provider URLs
 # whose host isn't in the suffix list.
-_PATH_KEY_SEGMENT_RE = re.compile(r"/(v[1-9])/[A-Za-z0-9_\-]{12,}")
+_PATH_KEY_SEGMENT_RE = re.compile(r"/(v\d+)/[A-Za-z0-9_\-]{12,}")
+
+# Discord webhook path, with or without an API version segment:
+#   /api/webhooks/<id>/<token>
+#   /api/v{N}/webhooks/<id>/<token>
+_DISCORD_WEBHOOK_PATH_RE = re.compile(r"^/api(?:/v\d+)?/webhooks/")
 
 _REDACTED = "<redacted>"
 
@@ -76,10 +84,12 @@ def _host_is_credentialed(host: str) -> bool:
 
 
 def sanitize_url(url: str) -> str:
-    """Return *url* with sensitive path segments and query values masked.
+    """Return *url* with sensitive components masked.
 
+    - ``user:pass@`` userinfo: stripped from the netloc.
     - Known provider hosts: path replaced with ``/<redacted>``.
-    - Discord webhooks: trailing token segment masked, id retained.
+    - Discord webhooks (versioned or unversioned): trailing token
+      segment masked, id retained.
     - ``/vN/<opaque>`` path segments: masked.
     - Query keys in ``_SECRET_QUERY_KEYS``: values masked.
 
@@ -98,12 +108,15 @@ def sanitize_url(url: str) -> str:
     new_path = parts.path
     if _host_is_credentialed(parts.hostname or ""):
         new_path = f"/{_REDACTED}"
-    elif (parts.hostname or "").endswith(("discord.com", "discordapp.com")) and parts.path.startswith("/api/webhooks/"):
-        # /api/webhooks/<id>/<token>: retain id, mask token.
+    elif (parts.hostname or "").endswith(("discord.com", "discordapp.com")) \
+            and _DISCORD_WEBHOOK_PATH_RE.match(parts.path):
         segments = parts.path.split("/")
-        if len(segments) >= 5:
-            segments[4] = _REDACTED
-            new_path = "/".join(segments[:5])
+        # Token sits one slot after "webhooks": index 4 for the
+        # unversioned shape, index 5 when an /api/vN/ segment is present.
+        token_idx = 5 if len(segments) >= 3 and segments[2].startswith("v") else 4
+        if len(segments) > token_idx:
+            segments[token_idx] = _REDACTED
+            new_path = "/".join(segments[: token_idx + 1])
     else:
         m = _PATH_KEY_SEGMENT_RE.search(parts.path)
         if m:
@@ -120,7 +133,14 @@ def sanitize_url(url: str) -> str:
                 rebuilt.append(f"{k}={v}")
         new_query = "&".join(rebuilt)
 
-    return urlunsplit((parts.scheme, parts.netloc, new_path, new_query, parts.fragment))
+    new_netloc = parts.netloc
+    if parts.username is not None or parts.password is not None:
+        host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        new_netloc = f"{host}:{parts.port}" if parts.port is not None else host
+
+    return urlunsplit((parts.scheme, new_netloc, new_path, new_query, parts.fragment))
 
 
 def sanitize_string(text: str) -> str:
