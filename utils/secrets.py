@@ -108,8 +108,9 @@ def sanitize_url(url: str) -> str:
     new_path = parts.path
     if _host_is_credentialed(parts.hostname or ""):
         new_path = f"/{_REDACTED}"
-    elif (parts.hostname or "").endswith(("discord.com", "discordapp.com")) \
-            and _DISCORD_WEBHOOK_PATH_RE.match(parts.path):
+    elif (parts.hostname or "").endswith(("discord.com", "discordapp.com")) and _DISCORD_WEBHOOK_PATH_RE.match(
+        parts.path
+    ):
         segments = parts.path.split("/")
         # Token sits one slot after "webhooks": index 4 for the
         # unversioned shape, index 5 when an /api/vN/ segment is present.
