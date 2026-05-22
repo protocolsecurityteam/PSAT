@@ -133,7 +133,7 @@ def find_dependencies(address: str, rpc_url: str | None = None, code_cache: dict
 
     address = normalize_address(address)
     deps = discover_dependencies(effective_rpc, address, code_cache=code_cache)
-    return {"address": address, "dependencies": deps, "rpc": effective_rpc}
+    return {"address": address, "dependencies": deps}
 
 
 def main():

@@ -626,7 +626,6 @@ def classify_contracts(
 
     return {
         "address": target,
-        "rpc": rpc_url,
         "classifications": classifications,
         "discovered_addresses": sorted(discovered),
     }
