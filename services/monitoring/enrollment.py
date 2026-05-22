@@ -210,14 +210,19 @@ def enroll_protocol_contracts(
     # analyzed).  We keep them (is_active=False) rather than deleting so
     # historical events are preserved.
     enrolled_addrs = {mc.address for mc in enrolled}
-    # Also include controller-discovered addresses
+    # Also include controller-discovered addresses so the stale-detection
+    # query below doesn't deactivate rows that ``_enroll_controller_addresses``
+    # just enrolled or kept active. Must mirror ``_CONTROLLER_MONITORED_TYPES``
+    # — leaving 'proxy' out caused a ping-pong where Pass 1 re-promoted a
+    # CGN-discovered proxy admin and the stale check then immediately
+    # deactivated it because 'proxy' wasn't in this subset.
     enrolled_addrs |= {
         mc.address
         for mc in session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
-                MonitoredContract.contract_type.in_(("safe", "timelock")),
+                MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
             )
         )
         .scalars()
