@@ -334,12 +334,8 @@ def _build_monitoring_config(
 # latch into ``last_known_state.owner`` and the scanner would
 # false-positive an OwnershipTransferred when the live owner finally
 # diverged from the stored pending-owner value.
-_INITIAL_STATE_OWNER_IDS = frozenset(
-    {"owner", "_owner", "state_variable:owner", "state_variable:_owner"}
-)
-_INITIAL_STATE_ADMIN_IDS = frozenset(
-    {"admin", "state_variable:admin"}
-)
+_INITIAL_STATE_OWNER_IDS = frozenset({"owner", "_owner", "state_variable:owner", "state_variable:_owner"})
+_INITIAL_STATE_ADMIN_IDS = frozenset({"admin", "state_variable:admin"})
 
 
 def _build_initial_state(

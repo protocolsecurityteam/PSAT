@@ -281,9 +281,7 @@ class TestEnrollmentWithProxyContracts:
             exclude_job_id=calling_job_id,
         )
         assert enrolled is True
-        mock_enroll.assert_called_once_with(
-            mock_session, 1, "http://rpc", "ethereum", calling_job_id
-        )
+        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", calling_job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +469,7 @@ class TestProtocolIdPropagationIntegration:
                 exclude_job_id=caller.id,
             )
             assert result is True, (
-                "Enrollment must fire even when both the calling job and "
-                "an unrelated sibling are in_flight."
+                "Enrollment must fire even when both the calling job and an unrelated sibling are in_flight."
             )
             mock_enroll.assert_called_once()
 

@@ -97,7 +97,7 @@ def assign_primary_controllers(
         for addr, owned in eligibility.items():
             if contract_lc not in owned:
                 continue
-            ptype = principal_by_addr[addr].get("type")
+            ptype = principal_by_addr[addr].get("type") or ""
             priority = PRINCIPAL_PRIORITY.get(ptype, 0)
             # Smaller tuple wins: negate priority/size so larger sorts earlier;
             # raw address (lex-smallest) is the final stable tiebreak.

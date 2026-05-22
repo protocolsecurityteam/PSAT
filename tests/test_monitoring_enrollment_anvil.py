@@ -49,11 +49,10 @@ import socket
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session as SASession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -69,10 +68,7 @@ from db.models import (
     JobStage,
     JobStatus,
     MonitoredContract,
-    MonitoredEvent,
     Protocol,
-    ProtocolSubscription,
-    ProxyUpgradeEvent,
     WatchedProxy,
 )
 
@@ -330,13 +326,11 @@ def test_db():
             for c in session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars():
                 session.delete(c)
             session.delete(proto)
-        # Belt-and-suspenders: kill orphan monitoring rows whose protocol
-        # might have been deleted out from under them.
-        for model in [MonitoredEvent, MonitoredContract, ProxyUpgradeEvent, WatchedProxy, ProtocolSubscription]:
-            try:
-                session.query(model).filter(False).delete()  # no-op; ORM session sync
-            except Exception:
-                pass
+        # Force ORM session sync before commit so any cascade-pending
+        # deletes flush. The pre-existing ``filter(False).delete()`` no-op
+        # construct was both dead code and a pyright miss; a plain flush
+        # accomplishes the actual intent.
+        session.flush()
         session.commit()
         session.close()
         engine.dispose()
@@ -399,9 +393,7 @@ def _grant_authority(
     ef = EffectiveFunction(contract_id=contract_id, function_name=function_name, authority_public=False)
     session.add(ef)
     session.flush()
-    session.add(
-        FunctionPrincipal(function_id=ef.id, address=principal_address.lower(), principal_type="controller")
-    )
+    session.add(FunctionPrincipal(function_id=ef.id, address=principal_address.lower(), principal_type="controller"))
     session.flush()
 
 
@@ -494,15 +486,12 @@ def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil
         f"Exactly one signer_added event expected (from the real Safe); got {len(real_evts)} "
         f"from {[e.data for e in real_evts]}"
     )
-    real_event_addrs = {
-        (e.data.get("contract_address") or "").lower()
-        for e in real_evts
-        if isinstance(e.data, dict)
-    }
-    # The MonitoredEvent.data may not carry the contract address explicitly;
+    # MonitoredEvent.data may not carry the contract address explicitly;
     # cross-check against the monitored_contract_id to be sure.
     real_event_target = (
-        test_db.execute(select(MonitoredContract.address).where(MonitoredContract.id == real_evts[0].monitored_contract_id))
+        test_db.execute(
+            select(MonitoredContract.address).where(MonitoredContract.id == real_evts[0].monitored_contract_id)
+        )
     ).scalar_one()
     assert real_event_target == real_safe
 
@@ -534,9 +523,7 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
 
     # Run 1: Safe enrolled & active.
     enroll_protocol_contracts(test_db, proto.id, rpc_url)
-    first = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.address == safe_addr)
-    ).scalar_one()
+    first = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
     assert first.is_active is True
     assert first.enrollment_source == "auto"
 
@@ -556,29 +543,23 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
         ).all()
     ]
     if ef_ids:
-        test_db.execute(FunctionPrincipal.__table__.delete().where(FunctionPrincipal.function_id.in_(ef_ids)))
-        test_db.execute(EffectiveFunction.__table__.delete().where(EffectiveFunction.id.in_(ef_ids)))
+        test_db.execute(delete(FunctionPrincipal).where(FunctionPrincipal.function_id.in_(ef_ids)))
+        test_db.execute(delete(EffectiveFunction).where(EffectiveFunction.id.in_(ef_ids)))
     test_db.commit()
     test_db.expire_all()
 
     # Run 2: zombie state — re-enroll should demote the Safe.
     enroll_protocol_contracts(test_db, proto.id, rpc_url)
-    demoted = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.address == safe_addr)
-    ).scalar_one()
+    demoted = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
     assert demoted.is_active is False, (
-        f"Zombie Safe should be deactivated (got is_active={demoted.is_active}, "
-        f"source={demoted.enrollment_source})"
+        f"Zombie Safe should be deactivated (got is_active={demoted.is_active}, source={demoted.enrollment_source})"
     )
     assert demoted.enrollment_source == "auto_deprimary"
 
     # Trigger another on-chain change; scanner must skip the inactive row.
     _cast_send(safe_addr, "changeThreshold(uint256)", ["2"], rpc_url)
     post = scan_for_events(test_db, rpc_url)
-    post_for_safe = [
-        e for e in post
-        if e.event_type in ("signer_added", "signer_removed", "threshold_changed")
-    ]
+    post_for_safe = [e for e in post if e.event_type in ("signer_added", "signer_removed", "threshold_changed")]
     assert post_for_safe == [], (
         f"Demoted Safe should not produce any events; got {[(e.event_type, e.data) for e in post_for_safe]}"
     )
@@ -611,9 +592,7 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     test_db.commit()
 
     enroll_protocol_contracts(test_db, proto.id, rpc_url)
-    first = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.address == admin_addr)
-    ).scalar_one()
+    first = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == admin_addr)).scalar_one()
     assert first.contract_type == "proxy"
     assert first.is_active is True
     assert first.enrollment_source == "auto"
@@ -623,9 +602,7 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     for _ in range(2):
         enroll_protocol_contracts(test_db, proto.id, rpc_url)
         test_db.expire_all()
-        again = test_db.execute(
-            select(MonitoredContract).where(MonitoredContract.address == admin_addr)
-        ).scalar_one()
+        again = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == admin_addr)).scalar_one()
         assert again.is_active is True, (
             f"CGN-discovered proxy admin must stay active across re-enrollments; "
             f"got is_active={again.is_active}, source={again.enrollment_source}"
@@ -678,9 +655,7 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
     test_db.commit()
 
     enroll_protocol_contracts(test_db, proto.id, rpc_url)
-    mc = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.address == addr)
-    ).scalar_one()
+    mc = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
 
     assert mc.last_known_state is not None
     assert mc.last_known_state.get("owner", "").lower() == active_owner.lower(), (
@@ -887,9 +862,7 @@ def test_late_protocol_id_stamp_converges_via_reconciler(anvil_env, test_db):
     # Idempotency — a second reconciler pass with no state changes must
     # leave both MC rows in place and untouched-by-stale-detection.
     reconcile_enrollments(test_db, rpc_url)
-    rows = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
-    ).scalars().all()
+    rows = test_db.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)).scalars().all()
     addresses = {r.address for r in rows if r.is_active}
     assert high_addr.lower() in addresses
     assert orphan_addr.lower() in addresses

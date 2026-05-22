@@ -14,7 +14,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -296,7 +296,9 @@ class TestBuildInitialState:
 
         contract = _mock_contract()
         active = _mock_controller_value(controller_id="state_variable:admin", value="0x" + "1" * 40)
-        nested = _mock_controller_value(controller_id="state_variable:rolesAuthority.pendingAdmin", value="0x" + "2" * 40)
+        nested = _mock_controller_value(
+            controller_id="state_variable:rolesAuthority.pendingAdmin", value="0x" + "2" * 40
+        )
         state = _build_initial_state(contract, [active, nested])
         assert state["admin"] == "0x" + "1" * 40
 
@@ -1075,9 +1077,7 @@ class TestEnrollmentIntegration:
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(3000)):
             enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
 
-        first = pg_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
-        ).scalar_one()
+        first = pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
         assert first.is_active is True
         assert first.enrollment_source == "auto"
 
@@ -1092,8 +1092,8 @@ class TestEnrollmentIntegration:
             ).all()
         ]
         if ef_ids:
-            pg_session.execute(FunctionPrincipal.__table__.delete().where(FunctionPrincipal.function_id.in_(ef_ids)))
-            pg_session.execute(EffectiveFunction.__table__.delete().where(EffectiveFunction.id.in_(ef_ids)))
+            pg_session.execute(delete(FunctionPrincipal).where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(delete(EffectiveFunction).where(EffectiveFunction.id.in_(ef_ids)))
         pg_session.commit()
         pg_session.expire_all()
 
@@ -1104,8 +1104,7 @@ class TestEnrollmentIntegration:
             select(MonitoredContract).where(MonitoredContract.address == safe_addr)
         ).scalar_one()
         assert demoted.is_active is False, (
-            f"Demoted Safe should be deactivated, got "
-            f"is_active={demoted.is_active} source={demoted.enrollment_source}"
+            f"Demoted Safe should be deactivated, got is_active={demoted.is_active} source={demoted.enrollment_source}"
         )
         assert demoted.enrollment_source == "auto_deprimary"
 
@@ -1174,8 +1173,8 @@ class TestEnrollmentIntegration:
             ).all()
         ]
         if ef_ids:
-            pg_session.execute(FunctionPrincipal.__table__.delete().where(FunctionPrincipal.function_id.in_(ef_ids)))
-            pg_session.execute(EffectiveFunction.__table__.delete().where(EffectiveFunction.id.in_(ef_ids)))
+            pg_session.execute(delete(FunctionPrincipal).where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(delete(EffectiveFunction).where(EffectiveFunction.id.in_(ef_ids)))
         pg_session.commit()
         pg_session.expire_all()
 
@@ -1186,7 +1185,6 @@ class TestEnrollmentIntegration:
             select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
         ).scalar_one()
         assert zombie.is_active is False, (
-            f"Zombie timelock should be demoted, got "
-            f"is_active={zombie.is_active} source={zombie.enrollment_source}"
+            f"Zombie timelock should be demoted, got is_active={zombie.is_active} source={zombie.enrollment_source}"
         )
         assert zombie.enrollment_source == "auto_deprimary"
