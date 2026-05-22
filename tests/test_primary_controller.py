@@ -1,0 +1,134 @@
+"""Unit tests for services.governance.primary_controller.
+
+The primary-controller assignment is what determines (a) which
+non-contract principals materialize MonitoredContract rows during
+enrollment and (b) which group container each contract joins on the
+Surface canvas. Both call sites share this module, so the tiebreakers
+and the FP-based eligibility rule are tested here in isolation.
+"""
+
+from __future__ import annotations
+
+from services.governance.primary_controller import assign_primary_controllers
+
+
+def _p(addr: str, ptype: str) -> dict:
+    return {"address": addr, "type": ptype}
+
+
+def test_unknown_type_excluded():
+    principals = [_p("0xa", "contract"), _p("0xb", "safe")]
+    fp = {"0xc1": {"0xa", "0xb"}}
+    result = assign_primary_controllers(principals, fp)
+    assert "0xa" not in result
+    assert result["0xb"] == ["0xc1"]
+
+
+def test_principals_winning_zero_contracts_present_with_empty_list():
+    """The dict shape must distinguish 'unknown principal' from 'known
+    principal that won nothing' — Surface uses the latter to know an
+    EOA principal should NOT render as a group, and enrollment uses it
+    to deactivate the corresponding MonitoredContract row.
+    """
+    principals = [_p("0xfee", "safe"), _p("0xreal", "safe")]
+    fp = {"0xc1": {"0xreal"}}
+    result = assign_primary_controllers(principals, fp)
+    assert result["0xreal"] == ["0xc1"]
+    assert result["0xfee"] == []
+
+
+def test_state_variable_destination_safe_excluded_by_fp():
+    """Concrete repro of the etherfi bug.
+
+    Two same-type Safes: ``0xcea`` is the real governance multisig
+    (FP-tagged on every protocol contract); ``0xa99`` is the fee
+    destination stored in ``accountantState.payoutAddress`` and has no
+    FP rows. The label heuristic the spec drafted would have caught
+    this, but FP membership catches it without depending on label
+    naming.
+    """
+    cea = "0xcea8039076e35a825854c5c2f85659430b06ec96"
+    a99 = "0xa9962a5bfbea6918e958dee0647e99fd7863b95a"
+    contracts = [
+        "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+        "0x49f954c67ff235034b69b8a59fbe309a40256c8d",
+        "0x86b5780b606940eb59a062aa85a07959518c0161",
+        "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+        "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+    ]
+    fp = {c: {cea} for c in contracts}
+    result = assign_primary_controllers([_p(cea, "safe"), _p(a99, "safe")], fp)
+    assert sorted(result[cea]) == sorted(contracts)
+    assert result[a99] == []
+
+
+def test_priority_tiebreaker():
+    """Safe wins over Timelock when both are eligible for the same contract."""
+    fp = {"0xc1": {"0xsafe", "0xtl"}}
+    result = assign_primary_controllers(
+        [_p("0xsafe", "safe"), _p("0xtl", "timelock")],
+        fp,
+    )
+    assert result["0xsafe"] == ["0xc1"]
+    assert result["0xtl"] == []
+
+
+def test_size_tiebreaker():
+    """Same type → bigger owner wins."""
+    fp = {
+        "0xc1": {"0xbig", "0xsmall"},
+        "0xc2": {"0xbig"},
+        "0xc3": {"0xbig"},
+    }
+    result = assign_primary_controllers(
+        [_p("0xbig", "safe"), _p("0xsmall", "safe")],
+        fp,
+    )
+    assert sorted(result["0xbig"]) == ["0xc1", "0xc2", "0xc3"]
+    assert result["0xsmall"] == []
+
+
+def test_lex_address_tiebreaker():
+    """All else equal, lex-smaller address wins (stable across re-runs)."""
+    fp = {"0xc1": {"0xaaa", "0xbbb"}}
+    result = assign_primary_controllers(
+        [_p("0xaaa", "safe"), _p("0xbbb", "safe")],
+        fp,
+    )
+    assert result["0xaaa"] == ["0xc1"]
+    assert result["0xbbb"] == []
+
+
+def test_address_lowercasing():
+    """Mixed-case principal addresses should match against the
+    lower-cased FP map keys/values, since callers normalize one side
+    and not always the other.
+    """
+    fp = {"0xc1": {"0xabc"}}
+    result = assign_primary_controllers([_p("0xABC", "safe")], fp)
+    assert result["0xabc"] == ["0xc1"]
+
+
+def test_self_address_in_fp_is_still_counted():
+    """A principal whose own address appears in its own FP map (rare,
+    e.g. a Safe calling itself via execTransaction) still counts as
+    primary for that contract. The function doesn't second-guess
+    self-reference; that's a Surface-layout concern handled separately.
+    """
+    fp = {"0xsafe": {"0xsafe"}}
+    result = assign_primary_controllers([_p("0xsafe", "safe")], fp)
+    assert result["0xsafe"] == ["0xsafe"]
+
+
+def test_empty_inputs():
+    assert assign_primary_controllers([], {}) == {}
+    assert assign_primary_controllers([_p("0xa", "safe")], {}) == {"0xa": []}
+    # Contracts in fp without any principal listed are silently ignored.
+    assert assign_primary_controllers([], {"0xc1": {"0xa"}}) == {}
+
+
+def test_output_is_sorted():
+    """Sorted contract lists per principal — stable enrollment / UI ordering."""
+    fp = {"0xc3": {"0xa"}, "0xc1": {"0xa"}, "0xc2": {"0xa"}}
+    result = assign_primary_controllers([_p("0xa", "safe")], fp)
+    assert result["0xa"] == ["0xc1", "0xc2", "0xc3"]

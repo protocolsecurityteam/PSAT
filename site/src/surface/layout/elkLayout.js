@@ -9,18 +9,9 @@ const elk = new ELK();
 // least this many contracts becomes a group container. We default to 1
 // — a Safe that touches a single contract still gets a labeled box,
 // matching the visual the user wants for EOAs as well. Principals that
-// lose every candidate child to a higher-priority owner (see
-// PRINCIPAL_PRIORITY) drop off the canvas entirely; they remain
-// addressable via search and sidebar.
+// the server didn't mark primary for any contract drop off the canvas
+// entirely; they remain addressable via search and sidebar.
 const MIN_GROUP_SIZE = 1;
-
-// Priority order when a contract is owned by multiple principals. Safes
-// usually carry the actual signers, so they win over a timelock that
-// proxies them; timelocks beat raw EOAs because the delay is the
-// load-bearing protection. proxy_admin sits below EOA because it tends
-// to BE an EOA wrapped in the proxy-admin contract — picking it would
-// just rename the owner.
-const PRINCIPAL_PRIORITY = { safe: 4, timelock: 3, eoa: 2, proxy_admin: 1 };
 
 export function hierarchicalLayout(machines, edgePairs) {
   const n = machines.length;
@@ -163,12 +154,16 @@ export function hierarchicalLayout(machines, edgePairs) {
 
 // Compute the contract→group assignment used by both buildGraphLayout
 // (for node parentId + edge filtering) and elkLayout (for ELK compound
-// children). A contract joins a principal's group iff that principal:
-//   1. Controls the contract (it's in principal.controls).
-//   2. Controls at least MIN_GROUP_SIZE contracts overall (small groups
-//      add visual chrome without reducing clutter).
-//   3. Wins the priority tie among all principals that satisfy (1)+(2):
-//      Safe > Timelock > EOA > ProxyAdmin, broken by larger group size.
+// children).
+//
+// The server's primary-controller assignment (services.governance.
+// primary_controller, exposed as principal.primary_for) is the source
+// of truth: a contract belongs to principal P's group iff P.primary_for
+// includes it. That's the same decision monitoring enrollment uses, so
+// the canvas and the Monitoring tab never disagree about who governs
+// what. We previously derived this client-side from principal.controls
+// + a local priority constant, which double-counted state-variable
+// destinations (e.g. payoutAddress Safes) that have no call authority.
 //
 // Returns:
 //   contractToGroup: Map<contractAddr_lc, principalAddr_lc>
@@ -179,57 +174,27 @@ export function assignGroups(machines, principals) {
   for (const m of machines) {
     if (m.address) contractAddrs.add(m.address.toLowerCase());
   }
-  const principalByAddr = new Map();
-  for (const p of principals || []) {
-    if (p.address) principalByAddr.set(p.address.toLowerCase(), p);
-  }
 
-  // For each principal, the subset of contracts in this protocol's
-  // canvas that it controls.
-  const principalOwned = new Map();
-  for (const [addr, p] of principalByAddr) {
-    const owned = new Set();
-    for (const c of p.controls || []) {
-      const lc = c?.toLowerCase();
-      if (lc && contractAddrs.has(lc) && lc !== addr) owned.add(lc);
-    }
-    principalOwned.set(addr, owned);
-  }
-
-  // Per contract, pick the best (highest-priority, then largest) principal
-  // that controls it AND has at least MIN_GROUP_SIZE total controlled.
   const contractToGroup = new Map();
-  for (const contractAddr of contractAddrs) {
-    let best = null;
-    for (const [principalAddr, owned] of principalOwned) {
-      if (!owned.has(contractAddr)) continue;
-      if (owned.size < MIN_GROUP_SIZE) continue;
-      const p = principalByAddr.get(principalAddr);
-      const priority = PRINCIPAL_PRIORITY[p?.type] || 0;
-      if (
-        !best
-        || priority > best.priority
-        || (priority === best.priority && owned.size > best.size)
-      ) {
-        best = { principalAddr, priority, size: owned.size };
-      }
-    }
-    if (best) contractToGroup.set(contractAddr, best.principalAddr);
-  }
-
   const groupChildren = new Map();
-  for (const [contractAddr, principalAddr] of contractToGroup) {
-    if (!groupChildren.has(principalAddr)) groupChildren.set(principalAddr, []);
-    groupChildren.get(principalAddr).push(contractAddr);
-  }
-  // A principal that loses all its candidate children to higher-priority
-  // owners (e.g. an EOA whose 3 contracts are all also Safe-owned) ends
-  // up with zero children — drop the group so we don't render an empty
-  // box, and the principal falls back to a standalone PrincipalNode.
-  for (const [addr, kids] of Array.from(groupChildren.entries())) {
-    if (kids.length < MIN_GROUP_SIZE) {
-      groupChildren.delete(addr);
-      for (const k of kids) contractToGroup.delete(k);
+
+  for (const p of principals || []) {
+    const principalAddr = p?.address?.toLowerCase();
+    if (!principalAddr) continue;
+    const primary = Array.isArray(p.primary_for) ? p.primary_for : [];
+    const owned = [];
+    for (const c of primary) {
+      const lc = c?.toLowerCase();
+      if (!lc || lc === principalAddr) continue;
+      if (!contractAddrs.has(lc)) continue;
+      // A contract should only ever appear in one principal's primary_for
+      // (server enforces this), but defensively skip duplicates.
+      if (contractToGroup.has(lc)) continue;
+      contractToGroup.set(lc, principalAddr);
+      owned.push(lc);
+    }
+    if (owned.length >= MIN_GROUP_SIZE) {
+      groupChildren.set(principalAddr, owned);
     }
   }
 

@@ -48,6 +48,7 @@ from db.models import (
     TvlSnapshot,
     UpgradeEvent,
 )
+from services.governance.primary_controller import assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 
 logger = logging.getLogger("services.aggregations.company_overview")
@@ -297,6 +298,7 @@ def _prefetch_child_tables(
         "ef_effects": {},
         "fp_governance_rows": {},
         "fp_in_contract_principals": {},
+        "fp_all_addrs": {},
         "upgrade_events_count": {},
         "upgrade_events_last": {},
         "balances": {},
@@ -483,6 +485,42 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
+    def _fp_all_addrs(s: Session) -> tuple[dict[int, set[str]], int]:
+        """Per-contract set of every FP address (lower-cased), no contract
+        filter. Drives ``services.governance.primary_controller`` which
+        needs to ask "is this non-contract principal (Safe/Timelock/EOA/
+        proxy_admin) in FP for any function on this contract?".
+
+        ``_fp_in_contract_principals`` intersects with the in-protocol
+        contract set so it can't answer that question — by construction
+        it filters out the very addresses (Safes / EOAs) we want to
+        check. ``signature_witness`` rows are excluded for the same
+        reason as there: signers of a message aren't callers.
+        """
+        local: dict[int, set[str]] = {}
+        rows = 0
+        for cid, addr in s.execute(
+            select(
+                EffectiveFunction.contract_id,
+                func.lower(FunctionPrincipal.address),
+            )
+            .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
+            .where(
+                EffectiveFunction.contract_id.in_(id_list),
+                FunctionPrincipal.address.is_not(None),
+                or_(
+                    FunctionPrincipal.principal_type != "signature_witness",
+                    FunctionPrincipal.principal_type.is_(None),
+                ),
+            )
+            .distinct()
+        ).all():
+            if not addr:
+                continue
+            local.setdefault(cid, set()).add(addr)
+            rows += 1
+        return local, rows
+
     def _upgrade_count(s: Session) -> tuple[dict[int, int], int]:
         local: dict[int, int] = {}
         for cid, count in s.execute(
@@ -560,6 +598,7 @@ def _prefetch_child_tables(
         ("ef_effects", "ef_effects", _ef_effects),
         ("fp_governance_rows", "fp_governance_rows", _fp_governance),
         ("fp_in_contract_principals", "fp_in_contract_principals", _fp_in_contract_principals),
+        ("fp_all_addrs", "fp_all_addrs", _fp_all_addrs),
         ("upgrade_events_count", "upgrade_events_count", _upgrade_count),
         ("upgrade_events_last", "upgrade_events_last", _upgrade_last),
     ]
@@ -810,6 +849,7 @@ def build_governance_view(
     cgn_by_cid: dict[int, list[ControlGraphNode]] = children["cgn"]
     cge_by_cid: dict[int, list[ControlGraphEdge]] = children["cge"]
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
+    fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 
     contracts: list[dict[str, Any]] = []
@@ -1012,6 +1052,23 @@ def build_governance_view(
         fp_in_contract_by_cid,
         principal_lookup,
     )
+
+    # Reshape FP-by-contract-id into FP-by-contract-address so each principal
+    # gets a ``primary_for`` list — the contracts it canonically governs. Used
+    # by Surface (group containment) and monitoring enrollment (which Safes
+    # to actually watch); see ``services.governance.primary_controller``.
+    contract_addr_by_cid: dict[int, str] = {
+        c.id: c.address.lower() for c in contracts_by_job_id.values() if c is not None and c.address
+    }
+    fp_addrs_by_contract_addr: dict[str, set[str]] = {}
+    for cid, addrs in fp_all_addrs_by_cid.items():
+        addr_lc = contract_addr_by_cid.get(cid)
+        if addr_lc:
+            fp_addrs_by_contract_addr[addr_lc] = addrs
+    primary_for = assign_primary_controllers(principals, fp_addrs_by_contract_addr)
+    for p in principals:
+        p_addr_lc = (p.get("address") or "").lower()
+        p["primary_for"] = primary_for.get(p_addr_lc, [])
 
     return GovernanceView(
         contracts=contracts,

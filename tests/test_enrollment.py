@@ -269,6 +269,37 @@ class TestBuildInitialState:
         state = _build_initial_state(contract, [cv])
         assert state["owner"] == "0x" + "e" * 40
 
+    def test_ignores_pending_owner_and_other_substring_matches(self):
+        """The old substring match latched ``pendingOwner``/``previousOwner``/
+        ``roleOwner``/``ownerFee`` into ``last_known_state.owner`` and the
+        scanner would false-positive an OwnershipTransferred when the live
+        owner finally diverged. Only the canonical Ownable slot counts.
+        """
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        active = _mock_controller_value(controller_id="state_variable:owner", value="0x" + "a" * 40)
+        pending = _mock_controller_value(controller_id="state_variable:pendingOwner", value="0x" + "b" * 40)
+        previous = _mock_controller_value(controller_id="state_variable:previousOwner", value="0x" + "c" * 40)
+        role_owner = _mock_controller_value(controller_id="state_variable:roleOwner", value="0x" + "d" * 40)
+        # Order: active first, then noise. Last-write-wins under the old
+        # substring match would have latched the last entry.
+        state = _build_initial_state(contract, [active, pending, previous, role_owner])
+        assert state["owner"] == "0x" + "a" * 40
+
+    def test_ignores_state_variable_destination_admin(self):
+        """``state_variable:foo.adminAddress`` is not the canonical
+        Ownable admin slot — same lesson as the owner test, applied to
+        admin matching.
+        """
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        active = _mock_controller_value(controller_id="state_variable:admin", value="0x" + "1" * 40)
+        nested = _mock_controller_value(controller_id="state_variable:rolesAuthority.pendingAdmin", value="0x" + "2" * 40)
+        state = _build_initial_state(contract, [active, nested])
+        assert state["admin"] == "0x" + "1" * 40
+
 
 # ---------------------------------------------------------------------------
 # Tests for maybe_enroll_protocol
@@ -537,6 +568,22 @@ def _create_completed_job(session, address, protocol_id):
     return job
 
 
+def _grant_primary_authority(session, contract_id, principal_address, function_name="setOwner"):
+    """Make ``principal_address`` a primary controller of the contract by
+    attaching a ``FunctionPrincipal`` row. ``assign_primary_controllers``
+    uses FP membership as eligibility, so any CGN principal needs at
+    least one matching FP row on the contract to survive the enrollment
+    filter.
+    """
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    ef = EffectiveFunction(contract_id=contract_id, function_name=function_name, authority_public=False)
+    session.add(ef)
+    session.flush()
+    session.add(FunctionPrincipal(function_id=ef.id, address=principal_address, principal_type="controller"))
+    session.flush()
+
+
 @requires_postgres
 class TestEnrollmentIntegration:
     """End-to-end enrollment with real Contract, ContractSummary, and
@@ -797,6 +844,11 @@ class TestEnrollmentIntegration:
                 ),
             ]
         )
+        # Make both the safe and timelock primary controllers via FP.
+        # The EOA is intentionally left out so the test continues to
+        # assert "EOAs don't materialize MonitoredContract rows".
+        _grant_primary_authority(pg_session, contract.id, safe_addr, function_name="setOwner")
+        _grant_primary_authority(pg_session, contract.id, timelock_addr, function_name="schedule")
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
@@ -889,6 +941,7 @@ class TestEnrollmentIntegration:
             resolved_type="safe",
         )
         pg_session.add(node)
+        _grant_primary_authority(pg_session, contract.id, safe_addr)
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(1000)):
@@ -905,3 +958,151 @@ class TestEnrollmentIntegration:
             "Controller MonitoredContract was deactivated by stale-detection — flush ordering bug"
         )
         assert safe_mc.contract_type == "safe"
+
+    def test_state_variable_destination_safe_is_not_enrolled(self, pg_session):
+        """A Safe that only appears as a state-variable destination
+        (CGN with no FunctionPrincipal authority on any function) must
+        NOT become an active MonitoredContract — that's the etherfi
+        ``accountantState.payoutAddress`` misclassification this whole
+        pipeline change is fixing.
+        """
+        from db.models import Contract, ControlGraphNode, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d2" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d2" * 20, proto.id)
+
+        real_safe = "0x" + "cc" * 20
+        fee_safe = "0x" + "ee" * 20
+        pg_session.add_all(
+            [
+                ControlGraphNode(
+                    contract_id=contract.id,
+                    address=real_safe,
+                    node_type="controller",
+                    resolved_type="safe",
+                    label="owner",
+                    depth=1,
+                ),
+                ControlGraphNode(
+                    contract_id=contract.id,
+                    address=fee_safe,
+                    node_type="controller",
+                    resolved_type="safe",
+                    label="accountantState.payoutAddress",
+                    depth=1,
+                ),
+            ]
+        )
+        # Only the real Safe holds function-level authority.
+        _grant_primary_authority(pg_session, contract.id, real_safe, function_name="transferOwnership")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(2000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        real_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == real_safe)
+        ).scalar_one()
+        assert real_mc.is_active is True
+        assert real_mc.contract_type == "safe"
+
+        fee_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == fee_safe)
+        ).scalar_one_or_none()
+        assert fee_mc is None, (
+            "Non-primary Safe was enrolled — the FP-based eligibility filter "
+            "didn't fire for accountantState.payoutAddress-style destinations"
+        )
+
+    def test_re_enrollment_demotes_safe_that_lost_authority(self, pg_session):
+        """A Safe enrolled in a prior run that has since lost its
+        function-level authority (no remaining FP rows) gets
+        ``is_active=False`` + ``enrollment_source='auto_deprimary'``
+        on the next ``enroll_protocol_contracts`` call. The row is
+        kept (not deleted) so its MonitoredEvent history survives.
+        """
+        from db.models import (
+            Contract,
+            ControlGraphNode,
+            EffectiveFunction,
+            FunctionPrincipal,
+            Protocol,
+        )
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d3" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d3" * 20, proto.id)
+
+        safe_addr = "0x" + "77" * 20
+        pg_session.add(
+            ControlGraphNode(
+                contract_id=contract.id,
+                address=safe_addr,
+                node_type="controller",
+                resolved_type="safe",
+                label="owner",
+                depth=1,
+            )
+        )
+        _grant_primary_authority(pg_session, contract.id, safe_addr, function_name="setOwner")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(3000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        first = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
+        ).scalar_one()
+        assert first.is_active is True
+        assert first.enrollment_source == "auto"
+
+        # Simulate the Safe losing its function authority (e.g. the
+        # owner was rotated). Drop the EF/FP rows for this contract
+        # specifically — a global FP wipe would clobber state from any
+        # other test sharing the test DB.
+        ef_ids = [
+            ef_id
+            for (ef_id,) in pg_session.execute(
+                select(EffectiveFunction.id).where(EffectiveFunction.contract_id == contract.id)
+            ).all()
+        ]
+        if ef_ids:
+            pg_session.execute(FunctionPrincipal.__table__.delete().where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(EffectiveFunction.__table__.delete().where(EffectiveFunction.id.in_(ef_ids)))
+        pg_session.commit()
+        pg_session.expire_all()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(4000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        demoted = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
+        ).scalar_one()
+        assert demoted.is_active is False, (
+            f"Demoted Safe should be deactivated, got "
+            f"is_active={demoted.is_active} source={demoted.enrollment_source}"
+        )
+        assert demoted.enrollment_source == "auto_deprimary"

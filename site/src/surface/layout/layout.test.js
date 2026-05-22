@@ -93,6 +93,7 @@ describe("buildSearchResults", () => {
     label: p.display_name,
     details: p.details,
     controls: machines.map((m) => m.address),
+    primary_for: machines.map((m) => m.address),
   }));
 
   it("filters to safes when mode=safe", () => {
@@ -123,16 +124,17 @@ describe("buildGraphLayout", () => {
   const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
 
   it("emits a group per principal that uniquely controls at least one contract", () => {
-    // Each principal points at machines[0]. The Safe wins priority and
-    // becomes a 1-child group; the Timelock loses every candidate
-    // child and drops off the canvas entirely (still visible in search
-    // and sidebar via companyData.principals).
+    // Server marks only the Safe as primary for machines[0]; the
+    // Timelock has no primary_for entries and drops off the canvas
+    // entirely (still visible in search and sidebar via
+    // companyData.principals).
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: [machines[0].address],
+      primary_for: p.resolved_type === "safe" ? [machines[0].address] : [],
     }));
     const { nodes, edges } = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
     const contractNodes = nodes.filter((n) => n.type === "contract");
@@ -150,15 +152,16 @@ describe("buildGraphLayout", () => {
   });
 
   it("collapses every principal→child edge into containment", () => {
-    // Same fixture, but the Safe now controls both contracts — exactly
-    // the fanout the grouping is meant to collapse. The Timelock still
-    // only controls one but loses priority to the Safe.
+    // Same fixture, but the Safe is now the server-marked primary for
+    // both contracts — exactly the fanout the grouping is meant to
+    // collapse. The Timelock has no primary_for entries.
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: p.resolved_type === "safe" ? machines.map((m) => m.address) : [machines[0].address],
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
     }));
     const { nodes, edges, groupChildren, contractToGroup } = buildGraphLayout(
       machines,
@@ -188,16 +191,18 @@ describe("buildGraphLayout", () => {
     expect(principalEdges).toHaveLength(0);
   });
 
-  it("picks the highest-priority principal when several control the same contracts", () => {
-    // Safe + Timelock both control both contracts. Safe wins per
-    // PRINCIPAL_PRIORITY; the Timelock's group dissolves because it has
-    // no remaining children.
+  it("respects the server's primary_for assignment for group membership", () => {
+    // Same fixture: server has already picked the Safe as primary for
+    // both contracts. The Timelock is in the principal list (so it
+    // remains searchable) but has an empty primary_for, so it doesn't
+    // get a group.
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
     }));
     const { groupChildren, contractToGroup } = assignGroups(machines, principals);
     expect(groupChildren.size).toBe(1);

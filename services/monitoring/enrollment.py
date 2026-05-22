@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -15,6 +15,8 @@ from db.models import (
     ContractSummary,
     ControlGraphNode,
     ControllerValue,
+    EffectiveFunction,
+    FunctionPrincipal,
     Job,
     JobStatus,
     MonitoredContract,
@@ -318,6 +320,23 @@ def _build_monitoring_config(
     return config
 
 
+# The active owner / admin slot, controller-id whitelist. Same shape as
+# ``services.aggregations.company_overview._ACTIVE_OWNER_CONTROLLER_IDS``
+# — both are picking the canonical Ownable slot. A loose substring match
+# (``"owner" in controller_id``) used to drive this and false-positives
+# on ``pendingOwner``, ``previousOwner``, ``roleOwner``, ``ownerFee``,
+# etc. Combined with last-write-wins iteration the wrong slot would
+# latch into ``last_known_state.owner`` and the scanner would
+# false-positive an OwnershipTransferred when the live owner finally
+# diverged from the stored pending-owner value.
+_INITIAL_STATE_OWNER_IDS = frozenset(
+    {"owner", "_owner", "state_variable:owner", "state_variable:_owner"}
+)
+_INITIAL_STATE_ADMIN_IDS = frozenset(
+    {"admin", "state_variable:admin"}
+)
+
+
 def _build_initial_state(
     contract: Contract,
     controller_values: Sequence[ControllerValue],
@@ -329,10 +348,12 @@ def _build_initial_state(
         state["implementation"] = contract.implementation
 
     for cv in controller_values:
-        cid = cv.controller_id.lower() if cv.controller_id else ""
-        if "owner" in cid and cv.value:
+        cid = (cv.controller_id or "").lower()
+        if not cv.value:
+            continue
+        if cid in _INITIAL_STATE_OWNER_IDS:
             state["owner"] = cv.value
-        elif "admin" in cid and cv.value:
+        elif cid in _INITIAL_STATE_ADMIN_IDS:
             state["admin"] = cv.value
 
     return state
@@ -377,6 +398,23 @@ def _bridge_to_watched_proxy(
         mc.watched_proxy_id = wp.id
 
 
+# CGN ``resolved_type`` → principal type understood by
+# :func:`assign_primary_controllers`. EOAs are intentionally absent
+# even though they're valid principals — there's nothing useful to
+# monitor on an EOA (no contract events, no state), and the prior
+# enrollment behavior never materialized MonitoredContract rows for
+# them. The company-overview path keeps EOAs in its principal list so
+# they still surface as Surface group containers when they win
+# primary_for.
+_CGN_TYPE_TO_PRINCIPAL_TYPE = {
+    "safe": "safe",
+    "gnosis_safe": "safe",
+    "timelock": "timelock",
+    "proxy": "proxy_admin",
+    "proxy_admin": "proxy_admin",
+}
+
+
 def _enroll_controller_addresses(
     session: Session,
     contracts: Sequence[Contract],
@@ -384,53 +422,114 @@ def _enroll_controller_addresses(
     chain: str,
     current_block: int,
 ) -> None:
-    """Discover and enroll controller addresses from control graph nodes."""
-    # Collect all contract addresses already enrolled
-    enrolled_addrs = {c.address.lower() for c in contracts}
+    """Discover and enroll controller addresses from control graph nodes.
 
+    A CGN principal (Safe / Timelock / proxy admin) is enrolled iff it
+    holds function-level authority on at least one protocol contract —
+    i.e. an address that appears in ``FunctionPrincipal`` for any
+    ``EffectiveFunction`` of one of *contracts*. CGN on its own
+    over-enrolls because the table also stores state-variable
+    destinations (``accountantState.payoutAddress`` pointing at a Safe
+    that's actually a fee sink, not a governor); ``FunctionPrincipal``
+    is the authoritative "can actually call something" signal already
+    trusted by ``services.aggregations.company_overview``.
+
+    The Surface canvas uses a *single* primary controller per contract
+    (winner-take-all by :func:`assign_primary_controllers`) so groups
+    don't overlap. Enrollment intentionally uses the broader
+    *eligibility* check: a contract owned by both a Safe and a
+    Timelock needs both to be monitored (each emits its own events),
+    even though Surface only renders the Safe's group.
+
+    Existing rows that no longer hold FP authority on any protocol
+    contract are *deactivated* (``is_active=False``,
+    ``enrollment_source="auto_deprimary"``) rather than deleted —
+    their MonitoredEvent history is real and a follow-up UI change can
+    surface them as "no longer primary, kept for history".
+    """
+    enrolled_contract_addrs = {c.address.lower() for c in contracts}
+
+    # Collect every candidate principal from the CGN walk.
+    candidates_by_addr: dict[str, str] = {}
     for contract in contracts:
         nodes = (
             session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract.id)).scalars().all()
         )
-
         for node in nodes:
             addr = node.address.lower() if node.address else ""
-            if not addr or addr in enrolled_addrs:
+            if not addr or addr in enrolled_contract_addrs:
                 continue
-
-            # Determine type from node
-            node_type = "regular"
-            if node.resolved_type in ("safe", "gnosis_safe"):
-                node_type = "safe"
-            elif node.resolved_type == "timelock":
-                node_type = "timelock"
-            elif node.resolved_type in ("proxy", "proxy_admin"):
-                node_type = "proxy"
-
-            if node_type == "regular":
+            ptype = _CGN_TYPE_TO_PRINCIPAL_TYPE.get(node.resolved_type or "")
+            if not ptype:
                 continue
+            # First-write-wins; CGN-resolved type for an address shouldn't
+            # vary across contracts within a single protocol, and if it
+            # does the difference is uninteresting for the enrollment
+            # decision (we just need to know it's some kind of principal).
+            candidates_by_addr.setdefault(addr, ptype)
 
-            existing = session.execute(
-                select(MonitoredContract).where(
-                    MonitoredContract.address == addr,
-                    MonitoredContract.chain == chain,
-                )
-            ).scalar_one_or_none()
+    if not candidates_by_addr:
+        return
 
-            if not existing:
-                config = _build_monitoring_config(None, [], node_type)
+    # Eligibility: the set of FP-tagged addresses across this protocol's
+    # contracts. An address is enrollment-eligible iff it appears here.
+    contract_ids = [c.id for c in contracts]
+    fp_eligible_addrs: set[str] = set()
+    if contract_ids:
+        for (fp_addr,) in session.execute(
+            select(func.lower(FunctionPrincipal.address))
+            .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+            .where(
+                EffectiveFunction.contract_id.in_(contract_ids),
+                FunctionPrincipal.address.is_not(None),
+                or_(
+                    FunctionPrincipal.principal_type != "signature_witness",
+                    FunctionPrincipal.principal_type.is_(None),
+                ),
+            )
+            .distinct()
+        ).all():
+            if fp_addr:
+                fp_eligible_addrs.add(fp_addr)
+
+    for addr, ptype in candidates_by_addr.items():
+        existing = session.execute(
+            select(MonitoredContract).where(
+                MonitoredContract.address == addr,
+                MonitoredContract.chain == chain,
+            )
+        ).scalar_one_or_none()
+
+        is_eligible = addr in fp_eligible_addrs
+        # proxy_admin maps to MonitoredContract.contract_type='proxy'
+        # (schema's historical naming); other principal types pass through.
+        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
+
+        if is_eligible:
+            if existing:
+                existing.protocol_id = protocol_id
+                existing.contract_type = monitored_type
+                existing.is_active = True
+                # Re-promote a previously-deprimary'd row so the
+                # stale-deactivation pass keeps it.
+                existing.enrollment_source = "auto"
+            else:
+                config = _build_monitoring_config(None, [], monitored_type)
                 mc = MonitoredContract(
                     id=uuid.uuid4(),
                     address=addr,
                     chain=chain,
                     protocol_id=protocol_id,
-                    contract_type=node_type,
+                    contract_type=monitored_type,
                     monitoring_config=config,
                     last_known_state={},
                     last_scanned_block=current_block,
-                    needs_polling=node_type in ("safe", "timelock"),
+                    needs_polling=monitored_type in ("safe", "timelock"),
                     is_active=True,
                     enrollment_source="auto",
                 )
                 session.add(mc)
-                enrolled_addrs.add(addr)
+        elif existing and existing.enrollment_source == "auto":
+            # Demote: keep event history, drop active monitoring.
+            existing.is_active = False
+            existing.enrollment_source = "auto_deprimary"
