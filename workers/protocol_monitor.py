@@ -42,6 +42,16 @@ def main():
         help="Run TVL tracking loop (periodic balance snapshots)",
     )
     parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help=(
+            "Run the enrollment reconciler loop — periodically re-runs "
+            "enroll_protocol_contracts for every protocol so monitored_contracts "
+            "converges with Contract+Job state regardless of how that state changed "
+            "(orphan-adoption migrations, deployer-cascade, manual fix-ups, etc.)."
+        ),
+    )
+    parser.add_argument(
         "--legacy",
         action="store_true",
         help="Run the legacy proxy-only scanner (backward compat fallback)",
@@ -62,6 +72,17 @@ def main():
         interval = args.interval if args.interval is not None else DEFAULT_TVL_INTERVAL
         logger.info("TVL tracker starting (interval=%ss)", interval)
         run_tvl_loop(interval)
+        return
+
+    if args.reconcile:
+        from services.monitoring.reconciler import (
+            DEFAULT_RECONCILE_INTERVAL_S,
+            run_enrollment_reconciler_loop,
+        )
+
+        interval = args.interval if args.interval is not None else DEFAULT_RECONCILE_INTERVAL_S
+        logger.info("Enrollment reconciler starting (interval=%ss)", interval)
+        run_enrollment_reconciler_loop(args.rpc_url, interval=interval)
         return
 
     if args.legacy:

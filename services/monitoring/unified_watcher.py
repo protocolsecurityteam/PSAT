@@ -763,9 +763,27 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 # ---------------------------------------------------------------------------
 
 
+def _boot_reconcile(rpc_url: str) -> None:
+    """Best-effort enrollment reconcile on watcher startup.
+
+    Catches the case where a migration / admin fix-up landed while the
+    watcher was down. The reconciler converges on every tick anyway, so
+    a failure here is non-fatal — but the boot pass closes the deploy-
+    window gap so monitored_contracts is correct before the first scan.
+    """
+    try:
+        from services.monitoring.reconciler import reconcile_enrollments
+
+        with SessionLocal() as session:
+            reconcile_enrollments(session, rpc_url)
+    except Exception as exc:
+        logger.warning("Boot reconcile failed: %s", exc, extra={"exc_type": type(exc).__name__})
+
+
 def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None:
     """Run the unified event scanner in a blocking loop."""
     logger.info("Starting unified protocol monitor (interval=%ss)", interval)
+    _boot_reconcile(rpc_url)
     while True:
         try:
             with SessionLocal() as session:
@@ -786,6 +804,7 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
 def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None:
     """Run the unified state polling loop."""
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
+    _boot_reconcile(rpc_url)
     while True:
         try:
             with SessionLocal() as session:
