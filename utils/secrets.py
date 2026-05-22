@@ -98,7 +98,7 @@ def sanitize_url(url: str) -> str:
     new_path = parts.path
     if _host_is_credentialed(parts.hostname or ""):
         new_path = f"/{_REDACTED}"
-    elif (parts.hostname or "").endswith("discord.com") and parts.path.startswith("/api/webhooks/"):
+    elif (parts.hostname or "").endswith(("discord.com", "discordapp.com")) and parts.path.startswith("/api/webhooks/"):
         # /api/webhooks/<id>/<token>: retain id, mask token.
         segments = parts.path.split("/")
         if len(segments) >= 5:

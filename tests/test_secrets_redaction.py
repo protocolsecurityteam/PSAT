@@ -54,6 +54,13 @@ class TestSanitizeUrl:
         # tell two webhooks apart in the UI.
         assert "123456789012345678" in out
 
+    def test_discord_legacy_host_webhook_is_masked(self):
+        legacy = "https://discordapp.com/api/webhooks/123456789012345678/LEGACY_TOKEN_VALUE_HERE"
+        out = sanitize_url(legacy)
+        assert "LEGACY_TOKEN_VALUE_HERE" not in out
+        assert "<redacted>" in out
+        assert "123456789012345678" in out
+
     def test_public_rpc_pass_through(self):
         # No path-key, no query-key — nothing to redact.
         assert sanitize_url(_PUBLIC_RPC) == _PUBLIC_RPC
