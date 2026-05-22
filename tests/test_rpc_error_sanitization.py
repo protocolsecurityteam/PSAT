@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import requests
@@ -69,9 +69,7 @@ def test_rpc_request_retries_exhausted_message_is_sanitized(monkeypatch):
 def test_rpc_request_connection_error_message_is_sanitized(monkeypatch):
     """A transport-level failure echoes the URL via str(exc) — must be scrubbed."""
     session = MagicMock()
-    session.post.side_effect = requests.ConnectionError(
-        f"connection reset by peer for {_ALCHEMY}"
-    )
+    session.post.side_effect = requests.ConnectionError(f"connection reset by peer for {_ALCHEMY}")
     monkeypatch.setattr(rpc_mod, "_get_session", lambda: session)
     monkeypatch.setattr(rpc_mod.time, "sleep", lambda _s: None)
 
