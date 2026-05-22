@@ -1106,3 +1106,85 @@ class TestEnrollmentIntegration:
             f"is_active={demoted.is_active} source={demoted.enrollment_source}"
         )
         assert demoted.enrollment_source == "auto_deprimary"
+
+    def test_zombie_timelock_row_demoted_when_cgn_evidence_disappears(self, pg_session):
+        """A timelock enrolled in a prior run whose CGN node is later
+        rebuilt away — and whose FP authority is also gone — must be
+        deactivated on re-enrollment. Observed on prod-etherfi: 4 of 5
+        monitored timelocks are zombies with no current evidence in
+        CGN, FP, or fund_flows. The deployed code had no path to
+        notice them because the CGN-walk-then-enroll loop only sees
+        addresses still in CGN; orphan rows survived indefinitely.
+        """
+        from db.models import (
+            Contract,
+            ControlGraphNode,
+            EffectiveFunction,
+            FunctionPrincipal,
+            Protocol,
+        )
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d4" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d4" * 20, proto.id)
+
+        timelock_addr = "0x" + "99" * 20
+        cgn_node = ControlGraphNode(
+            contract_id=contract.id,
+            address=timelock_addr,
+            node_type="controller",
+            resolved_type="timelock",
+            label="owner",
+            depth=1,
+        )
+        pg_session.add(cgn_node)
+        _grant_primary_authority(pg_session, contract.id, timelock_addr, function_name="schedule")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(5000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        first = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
+        ).scalar_one()
+        assert first.is_active is True
+        assert first.contract_type == "timelock"
+        assert first.enrollment_source == "auto"
+
+        # Simulate a re-analysis that drops both the CGN node AND the
+        # function authority — the zombie state observed on prod.
+        pg_session.delete(cgn_node)
+        ef_ids = [
+            ef_id
+            for (ef_id,) in pg_session.execute(
+                select(EffectiveFunction.id).where(EffectiveFunction.contract_id == contract.id)
+            ).all()
+        ]
+        if ef_ids:
+            pg_session.execute(FunctionPrincipal.__table__.delete().where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(EffectiveFunction.__table__.delete().where(EffectiveFunction.id.in_(ef_ids)))
+        pg_session.commit()
+        pg_session.expire_all()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(6000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        zombie = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
+        ).scalar_one()
+        assert zombie.is_active is False, (
+            f"Zombie timelock should be demoted, got "
+            f"is_active={zombie.is_active} source={zombie.enrollment_source}"
+        )
+        assert zombie.enrollment_source == "auto_deprimary"

@@ -415,6 +415,12 @@ _CGN_TYPE_TO_PRINCIPAL_TYPE = {
 }
 
 
+# MonitoredContract.contract_type values populated by this module via
+# ``_CGN_TYPE_TO_PRINCIPAL_TYPE``. Pass 2 below scans the full set so
+# zombies of every flavor get caught.
+_CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
+
+
 def _enroll_controller_addresses(
     session: Session,
     contracts: Sequence[Contract],
@@ -441,11 +447,17 @@ def _enroll_controller_addresses(
     Timelock needs both to be monitored (each emits its own events),
     even though Surface only renders the Safe's group.
 
-    Existing rows that no longer hold FP authority on any protocol
-    contract are *deactivated* (``is_active=False``,
-    ``enrollment_source="auto_deprimary"``) rather than deleted —
-    their MonitoredEvent history is real and a follow-up UI change can
-    surface them as "no longer primary, kept for history".
+    Demotion is symmetric with enrollment and is driven by the same FP
+    signal — every auto-enrolled controller row whose address has no
+    current FP authority on the protocol's contracts is deactivated
+    (``is_active=False``, ``enrollment_source="auto_deprimary"``),
+    regardless of whether CGN still surfaces it. That covers both the
+    "Safe lost its function gate" case (CGN still present) and the
+    "Safe fell out of CGN entirely" zombie case observed on prod
+    (timelocks enrolled in a prior run whose CGN nodes disappeared
+    when analysis was rebuilt — the deployed code had no path to
+    remove them). Demoted rows are kept rather than deleted so
+    MonitoredEvent history survives a re-promotion or audit.
     """
     enrolled_contract_addrs = {c.address.lower() for c in contracts}
 
@@ -468,11 +480,10 @@ def _enroll_controller_addresses(
             # decision (we just need to know it's some kind of principal).
             candidates_by_addr.setdefault(addr, ptype)
 
-    if not candidates_by_addr:
-        return
-
     # Eligibility: the set of FP-tagged addresses across this protocol's
     # contracts. An address is enrollment-eligible iff it appears here.
+    # We compute this even when candidates_by_addr is empty so Pass 2 can
+    # still demote zombies whose CGN evidence is gone.
     contract_ids = [c.id for c in contracts]
     fp_eligible_addrs: set[str] = set()
     if contract_ids:
@@ -492,30 +503,28 @@ def _enroll_controller_addresses(
             if fp_addr:
                 fp_eligible_addrs.add(fp_addr)
 
+    # Pass 1: enroll / re-promote candidates that currently hold FP authority.
     for addr, ptype in candidates_by_addr.items():
+        if addr not in fp_eligible_addrs:
+            continue
+        # proxy_admin maps to MonitoredContract.contract_type='proxy'
+        # (schema's historical naming); other principal types pass through.
+        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
         existing = session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.address == addr,
                 MonitoredContract.chain == chain,
             )
         ).scalar_one_or_none()
-
-        is_eligible = addr in fp_eligible_addrs
-        # proxy_admin maps to MonitoredContract.contract_type='proxy'
-        # (schema's historical naming); other principal types pass through.
-        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
-
-        if is_eligible:
-            if existing:
-                existing.protocol_id = protocol_id
-                existing.contract_type = monitored_type
-                existing.is_active = True
-                # Re-promote a previously-deprimary'd row so the
-                # stale-deactivation pass keeps it.
-                existing.enrollment_source = "auto"
-            else:
-                config = _build_monitoring_config(None, [], monitored_type)
-                mc = MonitoredContract(
+        if existing:
+            existing.protocol_id = protocol_id
+            existing.contract_type = monitored_type
+            existing.is_active = True
+            existing.enrollment_source = "auto"
+        else:
+            config = _build_monitoring_config(None, [], monitored_type)
+            session.add(
+                MonitoredContract(
                     id=uuid.uuid4(),
                     address=addr,
                     chain=chain,
@@ -528,8 +537,32 @@ def _enroll_controller_addresses(
                     is_active=True,
                     enrollment_source="auto",
                 )
-                session.add(mc)
-        elif existing and existing.enrollment_source == "auto":
-            # Demote: keep event history, drop active monitoring.
-            existing.is_active = False
-            existing.enrollment_source = "auto_deprimary"
+            )
+
+    # Pass 2: demote any active auto-enrolled controller row whose
+    # address has no FP authority on this protocol. Symmetric with
+    # Pass 1 — same signal, opposite direction. Catches both the
+    # "CGN-present, FP-absent" demotion AND the zombie case where the
+    # CGN row vanished entirely between enrollment runs. Protocol-
+    # contract rows are excluded so this never touches MC rows owned
+    # by the main contract loop in ``enroll_protocol_contracts``.
+    existing_controllers = (
+        session.execute(
+            select(MonitoredContract).where(
+                MonitoredContract.protocol_id == protocol_id,
+                MonitoredContract.enrollment_source == "auto",
+                MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
+                MonitoredContract.is_active.is_(True),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for mc in existing_controllers:
+        addr = (mc.address or "").lower()
+        if not addr or addr in enrolled_contract_addrs:
+            continue
+        if addr in fp_eligible_addrs:
+            continue
+        mc.is_active = False
+        mc.enrollment_source = "auto_deprimary"
