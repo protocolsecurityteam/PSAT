@@ -691,6 +691,72 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
 
 
 # ---------------------------------------------------------------------------
+# In-flight sibling regression — a sibling job in queued/processing must
+# not silently block the policy trigger from enrolling completed
+# contracts. The historical in-flight gate skipped the trigger whenever
+# any sibling existed in those states, with no fallback. Combined with
+# terminal-failure siblings (which never transitioned out of queued/
+# processing observably), this produced the prod-etherfi "completed
+# contracts but missing monitored_contracts rows" symptom.
+# ---------------------------------------------------------------------------
+
+
+def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
+    """The policy trigger must enroll completed contracts even when a
+    sibling job is still queued or processing. Pre-fix shape: the
+    in-flight gate in ``maybe_enroll_protocol`` returned False as soon
+    as any ``Job.status IN (queued, processing)`` existed for the
+    protocol, and there was no automatic retry. A sibling that crashed
+    before transitioning out of queued / processing — observed on the
+    dev DB as a discovery-stage failure — would freeze the trigger and
+    require a manual ``POST /api/protocols/{id}/re-enroll`` to recover.
+
+    Today: the gate is gone. ``enroll_protocol_contracts`` is idempotent
+    so a partial enrollment from a trigger that fires while siblings are
+    still in flight is fine — subsequent triggers (or the reconciler)
+    upsert the remaining contracts when they finish. This test pins the
+    new behavior at the trigger boundary so a future "let's add the gate
+    back" reflex breaks it.
+    """
+    from services.monitoring.enrollment import maybe_enroll_protocol
+
+    rpc_url, tmp_path = anvil_env
+    completed_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+
+    proto = _make_protocol(test_db)
+    _add_protocol_contract(test_db, proto.id, completed_addr, contract_name="Completed")
+
+    # Sibling job stuck in 'queued'. Pre-fix this caused
+    # maybe_enroll_protocol to return False and skip the completed
+    # contract's enrollment with no retry path.
+    test_db.add(
+        Job(
+            address="0x" + "ab" * 20,
+            protocol_id=proto.id,
+            status=JobStatus.queued,
+            stage=JobStage.discovery,
+        )
+    )
+    test_db.commit()
+
+    fired = maybe_enroll_protocol(test_db, proto.id, rpc_url, "ethereum")
+    assert fired is True, (
+        "maybe_enroll_protocol must fire even when a sibling is in_flight. "
+        "Pre-fix the gate skipped this enrollment with no fallback."
+    )
+
+    mc = test_db.execute(
+        select(MonitoredContract).where(MonitoredContract.address == completed_addr.lower())
+    ).scalar_one_or_none()
+    assert mc is not None, (
+        "Regression: completed contract must be enrolled even while a "
+        "sibling sits in queued/processing. If this fails, the in-flight "
+        "gate has come back."
+    )
+    assert mc.is_active is True
+
+
+# ---------------------------------------------------------------------------
 # Convergence regression — Contract.protocol_id stamped out-of-band must
 # still result in an enrolled MonitoredContract row without a manual
 # /re-enroll. Pins the dev-DB shape investigated in the protocol-

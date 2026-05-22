@@ -308,38 +308,40 @@ class TestBuildInitialState:
 
 class TestMaybeEnrollProtocol:
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
-    def test_skips_when_in_flight_jobs(self, mock_enroll, db_session):
+    def test_fires_with_in_flight_siblings(self, mock_enroll):
+        """A queued / processing sibling must not block enrollment.
+
+        The trigger used to short-circuit on
+        ``Job.status IN (queued, processing)`` for the protocol; that
+        gate produced silent skips when a sibling crashed before
+        transitioning out of those statuses and had no fallback. The
+        anvil integration counterpart is
+        ``test_in_flight_sibling_job_does_not_block_enrollment``.
+        """
         from services.monitoring.enrollment import maybe_enroll_protocol
 
-        # We need to mock the session queries since Job uses JSONB
+        # The single remaining query is the "≥1 completed job" gate;
+        # returning a row means we proceed to enroll.
         mock_session = MagicMock()
-        # in-flight query returns a result
-        mock_in_flight = MagicMock()
-        mock_in_flight.scalars.return_value.first.return_value = MagicMock()
-        mock_session.execute.return_value = mock_in_flight
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = MagicMock()
+        mock_session.execute.return_value = result
 
-        result = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
-        assert result is False
-        mock_enroll.assert_not_called()
+        fired = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
+        assert fired is True
+        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", None)
 
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_skips_when_no_completed_jobs(self, mock_enroll):
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         mock_session = MagicMock()
-        # in-flight returns None, completed returns None
-        call_count = [0]
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        mock_session.execute.return_value = result
 
-        def mock_execute(stmt):
-            call_count[0] += 1
-            result = MagicMock()
-            result.scalars.return_value.first.return_value = None
-            return result
-
-        mock_session.execute.side_effect = mock_execute
-
-        result = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
-        assert result is False
+        fired = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
+        assert fired is False
         mock_enroll.assert_not_called()
 
 

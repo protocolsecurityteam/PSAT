@@ -236,28 +236,18 @@ class TestEnrollmentWithProxyContracts:
 
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_maybe_enroll_called_with_correct_protocol(self, mock_enroll):
-        """Full maybe_enroll_protocol flow when all jobs are complete."""
+        """``maybe_enroll_protocol`` runs ``enroll_protocol_contracts``
+        with the protocol id it was called with, once at least one job
+        has completed."""
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         mock_enroll.return_value = []
 
         mock_session = MagicMock()
-        # First call: in-flight query → None
-        # Second call: completed query → a completed job
-        call_count = [0]
-
-        def mock_execute(stmt):
-            call_count[0] += 1
-            result = MagicMock()
-            if call_count[0] == 1:
-                # No in-flight jobs
-                result.scalars.return_value.first.return_value = None
-            else:
-                # Has completed jobs
-                result.scalars.return_value.first.return_value = MagicMock()
-            return result
-
-        mock_session.execute.side_effect = mock_execute
+        result = MagicMock()
+        # Completed-job gate: returning a row means the trigger proceeds.
+        result.scalars.return_value.first.return_value = MagicMock()
+        mock_session.execute.return_value = result
 
         enrolled = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
 
@@ -265,10 +255,13 @@ class TestEnrollmentWithProxyContracts:
         mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", None)
 
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
-    def test_exclude_job_id_prevents_self_block(self, mock_enroll):
-        """The calling policy job is still 'processing' when it calls
-        maybe_enroll_protocol. Without exclude_job_id, it always finds
-        itself as in-flight and enrollment never fires."""
+    def test_exclude_job_id_threads_through_to_enroll(self, mock_enroll):
+        """``exclude_job_id`` (the calling PolicyWorker's still-processing
+        job id) must reach ``enroll_protocol_contracts`` so its address
+        is included in the analyzed-addrs set despite the not-yet-flipped
+        status. This used to also gate the in-flight skip; the gate is
+        gone but the calling-job-id threading remains.
+        """
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         mock_enroll.return_value = []
@@ -276,22 +269,10 @@ class TestEnrollmentWithProxyContracts:
         calling_job_id = uuid.uuid4()
 
         mock_session = MagicMock()
-        call_count = [0]
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = MagicMock()
+        mock_session.execute.return_value = result
 
-        def mock_execute(stmt):
-            call_count[0] += 1
-            result = MagicMock()
-            if call_count[0] == 1:
-                # In-flight check: with exclude_job_id, should find nothing
-                result.scalars.return_value.first.return_value = None
-            else:
-                # Completed check: finds completed jobs
-                result.scalars.return_value.first.return_value = MagicMock()
-            return result
-
-        mock_session.execute.side_effect = mock_execute
-
-        # With exclude_job_id — enrollment should fire
         enrolled = maybe_enroll_protocol(
             mock_session,
             1,
@@ -300,43 +281,8 @@ class TestEnrollmentWithProxyContracts:
             exclude_job_id=calling_job_id,
         )
         assert enrolled is True
-
-    @patch("services.monitoring.enrollment.enroll_protocol_contracts")
-    def test_maybe_enroll_blocked_by_null_protocol_id_jobs(self, mock_enroll):
-        """When impl jobs have NULL protocol_id, in-flight check doesn't
-        account for them, and enrollment may fire prematurely or not at all.
-
-        This test shows that even if we call maybe_enroll_protocol with the
-        right protocol_id, impl jobs with NULL protocol_id are invisible to
-        the in-flight check.
-        """
-        from services.monitoring.enrollment import maybe_enroll_protocol
-
-        mock_session = MagicMock()
-        call_count = [0]
-
-        def mock_execute(stmt):
-            call_count[0] += 1
-            result = MagicMock()
-            if call_count[0] == 1:
-                # In-flight query for protocol_id=1: finds nothing because
-                # the impl job has protocol_id=NULL and won't match the
-                # WHERE clause Job.protocol_id == 1
-                result.scalars.return_value.first.return_value = None
-            else:
-                # Completed query: finds completed jobs
-                result.scalars.return_value.first.return_value = MagicMock()
-            return result
-
-        mock_session.execute.side_effect = mock_execute
-
-        # Enrollment fires, but the in-flight check missed the impl jobs
-        # because they have protocol_id=NULL. This means enrollment can
-        # fire while impl analysis is still running.
-        enrolled = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
-        assert enrolled is True, (
-            "Enrollment fires because NULL-protocol-id impl jobs are invisible "
-            "to the in-flight check — another symptom of the propagation bug"
+        mock_enroll.assert_called_once_with(
+            mock_session, 1, "http://rpc", "ethereum", calling_job_id
         )
 
 
@@ -459,12 +405,15 @@ class TestProtocolIdPropagationIntegration:
         # Also verify it's stored in the request JSONB
         assert child.request.get("protocol_id") == protocol.id
 
-    def test_exclude_job_id_allows_last_job_to_enroll(self, pg_session):
-        """The last policy job (still processing) must not block itself.
-
-        Simulates what happens in policy_worker.py: the job calls
-        maybe_enroll_protocol while its own status is still 'processing'.
-        Without exclude_job_id it would always find itself and skip.
+    def test_enrolls_with_in_flight_sibling(self, pg_session):
+        """A queued / processing sibling must not block the trigger from
+        enrolling completed contracts. The historical in-flight gate
+        used to skip in this case with no fallback; that's the bug pinned
+        by ``test_in_flight_sibling_job_does_not_block_enrollment`` in
+        ``tests/test_monitoring_enrollment_anvil.py``. This unit-level
+        version covers the same shape against pg_session without anvil,
+        and additionally covers the caller-job-self-block case (a
+        PolicyWorker calling for its own still-processing job).
         """
         from db.models import JobStage, JobStatus, Protocol
         from db.queue import create_job
@@ -474,7 +423,6 @@ class TestProtocolIdPropagationIntegration:
         pg_session.add(protocol)
         pg_session.commit()
 
-        # First job: already completed
         first = create_job(
             pg_session,
             {
@@ -487,7 +435,9 @@ class TestProtocolIdPropagationIntegration:
         first.stage = JobStage.done
         pg_session.commit()
 
-        # Second job: still processing (the caller)
+        # The calling job (still processing) plus an unrelated sibling
+        # also in-flight. Pre-fix both would trigger the gate; now both
+        # are ignored.
         caller = create_job(
             pg_session,
             {
@@ -498,21 +448,19 @@ class TestProtocolIdPropagationIntegration:
         )
         caller.status = JobStatus.processing
         caller.stage = JobStage.policy
+
+        sibling = create_job(
+            pg_session,
+            {
+                "address": "0x" + "aa" * 20,
+                "name": "QueuedSibling",
+                "protocol_id": protocol.id,
+            },
+        )
+        sibling.status = JobStatus.queued
+        sibling.stage = JobStage.discovery
         pg_session.commit()
 
-        # Without exclude: caller is in-flight → blocked
-        with patch("services.monitoring.enrollment.enroll_protocol_contracts"):
-            assert (
-                maybe_enroll_protocol(
-                    pg_session,
-                    protocol.id,
-                    "http://localhost:8545",
-                    "ethereum",
-                )
-                is False
-            ), "Should be blocked — the calling job sees itself as in-flight"
-
-        # With exclude: caller excluded, only completed job remains → enrolls
         with patch("services.monitoring.enrollment.enroll_protocol_contracts") as mock_enroll:
             mock_enroll.return_value = []
             result = maybe_enroll_protocol(
@@ -522,51 +470,11 @@ class TestProtocolIdPropagationIntegration:
                 "ethereum",
                 exclude_job_id=caller.id,
             )
-            assert result is True, "With exclude_job_id, the calling job should not block enrollment"
+            assert result is True, (
+                "Enrollment must fire even when both the calling job and "
+                "an unrelated sibling are in_flight."
+            )
             mock_enroll.assert_called_once()
-
-    def test_enrollment_in_flight_check_sees_impl_jobs(self, pg_session):
-        """Impl jobs with protocol_id are visible to maybe_enroll_protocol's
-        in-flight check, preventing premature enrollment."""
-        from db.models import JobStage, JobStatus, Protocol
-        from db.queue import create_job
-        from services.monitoring.enrollment import maybe_enroll_protocol
-
-        protocol = Protocol(name="__test_propagation__")
-        pg_session.add(protocol)
-        pg_session.commit()
-
-        # Parent job: completed
-        parent = create_job(
-            pg_session,
-            {
-                "address": "0x" + "33" * 20,
-                "name": "ProxyContract",
-                "protocol_id": protocol.id,
-            },
-        )
-        parent.status = JobStatus.completed
-        parent.stage = JobStage.done
-        pg_session.commit()
-
-        # Impl child job: still processing (simulates the fix working)
-        impl_job = create_job(
-            pg_session,
-            {
-                "address": "0x" + "44" * 20,
-                "name": "ProxyContract: (impl)",
-                "protocol_id": protocol.id,  # propagated thanks to the fix
-            },
-        )
-        impl_job.status = JobStatus.processing
-        pg_session.commit()
-
-        # Enrollment should be blocked — the impl job is still in-flight
-        result = maybe_enroll_protocol(pg_session, protocol.id, "http://localhost:8545", "ethereum")
-        assert result is False, (
-            "Enrollment must wait for impl jobs to finish. "
-            "If this passes prematurely, impl jobs are invisible to the check."
-        )
 
     def test_multi_hop_propagation(self, pg_session):
         """protocol_id survives proxy → impl → resolution-discovered chain."""
