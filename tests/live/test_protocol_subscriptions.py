@@ -10,6 +10,9 @@ import requests
 from tests.live.conftest import LiveClient
 
 TEST_DISCORD_WEBHOOK = "https://discord.com/api/webhooks/0/psat-live-test-protocol-never-delivered"
+# The subscriptions API runs the webhook through ``sanitize_url`` on read, so the
+# token segment comes back masked while the id segment survives.
+TEST_DISCORD_WEBHOOK_REDACTED = "https://discord.com/api/webhooks/0/<redacted>"
 
 
 @pytest.fixture
@@ -39,7 +42,7 @@ def protocol_subscription(
 
 def test_protocol_subscription_created(protocol_subscription, company_protocol_id: int):
     assert protocol_subscription["protocol_id"] == company_protocol_id
-    assert protocol_subscription["discord_webhook_url"] == TEST_DISCORD_WEBHOOK
+    assert protocol_subscription["discord_webhook_url"] == TEST_DISCORD_WEBHOOK_REDACTED
     assert protocol_subscription["label"] == "psat-live-test"
     # event_filter must roundtrip verbatim; the request validator could mangle it.
     assert protocol_subscription.get("event_filter") == {"event_types": ["upgraded"]}
