@@ -15,9 +15,12 @@ WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
 DEFAULT_SINGLE_TIMEOUT = 600
 # Company runs on a cold preview (shared-cpu-2x, 2GB RAM) spend ~2 min
 # in selection alone because ranking calls Etherscan per candidate and
-# inventories grow past 400 rows after the first run. 30 min covers the
-# tail; trim it when preview scaling or cache behaviour improves.
-DEFAULT_COMPANY_TIMEOUT = 1800
+# inventories grow past 400 rows after the first run. The multichain
+# bridge work added in alex/feat-add-multichain extends this further:
+# every LayerZero teller spawns per-peer peer-analysis jobs across
+# Optimism/Scroll/Base/etc. 60 min covers the new tail; trim it when
+# preview scaling or cache behaviour improves.
+DEFAULT_COMPANY_TIMEOUT = 3600
 DEFAULT_POLL_INTERVAL = 5
 
 
