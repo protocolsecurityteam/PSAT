@@ -2,28 +2,24 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api/client.js";
 import { listAddressLabels } from "./api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
-
-// Etherscan-reported contract names that are template-level proxy shells,
-// not the logic name we want to show users. Kept local to avoid pulling
-// App.jsx into the modal (would create a circular import).
-const GENERIC_PROXY_NAMES = new Set([
-  "uupsproxy",
-  "erc1967proxy",
-  "transparentupgradeableproxy",
-  "proxy",
-  "beaconproxy",
-  "ossifiableproxy",
-  "withdrawalsmanagerproxy",
-  "upgradeablebeacon",
-]);
+import {
+  bulkAnalyzeCandidates,
+  computeCurrentImplAddrs,
+  isPureHistorical,
+} from "./addressFilter.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
+// For is_proxy rows, lead with the implementation's name (what the proxy
+// actually executes) and tuck the proxy template into a "via …" suffix
+// so 19 different proxy rows don't all read as "UUPSProxy". When impl
+// info is missing, fall back to the raw row name.
 function prettyAddressName(row) {
   const raw = row?.name || "";
-  const isGeneric = GENERIC_PROXY_NAMES.has(raw.toLowerCase());
   if (row?.is_proxy && row?.implementation_name) {
-    return isGeneric ? row.implementation_name : `${raw} → ${row.implementation_name}`;
+    const impl = row.implementation_name;
+    if (!raw || raw.toLowerCase() === impl.toLowerCase()) return impl;
+    return `${impl} (via ${raw})`;
   }
   return raw;
 }
@@ -52,6 +48,8 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareInput, setCompareInput] = useState("");
   const [busyAddr, setBusyAddr] = useState(null); // address currently being deleted/analyzed
+  const [showHistorical, setShowHistorical] = useState(false);
+  const [bulkAnalyzing, setBulkAnalyzing] = useState(false);
 
   const refresh = useCallback(() => {
     let cancelled = false;
@@ -93,6 +91,25 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
     return m;
   }, [data]);
 
+  // Compute the set of impl addresses currently behind a proxy in this
+  // payload — keeps live impls visible even when their only discovery
+  // source is the upgrade-history sweep.
+  const currentImplAddrs = useMemo(
+    () => computeCurrentImplAddrs(data?.all_addresses || []),
+    [data],
+  );
+
+  const { activeRows, historicalCount } = useMemo(() => {
+    const all = data?.all_addresses || [];
+    const active = [];
+    let hist = 0;
+    for (const r of all) {
+      if (isPureHistorical(r, currentImplAddrs)) hist += 1;
+      else active.push(r);
+    }
+    return { activeRows: active, historicalCount: hist };
+  }, [data, currentImplAddrs]);
+
   const parsedCompare = useMemo(() => parseAddressList(compareInput), [compareInput]);
 
   // In compare mode the row set is the pasted addresses (matched first,
@@ -110,7 +127,10 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
       return [...matched, ...missing];
     }
 
-    const all = data?.all_addresses || [];
+    // Compare mode always uses the full inventory — users paste lists that
+    // may legitimately include historical impls and need to see them flagged
+    // as matched/missing. Outside compare mode, default to active-only.
+    const all = showHistorical ? (data?.all_addresses || []) : activeRows;
     const q = filter.trim().toLowerCase();
     const filtered = q
       ? all.filter((r) => {
@@ -144,7 +164,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
       sorted.sort((a, b) => (a.address || "").localeCompare(b.address || ""));
     }
     return sorted;
-  }, [data, filter, labels, sortBy, compareOpen, parsedCompare, addrIndex]);
+  }, [data, filter, labels, sortBy, compareOpen, parsedCompare, addrIndex, showHistorical, activeRows]);
 
   const compareSummary = useMemo(() => {
     if (!compareOpen) return null;
@@ -197,6 +217,47 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
       window.alert(`Queue failed: ${err?.message || err}`);
     } finally {
       setBusyAddr(null);
+    }
+  };
+
+  // Bulk-analyze every discovered-but-not-analyzed row in the current
+  // view. `bulkAnalyzeCandidates` re-applies the historical filter so it
+  // stays safe even when the user toggled "Show N historical" — those
+  // never get auto-queued.
+  const bulkPendingRows = useMemo(
+    () => (compareOpen ? [] : bulkAnalyzeCandidates(rows, currentImplAddrs)),
+    [rows, currentImplAddrs, compareOpen],
+  );
+
+  const onBulkAnalyzePending = async () => {
+    if (bulkPendingRows.length === 0) return;
+    const ok = window.confirm(
+      `Queue analysis for ${bulkPendingRows.length} pending address`
+        + `${bulkPendingRows.length === 1 ? "" : "es"}`
+        + ` in the current view?`,
+    );
+    if (!ok) return;
+    setBulkAnalyzing(true);
+    try {
+      for (const r of bulkPendingRows) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await api("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              address: r.address,
+              company: companyName,
+              name: r.name || null,
+            }),
+          });
+        } catch (err) {
+          console.error("Queue failed for", r.address, err);
+        }
+      }
+      setTimeout(refresh, 2000);
+    } finally {
+      setBulkAnalyzing(false);
     }
   };
 
@@ -267,6 +328,18 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
               <span style={{ color: "#94a3b8", fontWeight: 400, marginLeft: 8 }}>
                 {companyName}
               </span>
+              {data && historicalCount > 0 && !compareOpen && (
+                <button
+                  type="button"
+                  className="ps-addresses-modal-historical-toggle"
+                  onClick={() => setShowHistorical((v) => !v)}
+                  title="Stale impls behind upgraded proxies. Kept for audit-coverage matching; hidden by default."
+                >
+                  {showHistorical
+                    ? `Hide ${historicalCount} historical`
+                    : `Show ${historicalCount} historical`}
+                </button>
+              )}
             </h2>
           </div>
           <div className="ps-audit-modal-actions">
@@ -341,6 +414,19 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                 <option value="address">Address</option>
               </select>
             </div>
+            {bulkPendingRows.length > 0 && (
+              <button
+                type="button"
+                className="ps-addresses-modal-bulk-analyze"
+                disabled={bulkAnalyzing}
+                onClick={onBulkAnalyzePending}
+                title="Queue analysis for every discovered-but-not-analyzed row in the current view. Historical impls are never included."
+              >
+                {bulkAnalyzing
+                  ? "Queuing…"
+                  : `Analyze ${bulkPendingRows.length} pending`}
+              </button>
+            )}
           </div>
         )}
 

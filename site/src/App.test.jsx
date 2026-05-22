@@ -2,8 +2,8 @@
 // renders <App />, and asserts a stable landmark for that route renders
 // without throwing. The goal is regression coverage for the upcoming
 // App.jsx file split — if any internal page (PipelineDashboard,
-// ProtocolMonitoringPage, ProxyWatcherPage, CompanyOverview, the per-tab
-// renderers) breaks during the split, one of these will fail.
+// ProtocolMonitoringPage, CompanyOverview, the per-tab renderers)
+// breaks during the split, one of these will fail.
 //
 // Each test also asserts the ErrorBoundary fallback ("Something went
 // wrong") is NOT showing, so a thrown render error is caught even when
@@ -57,25 +57,6 @@ function installDefaultApiMocks() {
     () => ETHERFI_COMPANY,
   );
   setFetchHandler(/^\/api\/monitored-contracts/, () => ({ items: [] }));
-  // One real proxy so ProxyWatcherPage's row .map() actually runs in tests
-  // (an empty list silently skips the React.Fragment branch — the very thing
-  // that crashed in prod when the import was missing).
-  setFetchHandler(/^\/api\/watched-proxies$/, () => [
-    {
-      id: "proxy-1",
-      label: "test-proxy",
-      proxy_address: "0x2222222222222222222222222222222222222222",
-      proxy_type: "EIP1967",
-      last_known_implementation: "0x3333333333333333333333333333333333333333",
-      needs_polling: false,
-      last_scanned_block: 12345,
-    },
-  ]);
-  setFetchHandler(
-    (url) => /^\/api\/watched-proxies\/[^/]+\/subscriptions$/.test(url.pathname),
-    () => [],
-  );
-  setFetchHandler(/^\/api\/proxy-events/, () => []);
   setFetchHandler(/^\/api\/address_labels$/, () => ({ labels: {} }));
   setFetchHandler(
     (url) => /^\/api\/company\/[^/]+\/audits$/.test(url.pathname),
@@ -114,16 +95,6 @@ describe("App router smoke tests", () => {
       const eyebrow = screen.queryByText(/Pipeline Status/i);
       expect(loading || eyebrow).toBeInTheDocument();
     });
-    expectNoCrash();
-  });
-
-  it("renders the proxy watcher at /proxies", async () => {
-    navigateTo("/proxies");
-    render(<App />);
-    expect(await screen.findByText(/Watched Proxies/i)).toBeInTheDocument();
-    // Wait for the row to mount so the .map() runs the React.Fragment path —
-    // empty-list fixtures silently skip this and let import bugs slip through.
-    expect(await screen.findByText("test-proxy")).toBeInTheDocument();
     expectNoCrash();
   });
 

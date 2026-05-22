@@ -590,6 +590,8 @@ def backfill_historical_impl_contracts(
     protocol_id: int,
     chain: str | None,
     impl_addrs: set[str],
+    parent_proxy_sources: list[str] | None,
+    parent_proxy_current_impl_address: str | None = None,
 ) -> None:
     """Ensure a Contract row exists for each historical impl address.
 
@@ -597,7 +599,28 @@ def backfill_historical_impl_contracts(
     artifact's events should be present as a Contract row so the audit
     coverage matcher can link audits whose scope names a past impl.
 
-    For each address, three cases:
+    ``parent_proxy_sources`` is the discovery_sources of the proxy whose
+    upgrade history produced these impls. If the parent doesn't assert
+    ownership (only low-confidence sources, e.g. ``dapp_crawl``), the
+    impls are not stamped with ``protocol_id`` — orphan Contract rows
+    are created so the coverage matcher still has names to resolve, but
+    the protocol's inventory is not polluted. The whole point: a foreign
+    proxy (EigenLayer, OP-Stack) that snuck into inventory via a low-
+    confidence source must not multiply itself into N "owned" impls. See
+    services/discovery/source_confidence.py.
+
+    ``parent_proxy_current_impl_address`` is the proxy's
+    ``Contract.implementation`` field — the CURRENT impl address. Pass
+    it when the proxy is itself LOW-sourced (e.g. ``structural_adoption``
+    after 3a8f4d1c9b07's branch 4 adopted it) so the gate can consult
+    the impl's sources too. If the current impl is HIGH-sourced and
+    shares the protocol_id, that's the same one-hop-from-HIGH evidence
+    that 4d72e9b1f035's branch B uses against the historical orphan
+    set. Runtime counterpart to the migration: the LRTSquare* shape
+    (LOW UUPSProxy + HIGH LRTSquaredCore impl) gets handled at write
+    time instead of only at the next catch-up migration.
+
+    For each address, three cases (when ownership IS asserted):
       1. No Contract row exists → create one tagged
          ``discovery_source='upgrade_history'`` with Etherscan-resolved
          name. Normal path for newly-surfaced impls.
@@ -609,19 +632,58 @@ def backfill_historical_impl_contracts(
          silently stomping another protocol's inventory would be worse
          than an unresolved coverage link.
 
+    When ownership is NOT asserted, branch (1) drops ``protocol_id``
+    from the new row and branch (2) becomes a no-op (orphan adoption
+    is the leak we're closing). Branch (3) is unchanged.
+
     Etherscan name resolution uses the shared ``get_contract_info`` cache,
     so re-analyzing a protocol re-hits only new impls. Per-address errors
     are swallowed so one flaky lookup doesn't wreck the whole backfill.
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from db.models import Contract
+    from services.discovery.source_confidence import asserts_ownership
     from utils.etherscan import get_contract_info, parallel_get
     from utils.rpc import chain_id_for_chain_name
 
     if not impl_addrs:
         return
     chain_id = chain_id_for_chain_name(chain)
+
+    # Historical impls are structural same-protocol components of the
+    # parent proxy. Route through the unified gate so this path uses
+    # the same logic as the resolution / static-worker cascades: direct
+    # evidence (parent has a HIGH source) OR structural evidence (the
+    # relationship to the parent is ``implementation``). The two
+    # branches collapse into a single ``asserts_ownership`` call when
+    # the structural relationship is fixed and ``parent_owns`` carries
+    # the parent's direct-evidence state.
+    parent_owns = asserts_ownership(parent_proxy_sources)
+
+    # Anchor on the proxy's CURRENT impl when the proxy itself is LOW.
+    # Mirrors 4d72e9b1f035 branch B: the impl is the authoritative HIGH
+    # source in the LRTSquare* shape (LOW-adopted UUPSProxy with
+    # HIGH-sourced LRTSquaredCore implementation). Belt-and-suspenders
+    # mismatch guard: if the impl belongs to a different protocol, the
+    # chain isn't ours — leave the historical impls orphan.
+    if not parent_owns and parent_proxy_current_impl_address:
+        chain_filter_impl = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
+        impl_row = session.execute(
+            select(Contract).where(
+                func.lower(Contract.address) == parent_proxy_current_impl_address.lower(),
+                chain_filter_impl,
+            )
+        ).scalar_one_or_none()
+        if (
+            impl_row is not None
+            and (impl_row.protocol_id is None or impl_row.protocol_id == protocol_id)
+            and asserts_ownership(impl_row.discovery_sources)
+        ):
+            parent_owns = True
+
+    owns = asserts_ownership(None, parent_owns=parent_owns, parent_relationship="implementation")
+    owning_protocol_id = protocol_id if owns else None
 
     # Match the natural (address, chain) uniqueness grain. Cross-chain
     # protocols (rare but real — CREATE2 / deterministic deployments can
@@ -660,14 +722,21 @@ def backfill_historical_impl_contracts(
             if existing.protocol_id is None or existing.protocol_id == protocol_id:
                 was_orphan = existing.protocol_id is None
                 had_no_tag = "upgrade_history" not in (existing.discovery_sources or [])
-                if was_orphan:
+                # Without ownership assertion from the parent, don't
+                # adopt orphans into this protocol — that's exactly the
+                # leak we're closing. The tag append still happens so
+                # the source trail is preserved for later corroboration.
+                if was_orphan and owns:
                     existing.protocol_id = protocol_id
                 if had_no_tag:
                     existing.discovery_sources = list(existing.discovery_sources or []) + ["upgrade_history"]
                 if existing.chain_id is None and chain_id is not None:
                     existing.chain_id = chain_id
                 adopted += 1
-                if was_orphan or had_no_tag:
+                # Only schedule coverage refresh when the row is actually
+                # in our protocol — refresh on an orphan is wasted work
+                # since the matcher filters by protocol_id.
+                if owns and (was_orphan or had_no_tag):
                     refresh_ids.append(existing.id)
             else:
                 logger.warning(
@@ -682,7 +751,7 @@ def backfill_historical_impl_contracts(
         name = name_results.get(addr)
 
         new_row = Contract(
-            protocol_id=protocol_id,
+            protocol_id=owning_protocol_id,
             address=addr,
             chain=chain,
             chain_id=chain_id,
@@ -695,7 +764,10 @@ def backfill_historical_impl_contracts(
         session.add(new_row)
         created += 1
         session.flush()
-        refresh_ids.append(new_row.id)
+        # Same reasoning as above — coverage refresh only fires for rows
+        # that actually belong to the protocol.
+        if owns:
+            refresh_ids.append(new_row.id)
 
     if created or adopted:
         session.commit()

@@ -452,7 +452,6 @@ def find_dynamic_dependencies(
 
     return {
         "address": target,
-        "rpc": trace_rpc,
         "transactions_analyzed": selected_txs,
         "trace_methods": sorted(trace_methods),
         "dependencies": dependencies,

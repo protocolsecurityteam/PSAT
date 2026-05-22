@@ -31,15 +31,20 @@ function buildHeadersWithKey(options, key) {
 }
 
 export async function api(path, options = {}) {
-  let response = await fetch(path, { ...options, headers: buildHeadersWithKey(options, getAdminKey()) });
-  if (response.status === 401) {
+  // `silent: true` skips the 401 prompt. Background polls (e.g. the open
+  // detail panel refreshing every 2.5s) use this so a missing/wrong admin
+  // key doesn't surface a modal prompt on every tick — the caller catches
+  // the thrown error and degrades the UI instead.
+  const { silent, ...fetchOptions } = options;
+  let response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
+  if (response.status === 401 && !silent) {
     const entered = window.prompt(
       "Admin key required for this action.\nPaste your PSAT admin key:",
       getAdminKey(),
     );
     if (entered) {
       setAdminKey(entered);
-      response = await fetch(path, { ...options, headers: buildHeadersWithKey(options, entered) });
+      response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, entered) });
     }
   }
   if (!response.ok) {

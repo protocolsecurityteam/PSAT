@@ -81,7 +81,9 @@ def version() -> dict[str, str]:
 
 @router.get("/api/config")
 def config() -> dict[str, str]:
-    return {"default_rpc_url": deps.DEFAULT_RPC_URL}
+    from utils.secrets import sanitize_url
+
+    return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
 
 
 @router.get("/api/stats")

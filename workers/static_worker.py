@@ -258,7 +258,6 @@ def _merge_dynamic_deps(prev: dict, new: dict) -> dict:
 
     return {
         "address": new.get("address") or prev.get("address"),
-        "rpc": new.get("rpc") or prev.get("rpc"),
         "transactions_analyzed": merged_txs,
         "trace_methods": merged_methods,
         "dependencies": merged_deps,
@@ -502,11 +501,24 @@ def _finalize_upgrade_history(
                 stats["proxies_skipped_no_contract"],
             )
             if contract_row.protocol_id is not None and stats["impl_addrs"]:
+                # parent_proxy_sources gates ownership: when the subject
+                # proxy only has low-confidence sources (e.g. dapp_crawl),
+                # the impls land as orphans so a foreign proxy doesn't
+                # multiply itself into N "owned" rows. See
+                # services/discovery/source_confidence.py.
+                #
+                # parent_proxy_current_impl_address lets the gate consult
+                # the current impl when the proxy is itself LOW-sourced
+                # (e.g. ``structural_adoption`` post-3a8f4d1c9b07). The
+                # impl is the authoritative HIGH anchor in the LRTSquare*
+                # shape — same one-hop discipline as 4d72e9b1f035 branch B.
                 backfill_historical_impl_contracts(
                     session,
                     protocol_id=contract_row.protocol_id,
                     chain=contract_row.chain,
                     impl_addrs=stats["impl_addrs"],
+                    parent_proxy_sources=contract_row.discovery_sources,
+                    parent_proxy_current_impl_address=contract_row.implementation,
                 )
         except Exception as exc:
             record_degraded(
@@ -995,17 +1007,23 @@ class StaticWorker(BaseWorker):
         try:
             classification = classify_single(address, rpc_url)
         except Exception as exc:
+            from utils.secrets import sanitize_string
+
             record_degraded(
                 phase="proxy_classification",
                 exc=exc,
                 context={"address": address},
             )
-            logger.warning("Job %s: proxy classification failed: %s", job.id, exc)
+            logger.warning("Job %s: proxy classification failed: %s", job.id, sanitize_string(str(exc)))
             store_artifact(
                 session,
                 job.id,
                 "contract_flags",
-                data={"is_proxy": False, "classification_type": "unknown", "classification_error": str(exc)},
+                data={
+                    "is_proxy": False,
+                    "classification_type": "unknown",
+                    "classification_error": sanitize_string(str(exc)),
+                },
             )
             return None
 
@@ -1044,6 +1062,75 @@ class StaticWorker(BaseWorker):
             contract_row.beacon = beacon
             contract_row.admin = admin
             session.commit()
+
+            # Proxy-of-HIGH-impl runtime adoption — counterpart to the
+            # migration's fourth branch, fired at the moment we learn
+            # the proxy's impl. Closes the gap where a proxy is
+            # cascade-discovered without HIGH evidence on the proxy
+            # itself, but its impl IS HIGH-owned (e.g. ether.fi's
+            # ``LRTSquaredCore`` impl pointed at by ``0x8f08…``). Safety
+            # filter: require the proxy to also be referenced by some
+            # HIGH-owned contract of the same protocol — keeps
+            # arbitrary forks / EIP-1167 clones / ERC-6551 TBAs out.
+            # See services/discovery/source_confidence.py + the
+            # adopt-structural-orphans migration for the data model.
+            # This is a best-effort runtime fast-path; the migration
+            # is the safety net for any orphan this lookup misses, so
+            # transient DB errors are logged + swallowed rather than
+            # failing the analysis.
+            contract_proto_id = getattr(contract_row, "protocol_id", None)
+            contract_addr = (getattr(contract_row, "address", None) or "").lower() or None
+            if contract_proto_id is None and impl_address and contract_addr:
+                from db.models import ContractDependency
+
+                try:
+                    impl_row = session.execute(
+                        sa_select(Contract).where(Contract.address == impl_address.lower()).limit(1)
+                    ).scalar_one_or_none()
+                except Exception as exc:
+                    logger.debug("Job %s: structural-adoption impl lookup failed: %s", job.id, exc)
+                    impl_row = None
+                if impl_row is not None and getattr(impl_row, "protocol_id", None) is not None:
+                    # Parent must be HIGH-source-owned, mirroring the
+                    # ``asserts_ownership`` gate. A LOW-source parent
+                    # (``upgrade_history`` backfill, ``structural_adoption``)
+                    # with ``protocol_id`` set must not act as evidence —
+                    # that'd silently relax the runtime one-hop limit.
+                    from services.discovery.source_confidence import HIGH_CONFIDENCE_SOURCES
+
+                    try:
+                        referenced_by_same_protocol = session.execute(
+                            sa_select(ContractDependency.id)
+                            .join(Contract, Contract.id == ContractDependency.contract_id)
+                            .where(
+                                ContractDependency.dependency_address == contract_addr,
+                                Contract.protocol_id == impl_row.protocol_id,
+                                Contract.discovery_sources.overlap(list(HIGH_CONFIDENCE_SOURCES)),
+                            )
+                            .limit(1)
+                        ).scalar_one_or_none()
+                    except Exception as exc:
+                        logger.debug(
+                            "Job %s: structural-adoption dep-reference lookup failed: %s",
+                            job.id,
+                            exc,
+                        )
+                        referenced_by_same_protocol = None
+                    if referenced_by_same_protocol is not None:
+                        contract_row.protocol_id = impl_row.protocol_id
+                        merged_sources = list(getattr(contract_row, "discovery_sources", None) or [])
+                        if "structural_adoption" not in merged_sources:
+                            merged_sources.append("structural_adoption")
+                        contract_row.discovery_sources = merged_sources
+                        session.commit()
+                        logger.info(
+                            "Job %s: structurally adopted proxy %s into protocol %s "
+                            "(impl %s is HIGH-owned, proxy referenced by same protocol)",
+                            job.id,
+                            contract_addr,
+                            impl_row.protocol_id,
+                            impl_address,
+                        )
 
         store_artifact(
             session,
@@ -1122,6 +1209,17 @@ class StaticWorker(BaseWorker):
                 continue
 
             impl_name = f"{base_name}: ({label})"
+            # Structural propagation: the impl IS a same-protocol
+            # component of the parent proxy. When the parent itself has
+            # direct-evidence ownership, the child inherits via the
+            # ``parent_relationship='implementation'`` branch in
+            # ``asserts_ownership`` rather than needing its own HIGH
+            # source. See services/discovery/source_confidence.py.
+            from services.discovery.source_confidence import asserts_ownership
+
+            parent_owns_high = asserts_ownership(
+                list(contract_row.discovery_sources) if contract_row and contract_row.discovery_sources else None
+            )
             child_request = {
                 "address": impl_addr,
                 "name": impl_name,
@@ -1130,6 +1228,8 @@ class StaticWorker(BaseWorker):
                 "root_job_id": root_job_id,
                 "proxy_address": address,
                 "proxy_type": proxy_type,
+                "discovery_relationship": "implementation",
+                "parent_owns_high": parent_owns_high,
             }
             if chain is not None:
                 child_request["chain"] = chain
@@ -1379,11 +1479,10 @@ class StaticWorker(BaseWorker):
         else:
             uh_pre = None
 
-        resolved_rpc = None
-        if isinstance(deps_output, dict):
-            resolved_rpc = deps_output.get("rpc")
-        if not resolved_rpc and isinstance(dyn_output, dict):
-            resolved_rpc = dyn_output.get("rpc")
+        # Mirror the resolution order inside find_dependencies /
+        # find_dynamic_dependencies so classification hits the same
+        # endpoint discovery actually used.
+        resolved_rpc = deps_rpc or dynamic_rpc or os.getenv("ETH_RPC")
 
         cls_output = None
         if resolved_rpc:

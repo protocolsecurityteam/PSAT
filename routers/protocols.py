@@ -92,6 +92,8 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
         if protocol is None:
             raise HTTPException(status_code=404, detail="Protocol not found")
 
+        from utils.secrets import sanitize_url
+
         sub = ProtocolSubscription(
             protocol_id=protocol_id,
             discord_webhook_url=request.discord_webhook_url,
@@ -104,7 +106,7 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
         return {
             "id": str(sub.id),
             "protocol_id": sub.protocol_id,
-            "discord_webhook_url": sub.discord_webhook_url,
+            "discord_webhook_url": (sanitize_url(sub.discord_webhook_url) if sub.discord_webhook_url else None),
             "label": sub.label,
             "event_filter": sub.event_filter,
             "created_at": sub.created_at.isoformat() if sub.created_at else None,
@@ -114,6 +116,8 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
 @router.get("/api/protocols/{protocol_id}/subscriptions")
 def list_protocol_subscriptions(protocol_id: int) -> list[dict[str, Any]]:
     """List all ProtocolSubscription rows for a protocol."""
+    from utils.secrets import sanitize_url
+
     with deps.SessionLocal() as session:
         stmt = select(ProtocolSubscription).where(ProtocolSubscription.protocol_id == protocol_id)
         subs = session.execute(stmt).scalars().all()
@@ -121,7 +125,7 @@ def list_protocol_subscriptions(protocol_id: int) -> list[dict[str, Any]]:
             {
                 "id": str(s.id),
                 "protocol_id": s.protocol_id,
-                "discord_webhook_url": s.discord_webhook_url,
+                "discord_webhook_url": (sanitize_url(s.discord_webhook_url) if s.discord_webhook_url else None),
                 "label": s.label,
                 "event_filter": s.event_filter,
                 "created_at": s.created_at.isoformat() if s.created_at else None,

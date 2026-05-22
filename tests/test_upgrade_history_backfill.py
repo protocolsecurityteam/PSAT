@@ -54,8 +54,14 @@ def worker():
     yield None
 
 
-def _backfill(session, *, protocol_id, chain, impl_addrs):
-    """Direct call into the backfill helper, kept short for test ergonomics."""
+def _backfill(session, *, protocol_id, chain, impl_addrs, parent_proxy_sources=None):
+    """Direct call into the backfill helper, kept short for test ergonomics.
+
+    ``parent_proxy_sources`` defaults to ``['inventory']`` (high-
+    confidence) so tests written before the ownership gate keep their
+    semantics. Tests of the gate itself pass a low-confidence value
+    like ``['dapp_crawl']`` explicitly.
+    """
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
     backfill_historical_impl_contracts(
@@ -63,6 +69,7 @@ def _backfill(session, *, protocol_id, chain, impl_addrs):
         protocol_id=protocol_id,
         chain=chain,
         impl_addrs=impl_addrs,
+        parent_proxy_sources=parent_proxy_sources if parent_proxy_sources is not None else ["inventory"],
     )
 
 
@@ -87,11 +94,17 @@ def _run_pipeline(session, *, contract, artifact_data, protocol_id=None):
     session.commit()
     pid = protocol_id if protocol_id is not None else contract.protocol_id
     if pid is not None and stats["impl_addrs"]:
+        # Default to high-confidence ['inventory'] when the subject
+        # proxy has no discovery_sources set. Most tests in this file
+        # predate the ownership gate and just want to exercise the
+        # backfill mechanics; the gate is tested separately.
+        sources = contract.discovery_sources or ["inventory"]
         backfill_historical_impl_contracts(
             session,
             protocol_id=pid,
             chain=contract.chain,
             impl_addrs=stats["impl_addrs"],
+            parent_proxy_sources=sources,
         )
     return stats
 

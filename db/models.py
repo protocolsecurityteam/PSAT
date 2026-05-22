@@ -130,6 +130,8 @@ class Job(Base):
     )
 
     def to_dict(self) -> dict:
+        from utils.secrets import sanitize_obj, sanitize_string
+
         return {
             "job_id": str(self.id),
             "address": self.address,
@@ -138,8 +140,8 @@ class Job(Base):
             "status": self.status.value,
             "stage": self.stage.value,
             "detail": self.detail,
-            "request": self.request,
-            "error": self.error,
+            "request": sanitize_obj(self.request) if self.request is not None else None,
+            "error": sanitize_string(self.error) if isinstance(self.error, str) else self.error,
             "worker_id": self.worker_id,
             "trace_id": self.trace_id,
             "is_proxy": self.is_proxy,

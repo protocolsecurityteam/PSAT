@@ -155,12 +155,6 @@ async function setupPage(page) {
       body: JSON.stringify({ groups: [], recent_completed: [] }),
     }),
   );
-  await page.route(matchApi("/api/watched-proxies"), (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
-  );
-  await page.route(matchApi(/^\/api\/proxy-events/), (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
-  );
   await page.route(matchApi("/api/monitored-contracts"), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
   );
@@ -214,12 +208,6 @@ test.describe("visual baselines", () => {
     await page.locator(".top-nav").waitFor({ state: "visible" });
     await page.waitForTimeout(400);
     await expect(page).toHaveScreenshot("pipeline-dashboard.png", SCREENSHOT_OPTS);
-  });
-
-  test("proxy watcher", async ({ page }) => {
-    await page.goto("/proxies", { waitUntil: "domcontentloaded" });
-    await page.locator("h2", { hasText: /Watched Proxies/ }).waitFor({ state: "visible" });
-    await expect(page).toHaveScreenshot("proxy-watcher.png", SCREENSHOT_OPTS);
   });
 
   test("address detail — summary tab", async ({ page }) => {

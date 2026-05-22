@@ -257,6 +257,7 @@ def record_degraded(
     # ``utils.logging`` to require at import time (notably during pytest's
     # very-early plugin discovery).
     from schemas.stage_errors import StageError
+    from utils.secrets import sanitize_obj, sanitize_string
 
     job_id = job_id_var.get() or "0"
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__) if include_traceback else None
@@ -264,14 +265,14 @@ def record_degraded(
         stage=stage_var.get() or "?",
         severity="degraded",
         exc_type=f"{type(exc).__module__}.{type(exc).__name__}",
-        message=str(exc),
-        traceback="".join(tb) if tb else None,
+        message=sanitize_string(str(exc)),
+        traceback=sanitize_string("".join(tb)) if tb else None,
         phase=phase,
         trace_id=trace_id_var.get(),
         job_id=str(job_id),
         worker_id=worker_id_var.get() or "?",
         failed_at=datetime.now(timezone.utc),
-        context=context,
+        context=sanitize_obj(context) if context is not None else None,
     )
     accumulator.append(error)
 

@@ -241,11 +241,23 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     assert protocol_row.name == "127.0.0.1"
     assert protocol_row.official_domain == "127.0.0.1"
 
-    # Contracts table populated with all discovered addresses under this protocol
-    contracts = db_session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
+    # Contracts table populated with all discovered addresses, tagged
+    # dapp_crawl. ``protocol_id`` stays NULL until a high-confidence
+    # source corroborates — dapp_crawl is low-confidence (it scrapes
+    # every 0x... on a page, including third-party tokens and
+    # infrastructure), so it can't assert protocol ownership on its
+    # own. See services/discovery/source_confidence.py.
+    contracts = (
+        db_session.execute(select(Contract).where(Contract.address.in_([ADDR_A, ADDR_B, ADDR_C]))).scalars().all()
+    )
     contract_addrs = {c.address for c in contracts}
     assert {ADDR_A, ADDR_B, ADDR_C}.issubset(contract_addrs)
     assert all("dapp_crawl" in (c.discovery_sources or []) for c in contracts)
+    assert all(c.protocol_id is None for c in contracts), (
+        "dapp_crawl-only entries should land as orphans (protocol_id=NULL); "
+        "stamping protocol_id from a low-confidence source is the leak the "
+        "ownership gate closes — see test_discovery_source_confidence.py"
+    )
 
 
 @requires_postgres

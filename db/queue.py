@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from services.discovery.source_confidence import asserts_ownership
 from utils.chains import canonical_chain, canonical_chain_list
 from utils.rpc import chain_id_for_chain_name
 
@@ -213,13 +214,19 @@ def bulk_upsert_discovered_contracts(
     out: list[Contract] = []
     for address, chain, entry in norm_entries:
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
+        # Only high-confidence sources may assert protocol ownership.
+        # Low-confidence sources (dapp_crawl scraping, upgrade_history
+        # traversal of unconfirmed proxies) populate discovery_sources
+        # but leave protocol_id NULL until a high-confidence source
+        # corroborates. See services/discovery/source_confidence.py.
+        owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
         existing = existing_by_key.get((address, chain))
         if existing is None:
             row = Contract(
                 address=address,
                 chain=chain,
                 chain_id=entry.get("chain_id"),
-                protocol_id=protocol_id,
+                protocol_id=owning_protocol_id,
                 contract_name=entry.get("contract_name"),
                 confidence=entry.get("confidence"),
                 discovery_sources=list(clean_sources) or None,
@@ -237,8 +244,8 @@ def bulk_upsert_discovered_contracts(
                 merged.append(src)
         if merged:
             existing.discovery_sources = merged
-        if existing.protocol_id is None and protocol_id is not None:
-            existing.protocol_id = protocol_id
+        if existing.protocol_id is None and owning_protocol_id is not None:
+            existing.protocol_id = owning_protocol_id
         if existing.chain_id is None and entry.get("chain_id") is not None:
             existing.chain_id = entry["chain_id"]
         if not existing.contract_name and entry.get("contract_name"):
@@ -299,13 +306,16 @@ def upsert_discovered_contract(
     ).scalar_one_or_none()
 
     clean_sources = [s for s in new_sources if s]
+    # See bulk_upsert_discovered_contracts — only high-confidence sources
+    # may assert protocol ownership.
+    owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
 
     if existing is None:
         row = Contract(
             address=normalized,
             chain=chain,
             chain_id=resolved_chain_id,
-            protocol_id=protocol_id,
+            protocol_id=owning_protocol_id,
             contract_name=contract_name,
             confidence=confidence,
             discovery_sources=list(clean_sources) or None,
@@ -322,8 +332,8 @@ def upsert_discovered_contract(
     if merged:
         existing.discovery_sources = merged
 
-    if existing.protocol_id is None and protocol_id is not None:
-        existing.protocol_id = protocol_id
+    if existing.protocol_id is None and owning_protocol_id is not None:
+        existing.protocol_id = owning_protocol_id
     if existing.chain_id is None and resolved_chain_id is not None:
         existing.chain_id = resolved_chain_id
     if not existing.contract_name and contract_name:

@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.secrets import sanitize_url
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -75,13 +76,14 @@ def main():
             run_scan_loop,
         )
 
+        rpc_for_log = sanitize_url(args.rpc_url)
         if args.poll:
             interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
-            logger.info("Legacy proxy poll monitor starting (rpc=%s, interval=%ss)", args.rpc_url, interval)
+            logger.info("Legacy proxy poll monitor starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
             run_poll_loop(args.rpc_url, interval)
         else:
             interval = args.interval if args.interval is not None else DEFAULT_SCAN_INTERVAL
-            logger.info("Legacy proxy monitor starting (rpc=%s, interval=%ss)", args.rpc_url, interval)
+            logger.info("Legacy proxy monitor starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
             run_scan_loop(args.rpc_url, interval)
     else:
         from services.monitoring.unified_watcher import (
@@ -91,13 +93,14 @@ def main():
             run_scan_loop,
         )
 
+        rpc_for_log = sanitize_url(args.rpc_url)
         if args.poll:
             interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
-            logger.info("Unified protocol poller starting (rpc=%s, interval=%ss)", args.rpc_url, interval)
+            logger.info("Unified protocol poller starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
             run_poll_loop(args.rpc_url, interval)
         else:
             interval = args.interval if args.interval is not None else DEFAULT_SCAN_INTERVAL
-            logger.info("Unified protocol monitor starting (rpc=%s, interval=%ss)", args.rpc_url, interval)
+            logger.info("Unified protocol monitor starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
             run_scan_loop(args.rpc_url, interval)
 
 

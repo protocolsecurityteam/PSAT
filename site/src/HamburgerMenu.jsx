@@ -11,7 +11,6 @@ export default function HamburgerMenu({ onClose, viewMode, companyName, companyT
           <div className="hamburger-section-label">Navigation</div>
           <button className={`hamburger-link ${viewMode === "default" ? "active" : ""}`} onClick={() => { onNavigate("/", "default"); onClose(); }}>Runs</button>
           <button className={`hamburger-link ${viewMode === "monitor" ? "active" : ""}`} onClick={() => { onNavigate("/monitor", "monitor"); onClose(); }}>Monitor</button>
-          <button className={`hamburger-link ${viewMode === "proxies" ? "active" : ""}`} onClick={() => { onNavigate("/proxies", "proxies"); onClose(); }}>Proxies</button>
         </nav>
         {companyName && (
           <nav className="hamburger-nav hamburger-company-section">
