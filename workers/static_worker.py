@@ -241,7 +241,6 @@ def _merge_dynamic_deps(prev: dict, new: dict) -> dict:
 
     return {
         "address": new.get("address") or prev.get("address"),
-        "rpc": new.get("rpc") or prev.get("rpc"),
         "transactions_analyzed": merged_txs,
         "trace_methods": merged_methods,
         "dependencies": merged_deps,
@@ -995,17 +994,23 @@ class StaticWorker(BaseWorker):
         try:
             classification = classify_single(address, rpc_url)
         except Exception as exc:
+            from utils.secrets import sanitize_string
+
             record_degraded(
                 phase="proxy_classification",
                 exc=exc,
                 context={"address": address},
             )
-            logger.warning("Job %s: proxy classification failed: %s", job.id, exc)
+            logger.warning("Job %s: proxy classification failed: %s", job.id, sanitize_string(str(exc)))
             store_artifact(
                 session,
                 job.id,
                 "contract_flags",
-                data={"is_proxy": False, "classification_type": "unknown", "classification_error": str(exc)},
+                data={
+                    "is_proxy": False,
+                    "classification_type": "unknown",
+                    "classification_error": sanitize_string(str(exc)),
+                },
             )
             return None
 
@@ -1453,11 +1458,10 @@ class StaticWorker(BaseWorker):
         else:
             uh_pre = None
 
-        resolved_rpc = None
-        if isinstance(deps_output, dict):
-            resolved_rpc = deps_output.get("rpc")
-        if not resolved_rpc and isinstance(dyn_output, dict):
-            resolved_rpc = dyn_output.get("rpc")
+        # Mirror the resolution order inside find_dependencies /
+        # find_dynamic_dependencies so classification hits the same
+        # endpoint discovery actually used.
+        resolved_rpc = deps_rpc or dynamic_rpc or os.getenv("ETH_RPC")
 
         cls_output = None
         if resolved_rpc:

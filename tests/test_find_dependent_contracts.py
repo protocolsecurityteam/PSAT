@@ -70,35 +70,42 @@ def test_find_dependencies_raises_without_rpc(monkeypatch):
         fdc.find_dependencies("0x1111111111111111111111111111111111111111")
 
 
-# Verifies find_dependencies uses the explicitly provided RPC URL.
+# Verifies find_dependencies uses the explicitly provided RPC URL and
+# does not echo it into the returned artifact body.
 def test_find_dependencies_uses_explicit_rpc(monkeypatch):
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
-    monkeypatch.setattr(
-        fdc,
-        "discover_dependencies",
-        lambda _rpc_url, _root, code_cache=None: ["0x2222222222222222222222222222222222222222"],
-    )
+    captured: dict[str, str] = {}
+
+    def _fake_discover(rpc_url, _root, code_cache=None):
+        captured["rpc"] = rpc_url
+        return ["0x2222222222222222222222222222222222222222"]
+
+    monkeypatch.setattr(fdc, "discover_dependencies", _fake_discover)
 
     out = fdc.find_dependencies(
         "0x1111111111111111111111111111111111111111",
         "https://explicit-rpc.example",
     )
-    assert out["rpc"] == "https://explicit-rpc.example"
+    assert captured["rpc"] == "https://explicit-rpc.example"
     assert out["dependencies"] == ["0x2222222222222222222222222222222222222222"]
+    assert "rpc" not in out, "rpc URL must not be echoed back in the artifact body"
 
 
 # Verifies find_dependencies falls back to ETH_RPC env var when no explicit RPC is given.
 def test_find_dependencies_uses_env_rpc(monkeypatch):
     monkeypatch.setenv("ETH_RPC", "https://env-rpc.example")
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
-    monkeypatch.setattr(
-        fdc,
-        "discover_dependencies",
-        lambda _rpc_url, _root, code_cache=None: [],
-    )
+    captured: dict[str, str] = {}
+
+    def _fake_discover(rpc_url, _root, code_cache=None):
+        captured["rpc"] = rpc_url
+        return []
+
+    monkeypatch.setattr(fdc, "discover_dependencies", _fake_discover)
 
     out = fdc.find_dependencies("0x1111111111111111111111111111111111111111")
-    assert out["rpc"] == "https://env-rpc.example"
+    assert captured["rpc"] == "https://env-rpc.example"
+    assert "rpc" not in out
 
 
 # ---------------------------------------------------------------------------

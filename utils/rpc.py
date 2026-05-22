@@ -240,7 +240,12 @@ def rpc_request(rpc_url: str, method: str, params: list[Any], retries: int = 1) 
             if response.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
                 time.sleep(0.3 * (2**attempt))
                 continue
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError:
+                from utils.secrets import sanitize_url
+
+                raise RuntimeError(f"RPC HTTP {response.status_code} for {sanitize_url(rpc_url)}") from None
             payload = response.json()
             if payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
@@ -249,8 +254,12 @@ def rpc_request(rpc_url: str, method: str, params: list[Any], retries: int = 1) 
             if attempt < retries:
                 time.sleep(0.3 * (2**attempt))
                 continue
-            raise RuntimeError(f"RPC request failed for {rpc_url}: {exc}") from exc
-    raise RuntimeError(f"RPC request failed for {rpc_url}: all {retries + 1} attempts exhausted")
+            from utils.secrets import sanitize_string, sanitize_url
+
+            raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: {sanitize_string(str(exc))}") from exc
+    from utils.secrets import sanitize_url
+
+    raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
 
 
 def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
@@ -415,13 +424,20 @@ def rpc_batch_request(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[
             for i, (method, params) in enumerate(chunk)
         ]
 
-        response = _get_session().post(
-            rpc_url,
-            json=batch,
-            timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-            headers={"Content-Type": "application/json"},
-        )
-        response.raise_for_status()
+        try:
+            response = _get_session().post(
+                rpc_url,
+                json=batch,
+                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+        except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as exc:
+            from utils.secrets import sanitize_string, sanitize_url
+
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            detail = f"HTTP {status}" if status is not None else sanitize_string(str(exc))
+            raise RuntimeError(f"RPC batch failed for {sanitize_url(rpc_url)}: {detail}") from None
 
         payload = response.json()
         if isinstance(payload, dict):

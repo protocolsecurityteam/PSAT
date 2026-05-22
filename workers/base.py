@@ -457,9 +457,12 @@ class BaseWorker:
                     )
                     return
                 except Exception as exc:
+                    from utils.secrets import sanitize_string
+
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                    error = traceback.format_exc()
+                    error = sanitize_string(traceback.format_exc())
+                    exc_message = sanitize_string(str(exc))
                     # Decide retry vs terminal up front. ``prior_retry_count``
                     # is the count of attempts that had ALREADY failed before
                     # the current one — i.e. what we tag the just-failed
@@ -518,7 +521,7 @@ class BaseWorker:
                             stage=self.stage.value,
                             severity="error",
                             exc_type=exc_type_str,
-                            message=str(exc),
+                            message=exc_message,
                             traceback=error,
                             phase=None,
                             trace_id=getattr(job, "trace_id", None),
