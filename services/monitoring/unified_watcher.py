@@ -337,59 +337,64 @@ def _should_watch(mc: MonitoredContract, event_type: str) -> bool:
     """Check if the monitoring config allows this event type."""
     config = mc.monitoring_config or {}
 
-    type_to_config = {
-        "upgraded": "watch_upgrades",
-        "admin_changed": "watch_upgrades",
-        "beacon_upgraded": "watch_upgrades",
-        "changed_master_copy": "watch_upgrades",
-        "new_implementation": "watch_upgrades",
-        "new_pending_implementation": "watch_upgrades",
-        "target_updated": "watch_upgrades",
-        "upgraded_revision": "watch_upgrades",
-        "diamond_cut": "watch_upgrades",
-        "ownership_transferred": "watch_ownership",
-        "ownership_transfer_started": "watch_ownership",
-        "authority_updated": "watch_authority",
-        "paused": "watch_pause",
-        "unpaused": "watch_pause",
-        "role_granted": "watch_roles",
-        "role_revoked": "watch_roles",
-        "signer_added": "watch_safe_signers",
-        "signer_removed": "watch_safe_signers",
-        "threshold_changed": "watch_safe_signers",
-        "timelock_scheduled": "watch_timelock",
-        "timelock_executed": "watch_timelock",
-        "delay_changed": "watch_timelock",
-        # Safe execution events ride along with the existing safe-signers
-        # config flag — same monitoring intent ("watch this safe's
-        # activity"), and adding a separate flag would force every
-        # MonitoredContract row to be migrated.
-        "safe_tx_executed": "watch_safe_signers",
-        "safe_tx_failed": "watch_safe_signers",
-        # Module-triggered Safe executions (ExecutionFromModule*) — same
-        # monitoring intent. Ride the same flag.
-        "safe_module_executed": "watch_safe_signers",
-        "safe_module_failed": "watch_safe_signers",
+    # admin_changed routes to both watch_upgrades (EIP-1967 proxy admin)
+    # and watch_ownership (Compound/Aave/Curve governance admin — same
+    # semantic role as ownership for non-proxy contracts). The event_type
+    # is identical across both cases because the underlying mutation is
+    # "the privileged controller changed"; the monitoring intent depends
+    # on what the contract IS. Accept either flag rather than splitting
+    # the event_type, which would force every config consumer to
+    # disambiguate.
+    type_to_config_keys = {
+        "upgraded": ("watch_upgrades",),
+        "admin_changed": ("watch_upgrades", "watch_ownership"),
+        "beacon_upgraded": ("watch_upgrades",),
+        "changed_master_copy": ("watch_upgrades",),
+        "new_implementation": ("watch_upgrades",),
+        "new_pending_implementation": ("watch_upgrades",),
+        "target_updated": ("watch_upgrades",),
+        "upgraded_revision": ("watch_upgrades",),
+        "diamond_cut": ("watch_upgrades",),
+        "ownership_transferred": ("watch_ownership",),
+        "ownership_transfer_started": ("watch_ownership",),
+        "authority_updated": ("watch_authority",),
+        "paused": ("watch_pause",),
+        "unpaused": ("watch_pause",),
+        "role_granted": ("watch_roles",),
+        "role_revoked": ("watch_roles",),
+        "signer_added": ("watch_safe_signers",),
+        "signer_removed": ("watch_safe_signers",),
+        # signer_updated comes from the tag-driven path when a non-Safe
+        # contract writes its custom "owners" array. Route through the
+        # same flag as the Safe-native events.
+        "signer_updated": ("watch_safe_signers",),
+        "threshold_changed": ("watch_safe_signers",),
+        "timelock_scheduled": ("watch_timelock",),
+        "timelock_executed": ("watch_timelock",),
+        "delay_changed": ("watch_timelock",),
+        "safe_tx_executed": ("watch_safe_signers",),
+        "safe_tx_failed": ("watch_safe_signers",),
+        "safe_module_executed": ("watch_safe_signers",),
+        "safe_module_failed": ("watch_safe_signers",),
     }
 
-    config_key = type_to_config.get(event_type)
-    if config_key is None:
+    config_keys = type_to_config_keys.get(event_type)
+    if config_keys is None:
         return True  # Unknown event type — allow
 
     # Legacy alias support: `watch_signers` predates the rename to
-    # `watch_safe_signers` (which now also gates safe_tx_* /
-    # safe_module_* execution events). Accept either flag for the
-    # safe-signers config key so historic MonitoredContract rows
-    # written before the rename keep working without a migration.
-    if config_key == "watch_safe_signers":
+    # `watch_safe_signers`. Accept either flag so historic
+    # MonitoredContract rows written before the rename keep working
+    # without a migration.
+    if "watch_safe_signers" in config_keys:
         if config.get("watch_safe_signers") or config.get("watch_signers"):
             return True
-        # Both keys absent — fall through to the default-on behaviour
-        # below (return True when neither key is set).
         if "watch_safe_signers" in config or "watch_signers" in config:
             return False
-        return True
-    return config.get(config_key, True)
+        # Neither key set — default-on, fall through to the general path.
+
+    # Allow if ANY relevant flag is set (or defaults to True via .get()).
+    return any(config.get(key, True) for key in config_keys)
 
 
 def _write_through_proxy_event(
@@ -445,6 +450,35 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
         state["beacon"] = parsed["beacon"]
     elif event_type == "delay_changed" and parsed.get("new_delay") is not None:
         state["min_delay"] = parsed["new_delay"]
+    elif event_type == "initialized":
+        # OZ Initializable Initialized(uint64 version). The version arg is
+        # named ``version`` in the canonical ABI; some forks use
+        # ``initVersion``. Either way the value goes into last_known_state
+        # so reanalysis can compare against the next observation.
+        version = parsed.get("version")
+        if version is None:
+            version = parsed.get("initVersion")
+        if version is not None:
+            state["initialized_version"] = version
+
+    # Tag-driven generic reflection: for each state var the emitter wrote
+    # that doesn't have a canonical branch above, capture the new value
+    # by name match. Covers custom controller slots (e.g. ``protocolAdmin``,
+    # ``feeRecipient``) without requiring per-slot code. Skips when the
+    # canonical branch already populated the slot.
+    tags = parsed.get("effect_tags") or {}
+    for write_target in tags.get("writes") or []:
+        if not isinstance(write_target, str) or write_target in state:
+            continue
+        # Look for an arg matching the write target's name, with or
+        # without the OZ ``new`` prefix. The decoder populated
+        # ``parsed[input_name]`` for every input.
+        candidate = parsed.get(write_target)
+        if candidate is None:
+            cap = write_target[:1].upper() + write_target[1:] if write_target else ""
+            candidate = parsed.get(f"new{cap}")
+        if candidate is not None:
+            state[write_target] = candidate
 
     mc.last_known_state = state
     flag_modified(mc, "last_known_state")

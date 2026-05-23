@@ -26,6 +26,12 @@ _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
 logger = logging.getLogger(__name__)
 
 # Event types that should trigger a full re-analysis job.
+#
+# After the effect_tags migration, every per-contract event whose emitter
+# writes one of {owner, admin, authority, pendingOwner, …} classifies as
+# one of these canonical types automatically — Compound NewAdmin, Curve
+# CommitOwnership, Aave PoolAdminUpdated, Solady setOwner, etc. all flow
+# through here without per-ABI rules.
 REANALYSIS_EVENT_TYPES = frozenset(
     {
         # Proxy upgrades — implementation code changed, entire analysis is stale
@@ -33,6 +39,8 @@ REANALYSIS_EVENT_TYPES = frozenset(
         "new_implementation",
         "changed_master_copy",
         "target_updated",
+        # Diamond facet change is also an effective implementation swap.
+        "diamond_cut",
         # Beacon upgrade — all proxies pointing at this beacon delegate to new code
         "beacon_upgraded",
         # Admin changed — control graph and effective permissions are stale
@@ -45,6 +53,34 @@ REANALYSIS_EVENT_TYPES = frozenset(
         # every gated function may now resolve to a different principal,
         # so the control graph + effective permissions must be rebuilt.
         "authority_updated",
+        # OZ Initializable Initialized(uint64 version) — emitted on every
+        # initializer / reinitializer call. The first emission landed
+        # during the constructor (before enrollment) so any post-enrollment
+        # firing means a reinitializer ran — that's a state migration we
+        # need to capture by re-analyzing the contract.
+        "initialized",
+    }
+)
+
+
+# State-variable write targets whose mutation by any tracked event
+# warrants reanalysis, independent of the resolved event_type. Used by
+# ``should_trigger_reanalysis`` as a fallback when an emitter writes a
+# control-relevant slot under a name we haven't mapped to a canonical
+# event_type (e.g. a fork's renamed admin field). Keeps reanalysis firing
+# without requiring the canonical-type map to enumerate every variant.
+_REANALYSIS_WRITE_TARGETS = frozenset(
+    {
+        "owner",
+        "_owner",
+        "pendingOwner",
+        "authority",
+        "admin",
+        "_admin",
+        "pendingAdmin",
+        "future_admin",
+        "_initialized",
+        "_initializing",
     }
 )
 
@@ -58,11 +94,35 @@ REANALYSIS_POLL_FIELDS = frozenset(
 
 
 def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool:
-    """Return True if *event_type* (with optional *data*) warrants a re-analysis."""
+    """Return True if *event_type* (with optional *data*) warrants a re-analysis.
+
+    Three pathways, tried in order:
+
+      1. Canonical event_type membership — fast path. Covers every event
+         the tag-driven classifier or hand-rolled registry resolves.
+      2. ``effect_tags.writes`` intersects ``_REANALYSIS_WRITE_TARGETS`` —
+         fallback for forks that use renamed slots (e.g. ``protocolAdmin``)
+         where the classifier leaves the event_type at
+         ``controller_changed:*`` but the underlying mutation still
+         invalidates the control graph.
+      3. ``effect_tags.delegates`` — bare DELEGATECALL in the emitter
+         body is unconditionally upgrade-equivalent.
+      4. ``effect_tags.is_initializer`` — re-init detected from the
+         modifier, even when the slot isn't named ``_initialized``.
+    """
     if event_type in REANALYSIS_EVENT_TYPES:
         return True
     if event_type == "state_changed_poll" and data:
         return data.get("field") in REANALYSIS_POLL_FIELDS
+    tags = (data or {}).get("effect_tags") if isinstance(data, dict) else None
+    if isinstance(tags, dict):
+        writes = tags.get("writes") or []
+        if any(w in _REANALYSIS_WRITE_TARGETS for w in writes):
+            return True
+        if tags.get("delegates"):
+            return True
+        if tags.get("is_initializer"):
+            return True
     return False
 
 

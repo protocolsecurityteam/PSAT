@@ -37,13 +37,30 @@ def _is_external_contract_read_spec(read_spec: object) -> bool:
 
 
 def _is_runtime_resolvable_controller(target: object) -> bool:
+    """A controller earns inclusion in the tracking plan if it's either
+    pollable (address-like state we can read via eth_call) OR
+    event-watchable (any state var whose writers emit logs we can
+    subscribe to).
+
+    The poller filters by type_kind itself (it only handles a fixed
+    set of slot shapes), so non-address vars surfaced here flow purely
+    through the event pathway. This lets us track Governor proposal
+    mappings, role-bitmap slots, threshold ints, etc. by listening to
+    their emitted events without needing per-shape polling support.
+    """
     if not isinstance(target, dict):
         return False
     kind = target.get("kind")
     if kind == "role_identifier":
         return True
     if kind == "state_variable":
-        return _is_address_like_read_spec(target.get("read_spec"))
+        if _is_address_like_read_spec(target.get("read_spec")):
+            return True
+        # Non-address state vars (mappings, uints, bools, structs) earn
+        # inclusion via event coverage. Any writer that emits a log is a
+        # signal worth subscribing to — semantics get classified later
+        # from the emitter's effect_tags.
+        return bool(target.get("associated_events"))
     if kind == "external_contract":
         return _is_external_contract_read_spec(target.get("read_spec"))
     return False

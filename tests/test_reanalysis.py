@@ -439,6 +439,54 @@ class TestShouldTriggerReanalysis:
         assert should_trigger_reanalysis("state_changed_poll") is False
         assert should_trigger_reanalysis("state_changed_poll", {}) is False
 
+    def test_effect_tags_writes_owner_triggers(self):
+        """Generic-classification fallback: an event_type the canonical
+        set doesn't recognize, but whose effect_tags say the emitter
+        writes ``owner``, still triggers reanalysis. Covers protocols
+        whose admin slots are renamed (e.g. fork ``protocolOwner``)."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:owner",
+                {"effect_tags": {"writes": ["owner"]}},
+            )
+            is True
+        )
+
+    def test_effect_tags_writes_unrelated_does_not_trigger(self):
+        """Writes to a non-control-relevant slot (e.g. ``feeRecipient``)
+        should not trigger reanalysis even when the event_type isn't
+        canonical."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:feeRecipient",
+                {"effect_tags": {"writes": ["feeRecipient"]}},
+            )
+            is False
+        )
+
+    def test_effect_tags_delegates_triggers(self):
+        """A DELEGATECALL in the emitter body is unconditionally
+        upgrade-equivalent — proxy fallback / custom upgrade
+        choreography. Trigger reanalysis."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:custom",
+                {"effect_tags": {"delegates": True}},
+            )
+            is True
+        )
+
+    def test_effect_tags_is_initializer_triggers(self):
+        """Re-init detected by the modifier rather than the slot name —
+        OZ forks that rename ``_initialized`` still get caught."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:custom",
+                {"effect_tags": {"is_initializer": True}},
+            )
+            is True
+        )
+
 
 # ---------------------------------------------------------------------------
 # DB integration tests: maybe_queue_reanalysis

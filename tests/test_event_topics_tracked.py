@@ -406,6 +406,206 @@ def test_parse_tracked_log_ozownable2step_oz_naming():
     assert parsed["new_owner"].lower() == new.lower()
 
 
+# ---------------------------------------------------------------------------
+# Tag-driven classification (effect_tags)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_governance_topics_tags_drive_admin_changed():
+    """Compound NewAdmin via the tag-driven path: even though
+    ``state_variable:admin`` isn't in the legacy controller_id map,
+    effect_tags.writes containing ``admin`` classifies the event as
+    ``admin_changed``. This is the general fix — no per-ABI table edit
+    needed to pick up the Compound family."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:admin",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "NewAdmin",
+                            "signature": "NewAdmin(address)",
+                            "topic0": _topic0("NewAdmin(address)"),
+                            "inputs": [{"name": "newAdmin", "type": "address", "indexed": False}],
+                            "effect_tags": {"writes": ["admin"]},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert len(topics) == 1
+    spec = topics[0]
+    assert spec["event_type"] == "admin_changed"
+    assert spec["effect_tags"] == {"writes": ["admin"]}
+
+
+def test_extract_governance_topics_tags_curve_commit_ownership():
+    """Curve / Vyper 2-step admin pattern: ``CommitOwnership`` is emitted
+    by a function writing ``future_admin``. Tag-driven classification
+    routes it through ``admin_changed`` without a controller_id mapping."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:future_admin",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "CommitOwnership",
+                            "signature": "CommitOwnership(address)",
+                            "topic0": _topic0("CommitOwnership(address)"),
+                            "inputs": [{"name": "admin", "type": "address", "indexed": False}],
+                            "effect_tags": {"writes": ["future_admin"]},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert len(topics) == 1
+    assert topics[0]["event_type"] == "admin_changed"
+
+
+def test_extract_governance_topics_tags_ownable2step_commit_phase():
+    """OZ Ownable2Step ``acceptOwnership`` writes BOTH ``owner`` and
+    ``pendingOwner``. The classifier must pick ``ownership_transferred``
+    (commit phase), not ``ownership_transfer_started``."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:owner",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "OwnershipTransferred",
+                            "signature": "OwnershipTransferred2(address,address)",
+                            "topic0": _topic0("OwnershipTransferred2(address,address)"),
+                            "inputs": [
+                                {"name": "previousOwner", "type": "address", "indexed": True},
+                                {"name": "newOwner", "type": "address", "indexed": True},
+                            ],
+                            "effect_tags": {"writes": ["owner", "pendingOwner"]},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert topics[0]["event_type"] == "ownership_transferred"
+
+
+def test_extract_governance_topics_tags_initializer():
+    """OZ Initializable ``Initialized(uint64 version)`` — tagged via
+    ``is_initializer`` since the slot is named ``_initialized``."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:_initialized",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "Initialized",
+                            "signature": "Initialized(uint64)",
+                            "topic0": _topic0("Initialized(uint64)"),
+                            "inputs": [{"name": "version", "type": "uint64", "indexed": False}],
+                            "effect_tags": {"writes": ["_initialized"], "is_initializer": True},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert topics[0]["event_type"] == "initialized"
+
+
+def test_extract_governance_topics_tags_fall_through_when_no_match():
+    """When effect_tags don't match any canonical write target, the
+    classifier falls back to controller_id and ultimately
+    ``controller_changed:<id>``."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:guardian",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "GuardianSet",
+                            "signature": "GuardianSet(address)",
+                            "topic0": _topic0("GuardianSet(address)"),
+                            "inputs": [{"name": "guardian", "type": "address", "indexed": True}],
+                            "effect_tags": {"writes": ["guardian"]},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert topics[0]["event_type"] == "controller_changed:state_variable:guardian"
+    # Tags still ride along even when classification fell back.
+    assert topics[0]["effect_tags"] == {"writes": ["guardian"]}
+
+
+def test_extract_governance_topics_tags_outrank_controller_id():
+    """If the controller_id mapping disagrees with effect_tags, tags win
+    — tags reflect what the emitter ACTUALLY mutates, which is more
+    accurate than the controller's name."""
+    plan = {
+        "tracked_controllers": [
+            {
+                # Misleading controller_id (would map to ownership_transferred)
+                "controller_id": "state_variable:owner",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "AdminSet",
+                            "signature": "AdminSet(address)",
+                            "topic0": _topic0("AdminSet(address)"),
+                            "inputs": [{"name": "newAdmin", "type": "address", "indexed": True}],
+                            # ...but the emitter actually writes admin, not owner
+                            "effect_tags": {"writes": ["admin"]},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert topics[0]["event_type"] == "admin_changed"
+
+
+def test_parse_tracked_log_carries_effect_tags_through():
+    """The decoder propagates effect_tags from the spec onto the parsed
+    event so the watcher's downstream sync paths can branch on them."""
+    sig = "NewAdmin(address)"
+    spec = {
+        "topic0": _topic0(sig),
+        "signature": sig,
+        "event_type": "admin_changed",
+        "controller_id": "state_variable:admin",
+        "inputs": [{"name": "newAdmin", "type": "address", "indexed": False}],
+        "effect_tags": {"writes": ["admin"]},
+    }
+    new_admin = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
+    data = "0x" + eth_abi_encode(["address"], [new_admin]).hex()
+    log = {
+        "topics": [spec["topic0"]],
+        "data": data,
+        "blockNumber": "0x1",
+        "logIndex": "0x0",
+        "transactionHash": "0xfe",
+    }
+    parsed = parse_tracked_log(log, spec)
+    assert parsed is not None
+    assert parsed["effect_tags"] == {"writes": ["admin"]}
+    assert parsed["new_admin"].lower() == new_admin.lower()
+
+
 def test_parse_tracked_log_returns_none_on_short_topics():
     """If the log's topic count doesn't match the spec's indexed inputs
     (corrupt log, wrong topic0 routed by mistake), the decoder declines

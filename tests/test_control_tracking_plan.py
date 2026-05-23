@@ -72,6 +72,7 @@ def test_build_control_tracking_plan_uses_event_watch_when_available(tmp_path):
                     {"name": "user", "type": "address", "indexed": True},
                     {"name": "newOwner", "type": "address", "indexed": True},
                 ],
+                "effect_tags": {"writes": ["owner"]},
             }
         ],
         "writer_functions": ["transferOwnership(address)"],
@@ -91,6 +92,7 @@ def test_build_control_tracking_plan_uses_event_watch_when_available(tmp_path):
                     {"name": "user", "type": "address", "indexed": True},
                     {"name": "newAuthority", "type": "address", "indexed": True},
                 ],
+                "effect_tags": {"writes": ["authority"]},
             }
         ],
         "writer_functions": ["setAuthority(AuthorityLike)"],
