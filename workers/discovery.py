@@ -9,8 +9,9 @@ set and creates the top-N analysis child jobs once the siblings settle.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -30,7 +31,7 @@ from db.queue import (
 )
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
-from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources
+from services.discovery.fetch import chain_id_for_chain, fetch, is_vyper_result, parse_remappings, parse_sources
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
@@ -38,6 +39,116 @@ from utils.logging import record_degraded
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [text for item in value if (text := str(item).strip())]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _first_chain(chains: list[str]) -> str | None:
+    for chain in chains:
+        if chain and chain != "unknown":
+            return chain
+    return chains[0] if chains else None
+
+
+def _source_list(entry: dict[str, Any]) -> list[str]:
+    sources = entry.get("source") or ["inventory"]
+    if isinstance(sources, list):
+        return [str(source) for source in sources if source]
+    return [str(sources)]
+
+
+def _inventory_contract_rows(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten inventory output into per-(address, chain) DB rows.
+
+    ``search_protocol_inventory`` groups same-named multichain deployments as
+    ``{"deployments": [...]}`` for compact display. The DB and selection queue
+    need one concrete row per deployment so each chain-specific address can be
+    ranked, fetched, analyzed, and surfaced.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry in contracts:
+        entry_chains = _as_string_list(entry.get("chains")) or _as_string_list(entry.get("chain"))
+        sources = _source_list(entry)
+        deployments = entry.get("deployments")
+
+        if isinstance(deployments, list) and deployments:
+            for deployment in deployments:
+                if not isinstance(deployment, dict) or not deployment.get("address"):
+                    continue
+                dep_chains = _as_string_list(deployment.get("chains")) or _as_string_list(deployment.get("chain"))
+                if not dep_chains:
+                    dep_chains = list(entry_chains)
+                rows.append(
+                    {
+                        "address": str(deployment["address"]),
+                        "chain": _first_chain(dep_chains),
+                        "new_sources": sources,
+                        "contract_name": deployment.get("name") or entry.get("name"),
+                        "confidence": deployment.get("confidence", entry.get("confidence")),
+                        "chains": dep_chains,
+                        "discovery_url": entry.get("discovery_url"),
+                    }
+                )
+            continue
+
+        if not entry.get("address"):
+            continue
+        rows.append(
+            {
+                "address": str(entry["address"]),
+                "chain": _first_chain(entry_chains),
+                "new_sources": sources,
+                "contract_name": entry.get("name"),
+                "confidence": entry.get("confidence"),
+                "chains": entry_chains,
+                "discovery_url": entry.get("discovery_url"),
+            }
+        )
+    return rows
+
+
+def _call_supports_kwarg(fn: Any, name: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD or param.name == name for param in params)
+
+
+def _chain_id_for_request(request: dict[str, Any]) -> int | None:
+    raw_chain_id = request.get("chain_id")
+    if isinstance(raw_chain_id, int) and raw_chain_id > 0:
+        return raw_chain_id
+    return chain_id_for_chain(request.get("chain"))
+
+
+def _fetch_for_request(address: str, request: dict[str, Any]) -> dict:
+    chain = request.get("chain") if isinstance(request.get("chain"), str) else None
+    chain_id = _chain_id_for_request(request)
+    if chain and chain_id is None:
+        raise RuntimeError(f"Unsupported Etherscan chain for source fetch: {chain}")
+    if _call_supports_kwarg(fetch, "chain_id"):
+        if _call_supports_kwarg(fetch, "chain"):
+            return fetch(address, chain=chain, chain_id=chain_id)
+        return fetch(address, chain_id=chain_id)
+    if _call_supports_kwarg(fetch, "chain"):
+        return fetch(address, chain=chain)
+    return fetch(address)
+
+
+def _creators_for_request(address: str, request: dict[str, Any]) -> dict[str, str]:
+    chain_id = _chain_id_for_request(request)
+    if chain_id is None:
+        raise RuntimeError(f"Unsupported Etherscan chain for deployer lookup: {request.get('chain')}")
+    if _call_supports_kwarg(_batch_get_creators, "chain_id"):
+        return _batch_get_creators([address], chain_id=chain_id)
+    return _batch_get_creators([address])
 
 
 def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[dict]) -> None:
@@ -249,7 +360,8 @@ class DiscoveryWorker(BaseWorker):
             )
             logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
 
-        discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
+        inventory_contracts = [e for e in inventory.get("contracts", []) if isinstance(e, dict)]
+        bulk_entries = _inventory_contract_rows(inventory_contracts)
 
         # Write ALL discovered addresses to contracts table. Ranking and
         # job creation happen later in the selection stage, once DApp
@@ -263,23 +375,6 @@ class DiscoveryWorker(BaseWorker):
         # own ``source`` list (e.g. ``["ai_inventory", "deployer_expansion"]``)
         # when multiple inventory signals agreed; preserve that granularity
         # so ranking sees the richer corroboration story.
-        bulk_entries: list[dict] = []
-        for entry in discovered:
-            entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
-            entry_sources = entry.get("source") or ["inventory"]
-            if not isinstance(entry_sources, list):
-                entry_sources = [str(entry_sources)]
-            bulk_entries.append(
-                {
-                    "address": str(entry["address"]),
-                    "chain": entry_chain,
-                    "new_sources": entry_sources,
-                    "contract_name": entry.get("name"),
-                    "confidence": entry.get("confidence"),
-                    "chains": entry.get("chains"),
-                }
-            )
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
         # into roughly one round-trip.
@@ -294,7 +389,9 @@ class DiscoveryWorker(BaseWorker):
                 "mode": "company",
                 "company": company,
                 "official_domain": inventory.get("official_domain"),
-                "discovered_count": len(discovered),
+                "discovered_count": len(bulk_entries),
+                "inventory_contract_count": len(inventory_contracts),
+                "multichain_group_count": sum(1 for entry in inventory_contracts if entry.get("deployments")),
             },
         )
 
@@ -309,7 +406,7 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(
             session,
             job,
-            f"Discovered {len(discovered)} contracts; awaiting parallel discovery before ranking",
+            f"Discovered {len(bulk_entries)} deployments; awaiting parallel discovery before ranking",
         )
 
         # Hand off to the selection stage. The SelectionWorker waits for
@@ -320,7 +417,7 @@ class DiscoveryWorker(BaseWorker):
             session,
             job.id,
             JobStage.selection,
-            f"Discovery complete for {company}: {len(discovered)} contracts; ranking pending",
+            f"Discovery complete for {company}: {len(bulk_entries)} deployments; ranking pending",
         )
         raise JobHandledDirectly()
 
@@ -437,8 +534,8 @@ class DiscoveryWorker(BaseWorker):
         # serial RTT between them goes away.
         fan_out = etherscan.parallel_get(
             {
-                "fetch": lambda a=address: fetch(a),
-                "creators": lambda a=address: _batch_get_creators([a]),
+                "fetch": lambda a=address, req=request: _fetch_for_request(a, req),
+                "creators": lambda a=address, req=request: _creators_for_request(a, req),
             }
         )
         result_or_exc = fan_out["fetch"]

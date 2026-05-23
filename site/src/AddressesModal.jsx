@@ -137,11 +137,13 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
           const addr = (r.address || "").toLowerCase();
           const name = (r.name || "").toLowerCase();
           const impl = (r.implementation_name || "").toLowerCase();
+          const chain = (r.chain || "").toLowerCase();
           const label = (labels.get(addr) || "").toLowerCase();
           return (
             addr.includes(q) ||
             name.includes(q) ||
             impl.includes(q) ||
+            chain.includes(q) ||
             label.includes(q)
           );
         })
@@ -247,6 +249,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               address: r.address,
+              chain: r.chain || null,
               company: companyName,
               name: r.name || null,
             }),
@@ -474,6 +477,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                 <tr>
                   <th style={{ width: 60 }}>Rank</th>
                   <th>Name / Label</th>
+                  <th style={{ width: 90 }}>Chain</th>
                   <th>Address</th>
                   <th style={{ width: 100 }}>Status</th>
                   <th style={{ width: 130 }}>Actions</th>
@@ -521,6 +525,13 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                               size="xs"
                             />
                           </div>
+                        )}
+                      </td>
+                      <td>
+                        {r.chain ? (
+                          <span className="ps-addresses-modal-chip">{r.chain}</span>
+                        ) : (
+                          <span style={{ opacity: 0.4 }}>—</span>
                         )}
                       </td>
                       <td className="ps-addresses-modal-addr mono">{r.address}</td>

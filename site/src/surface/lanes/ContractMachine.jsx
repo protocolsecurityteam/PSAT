@@ -56,6 +56,7 @@ export function ContractMachine({
           {machine.role === "value_handler" && Number(machine.total_usd) > 0 ? (
             <span className="ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
           ) : null}
+          {machine.chain ? <span className="ps-badge" style={{ "--badge-accent": "#38bdf8" }}>{machine.chain}</span> : null}
           {machine.is_proxy ? <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{machine.proxy_type || "proxy"}</span> : null}
           {machine.upgrade_count != null ? <span className="ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
           <span className="ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>

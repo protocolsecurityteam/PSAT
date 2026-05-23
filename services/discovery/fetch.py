@@ -7,12 +7,25 @@ import re
 import textwrap
 from pathlib import Path
 
+from services.discovery.inventory_domain import CHAIN_IDS
 from utils.etherscan import get_source
 
 
-def fetch(address: str) -> dict:
+def chain_id_for_chain(chain: str | None, default: int = 1) -> int | None:
+    """Return the Etherscan v2 chain id for a normalized chain label."""
+    if not isinstance(chain, str) or not chain.strip():
+        return default
+    if chain.lower().strip() == "unknown":
+        return default
+    return CHAIN_IDS.get(chain.lower().strip())
+
+
+def fetch(address: str, *, chain: str | None = None, chain_id: int | None = None) -> dict:
     """Fetch verified source from Etherscan. Returns the raw result dict."""
-    return get_source(address)
+    resolved_chain_id = chain_id or chain_id_for_chain(chain)
+    if resolved_chain_id is None:
+        raise RuntimeError(f"Unsupported Etherscan chain for {address}: {chain}")
+    return get_source(address, chain_id=resolved_chain_id)
 
 
 def _parse_source_code(raw: str) -> dict | None:

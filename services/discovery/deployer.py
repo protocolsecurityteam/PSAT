@@ -48,6 +48,7 @@ _MIN_SEED_SHARE = 0.05
 def _batch_get_creators(
     addresses: list[str],
     batch_size: int = 5,
+    chain_id: int = 1,
     debug: bool = False,
 ) -> dict[str, str]:
     """Look up contract creators in batches.
@@ -61,6 +62,7 @@ def _batch_get_creators(
             data = etherscan.get(
                 "contract",
                 "getcontractcreation",
+                chain_id=chain_id,
                 contractaddresses=",".join(batch),
             )
             for item in data.get("result", []):
@@ -73,12 +75,13 @@ def _batch_get_creators(
     return creators
 
 
-def _get_deployed_contracts(deployer: str, debug: bool = False) -> list[str]:
+def _get_deployed_contracts(deployer: str, *, chain_id: int = 1, debug: bool = False) -> list[str]:
     """Return all contract addresses created by *deployer* via ``txlist``."""
     try:
         data = etherscan.get(
             "account",
             "txlist",
+            chain_id=chain_id,
             address=deployer,
             startblock="0",
             endblock="99999999",
@@ -97,13 +100,14 @@ def _get_deployed_contracts(deployer: str, debug: bool = False) -> list[str]:
     return deployed
 
 
-def _get_one_name(addr: str) -> tuple[str, str | None]:
+def _get_one_name(addr: str, chain_id: int = 1) -> tuple[str, str | None]:
     """Fetch the contract name for a single address (rate-limited centrally by etherscan.get)."""
-    return addr, etherscan.get_contract_name(addr)
+    return addr, etherscan.get_contract_name(addr, chain_id=chain_id)
 
 
 def _batch_get_names(
     addresses: list[str],
+    chain_id: int = 1,
     debug: bool = False,
 ) -> dict[str, str]:
     """Best-effort contract name lookup using a thread pool.  Returns ``{address: name}``."""
@@ -118,7 +122,7 @@ def _batch_get_names(
         futures: dict = {}
         for addr in addresses:
             ctx = contextvars.copy_context()
-            futures[executor.submit(ctx.run, _get_one_name, addr)] = addr
+            futures[executor.submit(ctx.run, _get_one_name, addr, chain_id)] = addr
         for future in as_completed(futures):
             try:
                 addr, name = future.result()
@@ -173,6 +177,7 @@ def expand_from_deployers(
     resolve_names: bool = True,
     min_seed_count: int = _MIN_SEED_COUNT,
     min_seed_share: float = _MIN_SEED_SHARE,
+    chain_id: int = 1,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Discover additional contracts by tracing deployer wallets.
@@ -194,7 +199,7 @@ def expand_from_deployers(
     _debug_log(debug, f"Deployer expansion: {len(normalized_seeds)} seed address(es)")
 
     # Step 1 — find deployer wallets
-    creators = _batch_get_creators(normalized_seeds, debug=debug)
+    creators = _batch_get_creators(normalized_seeds, chain_id=chain_id, debug=debug)
     if not creators:
         _debug_log(debug, "No deployer wallets identified")
         return []
@@ -219,7 +224,7 @@ def expand_from_deployers(
     seed_set = set(normalized_seeds)
     all_deployed: dict[str, set[str]] = {}  # address → deployers that created it
     for deployer in qualified_deployers:
-        deployed = _get_deployed_contracts(deployer, debug=debug)
+        deployed = _get_deployed_contracts(deployer, chain_id=chain_id, debug=debug)
         for addr in deployed:
             all_deployed.setdefault(addr, set()).add(deployer)
 
@@ -232,7 +237,7 @@ def expand_from_deployers(
     new_addresses = sorted(all_deployed.keys() - seed_set)
     names: dict[str, str] = {}
     if resolve_names and new_addresses:
-        names = _batch_get_names(new_addresses, debug=debug)
+        names = _batch_get_names(new_addresses, chain_id=chain_id, debug=debug)
 
     # Step 5 — build inventory entries
     entries: list[dict[str, Any]] = []
