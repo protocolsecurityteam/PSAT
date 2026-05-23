@@ -504,6 +504,79 @@ _WRITE_TARGET_TO_STATE: dict[str, tuple[str, _StateExtractor]] = {
 }
 
 
+def _resolve_value_for_write_target(parsed: dict, write_target: str) -> object | None:
+    """Pull the new value an event reports for *write_target* using the
+    most specific signal available, falling back to ABI conventions
+    when the analyzer's tag is the only structural pin.
+
+    Resolution order:
+
+      1. **Bare-name match** — ``parsed[write_target]`` works for
+         single-arg events whose only arg is the new value
+         (DSAuth ``LogSetOwner(address indexed owner)`` with
+         write_target ``owner``).
+      2. **OZ ``new<Cap>`` convention** — ``parsed[f"new{Cap}"]`` covers
+         the OZ family (``newOwner``, ``newAdmin``, ``newImplementation``).
+      3. **Tag-pinned ``new*`` arg from the ABI inputs spec** — when the
+         analyzer attached ``_inputs`` (per-contract tracked events via
+         ``parse_tracked_log``), find any input whose name starts with
+         "new" (case-insensitive) and return its value. Catches
+         Compound-shape ``NewAdmin(address newAdmin)`` /
+         ``ProtocolAdminChanged(previousAdmin, newAdmin)`` for a
+         write_target like ``protocolAdmin`` where neither the bare
+         name nor the OZ ``new<Cap>`` convention applies.
+      4. **Positional last-arg fallback** — for single-write events the
+         "new value" is conventionally the last arg even when no naming
+         convention applies (Solady, custom ABIs that just name the
+         arg ``account`` or ``to``). Only fires when ``_inputs`` is
+         present and (3) didn't match.
+
+    Underscore-prefixed write_targets (``_roles``, ``_timelock_op``,
+    ``_safe_op``, ``_safe_module_op``) are synthetic activity markers
+    not real slots; they short-circuit to ``None`` so the fallback
+    doesn't false-positive on the third-arg ``sender`` of a RoleGranted
+    event (which has no canonical extractor and would otherwise hit
+    pass (4) and overwrite ``state["_roles"]`` with a sender address).
+    """
+    if write_target.startswith("_"):
+        return None
+
+    candidate = parsed.get(write_target)
+    if candidate is not None:
+        return candidate
+
+    cap = write_target[:1].upper() + write_target[1:]
+    candidate = parsed.get(f"new{cap}")
+    if candidate is not None:
+        return candidate
+
+    inputs = parsed.get("_inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return None
+
+    # Pass 3: any input whose name starts with "new" (case-insensitive).
+    # First match wins; the analyzer's tag tells us there's a single
+    # write target here, so the convention "the new value of THAT slot
+    # is named new<something>" is reliable.
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = inp.get("name") or ""
+        if name.lower().startswith("new") and name in parsed:
+            return parsed[name]
+
+    # Pass 4: positional last-arg. The analyzer's tag pins this event
+    # as writing exactly one slot, so the last arg is the conventional
+    # location of the new value across every governance ABI we've seen
+    # (Solady, custom). Skipped when (3) matched.
+    last = inputs[-1]
+    if isinstance(last, dict):
+        name = last.get("name") or ""
+        if name and name in parsed:
+            return parsed[name]
+    return None
+
+
 def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
     """Reflect the event's mutations into ``last_known_state``.
 
@@ -532,16 +605,13 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
             if value is not None:
                 state[state_key] = value
             continue
-        # Generic name-match fallback for custom slots — the decoder
-        # populated ``parsed[input_name]`` for every input; try the bare
-        # target name, then the OZ ``new<Cap>`` convention. Unlike the
-        # canonical branch we DO overwrite an existing state entry —
-        # this path is the only one that updates custom slots, so a
-        # subsequent observation must take precedence.
-        candidate = parsed.get(write_target)
-        if candidate is None:
-            cap = write_target[:1].upper() + write_target[1:]
-            candidate = parsed.get(f"new{cap}")
+        # Generic resolution for custom slots — uses bare-name match,
+        # OZ ``new<Cap>`` convention, ABI-pinned ``new*`` arg, and last-
+        # arg positional fallback. Unlike the canonical branch we DO
+        # overwrite an existing state entry — this path is the only one
+        # that updates custom slots, so a subsequent observation must
+        # take precedence.
+        candidate = _resolve_value_for_write_target(parsed, write_target)
         if candidate is not None:
             state[write_target] = candidate
 
@@ -553,18 +623,15 @@ def _new_value_for_write_target(write_target: str, parsed: dict) -> object | Non
     """Pull the new value for *write_target* out of a parsed event.
 
     Tries the canonical extractor in ``_WRITE_TARGET_TO_STATE`` first,
-    then falls back to generic name-match (bare name + OZ ``new<Cap>``
-    convention) so custom slots resolve without per-slot code.
+    then defers to ``_resolve_value_for_write_target`` for custom slots
+    so the event-side relational sync and the state-update sync share
+    one resolution chain.
     """
     mapping = _WRITE_TARGET_TO_STATE.get(write_target)
     if mapping is not None:
         _, extractor = mapping
         return extractor(parsed)
-    candidate = parsed.get(write_target)
-    if candidate is None:
-        cap = write_target[:1].upper() + write_target[1:]
-        candidate = parsed.get(f"new{cap}")
-    return candidate
+    return _resolve_value_for_write_target(parsed, write_target)
 
 
 def _sync_relational_tables(

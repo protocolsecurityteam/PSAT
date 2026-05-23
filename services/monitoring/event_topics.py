@@ -635,6 +635,12 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     spec_tags = spec.get("effect_tags")
     if isinstance(spec_tags, dict) and spec_tags:
         event["effect_tags"] = spec_tags
+    # Attach the ABI input list (declaration order, not topic order) so
+    # downstream write-target resolution can do positional / name-prefix
+    # heuristics for non-OZ ABIs. Compound's ``NewAdmin(address newAdmin)``
+    # and similar shapes need this to map a custom write_target like
+    # ``protocolAdmin`` to the ``newAdmin`` arg.
+    event["_inputs"] = list(inputs)
 
     # Decode indexed args from topics.
     args_in_order: list[object] = []
