@@ -479,6 +479,160 @@ class TestOwnerControllerMatching:
         assert cv_previous_reloaded.value == ADDR(20), "previous_owner_map was incorrectly updated"
 
 
+# =========================================================================
+# Custom-named controller slots via effect_tags
+# =========================================================================
+
+
+class TestCustomNamedSlotEndToEnd:
+    """End-to-end proof that the tag-driven dispatch handles a controller
+    slot the canonical maps don't know about.
+
+    A protocol with a custom slot named ``protocolAdmin`` that isn't in
+    ``_WRITE_TARGET_TO_STATE`` / ``_WRITE_TARGET_TO_CONFIG_KEYS`` /
+    ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` should still flow through every
+    downstream consumer when the static analyzer attaches
+    ``effect_tags.writes=["protocolAdmin"]`` to its setter event.
+    """
+
+    def _setup_custom_slot_fixture(self, session: SASession):
+        proto = Protocol(name="CustomSlotProtocol")
+        session.add(proto)
+        session.flush()
+
+        contract = Contract(
+            address=ADDR(1),
+            chain="ethereum",
+            protocol_id=proto.id,
+        )
+        session.add(contract)
+        session.flush()
+
+        # Pre-existing ControllerValue row under the static-analyzer
+        # canonical id "state_variable:protocolAdmin" — the row the
+        # tag-driven sync must find via the generalized lookup
+        # (write_target, state_variable:write_target, external_contract:write_target).
+        cv = ControllerValue(
+            contract_id=contract.id,
+            controller_id="state_variable:protocolAdmin",
+            value=ADDR(10),
+        )
+        session.add(cv)
+        session.flush()
+
+        mc = MonitoredContract(
+            id=uuid.uuid4(),
+            address=ADDR(1),
+            chain="ethereum",
+            contract_id=contract.id,
+            contract_type="regular",
+            monitoring_config={"watch_ownership": True},
+            last_known_state={"protocolAdmin": ADDR(10)},
+            last_scanned_block=100,
+            is_active=True,
+        )
+        session.add(mc)
+        session.commit()
+        return mc, cv
+
+    def test_state_updates_for_custom_slot(self, db_session: SASession):
+        """``_update_state_from_event`` reflects the custom-slot write
+        via the generic name-match fallback — looks at parsed["newProtocolAdmin"]
+        when the canonical extractor map has no entry for "protocolAdmin"."""
+        from services.monitoring.unified_watcher import _update_state_from_event
+
+        mc, _ = self._setup_custom_slot_fixture(db_session)
+
+        parsed = {
+            "event_type": "controller_changed:state_variable:protocolAdmin",
+            "block_number": 200,
+            "tx_hash": "0xabc",
+            "newProtocolAdmin": ADDR(50),
+            "effect_tags": {"writes": ["protocolAdmin"]},
+        }
+
+        _update_state_from_event(mc, parsed)
+        db_session.commit()
+        db_session.expire_all()
+        reloaded = db_session.get(MonitoredContract, mc.id)
+        assert reloaded is not None
+        assert reloaded.last_known_state is not None
+        assert reloaded.last_known_state.get("protocolAdmin") == ADDR(50)
+
+    def test_controller_value_syncs_for_custom_slot(self, db_session: SASession):
+        """``_sync_relational_tables`` matches the ControllerValue row
+        under ``state_variable:protocolAdmin`` via the generalized
+        prefix-form lookup."""
+        from services.monitoring.unified_watcher import _sync_relational_tables
+
+        mc, cv = self._setup_custom_slot_fixture(db_session)
+
+        parsed = {
+            "event_type": "controller_changed:state_variable:protocolAdmin",
+            "block_number": 200,
+            "tx_hash": "0xabc",
+            "newProtocolAdmin": ADDR(50),
+            "effect_tags": {"writes": ["protocolAdmin"]},
+        }
+        _sync_relational_tables(db_session, mc, parsed)
+        db_session.commit()
+        db_session.expire_all()
+
+        cv_reloaded = db_session.get(ControllerValue, cv.id)
+        assert cv_reloaded is not None
+        assert cv_reloaded.value == ADDR(50), (
+            "ControllerValue with controller_id=state_variable:protocolAdmin "
+            "was not updated — the tag-driven sync's generalized prefix-form "
+            "lookup is missing the state_variable: prefix"
+        )
+
+    def test_reanalysis_does_not_fire_for_unrelated_custom_slot(self):
+        """A custom-named slot that isn't in ``_REANALYSIS_WRITE_TARGETS``
+        (e.g. ``feeRecipient``) must NOT trigger reanalysis even though
+        the event flows through every other dispatch path. Reanalysis
+        is reserved for control-graph-invalidating writes."""
+        from services.monitoring.reanalysis import should_trigger_reanalysis
+
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:feeRecipient",
+                {"effect_tags": {"writes": ["feeRecipient"]}},
+            )
+            is False
+        )
+
+    def test_reanalysis_fires_for_control_relevant_custom_slot(self):
+        """A custom-named slot that IS a control-relevant rename (e.g. a
+        fork that calls its admin field ``protocolAdmin`` but writes
+        ``admin``) triggers reanalysis via the tag intersection check."""
+        from services.monitoring.reanalysis import should_trigger_reanalysis
+
+        # The static analyzer tagged the emitter as writing "admin" even
+        # though the surface name is "protocolAdmin" — that's the
+        # generalization payoff.
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:protocolAdmin",
+                {"effect_tags": {"writes": ["admin"]}},
+            )
+            is True
+        )
+
+    def test_should_watch_passes_custom_slot_with_default_config(self, db_session: SASession):
+        """``_should_watch`` allows events whose write targets don't map
+        to any specific config flag — there's no way for the user to
+        opt out of an unrecognized slot without a config key, so default
+        is allow."""
+        from services.monitoring.unified_watcher import _should_watch
+
+        mc, _ = self._setup_custom_slot_fixture(db_session)
+        parsed = {
+            "event_type": "controller_changed:state_variable:protocolAdmin",
+            "effect_tags": {"writes": ["protocolAdmin"]},
+        }
+        assert _should_watch(mc, parsed) is True
+
+
 # ---------------------------------------------------------------------------
 # Timelock event decode (CallScheduled / CallExecuted)
 # ---------------------------------------------------------------------------

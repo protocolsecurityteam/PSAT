@@ -91,6 +91,104 @@ GOVERNANCE_EVENT_TOPICS: dict[str, str] = {
 ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOPICS}
 
 # ---------------------------------------------------------------------------
+# Synthetic effect_tags for hand-rolled events
+# ---------------------------------------------------------------------------
+
+# Synthesizes ``effect_tags`` from a canonical event_type. Two consumers:
+#
+#   1. ``parse_governance_log`` / ``parse_any_log`` attach tags to every
+#      hand-rolled event so downstream sees the same shape ``parse_tracked_log``
+#      produces from the static analysis tracking_plan.
+#   2. ``_update_state_from_event`` / ``_should_watch`` /
+#      ``_sync_relational_tables`` / ``should_trigger_reanalysis`` fall
+#      back to this map when ``parsed["effect_tags"]`` is missing —
+#      catches legacy monitoring_config specs persisted before tags
+#      landed in the spec shape, and bare-event_type callers.
+#
+# Tag-driven dispatch unifies hand-rolled and per-contract event handling
+# under one shape; the previous parallel event_type → config_keys maps
+# in unified_watcher and reanalysis collapse into a single source of
+# truth.
+#
+# Conventions:
+#   - Real state-variable names ("owner", "admin", "implementation",
+#     "paused", "owners", "threshold", "min_delay", "beacon", "facets")
+#     match what the static analyzer emits for those slots.
+#   - Underscore-prefixed names are synthetic markers for events that
+#     don't mutate a single named slot — used so the watcher's config
+#     gating still has something to key off:
+#       ``_roles``        — RoleGranted / RoleRevoked (AccessControl
+#                            doesn't expose a single state-var name)
+#       ``_timelock_op``  — CallScheduled / CallExecuted (activity,
+#                            no persistent state change)
+#       ``_safe_op``      — ExecutionSuccess / ExecutionFailure (Safe
+#                            tx wrapper activity)
+#       ``_safe_module_op`` — ExecutionFromModule[Success|Failure]
+#                            (Safe module call activity)
+#   - ``delegates: True`` marks events that signal a delegate-target swap.
+#     Set on every proxy-impl event (Upgraded, NewImplementation,
+#     BeaconUpgraded, DiamondCut, etc.) so the upgrade-triggered paths
+#     (reanalysis, coverage refresh, UpgradeEvent insert) fire uniformly.
+_HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
+    # Proxy / upgrade events — see services/discovery/upgrade_history.py
+    "upgraded": {"writes": ["implementation"], "delegates": True},
+    "admin_changed": {"writes": ["admin"]},
+    "beacon_upgraded": {"writes": ["beacon"], "delegates": True},
+    "changed_master_copy": {"writes": ["implementation"], "delegates": True},
+    "new_implementation": {"writes": ["implementation"], "delegates": True},
+    "new_pending_implementation": {"writes": ["pendingImplementation"]},
+    "target_updated": {"writes": ["implementation"], "delegates": True},
+    "upgraded_revision": {"writes": ["implementation"], "delegates": True},
+    "diamond_cut": {"writes": ["facets"], "delegates": True},
+    # Governance events
+    "ownership_transferred": {"writes": ["owner"]},
+    "paused": {"writes": ["paused"]},
+    "unpaused": {"writes": ["paused"]},
+    "role_granted": {"writes": ["_roles"]},
+    "role_revoked": {"writes": ["_roles"]},
+    "signer_added": {"writes": ["owners"]},
+    "signer_removed": {"writes": ["owners"]},
+    "threshold_changed": {"writes": ["threshold"]},
+    "timelock_scheduled": {"writes": ["_timelock_op"]},
+    "timelock_executed": {"writes": ["_timelock_op"]},
+    "delay_changed": {"writes": ["min_delay"]},
+    "safe_tx_executed": {"writes": ["_safe_op"]},
+    "safe_tx_failed": {"writes": ["_safe_op"]},
+    "safe_module_executed": {"writes": ["_safe_module_op"]},
+    "safe_module_failed": {"writes": ["_safe_module_op"]},
+    # Per-contract canonical types from ``parse_tracked_log``. Events
+    # produced through that path already carry tags from the spec; the
+    # entries here are the synthesis fallback for callers that pass only
+    # an event_type (legacy specs without tags, bare reanalysis checks).
+    "ownership_transfer_started": {"writes": ["pendingOwner"]},
+    "authority_updated": {"writes": ["authority"]},
+    "initialized": {"writes": ["_initialized"], "is_initializer": True},
+    "signer_updated": {"writes": ["owners"]},
+}
+
+
+def _attach_effect_tags(event: dict | None) -> dict | None:
+    """If *event* carries a canonical hand-rolled event_type, attach the
+    matching ``effect_tags`` (in place) so the watcher's tag-driven
+    dispatch sees the same shape it gets from ``parse_tracked_log``.
+
+    No-op when event_type isn't in the synthesis map — e.g. an unknown
+    or per-contract event with tags already in its spec.
+    """
+    if not event:
+        return event
+    event_type = event.get("event_type")
+    if not isinstance(event_type, str):
+        return event
+    tags = _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type)
+    if tags is None:
+        return event
+    # Copy so the module-level dict is never mutated by callers.
+    event["effect_tags"] = {k: (list(v) if isinstance(v, list) else v) for k, v in tags.items()}
+    return event
+
+
+# ---------------------------------------------------------------------------
 # Governance log parser
 # ---------------------------------------------------------------------------
 
@@ -246,6 +344,7 @@ def parse_governance_log(log: dict) -> dict | None:
         if len(topics) >= 2 and topics[1]:
             event["module"] = _topic_to_address(topics[1])
 
+    _attach_effect_tags(event)
     return event
 
 
@@ -256,7 +355,12 @@ def parse_any_log(log: dict) -> dict | None:
     """
     result = parse_upgrade_log(log)
     if result is not None:
-        return result
+        # ``parse_upgrade_log`` lives in services/discovery/upgrade_history.py
+        # — importing the tag synthesizer there would create a circular
+        # import. Attach tags here at the consolidated entry point so the
+        # watcher always sees tagged events regardless of which decoder
+        # produced them.
+        return _attach_effect_tags(result)
     return parse_governance_log(log)
 
 

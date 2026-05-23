@@ -49,10 +49,30 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.reanalysis import (
-    REANALYSIS_EVENT_TYPES,
     REANALYSIS_POLL_FIELDS,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
+)
+
+# Canonical event types that should trigger a full re-analysis job. The
+# tag-driven dispatch in ``should_trigger_reanalysis`` derives the same
+# verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — these are the
+# event_types whose synthesized tags either write a control-relevant
+# slot, set ``delegates``, or set ``is_initializer``. ``upgraded_revision``
+# is included because Aave V2's revision bump IS a delegate-target
+# swap (was missing from the pre-tag-migration set).
+_TRIGGERING_EVENT_TYPES = (
+    "upgraded",
+    "new_implementation",
+    "changed_master_copy",
+    "target_updated",
+    "upgraded_revision",
+    "diamond_cut",
+    "beacon_upgraded",
+    "admin_changed",
+    "ownership_transferred",
+    "authority_updated",
+    "initialized",
 )
 
 # ---------------------------------------------------------------------------
@@ -405,7 +425,7 @@ def _make_monitored_contract(
 class TestShouldTriggerReanalysis:
     """Pure logic tests — no DB needed."""
 
-    @pytest.mark.parametrize("event_type", sorted(REANALYSIS_EVENT_TYPES))
+    @pytest.mark.parametrize("event_type", sorted(_TRIGGERING_EVENT_TYPES))
     def test_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is True
 
@@ -486,6 +506,47 @@ class TestShouldTriggerReanalysis:
             )
             is True
         )
+
+    def test_handrolled_ownership_transferred_data_synthesizes_tags(self):
+        """An ``ownership_transferred`` event passing through the
+        hand-rolled decoder (``parse_governance_log``) now carries
+        ``effect_tags={"writes": ["owner"]}`` in its data. Verify the
+        reanalysis check fires when given that shape — i.e. the
+        synthesis path produces a tag-equivalent verdict to the bare
+        event_type path. This is the production path: scan_for_events
+        always passes event_data (which includes effect_tags) when it
+        queues a reanalysis job."""
+        data = {
+            "old_owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "new_owner": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+            "effect_tags": {"writes": ["owner"]},
+        }
+        assert should_trigger_reanalysis("ownership_transferred", data) is True
+
+    def test_handrolled_upgraded_data_synthesizes_tags(self):
+        """Same shape as above but for proxy Upgraded — verifies the
+        ``delegates: True`` path fires when the hand-rolled decoder
+        attaches it."""
+        data = {
+            "implementation": "0x" + "aa" * 20,
+            "effect_tags": {"writes": ["implementation"], "delegates": True},
+        }
+        assert should_trigger_reanalysis("upgraded", data) is True
+
+    def test_bare_event_type_without_data_uses_synthesis_fallback(self):
+        """Some queue dedupe paths call ``should_trigger_reanalysis``
+        with only an event_type (no decoded data). The synthesis
+        fallback in ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` must produce
+        the same verdict so those paths don't drift from the production
+        scan path."""
+        # Triggers
+        assert should_trigger_reanalysis("ownership_transferred") is True
+        assert should_trigger_reanalysis("upgraded") is True
+        assert should_trigger_reanalysis("admin_changed") is True
+        # Non-triggers
+        assert should_trigger_reanalysis("paused") is False
+        assert should_trigger_reanalysis("role_granted") is False
+        assert should_trigger_reanalysis("signer_added") is False
 
 
 # ---------------------------------------------------------------------------

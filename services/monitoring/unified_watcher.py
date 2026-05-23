@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 from sqlalchemy import select
@@ -25,6 +26,7 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.event_topics import (
+    _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
     PROXY_EVENT_TOPICS,
     parse_any_log,
@@ -242,7 +244,7 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             event_type = parsed["event_type"]
 
             # Check monitoring config
-            if mc.monitoring_config and not _should_watch(mc, event_type):
+            if mc.monitoring_config and not _should_watch(mc, parsed):
                 continue
 
             # First gate: have we already stored ANY row for this
@@ -333,60 +335,85 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     return new_events
 
 
-def _should_watch(mc: MonitoredContract, event_type: str) -> bool:
-    """Check if the monitoring config allows this event type."""
+# Per-write-target → monitoring_config flag gates. Tag-driven dispatch
+# routes each ``effect_tags.writes`` entry through this map; if any of
+# the resulting flags is enabled the event passes the watch filter.
+#
+# ``admin``-family writes route to both watch_upgrades (EIP-1967 proxy
+# admin slot is the upgrader role) AND watch_ownership (Compound/Aave/
+# Curve "admin" is the principal owner) because the underlying mutation
+# is "the privileged controller changed" — the monitoring intent depends
+# on what the contract IS, not what the event is named.
+_WRITE_TARGET_TO_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    # Ownership
+    "owner": ("watch_ownership",),
+    "_owner": ("watch_ownership",),
+    "pendingOwner": ("watch_ownership",),
+    "_pendingOwner": ("watch_ownership",),
+    # Admin family — both upgrade- and ownership-gated
+    "admin": ("watch_upgrades", "watch_ownership"),
+    "_admin": ("watch_upgrades", "watch_ownership"),
+    "pendingAdmin": ("watch_upgrades", "watch_ownership"),
+    "future_admin": ("watch_upgrades", "watch_ownership"),
+    # Upgrade-relevant slot writes (also any delegates=True event)
+    "implementation": ("watch_upgrades",),
+    "beacon": ("watch_upgrades",),
+    "facets": ("watch_upgrades",),
+    "pendingImplementation": ("watch_upgrades",),
+    "_initialized": ("watch_upgrades",),
+    "_initializing": ("watch_upgrades",),
+    # Authority
+    "authority": ("watch_authority",),
+    # Pause
+    "paused": ("watch_pause",),
+    # Roles
+    "_roles": ("watch_roles",),
+    # Safe signers / Safe + Timelock activity
+    "owners": ("watch_safe_signers",),
+    "threshold": ("watch_safe_signers",),
+    "_safe_op": ("watch_safe_signers",),
+    "_safe_module_op": ("watch_safe_signers",),
+    "_timelock_op": ("watch_timelock",),
+    "min_delay": ("watch_timelock",),
+}
+
+
+def _should_watch(mc: MonitoredContract, parsed: dict) -> bool:
+    """Check if the monitoring config allows this event.
+
+    Tag-driven: derive the set of monitoring_config flags this event is
+    gated on from ``effect_tags.writes`` + ``effect_tags.delegates``,
+    then pass if any flag is enabled (or defaults on). Legacy events
+    without tags synthesize them from event_type via
+    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
+    """
     config = mc.monitoring_config or {}
+    event_type = parsed.get("event_type", "")
 
-    # admin_changed routes to both watch_upgrades (EIP-1967 proxy admin)
-    # and watch_ownership (Compound/Aave/Curve governance admin — same
-    # semantic role as ownership for non-proxy contracts). The event_type
-    # is identical across both cases because the underlying mutation is
-    # "the privileged controller changed"; the monitoring intent depends
-    # on what the contract IS. Accept either flag rather than splitting
-    # the event_type, which would force every config consumer to
-    # disambiguate.
-    type_to_config_keys = {
-        "upgraded": ("watch_upgrades",),
-        "admin_changed": ("watch_upgrades", "watch_ownership"),
-        "beacon_upgraded": ("watch_upgrades",),
-        "changed_master_copy": ("watch_upgrades",),
-        "new_implementation": ("watch_upgrades",),
-        "new_pending_implementation": ("watch_upgrades",),
-        "target_updated": ("watch_upgrades",),
-        "upgraded_revision": ("watch_upgrades",),
-        "diamond_cut": ("watch_upgrades",),
-        "ownership_transferred": ("watch_ownership",),
-        "ownership_transfer_started": ("watch_ownership",),
-        "authority_updated": ("watch_authority",),
-        "paused": ("watch_pause",),
-        "unpaused": ("watch_pause",),
-        "role_granted": ("watch_roles",),
-        "role_revoked": ("watch_roles",),
-        "signer_added": ("watch_safe_signers",),
-        "signer_removed": ("watch_safe_signers",),
-        # signer_updated comes from the tag-driven path when a non-Safe
-        # contract writes its custom "owners" array. Route through the
-        # same flag as the Safe-native events.
-        "signer_updated": ("watch_safe_signers",),
-        "threshold_changed": ("watch_safe_signers",),
-        "timelock_scheduled": ("watch_timelock",),
-        "timelock_executed": ("watch_timelock",),
-        "delay_changed": ("watch_timelock",),
-        "safe_tx_executed": ("watch_safe_signers",),
-        "safe_tx_failed": ("watch_safe_signers",),
-        "safe_module_executed": ("watch_safe_signers",),
-        "safe_module_failed": ("watch_safe_signers",),
-    }
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
+    delegates = bool(tags.get("delegates"))
 
-    config_keys = type_to_config_keys.get(event_type)
-    if config_keys is None:
-        return True  # Unknown event type — allow
+    config_keys: set[str] = set()
+    if delegates:
+        config_keys.add("watch_upgrades")
+    for write_target in writes:
+        if not isinstance(write_target, str):
+            continue
+        keys = _WRITE_TARGET_TO_CONFIG_KEYS.get(write_target)
+        if keys:
+            config_keys.update(keys)
 
-    # Legacy alias support: `watch_signers` predates the rename to
-    # `watch_safe_signers`. Accept either flag so historic
+    if not config_keys:
+        return True  # Unrecognized event — allow rather than silently drop.
+
+    # Legacy alias: ``watch_signers`` predates the rename to
+    # ``watch_safe_signers``. Accept either flag so historic
     # MonitoredContract rows written before the rename keep working
-    # without a migration.
-    if "watch_safe_signers" in config_keys:
+    # without a migration. Only kicks in when the event's gating
+    # reduces to watch_safe_signers alone — multi-gate events
+    # (admin_changed) flow through the general path.
+    if config_keys == {"watch_safe_signers"}:
         if config.get("watch_safe_signers") or config.get("watch_signers"):
             return True
         if "watch_safe_signers" in config or "watch_signers" in config:
@@ -427,61 +454,145 @@ def _write_through_proxy_event(
         wp.last_scanned_block = parsed["block_number"]
 
 
+def _extract_new_owner(parsed: dict) -> object:
+    return parsed.get("new_owner")
+
+
+def _extract_new_authority(parsed: dict) -> object:
+    return parsed.get("new_authority")
+
+
+def _extract_paused_bool(parsed: dict) -> object:
+    # paused/unpaused share writes=["paused"]; the event_type discriminates
+    # the new state. The arg on the wire is the account that flipped the
+    # flag, not the flag value — so we ignore parsed["account"] and read
+    # the semantic from event_type.
+    et = parsed.get("event_type")
+    if et == "paused":
+        return True
+    if et == "unpaused":
+        return False
+    return None
+
+
+def _extract_threshold(parsed: dict) -> object:
+    # GnosisSafe ChangedThreshold(uint256 threshold) decodes to ``threshold``.
+    # Tracked Safe-shaped ABIs may use new_threshold via semantic-key aliasing.
+    val = parsed.get("threshold")
+    if val is None:
+        val = parsed.get("new_threshold")
+    return val
+
+
+def _extract_implementation(parsed: dict) -> object:
+    return parsed.get("implementation")
+
+
+def _extract_new_admin(parsed: dict) -> object:
+    return parsed.get("new_admin")
+
+
+def _extract_beacon(parsed: dict) -> object:
+    return parsed.get("beacon")
+
+
+def _extract_new_delay(parsed: dict) -> object:
+    return parsed.get("new_delay")
+
+
+def _extract_initialized_version(parsed: dict) -> object:
+    # OZ Initializable Initialized(uint64 version). Canonical ABI names
+    # the arg ``version``; some forks use ``initVersion``. Either way the
+    # value goes into last_known_state so reanalysis can compare against
+    # the next observation.
+    version = parsed.get("version")
+    if version is None:
+        version = parsed.get("initVersion")
+    return version
+
+
+_StateExtractor = Callable[[dict], object]
+
+# Per-write-target dispatch for ``_update_state_from_event``. Maps a tag
+# write target → (state_key, extractor). The state_key may differ from
+# the write target (``_initialized`` writes to ``initialized_version``);
+# the extractor pulls the right value out of the decoded event. Targets
+# absent here fall through to the generic name-match reflection so
+# custom slots (e.g. ``protocolAdmin``) work without per-slot code.
+_WRITE_TARGET_TO_STATE: dict[str, tuple[str, _StateExtractor]] = {
+    "owner": ("owner", _extract_new_owner),
+    "authority": ("authority", _extract_new_authority),
+    "paused": ("paused", _extract_paused_bool),
+    "threshold": ("threshold", _extract_threshold),
+    "implementation": ("implementation", _extract_implementation),
+    "admin": ("admin", _extract_new_admin),
+    "beacon": ("beacon", _extract_beacon),
+    "min_delay": ("min_delay", _extract_new_delay),
+    "_initialized": ("initialized_version", _extract_initialized_version),
+}
+
+
 def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
-    """Update last_known_state based on a detected event."""
+    """Reflect the event's mutations into ``last_known_state``.
+
+    Tag-driven: each ``effect_tags.writes`` target either resolves to a
+    canonical (state_key, extractor) in ``_WRITE_TARGET_TO_STATE`` or
+    falls back to generic name-match reflection so custom slots like
+    ``protocolAdmin`` flow through without per-slot code.
+
+    Legacy events without ``effect_tags`` synthesize them from event_type
+    via ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — covers monitoring_config
+    rows persisted before tag synthesis landed.
+    """
     state = dict(mc.last_known_state or {})
     event_type = parsed["event_type"]
 
-    if event_type == "ownership_transferred" and parsed.get("new_owner"):
-        state["owner"] = parsed["new_owner"]
-    elif event_type == "authority_updated" and parsed.get("new_authority"):
-        state["authority"] = parsed["new_authority"]
-    elif event_type in ("paused", "unpaused"):
-        state["paused"] = event_type == "paused"
-    elif event_type == "threshold_changed" and parsed.get("threshold"):
-        state["threshold"] = parsed["threshold"]
-    elif event_type in ("upgraded", "new_implementation", "changed_master_copy", "target_updated"):
-        impl = parsed.get("implementation")
-        if impl:
-            state["implementation"] = impl
-    elif event_type == "admin_changed" and parsed.get("new_admin"):
-        state["admin"] = parsed["new_admin"]
-    elif event_type == "beacon_upgraded" and parsed.get("beacon"):
-        state["beacon"] = parsed["beacon"]
-    elif event_type == "delay_changed" and parsed.get("new_delay") is not None:
-        state["min_delay"] = parsed["new_delay"]
-    elif event_type == "initialized":
-        # OZ Initializable Initialized(uint64 version). The version arg is
-        # named ``version`` in the canonical ABI; some forks use
-        # ``initVersion``. Either way the value goes into last_known_state
-        # so reanalysis can compare against the next observation.
-        version = parsed.get("version")
-        if version is None:
-            version = parsed.get("initVersion")
-        if version is not None:
-            state["initialized_version"] = version
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
 
-    # Tag-driven generic reflection: for each state var the emitter wrote
-    # that doesn't have a canonical branch above, capture the new value
-    # by name match. Covers custom controller slots (e.g. ``protocolAdmin``,
-    # ``feeRecipient``) without requiring per-slot code. Skips when the
-    # canonical branch already populated the slot.
-    tags = parsed.get("effect_tags") or {}
-    for write_target in tags.get("writes") or []:
-        if not isinstance(write_target, str) or write_target in state:
+    for write_target in writes:
+        if not isinstance(write_target, str):
             continue
-        # Look for an arg matching the write target's name, with or
-        # without the OZ ``new`` prefix. The decoder populated
-        # ``parsed[input_name]`` for every input.
+        mapping = _WRITE_TARGET_TO_STATE.get(write_target)
+        if mapping is not None:
+            state_key, extractor = mapping
+            value = extractor(parsed)
+            if value is not None:
+                state[state_key] = value
+            continue
+        # Generic name-match fallback for custom slots — the decoder
+        # populated ``parsed[input_name]`` for every input; try the bare
+        # target name, then the OZ ``new<Cap>`` convention. Unlike the
+        # canonical branch we DO overwrite an existing state entry —
+        # this path is the only one that updates custom slots, so a
+        # subsequent observation must take precedence.
         candidate = parsed.get(write_target)
         if candidate is None:
-            cap = write_target[:1].upper() + write_target[1:] if write_target else ""
+            cap = write_target[:1].upper() + write_target[1:]
             candidate = parsed.get(f"new{cap}")
         if candidate is not None:
             state[write_target] = candidate
 
     mc.last_known_state = state
     flag_modified(mc, "last_known_state")
+
+
+def _new_value_for_write_target(write_target: str, parsed: dict) -> object | None:
+    """Pull the new value for *write_target* out of a parsed event.
+
+    Tries the canonical extractor in ``_WRITE_TARGET_TO_STATE`` first,
+    then falls back to generic name-match (bare name + OZ ``new<Cap>``
+    convention) so custom slots resolve without per-slot code.
+    """
+    mapping = _WRITE_TARGET_TO_STATE.get(write_target)
+    if mapping is not None:
+        _, extractor = mapping
+        return extractor(parsed)
+    candidate = parsed.get(write_target)
+    if candidate is None:
+        cap = write_target[:1].upper() + write_target[1:]
+        candidate = parsed.get(f"new{cap}")
+    return candidate
 
 
 def _sync_relational_tables(
@@ -492,90 +603,87 @@ def _sync_relational_tables(
     """Propagate a detected event to the relational Contract / ControllerValue /
     UpgradeEvent tables so the API serves up-to-date data.
 
+    Tag-driven: each ``effect_tags.writes`` target drives one row update.
+    Legacy events without tags synthesize them from event_type via
+    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
+
     Only updates rows when the MonitoredContract has a linked contract_id.
     """
     if not mc.contract_id:
         return
 
     event_type = parsed["event_type"]
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
+    delegates = bool(tags.get("delegates"))
 
-    # --- Proxy upgrade events → Contract.implementation + UpgradeEvent row ---
-    if event_type in (
-        "upgraded",
-        "new_implementation",
-        "changed_master_copy",
-        "target_updated",
-    ):
-        new_impl = parsed.get("implementation")
-        if not new_impl:
-            return
-        contract = session.get(Contract, mc.contract_id)
-        if not contract:
-            return
+    contract: Contract | None = None
 
-        old_impl = contract.implementation
-        contract.implementation = new_impl
+    def _get_contract() -> Contract | None:
+        nonlocal contract
+        if contract is None:
+            contract = session.get(Contract, mc.contract_id)
+        return contract
 
-        session.add(
-            UpgradeEvent(
-                contract_id=contract.id,
-                proxy_address=mc.address,
-                old_impl=old_impl,
-                new_impl=new_impl,
-                block_number=parsed.get("block_number"),
-                tx_hash=parsed.get("tx_hash"),
-            )
+    # Upgrade path: a delegate-target swap → Contract.implementation,
+    # UpgradeEvent row, coverage refresh. Load-bearing semantics that
+    # generic ControllerValue reflection can't reproduce.
+    impl_writes = {"implementation", "beacon", "facets"}
+    if delegates and any(w in impl_writes for w in writes if isinstance(w, str)):
+        new_impl = parsed.get("implementation") or parsed.get("beacon")
+        if new_impl:
+            c = _get_contract()
+            if c is not None:
+                old_impl = c.implementation
+                c.implementation = new_impl
+                session.add(
+                    UpgradeEvent(
+                        contract_id=c.id,
+                        proxy_address=mc.address,
+                        old_impl=old_impl,
+                        new_impl=new_impl,
+                        block_number=parsed.get("block_number"),
+                        tx_hash=parsed.get("tx_hash"),
+                    )
+                )
+                # Coverage windows are derived from UpgradeEvent history, so a
+                # new upgrade can change which audits apply to the previous impl
+                # (it's now bounded) and the new one (newly current). Rebuild
+                # coverage for every audit in the protocol — it's idempotent.
+                _refresh_coverage_after_upgrade(session, c.protocol_id)
+
+    # Per-write-target row sync: top-level Contract.admin shadow for
+    # admin writes, plus ControllerValue rows keyed by any of the common
+    # prefix forms ({target}, state_variable:{target}, external_contract:{target}).
+    for write_target in writes:
+        if not isinstance(write_target, str):
+            continue
+        new_value = _new_value_for_write_target(write_target, parsed)
+        if new_value is None:
+            continue
+
+        if write_target == "admin":
+            c = _get_contract()
+            if c is not None:
+                c.admin = str(new_value)
+
+        controller_ids = (
+            write_target,
+            f"state_variable:{write_target}",
+            f"external_contract:{write_target}",
         )
-        # Coverage windows are derived from UpgradeEvent history, so a
-        # new upgrade can change which audits apply to the previous impl
-        # (it's now bounded) and the new one (newly current). Rebuild
-        # coverage for every audit in the protocol — it's idempotent.
-        _refresh_coverage_after_upgrade(session, contract.protocol_id)
-
-    # --- AdminChanged → Contract.admin ---
-    elif event_type == "admin_changed":
-        new_admin = parsed.get("new_admin")
-        if not new_admin:
-            return
-        contract = session.get(Contract, mc.contract_id)
-        if contract:
-            contract.admin = new_admin
-
-    # --- OwnershipTransferred → ControllerValue where controller_id is 'owner' ---
-    elif event_type == "ownership_transferred":
-        new_owner = parsed.get("new_owner")
-        if not new_owner:
-            return
         cv_rows = (
             session.execute(
                 select(ControllerValue).where(
                     ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(_OWNER_CONTROLLER_IDS),
+                    ControllerValue.controller_id.in_(controller_ids),
                 )
             )
             .scalars()
             .all()
         )
         for cv in cv_rows:
-            cv.value = new_owner
-
-    # --- AuthorityUpdated → ControllerValue where controller_id is 'authority' ---
-    elif event_type == "authority_updated":
-        new_authority = parsed.get("new_authority")
-        if not new_authority:
-            return
-        cv_rows = (
-            session.execute(
-                select(ControllerValue).where(
-                    ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(_AUTHORITY_CONTROLLER_IDS),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for cv in cv_rows:
-            cv.value = new_authority
+            cv.value = str(new_value)
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:

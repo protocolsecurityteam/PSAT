@@ -17,9 +17,21 @@ from eth_utils.crypto import keccak
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from services.discovery.upgrade_history import (
+    ADMIN_CHANGED_TOPIC0,
+    DIAMOND_CUT_TOPIC0,
+    UPGRADED_TOPIC0,
+)
 from services.monitoring.event_topics import (
+    ADDED_OWNER_TOPIC0,
     ALL_EVENT_TOPICS,
+    CALL_SCHEDULED_TOPIC0,
+    OWNERSHIP_TRANSFERRED_TOPIC0,
+    PAUSED_TOPIC0,
+    ROLE_GRANTED_TOPIC0,
     extract_governance_topics,
+    parse_any_log,
+    parse_governance_log,
     parse_tracked_log,
 )
 
@@ -630,3 +642,199 @@ def test_parse_tracked_log_returns_none_on_short_topics():
         "transactionHash": "0xab",
     }
     assert parse_tracked_log(log, spec) is None
+
+
+# ---------------------------------------------------------------------------
+# Hand-rolled decoders attach synthesized effect_tags
+# ---------------------------------------------------------------------------
+#
+# These tests pin the canonical event_type → effect_tags map. Downstream
+# consumers (``_should_watch``, ``_update_state_from_event``,
+# ``_sync_relational_tables``, ``should_trigger_reanalysis``) all branch
+# on tags, so a regression here would silently drop hand-rolled events
+# from the dispatch.
+
+
+def test_parse_governance_log_ownership_transferred_attaches_tags():
+    log = {
+        "topics": [
+            OWNERSHIP_TRANSFERRED_TOPIC0,
+            _topic_addr("0xf39fd6e51aad88f6f4ce6ab8827279cffFb92266"),
+            _topic_addr("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+        ],
+        "data": "0x",
+        "blockNumber": "0x10",
+        "transactionHash": "0xdeadbeef",
+    }
+    ev = parse_governance_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "ownership_transferred"
+    assert ev["effect_tags"] == {"writes": ["owner"]}
+
+
+def test_parse_governance_log_paused_attaches_tags():
+    log = {
+        "topics": [PAUSED_TOPIC0],
+        "data": "0x" + "00" * 12 + "ab" * 20,
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_governance_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "paused"
+    assert ev["effect_tags"] == {"writes": ["paused"]}
+
+
+def test_parse_governance_log_role_granted_attaches_tags():
+    log = {
+        "topics": [
+            ROLE_GRANTED_TOPIC0,
+            "0x" + "00" * 32,  # role
+            _topic_addr("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),  # account
+            _topic_addr("0xf39fd6e51aad88f6f4ce6ab8827279cffFb92266"),  # sender
+        ],
+        "data": "0x",
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_governance_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "role_granted"
+    assert ev["effect_tags"] == {"writes": ["_roles"]}
+
+
+def test_parse_governance_log_added_owner_attaches_tags():
+    log = {
+        "topics": [ADDED_OWNER_TOPIC0],
+        "data": "0x" + "00" * 12 + "cd" * 20,
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_governance_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "signer_added"
+    assert ev["effect_tags"] == {"writes": ["owners"]}
+
+
+def test_parse_governance_log_call_scheduled_attaches_tags():
+    target_word = "0" * 24 + "0" * 38 + "01"
+    value_word = "0" * 64
+    bytes_offset = format(160, "x").zfill(64)
+    predecessor_word = "0" * 64
+    delay_word = format(3600, "x").zfill(64)
+    data_hex = "0x" + target_word + value_word + bytes_offset + predecessor_word + delay_word
+    log = {
+        "topics": [
+            CALL_SCHEDULED_TOPIC0,
+            "0x" + "ab" * 32,
+            "0x" + format(0, "x").zfill(64),
+        ],
+        "data": data_hex,
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_governance_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "timelock_scheduled"
+    # Synthetic ``_timelock_op`` marker — activity events don't mutate a
+    # named state slot, but ``_should_watch`` still needs a tag to gate
+    # them against ``watch_timelock``.
+    assert ev["effect_tags"] == {"writes": ["_timelock_op"]}
+
+
+def test_parse_any_log_upgraded_attaches_tags():
+    """parse_upgrade_log lives in services/discovery/upgrade_history.py
+    and can't import the synthesizer without a circular dependency.
+    parse_any_log attaches tags at the consolidated entry point — verify
+    they actually land there."""
+    log = {
+        "topics": [
+            UPGRADED_TOPIC0,
+            _topic_addr("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+        ],
+        "data": "0x",
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_any_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "upgraded"
+    # ``delegates: True`` is the canonical marker for delegate-target
+    # swaps — drives the upgrade path in _sync_relational_tables.
+    assert ev["effect_tags"] == {"writes": ["implementation"], "delegates": True}
+
+
+def test_parse_any_log_admin_changed_attaches_tags():
+    data = (
+        "0x"
+        + "00" * 12
+        + "ab" * 20  # previous admin
+        + "00" * 12
+        + "cd" * 20  # new admin
+    )
+    log = {
+        "topics": [ADMIN_CHANGED_TOPIC0],
+        "data": data,
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_any_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "admin_changed"
+    assert ev["effect_tags"] == {"writes": ["admin"]}
+
+
+def test_parse_any_log_diamond_cut_attaches_tags():
+    """EIP-2535 DiamondCut signals a facet swap — equivalent to an
+    implementation upgrade for a proxy. Tags must include both
+    ``delegates: True`` (to trigger reanalysis) and ``facets`` (to
+    route through the upgrade path)."""
+    # Minimal DiamondCut data: one Add action with one facet, zero init.
+    facet = "00" * 12 + "01" * 20
+    # ABI: offset to FacetCut[], _init, _calldata offset
+    array_off = format(96, "x").zfill(64)
+    init_word = "0" * 64
+    calldata_off = format(160, "x").zfill(64)
+    # Array starts here: count=1, entry_offset=32
+    array_count = format(1, "x").zfill(64)
+    entry_off = format(32, "x").zfill(64)
+    # Entry: facet, action=0 (Add), selectors array (empty)
+    entry = facet + format(0, "x").zfill(64) + format(96, "x").zfill(64) + format(0, "x").zfill(64)
+    calldata_len = "0" * 64
+    data_hex = "0x" + array_off + init_word + calldata_off + array_count + entry_off + entry + calldata_len
+
+    log = {
+        "topics": [DIAMOND_CUT_TOPIC0],
+        "data": data_hex,
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev = parse_any_log(log)
+    assert ev is not None
+    assert ev["event_type"] == "diamond_cut"
+    assert ev["effect_tags"] == {"writes": ["facets"], "delegates": True}
+
+
+def test_parse_any_log_handrolled_tags_isolated_from_module_state():
+    """``_attach_effect_tags`` must deep-copy the writes list so a
+    consumer mutating ``ev["effect_tags"]["writes"]`` doesn't poison
+    the module-level synthesis map for future events."""
+    log = {
+        "topics": [
+            OWNERSHIP_TRANSFERRED_TOPIC0,
+            _topic_addr("0xf39fd6e51aad88f6f4ce6ab8827279cffFb92266"),
+            _topic_addr("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+        ],
+        "data": "0x",
+        "blockNumber": "0x10",
+        "transactionHash": "0xdead",
+    }
+    ev1 = parse_governance_log(log)
+    assert ev1 is not None
+    ev1["effect_tags"]["writes"].append("__poisoned__")
+
+    ev2 = parse_governance_log(log)
+    assert ev2 is not None
+    assert ev2["effect_tags"]["writes"] == ["owner"], (
+        "module-level synthesis map was mutated by a consumer — _attach_effect_tags must copy the writes list"
+    )
