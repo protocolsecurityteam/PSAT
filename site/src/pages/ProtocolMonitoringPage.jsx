@@ -566,22 +566,22 @@ function EventsPane({
         </div>
       </div>
       <div className="pm-fbar">
-        <span
+        <button
+          type="button"
           className={`pm-fchip${activeKinds.size === 0 ? " on" : ""}`}
           onClick={() => activeKinds.size > 0 && Array.from(activeKinds).forEach(onToggleKind)}
-          role="button"
         >
           All
-        </span>
+        </button>
         {FILTER_GROUPS.map((g) => (
-          <span
+          <button
             key={g.id}
+            type="button"
             className={`pm-fchip${activeKinds.has(g.id) ? " on" : ""}`}
             onClick={() => onToggleKind(g.id)}
-            role="button"
           >
             {g.label}
-          </span>
+          </button>
         ))}
         <input
           className="pm-search"
@@ -703,6 +703,7 @@ function WebhookModal({
               <div className="pm-form-row">
                 <input
                   className="pm-input mono"
+                  aria-label="Webhook URL"
                   placeholder="https://discord.com/api/webhooks/…"
                   value={url}
                   onChange={(e) => onUrl(e.target.value)}
@@ -710,6 +711,7 @@ function WebhookModal({
                 />
                 <input
                   className="pm-input"
+                  aria-label="Label (optional)"
                   placeholder="Label (optional)"
                   value={label}
                   onChange={(e) => onLabel(e.target.value)}

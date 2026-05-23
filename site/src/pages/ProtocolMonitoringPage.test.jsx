@@ -7,6 +7,7 @@
 import React from "react";
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import ProtocolMonitoringPage from "./ProtocolMonitoringPage.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
@@ -116,5 +117,55 @@ describe("ProtocolMonitoringPage contract groups", () => {
 
     expect(screen.queryByRole("button", { name: /Safes/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Regular/ })).toBeNull();
+  });
+});
+
+describe("ProtocolMonitoringPage accessibility", () => {
+  it("toggles an event filter chip via the keyboard (Enter/Space)", async () => {
+    // Regression: filter chips were <span role="button"> with no onKeyDown
+    // and no tabIndex, so keyboard users couldn't activate them. Fix is
+    // either real <button>s or role=button + tabIndex=0 + Enter/Space
+    // handler. userEvent.keyboard mirrors browser native-button activation
+    // (jsdom's fireEvent.keyDown does not), so this fails on the broken
+    // <span role="button"> markup and passes once it's a real <button>.
+    const user = userEvent.setup();
+    const regular = makeContract({ id: "reg-1", contract_type: "regular", address: "0xcccc000000000000000000000000000000000003" });
+    mountWithContracts([regular]);
+
+    await waitFor(() => expect(screen.getByText(/1 watched/i)).toBeTruthy());
+
+    const chip = screen.getByRole("button", { name: /^Upgrade$/ });
+
+    // Starts inactive.
+    expect(chip.className).not.toMatch(/\bon\b/);
+
+    chip.focus();
+    expect(document.activeElement).toBe(chip);
+
+    await user.keyboard("{Enter}");
+    expect(chip.className).toMatch(/\bon\b/);
+
+    await user.keyboard(" ");
+    expect(chip.className).not.toMatch(/\bon\b/);
+  });
+
+  it("gives the webhook URL and label inputs accessible names", async () => {
+    // Regression: the modal's two inputs used placeholder-only labelling.
+    // Screen readers don't announce placeholders as the field's name, so
+    // a user navigating by Tab hears "edit, blank" with no idea what to
+    // type. Fix requires aria-label or a wrapping <label>.
+    const regular = makeContract({ id: "reg-1", contract_type: "regular", address: "0xcccc000000000000000000000000000000000003" });
+    mountWithContracts([regular]);
+
+    await waitFor(() => expect(screen.getByText(/1 watched/i)).toBeTruthy());
+
+    // Open the webhook modal via the NotifMini CTA.
+    fireEvent.click(screen.getByRole("button", { name: /Add →/ }));
+
+    // Both inputs must expose an accessible name. getByRole("textbox",
+    // { name }) only matches when the field has a real label/aria-label
+    // — placeholders don't qualify.
+    expect(screen.getByRole("textbox", { name: /webhook url/i })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: /label/i })).toBeTruthy();
   });
 });
