@@ -32,6 +32,17 @@ const FILTER_GROUPS = [
 
 const ALL_EVENT_TYPES = FILTER_GROUPS.flatMap((g) => g.types);
 
+// Sidebar groups the contracts list by contract_type. Order here matches
+// the TYPE_RANK in sortedContracts so the iteration order falls out for free.
+const TYPE_LABELS = {
+  safe: "Safes",
+  timelock: "Timelocks",
+  proxy: "Proxies",
+  pausable: "Pausable",
+  role_control: "Role Control",
+  regular: "Regular",
+};
+
 function explorerTxUrl(txHash, chain = "ethereum") {
   // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
   const addrUrl = blockExplorerAddressUrl("0x", chain);
@@ -158,6 +169,22 @@ export default function ProtocolMonitoringPage({ companyName }) {
       return friendlyName(a.address).localeCompare(friendlyName(b.address));
     });
   }, [contracts, lastEventTimes, friendlyName]);
+
+  const groupedContracts = useMemo(() => {
+    // Map preserves insertion order, and sortedContracts is already TYPE_RANK-ordered,
+    // so groups come out in the right order without a second sort.
+    const buckets = new Map();
+    for (const c of sortedContracts) {
+      const type = c.contract_type || "regular";
+      if (!buckets.has(type)) buckets.set(type, []);
+      buckets.get(type).push(c);
+    }
+    return Array.from(buckets, ([type, items]) => ({
+      type,
+      label: TYPE_LABELS[type] || type.replace(/_/g, " "),
+      contracts: items,
+    }));
+  }, [sortedContracts]);
 
   const selectedContract = useMemo(
     () => contracts.find((c) => c.id === selectedContractId) || null,
@@ -311,7 +338,8 @@ export default function ProtocolMonitoringPage({ companyName }) {
         />
         <div className="pm-console">
           <ContractsPane
-            contracts={sortedContracts}
+            groups={groupedContracts}
+            totalCount={contracts.length}
             selectedId={selectedContractId}
             lastEventTimes={lastEventTimes}
             friendlyName={friendlyName}
@@ -383,21 +411,61 @@ function StatusBar({ health, headBlock, activeCount, totalCount, reEnrolling, on
   );
 }
 
-function ContractsPane({ contracts, selectedId, lastEventTimes, friendlyName, onSelect, onToggleActive }) {
+function ContractsPane({ groups, totalCount, selectedId, lastEventTimes, friendlyName, onSelect, onToggleActive }) {
   return (
     <div className="pm-pane">
       <div className="pm-pane-head">
         <h2>Contracts</h2>
-        <span className="pm-count">{contracts.length} watched</span>
+        <span className="pm-count">{totalCount} watched</span>
       </div>
       <div className="pm-contracts">
-        {contracts.length === 0 ? (
+        {totalCount === 0 ? (
           <div className="pm-empty">
             <b>No contracts enrolled</b>
             Click <em>Re-enroll</em> above to scan this protocol's analyzed contracts and add monitorable ones.
           </div>
         ) : (
-          contracts.map((c) => (
+          groups.map((g) => (
+            <ContractGroup
+              key={g.type}
+              group={g}
+              selectedId={selectedId}
+              lastEventTimes={lastEventTimes}
+              friendlyName={friendlyName}
+              onSelect={onSelect}
+              onToggleActive={onToggleActive}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContractGroup({ group, selectedId, lastEventTimes, friendlyName, onSelect, onToggleActive }) {
+  const [expanded, setExpanded] = useState(true);
+  // If the user clicks a contract that lives in this group, force-expand so
+  // the selected row is never hidden behind a collapsed header.
+  const containsSelected = group.contracts.some((c) => c.id === selectedId);
+  useEffect(() => {
+    if (containsSelected) setExpanded(true);
+  }, [containsSelected]);
+
+  return (
+    <div className={`pm-group${expanded ? " open" : ""}`} data-group={group.type}>
+      <button
+        type="button"
+        className="pm-group-header"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className={`pm-group-chevron${expanded ? " open" : ""}`} aria-hidden="true">▸</span>
+        <span className={`pm-group-label ${group.type}`}>{group.label}</span>
+        <span className="pm-group-count">{group.contracts.length}</span>
+      </button>
+      {expanded && (
+        <div className="pm-group-body">
+          {group.contracts.map((c) => (
             <ContractRow
               key={c.id}
               contract={c}
@@ -407,9 +475,9 @@ function ContractsPane({ contracts, selectedId, lastEventTimes, friendlyName, on
               onSelect={() => onSelect(c.id)}
               onToggleActive={(e) => onToggleActive(c.id, c.is_active, e)}
             />
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
