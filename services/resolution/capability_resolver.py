@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
@@ -57,7 +58,7 @@ from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
 
 logger = logging.getLogger(__name__)
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", "https://ethereum-rpc.publicnode.com")
+DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 
 
 @dataclass(frozen=True)
@@ -199,13 +200,25 @@ def resolve_contract_capabilities(
         req_chain = runtime_job.request.get("chain")
         if isinstance(req_chain, str) and req_chain:
             chain = req_chain
-    rpc_url = None
+    rpc_url: str | None = None
+    rpc_chain_id: int | str | None = None
     for candidate_job in (analysis_job, runtime_job):
-        if isinstance(candidate_job.request, dict) and isinstance(candidate_job.request.get("rpc_url"), str):
+        if not isinstance(candidate_job.request, dict):
+            continue
+        if rpc_chain_id is None:
+            rpc_chain_id = candidate_job.request.get("chain_id")
+        if isinstance(candidate_job.request.get("rpc_url"), str):
             rpc_url = candidate_job.request["rpc_url"]
             break
-    if not rpc_url:
-        rpc_url = DEFAULT_RPC_URL
+    rpc_url = (
+        default_rpc_url(
+            explicit_rpc_url=rpc_url,
+            chain_id=rpc_chain_id,
+            chain=chain,
+            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
+        )
+        or DEFAULT_RPC_URL
+    )
 
     registry = AdapterRegistry()
     registry.register(EventIndexedAdapter)
