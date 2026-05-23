@@ -169,7 +169,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
     const needle = search.trim().toLowerCase();
     return events.filter((e) => {
       if (selectedContractId && e.monitored_contract_id !== selectedContractId) return false;
-      if (kindsActive && !activeKinds.has(eventKind(e.event_type))) return false;
+      if (kindsActive && !activeKinds.has(eventKind(e))) return false;
       if (needle) {
         const hay = [
           e.tx_hash,
@@ -548,8 +548,8 @@ function EventsPane({
 
 function EventRow({ evt, friendlyName, chainOf, isAllView }) {
   const decoded = useMemo(() => decodeEvent(evt), [evt]);
-  const kind = eventKind(evt.event_type);
-  const label = eventKindLabel(evt.event_type);
+  const kind = eventKind(evt);
+  const label = eventKindLabel(evt);
   const addr = evt.data?.contract_address;
   const chain = chainOf(addr);
   return (
