@@ -47,13 +47,13 @@ _REANALYSIS_WRITE_TARGETS = frozenset(
     }
 )
 
-# State-poll field names that map to the same triggers above.
-REANALYSIS_POLL_FIELDS = frozenset(
-    {
-        "implementation",  # equivalent to proxy upgrade
-        "owner",  # equivalent to ownership_transferred
-    }
-)
+# Field names whose poll-detected change always triggers reanalysis
+# regardless of the per-contract write-target set. ``implementation`` is
+# the canonical proxy-upgrade signal and the vendored EIP-1967 poll
+# entry surfaces it without ever flowing through ``_REANALYSIS_WRITE_
+# TARGETS``; included here so the trigger fires even when the proxy
+# shell has no tracking plan of its own.
+REANALYSIS_POLL_FIELDS_VENDORED = frozenset({"implementation"})
 
 
 def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool:
@@ -66,11 +66,21 @@ def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool
     tags from the canonical event_type via
     ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` so the dispatch shape is uniform.
 
-    The poll path (``state_changed_poll``) bypasses tags — those events
-    don't go through a decoder, so they carry ``field`` directly.
+    The poll path (``state_changed_poll``) reuses the same write-target
+    vocabulary so custom slots (``protocolAdmin``, a renamed ``_admin``)
+    trigger reanalysis through the analyzer-derived polling plan
+    without a per-slot map entry. ``implementation`` is additionally
+    treated as a vendored trigger because it's emitted by the EIP-1967
+    storage-slot poll entry, which is keyed by ``proxy_type`` rather
+    than by the analyzer's write targets.
     """
     if event_type == "state_changed_poll" and data:
-        return data.get("field") in REANALYSIS_POLL_FIELDS
+        field = data.get("field")
+        if field in REANALYSIS_POLL_FIELDS_VENDORED:
+            return True
+        if isinstance(field, str) and field in _REANALYSIS_WRITE_TARGETS:
+            return True
+        return False
 
     # Tag-driven dispatch. Prefer tags from the parsed event; fall back
     # to canonical-event_type synthesis for callers that pass bare

@@ -321,14 +321,37 @@ class TestRevertedEthCallPolling:
         """When rpc_batch_request returns None for an errored call,
         poll_for_state_changes should skip it gracefully.
         """
+        from services.monitoring.polling_plan import build_polling_plan
         from services.monitoring.unified_watcher import poll_for_state_changes
+
+        # ``custom`` proxy_type yields a single ``implementation()`` poll
+        # entry — same dispatch shape as the prior contract_type-based
+        # path, but exercised through the new polling_plan code path so
+        # this test still pins the "errored RPC result → no event" rule.
+        polling_plan = build_polling_plan(
+            contract_type="proxy",
+            proxy_type="custom",
+            tracking_plan=None,
+            tracked_topics=None,
+        )
+        # Add an owner entry too so the mock batch's index-1 revert
+        # hits a real poll dispatch slot rather than being out-of-range.
+        polling_plan.append(
+            {
+                "field": "owner",
+                "kind": "getter_call",
+                "target": "owner",
+                "selector": "0x8da5cb5b",
+                "type_kind": "address",
+            }
+        )
 
         mc = MonitoredContract(
             id=uuid.uuid4(),
             address=ADDR(1),
             chain="ethereum",
             contract_type="proxy",
-            monitoring_config={},
+            monitoring_config={"polling_plan": polling_plan},
             last_known_state={"implementation": ADDR(99)},
             last_scanned_block=100,
             needs_polling=True,

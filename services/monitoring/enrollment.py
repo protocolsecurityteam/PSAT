@@ -24,6 +24,7 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.event_topics import extract_governance_topics
+from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -150,18 +151,24 @@ def enroll_protocol_contracts(
         # Determine contract type
         contract_type = _determine_contract_type(contract, summary, cv_rows)
 
-        # Discover per-contract governance event topics from the static
-        # analysis tracking_plan. The plan lists every governance event
-        # the contract actually emits — including non-OZ ABIs (Solmate
-        # OwnerUpdated/AuthorityUpdated, DSAuth, Compound NewAdmin,
-        # Curve CommitOwnership, …) that the hand-rolled topic registry
-        # in ``event_topics.py`` can't cover protocol-by-protocol.
-        tracked_topics = _load_tracked_topics(session, contract)
+        # Discover per-contract governance event topics + raw tracking
+        # plan from the static analysis. Used twice: ``tracked_topics``
+        # feeds the watcher's event dispatcher, and the raw plan feeds
+        # ``build_polling_plan`` which projects pollable getters /
+        # storage slots from the analyzer's tracked_controllers.
+        tracked_topics, tracking_plan = _load_tracking_plan_artifacts(session, contract)
+
+        polling_plan = build_polling_plan(
+            contract_type=contract_type,
+            proxy_type=contract.proxy_type,
+            tracking_plan=tracking_plan,
+            tracked_topics=tracked_topics,
+        )
 
         # Build monitoring config and initial state
-        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type, tracked_topics)
-        initial_state = _build_initial_state(contract, cv_rows)
-        needs_poll = _needs_polling(contract_type, contract)
+        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type, tracked_topics, polling_plan)
+        initial_state = _build_initial_state(contract, cv_rows, polling_plan)
+        needs_poll = bool(polling_plan)
 
         # Check for existing MonitoredContract
         existing = session.execute(
@@ -297,43 +304,42 @@ def _determine_contract_type(
 _EVENT_BASED_PROXY_TYPES = {"eip1967", "eip1167", "eip1822"}
 
 
-def _needs_polling(contract_type: str, contract: Contract) -> bool:
-    """Decide whether a contract needs the state-polling loop.
+def _load_tracking_plan_artifacts(
+    session: Session,
+    contract: Contract,
+) -> tuple[list[dict], dict | None]:
+    """Hydrate the analysis ``tracking_plan`` for *contract* once and
+    return both projections the enrollment path needs:
 
-    EIP-1967 (and other standard) proxies emit Upgraded / AdminChanged events
-    that the event scanner picks up — no polling required.  Only safes,
-    timelocks, and non-standard (custom) proxies need polling.
-    """
-    if contract_type in ("safe", "timelock"):
-        return True
-    if contract_type == "proxy":
-        return (contract.proxy_type or "").lower() not in _EVENT_BASED_PROXY_TYPES
-    return False
+      * ``tracked_topics`` — per-contract event-topic specs the watcher
+        dispatches on. Same shape as ``extract_governance_topics``.
+      * the raw ``tracking_plan`` dict — the polling-plan builder walks
+        ``tracked_controllers`` directly so it can read each entry's
+        ``read_spec`` / ``polling_fallback`` without losing context.
 
-
-def _load_tracked_topics(session: Session, contract: Contract) -> list[dict]:
-    """Hydrate the analysis ``tracking_plan`` for *contract* and return the
-    per-contract topic specs the scanner should watch. Returns ``[]`` when
-    the materialization row is missing, status is not ready, or the plan
-    has no events — callers fall back to the hand-rolled global registry.
+    Returns ``([], None)`` when the materialization row is missing /
+    the status isn't ready / a blob fetch fails. The watcher still has
+    the hand-rolled topic registry as a baseline for events and the
+    vendored proxy/safe/timelock templates as a baseline for polling.
     """
     try:
         row = find_by_address(session, chain=contract.chain or "ethereum", address=contract.address)
         if row is None:
-            return []
+            return [], None
         plan = hydrate_tracking_plan(row)
-        return extract_governance_topics(plan)
+        topics = extract_governance_topics(plan)
+        return topics, plan
     except Exception as exc:
         # A blob-fetch hiccup or schema drift in tracking_plan shouldn't
         # block enrollment — the hand-rolled registry still catches the
         # OZ/Safe/Timelock baseline.
         logger.warning(
-            "Failed to load tracking_plan topics for %s: %s",
+            "Failed to load tracking_plan for %s: %s",
             contract.address,
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return []
+        return [], None
 
 
 def _build_monitoring_config(
@@ -341,6 +347,7 @@ def _build_monitoring_config(
     controller_values: Sequence[ControllerValue],  # noqa: ARG001 — reserved for future use
     contract_type: str,
     tracked_topics: list[dict] | None = None,
+    polling_plan: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Build the monitoring_config JSONB based on detected capabilities."""
     config: dict[str, Any] = {
@@ -367,40 +374,94 @@ def _build_monitoring_config(
         if any(t.get("event_type") == "authority_updated" for t in tracked_topics):
             config["watch_authority"] = True
 
+    if polling_plan:
+        config["polling_plan"] = polling_plan
+
     return config
 
 
-# The active owner / admin slot, controller-id whitelist. Same shape as
+# Canonical owner/admin controller_id whitelists. Same shape as
 # ``services.aggregations.company_overview._ACTIVE_OWNER_CONTROLLER_IDS``
-# — both are picking the canonical Ownable slot. A loose substring match
-# (``"owner" in controller_id``) used to drive this and false-positives
-# on ``pendingOwner``, ``previousOwner``, ``roleOwner``, ``ownerFee``,
-# etc. Combined with last-write-wins iteration the wrong slot would
-# latch into ``last_known_state.owner`` and the scanner would
-# false-positive an OwnershipTransferred when the live owner finally
-# diverged from the stored pending-owner value.
+# — both pick the canonical Ownable slot. Kept here so the initial-state
+# seed for the two universally-seeded fields (owner, admin) survives
+# whether or not the analyzer surfaced them in the polling plan.
 _INITIAL_STATE_OWNER_IDS = frozenset({"owner", "_owner", "state_variable:owner", "state_variable:_owner"})
 _INITIAL_STATE_ADMIN_IDS = frozenset({"admin", "state_variable:admin"})
+
+
+def _candidate_controller_ids_for_field(field: str) -> tuple[str, ...]:
+    """Controller_id forms the analyzer emits for a given state-var
+    name. Mirrors ``_update_controller_value_rows`` in the watcher so
+    the polling-plan-driven initial-state seed reads from the same key
+    set the runtime sync writes to."""
+    return (
+        field,
+        f"_{field}",
+        f"state_variable:{field}",
+        f"state_variable:_{field}",
+        f"external_contract:{field}",
+    )
 
 
 def _build_initial_state(
     contract: Contract,
     controller_values: Sequence[ControllerValue],
+    polling_plan: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Build the last_known_state dict from existing pipeline data."""
+    """Seed ``last_known_state`` from pre-existing analysis data so the
+    poller has a comparison baseline on its first tick and the API has
+    something to render before the first observation arrives.
+
+    Two stacked sources, in order:
+
+      1. ``contract.implementation`` plus the canonical owner / admin
+         CV slots. These are universally surfaced — the API and
+         reanalysis snapshot both rely on ``last_known_state.owner`` /
+         ``.admin`` being present whenever the resolution stage produced
+         a value, independent of whether the analyzer also surfaced a
+         polling entry for them.
+      2. Per-polling-plan-field CV seeding for custom slots
+         (``protocolAdmin``, ``feeRecipient``, …) so the first poll on
+         those slots doesn't fire a spurious state_changed event.
+
+    The two passes operate on disjoint key sets: pass 1 covers
+    ``implementation`` / ``owner`` / ``admin`` (and never overwrites);
+    pass 2 covers fields named by polling-plan entries that aren't
+    already in state.
+    """
     state: dict[str, Any] = {}
 
     if contract.implementation:
         state["implementation"] = contract.implementation
 
+    cv_by_id: dict[str, str] = {}
     for cv in controller_values:
         cid = (cv.controller_id or "").lower()
-        if not cv.value:
-            continue
-        if cid in _INITIAL_STATE_OWNER_IDS:
-            state["owner"] = cv.value
-        elif cid in _INITIAL_STATE_ADMIN_IDS:
-            state["admin"] = cv.value
+        if cid and cv.value:
+            cv_by_id.setdefault(cid, cv.value)
+
+    # Pass 1: canonical owner/admin seeding from CV rows.
+    for cid, value in cv_by_id.items():
+        if cid in _INITIAL_STATE_OWNER_IDS and "owner" not in state:
+            state["owner"] = value
+        elif cid in _INITIAL_STATE_ADMIN_IDS and "admin" not in state:
+            state["admin"] = value
+
+    # Pass 2: polling-plan-driven custom-slot seeding.
+    if polling_plan:
+        for entry in polling_plan:
+            if not isinstance(entry, dict):
+                continue
+            field = entry.get("field")
+            if not isinstance(field, str) or not field:
+                continue
+            if field in state:
+                continue
+            for candidate in _candidate_controller_ids_for_field(field):
+                value = cv_by_id.get(candidate.lower())
+                if value:
+                    state[field] = value
+                    break
 
     return state
 
@@ -568,7 +629,20 @@ def _enroll_controller_addresses(
             existing.is_active = True
             existing.enrollment_source = "auto"
         else:
-            config = _build_monitoring_config(None, [], monitored_type)
+            # CGN-discovered controllers don't have a per-address tracking
+            # plan (they're principals on other contracts, not analyzed
+            # themselves), so the polling plan resolves to vendored
+            # entries only — Safe gets ``getThreshold``, Timelock gets
+            # ``getMinDelay``, proxy_admin (unknown proxy_type) gets
+            # nothing and stays needs_polling=False, matching the prior
+            # contract_type-keyed behavior.
+            polling_plan = build_polling_plan(
+                contract_type=monitored_type,
+                proxy_type=None,
+                tracking_plan=None,
+                tracked_topics=None,
+            )
+            config = _build_monitoring_config(None, [], monitored_type, None, polling_plan)
             session.add(
                 MonitoredContract(
                     id=uuid.uuid4(),
@@ -579,7 +653,7 @@ def _enroll_controller_addresses(
                     monitoring_config=config,
                     last_known_state={},
                     last_scanned_block=current_block,
-                    needs_polling=monitored_type in ("safe", "timelock"),
+                    needs_polling=bool(polling_plan),
                     is_active=True,
                     enrollment_source="auto",
                 )

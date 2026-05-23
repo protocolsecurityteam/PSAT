@@ -714,8 +714,10 @@ class TestEnrollmentIntegration:
         assert proxy_mc.monitoring_config["watch_pause"] is True
         assert proxy_mc.last_known_state["implementation"] == "0x" + "a2" * 20
         assert proxy_mc.last_known_state["owner"] == "0x" + "b1" * 20
-        # EIP-1967 proxies emit events — no polling needed
-        assert proxy_mc.needs_polling is False
+        # The polling-plan projection still emits an EIP-1967 vendored
+        # storage-slot entry as a safety net, so needs_polling=True.
+        # Duplicate poll events are suppressed by the scan/poll dedupe.
+        assert proxy_mc.needs_polling is True
         # Proxy should also have a WatchedProxy row linked
         assert proxy_mc.watched_proxy_id is not None
 
@@ -780,8 +782,11 @@ class TestEnrollmentIntegration:
 
         # Must be proxy, not regular
         assert mc.contract_type == "proxy"
-        # EIP-1967 proxies emit events — no polling needed
-        assert mc.needs_polling is False
+        # EIP-1967 still emits Upgraded events the scanner catches, but
+        # the poll path now runs as a belt-and-suspenders safety net
+        # for the same impl slot. The poll/scan dedupe filter swallows
+        # the duplicate so this is no-cost notification-wise.
+        assert mc.needs_polling is True
         assert mc.monitoring_config["watch_upgrades"] is True
         assert mc.monitoring_config["watch_ownership"] is True
 

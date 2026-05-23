@@ -32,10 +32,10 @@ from services.monitoring.event_topics import (
     parse_any_log,
     parse_tracked_log,
 )
+from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from utils.rpc import (
     normalize_hex,
-    parse_address_result,
     rpc_batch_request,
     rpc_request,
 )
@@ -48,15 +48,6 @@ MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
 
-# Storage slots for proxy resolution
-_EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-
-# Selectors for state polling
-_OWNER_SEL = "0x8da5cb5b"  # owner()
-_PAUSED_SEL = "0x5c975abb"  # paused()
-_GET_THRESHOLD_SEL = "0xe75235b8"  # getThreshold()
-_GET_MIN_DELAY_SEL = "0xf27a0c92"  # getMinDelay()
-
 # Controller IDs that represent the contract owner. Used by relational sync
 # to update only the real owner row, not unrelated controller values that
 # happen to contain "owner" in their name (e.g. token_owner_registry).
@@ -64,25 +55,6 @@ _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
 # Solmate-Auth / DSAuth-style authority pointer. Sync target for the
 # ``authority_updated`` event emitted by Solmate's ``Auth.setAuthority``.
 _AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
-
-# Mapping from poll field names to scanner event types that detect the same
-# underlying state change.  Used by the poller to suppress duplicate events
-# when the event scanner has already recorded the change via an on-chain log.
-_POLL_FIELD_TO_SCAN_EVENTS: dict[str, frozenset[str]] = {
-    "implementation": frozenset(
-        {
-            "upgraded",
-            "new_implementation",
-            "changed_master_copy",
-            "target_updated",
-            "beacon_upgraded",
-        }
-    ),
-    "owner": frozenset({"ownership_transferred"}),
-    "paused": frozenset({"paused", "unpaused"}),
-    "threshold": frozenset({"threshold_changed"}),
-    "min_delay": frozenset({"delay_changed"}),
-}
 
 
 def get_latest_block(rpc_url: str) -> int:
@@ -667,23 +639,7 @@ def _sync_relational_tables(
             if c is not None:
                 c.admin = str(new_value)
 
-        controller_ids = (
-            write_target,
-            f"state_variable:{write_target}",
-            f"external_contract:{write_target}",
-        )
-        cv_rows = (
-            session.execute(
-                select(ControllerValue).where(
-                    ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(controller_ids),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for cv in cv_rows:
-            cv.value = str(new_value)
+        _update_controller_value_rows(session, mc, write_target, new_value)
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:
@@ -718,6 +674,43 @@ def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -
         )
 
 
+def _update_controller_value_rows(
+    session: Session,
+    mc: MonitoredContract,
+    write_target: str,
+    new_value: object,
+) -> None:
+    """Write *new_value* into every ControllerValue row keyed by the
+    three canonical controller_id forms the analyzer emits
+    (``{name}``, ``state_variable:{name}``, ``external_contract:{name}``).
+
+    Shared between event-driven sync (``_sync_relational_tables``) and
+    poll-driven sync (``_sync_relational_from_poll``) so the two paths
+    converge on the same row-keying rules and a custom slot like
+    ``protocolAdmin`` propagates through either path without per-slot
+    code.
+    """
+    if not mc.contract_id:
+        return
+    controller_ids = (
+        write_target,
+        f"state_variable:{write_target}",
+        f"external_contract:{write_target}",
+    )
+    cv_rows = (
+        session.execute(
+            select(ControllerValue).where(
+                ControllerValue.contract_id == mc.contract_id,
+                ControllerValue.controller_id.in_(controller_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for cv in cv_rows:
+        cv.value = str(new_value)
+
+
 def _sync_relational_from_poll(
     session: Session,
     mc: MonitoredContract,
@@ -725,7 +718,14 @@ def _sync_relational_from_poll(
     new_value: object,
     old_value: object,
 ) -> None:
-    """Propagate a polling-detected state change to relational tables."""
+    """Propagate a polling-detected state change to relational tables.
+
+    ``implementation`` keeps the dedicated branch — the
+    Contract.implementation shadow + UpgradeEvent row + coverage refresh
+    are side effects ControllerValue can't reproduce. Every other field
+    flows through the generic ControllerValue updater so custom slots
+    (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
+    """
     if not mc.contract_id:
         return
 
@@ -744,20 +744,9 @@ def _sync_relational_from_poll(
                 )
             )
             _refresh_coverage_after_upgrade(session, contract.protocol_id)
+        return
 
-    elif field_name == "owner":
-        cv_rows = (
-            session.execute(
-                select(ControllerValue).where(
-                    ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(_OWNER_CONTROLLER_IDS),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for cv in cv_rows:
-            cv.value = str(new_value)
+    _update_controller_value_rows(session, mc, field_name, new_value)
 
 
 # ---------------------------------------------------------------------------
@@ -765,11 +754,44 @@ def _sync_relational_from_poll(
 # ---------------------------------------------------------------------------
 
 
-def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
-    """Poll for state changes on contracts that need polling.
+def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list] | None:
+    """Translate a polling-plan entry into a JSON-RPC ``(method, params)``
+    pair. Returns ``None`` for unrecognized entry kinds — the loop drops
+    those silently so a forward-compatible schema addition can't break
+    a running watcher."""
+    kind = entry.get("kind")
+    if kind == "getter_call":
+        selector = entry.get("selector")
+        if not selector:
+            return None
+        return ("eth_call", [{"to": address, "data": selector}, "latest"])
+    if kind == "storage_slot":
+        slot = entry.get("slot")
+        if not slot:
+            return None
+        return ("eth_getStorageAt", [address, slot, "latest"])
+    return None
 
-    Batches RPC calls based on contract_type and compares against
-    last_known_state. Returns list of new MonitoredEvent records for changes.
+
+def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
+    """Poll for state changes by walking each contract's persisted
+    ``polling_plan``.
+
+    The plan is built at enrollment (``polling_plan.build_polling_plan``)
+    from the static analyzer's tracked_controllers, plus vendored proxy
+    storage slots and Safe/Timelock standard ABIs. Each tick:
+
+      1. Expand every entry into a batched RPC call.
+      2. Decode each result by the entry's ``type_kind`` / ``type``.
+      3. Compare against ``mc.last_known_state[entry["field"]]``; if it
+         changed, persist the new value, emit a ``state_changed_poll``
+         event, and run downstream sync (relational, reanalysis,
+         per-entry suppression of scanner duplicates).
+
+    Contracts whose ``monitoring_config`` lacks a ``polling_plan`` are
+    skipped — the reconciler (``services/monitoring/reconciler.py``)
+    backfills the plan within its interval (default 600s) so this is a
+    bounded transient on freshly-migrated rows.
     """
     contracts = (
         session.execute(
@@ -784,33 +806,22 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     if not contracts:
         return []
 
-    # Build batch calls
     batch_calls: list[tuple[str, list]] = []
-    # (contract, start_idx, field_name)
-    poll_plan: list[tuple[MonitoredContract, int, str]] = []
+    # (contract, batch_index, entry_dict)
+    poll_dispatch: list[tuple[MonitoredContract, int, dict]] = []
 
     for mc in contracts:
-        ct = mc.contract_type
-        if ct == "proxy":
-            start = len(batch_calls)
-            batch_calls.append(("eth_getStorageAt", [mc.address, _EIP1967_IMPL_SLOT, "latest"]))
-            poll_plan.append((mc, start, "implementation"))
-        if ct in ("proxy", "regular", "pausable", "role_control"):
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _OWNER_SEL}, "latest"]))
-            poll_plan.append((mc, start, "owner"))
-        if ct in ("pausable",):
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _PAUSED_SEL}, "latest"]))
-            poll_plan.append((mc, start, "paused"))
-        if ct == "safe":
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _GET_THRESHOLD_SEL}, "latest"]))
-            poll_plan.append((mc, start, "threshold"))
-        if ct == "timelock":
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _GET_MIN_DELAY_SEL}, "latest"]))
-            poll_plan.append((mc, start, "min_delay"))
+        plan = (mc.monitoring_config or {}).get("polling_plan") or []
+        if not isinstance(plan, list):
+            continue
+        for entry in plan:
+            if not isinstance(entry, dict):
+                continue
+            call = _rpc_call_for_entry(mc.address, entry)
+            if call is None:
+                continue
+            poll_dispatch.append((mc, len(batch_calls), entry))
+            batch_calls.append(call)
 
     if not batch_calls:
         return []
@@ -823,145 +834,128 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 
     new_events: list[MonitoredEvent] = []
 
-    for mc, idx, field_name in poll_plan:
+    for mc, idx, entry in poll_dispatch:
         raw = results[idx]
-        state = dict(mc.last_known_state or {})
-        old_value = state.get(field_name)
-
-        if field_name == "implementation":
-            new_value = parse_address_result(raw)
-        elif field_name == "owner":
-            new_value = parse_address_result(raw)
-        elif field_name == "paused":
-            if not raw:
-                new_value = None
-            elif raw != "0x" + "0" * 64:
-                new_value = True
-            else:
-                new_value = False
-        elif field_name in ("threshold", "min_delay"):
-            if raw and raw != "0x":
-                try:
-                    new_value = int(raw, 16)
-                except (ValueError, TypeError):
-                    new_value = None
-            else:
-                new_value = None
-        else:
-            new_value = None
-
+        field_name = entry.get("field")
+        if not isinstance(field_name, str) or not field_name:
+            continue
+        new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
         if new_value is None:
             continue
 
-        if new_value != old_value:
-            # Always record the new value in last_known_state
-            state[field_name] = new_value
-            mc.last_known_state = state
-            flag_modified(mc, "last_known_state")
+        state = dict(mc.last_known_state or {})
+        old_value = state.get(field_name)
+        if new_value == old_value:
+            continue
 
-            # Skip emitting an event when old_value is None — that's the
-            # first observation after enrollment, not an actual state change.
-            if old_value is None:
+        # Always record the new value in last_known_state, even on the
+        # first observation — subsequent polls then have a baseline.
+        state[field_name] = new_value
+        mc.last_known_state = state
+        flag_modified(mc, "last_known_state")
+
+        # First observation after enrollment isn't a real state change.
+        if old_value is None:
+            logger.debug(
+                "Initial %s observation on %s: %s (no event emitted)",
+                field_name,
+                mc.address,
+                new_value,
+            )
+            continue
+
+        # Suppress when the event scanner already recorded the same
+        # mutation. Per-entry suppress lists come from the enrollment-
+        # time projection: vendored entries carry the canonical
+        # event_types for their slot, analyzer-derived entries carry
+        # event_types whose ``effect_tags.writes`` includes this field.
+        scan_types = entry.get("suppress_when_scan_event_types") or []
+        if isinstance(scan_types, list) and scan_types:
+            suppression_cutoff = datetime.now(timezone.utc) - timedelta(
+                seconds=DEFAULT_POLL_INTERVAL * 2,
+            )
+            already = session.execute(
+                select(MonitoredEvent.id)
+                .where(
+                    MonitoredEvent.monitored_contract_id == mc.id,
+                    MonitoredEvent.event_type.in_(scan_types),
+                    MonitoredEvent.detected_at >= suppression_cutoff,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if already is not None:
                 logger.debug(
-                    "Initial %s observation on %s: %s (no event emitted)",
-                    field_name,
+                    "Suppressing poll event for %s/%s — scanner already detected it",
                     mc.address,
-                    new_value,
+                    field_name,
                 )
                 continue
 
-            # Suppress if the event scanner already recorded this change.
-            # This handles the race condition where the scanner and poller
-            # processes both detect the same underlying change (e.g., a proxy
-            # upgrade is visible as both an Upgraded log and a storage-slot
-            # change).
-            scan_types = _POLL_FIELD_TO_SCAN_EVENTS.get(field_name)
-            if scan_types:
-                suppression_cutoff = datetime.now(timezone.utc) - timedelta(
-                    seconds=DEFAULT_POLL_INTERVAL * 2,
+        event = MonitoredEvent(
+            id=uuid.uuid4(),
+            monitored_contract_id=mc.id,
+            event_type="state_changed_poll",
+            block_number=0,
+            tx_hash="",
+            data={
+                "field": field_name,
+                "old_value": str(old_value),
+                "new_value": str(new_value),
+            },
+        )
+        session.add(event)
+        new_events.append(event)
+
+        logger.info(
+            "Poll detected %s change on %s: %s -> %s",
+            field_name,
+            mc.address,
+            old_value,
+            new_value,
+        )
+
+        # Write-through for proxy implementation changes
+        if field_name == "implementation" and mc.watched_proxy_id:
+            wp = session.get(WatchedProxy, mc.watched_proxy_id)
+            if wp:
+                upgrade_event = ProxyUpgradeEvent(
+                    watched_proxy_id=wp.id,
+                    block_number=0,
+                    tx_hash="",
+                    old_implementation=str(old_value) if old_value else None,
+                    new_implementation=str(new_value),
+                    event_type="storage_poll",
                 )
-                already = session.execute(
-                    select(MonitoredEvent.id)
-                    .where(
-                        MonitoredEvent.monitored_contract_id == mc.id,
-                        MonitoredEvent.event_type.in_(scan_types),
-                        MonitoredEvent.detected_at >= suppression_cutoff,
-                    )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if already is not None:
-                    logger.debug(
-                        "Suppressing poll event for %s/%s — scanner already detected it",
-                        mc.address,
-                        field_name,
-                    )
-                    continue
+                session.add(upgrade_event)
+                wp.last_known_implementation = str(new_value)
 
-            event = MonitoredEvent(
-                id=uuid.uuid4(),
-                monitored_contract_id=mc.id,
-                event_type="state_changed_poll",
-                block_number=0,
-                tx_hash="",
-                data={
-                    "field": field_name,
-                    "old_value": str(old_value),
-                    "new_value": str(new_value),
-                },
+        # Propagate to relational tables
+        _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
+
+        # Queue a re-analysis job if the state change warrants it
+        try:
+            poll_data = {
+                "field": field_name,
+                "old_value": str(old_value),
+                "new_value": str(new_value),
+            }
+            reanalysis_job = maybe_queue_reanalysis(
+                session,
+                mc,
+                "state_changed_poll",
+                poll_data,
             )
-            session.add(event)
-            new_events.append(event)
-
-            logger.info(
-                "Poll detected %s change on %s: %s -> %s",
-                field_name,
+            if reanalysis_job:
+                updated = dict(event.data or {})
+                updated["reanalysis_job_id"] = str(reanalysis_job.id)
+                event.data = updated
+        except Exception as exc:
+            logger.warning(
+                "Failed to queue re-analysis for %s: %s",
                 mc.address,
-                old_value,
-                new_value,
+                exc,
+                extra={"exc_type": type(exc).__name__},
             )
-
-            # Write-through for proxy implementation changes
-            if field_name == "implementation" and mc.watched_proxy_id:
-                wp = session.get(WatchedProxy, mc.watched_proxy_id)
-                if wp:
-                    upgrade_event = ProxyUpgradeEvent(
-                        watched_proxy_id=wp.id,
-                        block_number=0,
-                        tx_hash="",
-                        old_implementation=str(old_value) if old_value else None,
-                        new_implementation=str(new_value),
-                        event_type="storage_poll",
-                    )
-                    session.add(upgrade_event)
-                    wp.last_known_implementation = str(new_value)
-
-            # Propagate to relational tables
-            _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
-
-            # Queue a re-analysis job if the state change warrants it
-            try:
-                poll_data = {
-                    "field": field_name,
-                    "old_value": str(old_value),
-                    "new_value": str(new_value),
-                }
-                reanalysis_job = maybe_queue_reanalysis(
-                    session,
-                    mc,
-                    "state_changed_poll",
-                    poll_data,
-                )
-                if reanalysis_job:
-                    updated = dict(event.data or {})
-                    updated["reanalysis_job_id"] = str(reanalysis_job.id)
-                    event.data = updated
-            except Exception as exc:
-                logger.warning(
-                    "Failed to queue re-analysis for %s: %s",
-                    mc.address,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
 
     session.commit()
     return new_events

@@ -49,10 +49,18 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.reanalysis import (
-    REANALYSIS_POLL_FIELDS,
+    _REANALYSIS_WRITE_TARGETS,
+    REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
 )
+
+# Poll fields that should trigger reanalysis post-tag-migration: vendored
+# triggers (``implementation``) plus the analyzer's control-relevant
+# write targets (``owner``, ``_owner``, ``pendingOwner``, ``authority``,
+# the admin family, ``_initialized``/``_initializing``). The poll path
+# and the event path now share this vocabulary.
+_REANALYSIS_POLL_FIELDS = REANALYSIS_POLL_FIELDS_VENDORED | _REANALYSIS_WRITE_TARGETS
 
 # Canonical event types that should trigger a full re-analysis job. The
 # tag-driven dispatch in ``should_trigger_reanalysis`` derives the same
@@ -391,7 +399,51 @@ def _make_monitored_contract(
     protocol_id: int | None = None,
     chain: str = "ethereum",
     needs_polling: bool = False,
+    proxy_type: str | None = None,
 ) -> MonitoredContract:
+    from services.monitoring.polling_plan import build_polling_plan
+
+    # PROXY_SOURCE in this test module writes to the EIP-1967 slot via
+    # assembly; default to the matching vendored entry so the storage-
+    # slot poll dispatch actually reads the upgraded value.
+    plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
+    tracking_plan: dict | None = None
+    if contract_type in ("regular", "pausable", "proxy"):
+        tracked: list[dict] = [
+            {
+                "controller_id": "state_variable:owner",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "owner",
+                    "kind": "state_variable",
+                    "state_variable_name": "owner",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+            },
+        ]
+        if contract_type == "pausable":
+            tracked.append(
+                {
+                    "controller_id": "state_variable:paused",
+                    "read_spec": {
+                        "strategy": "getter_call",
+                        "target": "paused",
+                        "kind": "state_variable",
+                        "state_variable_name": "paused",
+                        "type": "bool",
+                        "type_kind": "primitive",
+                    },
+                }
+            )
+        tracking_plan = {"tracked_controllers": tracked}
+    polling_plan = build_polling_plan(
+        contract_type=contract_type,
+        proxy_type=plan_proxy_type,
+        tracking_plan=tracking_plan,
+        tracked_topics=None,
+    )
+
     mc = MonitoredContract(
         id=uuid.uuid4(),
         address=address.lower(),
@@ -405,6 +457,7 @@ def _make_monitored_contract(
             "watch_roles": False,
             "watch_safe_signers": contract_type == "safe",
             "watch_timelock": contract_type == "timelock",
+            "polling_plan": polling_plan,
         },
         last_known_state={},
         last_scanned_block=last_scanned_block,
@@ -447,11 +500,11 @@ class TestShouldTriggerReanalysis:
     def test_non_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is False
 
-    @pytest.mark.parametrize("field", sorted(REANALYSIS_POLL_FIELDS))
+    @pytest.mark.parametrize("field", sorted(_REANALYSIS_POLL_FIELDS))
     def test_poll_triggering_fields(self, field):
         assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is True
 
-    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay"])
+    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay", "owners"])
     def test_poll_non_triggering_fields(self, field):
         assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is False
 

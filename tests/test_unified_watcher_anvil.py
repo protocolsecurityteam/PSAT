@@ -529,6 +529,51 @@ def test_db():
         engine.dispose()
 
 
+def _synthetic_tracking_plan_for(contract_type: str) -> dict | None:
+    """Mint a minimal ``ControlTrackingPlan``-shaped dict for tests
+    whose anvil-deployed contracts never went through the static
+    analyzer.
+
+    Mirrors what the analyzer would emit for the canonical Ownable /
+    Pausable shapes the test fixtures use (OWNABLE_SOURCE,
+    PAUSABLE_SOURCE). Vendored entries (proxy slot, Safe getThreshold,
+    Timelock getMinDelay) come from ``build_polling_plan`` directly via
+    contract_type, so this only fills the analyzer-driven gap.
+    """
+    controllers: list[dict] = []
+    if contract_type in ("regular", "pausable", "role_control", "proxy"):
+        controllers.append(
+            {
+                "controller_id": "state_variable:owner",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "owner",
+                    "kind": "state_variable",
+                    "state_variable_name": "owner",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+            }
+        )
+    if contract_type == "pausable":
+        controllers.append(
+            {
+                "controller_id": "state_variable:paused",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "paused",
+                    "kind": "state_variable",
+                    "state_variable_name": "paused",
+                    "type": "bool",
+                    "type_kind": "primitive",
+                },
+            }
+        )
+    if not controllers:
+        return None
+    return {"tracked_controllers": controllers}
+
+
 def _register_contract(
     session: SASession,
     address: str,
@@ -536,8 +581,30 @@ def _register_contract(
     last_scanned_block: int,
     monitoring_config: dict | None = None,
     watched_proxy_id: uuid.UUID | None = None,
+    proxy_type: str | None = None,
 ) -> MonitoredContract:
-    """Register a MonitoredContract in the test DB."""
+    """Register a MonitoredContract in the test DB.
+
+    Builds a synthetic polling plan from ``contract_type`` (and
+    ``proxy_type`` when given) using ``build_polling_plan`` so the
+    runtime poll path sees the same shape it would after a real
+    enrollment. When *monitoring_config* is provided, the polling plan
+    is merged in unless the caller already supplied one.
+    """
+    from services.monitoring.polling_plan import build_polling_plan
+
+    # Build the polling plan first so it can ride along with whatever
+    # monitoring_config the caller hands us (or the default below).
+    # PROXY_SOURCE in this module writes to the EIP-1967 slot via
+    # assembly, so default proxy contracts to that vendored entry.
+    plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
+    polling_plan = build_polling_plan(
+        contract_type=contract_type,
+        proxy_type=plan_proxy_type,
+        tracking_plan=_synthetic_tracking_plan_for(contract_type),
+        tracked_topics=None,
+    )
+
     if monitoring_config is None:
         monitoring_config = {
             "watch_upgrades": contract_type == "proxy",
@@ -547,6 +614,8 @@ def _register_contract(
             "watch_safe_signers": contract_type == "safe",
             "watch_timelock": contract_type == "timelock",
         }
+    monitoring_config = dict(monitoring_config)
+    monitoring_config.setdefault("polling_plan", polling_plan)
 
     mc = MonitoredContract(
         id=uuid.uuid4(),
@@ -556,7 +625,7 @@ def _register_contract(
         monitoring_config=monitoring_config,
         last_known_state={},
         last_scanned_block=last_scanned_block,
-        needs_polling=contract_type in ("proxy", "safe", "timelock"),
+        needs_polling=bool(monitoring_config.get("polling_plan")),
         is_active=True,
         enrollment_source="manual",
         watched_proxy_id=watched_proxy_id,
