@@ -17,6 +17,7 @@ from db.models import (
     ProxySubscription,
     ProxyUpgradeEvent,
 )
+from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
 
 logger = logging.getLogger(__name__)
 
@@ -112,30 +113,196 @@ def notify_upgrades(session: Session, events: list[ProxyUpgradeEvent]) -> None:
 # Protocol-level governance event notifications
 # ---------------------------------------------------------------------------
 
-# Color mapping by severity
-_EVENT_COLORS = {
-    "ownership_transferred": 0xFF0000,  # red
-    "ownership_transfer_started": 0xFF9900,  # orange (intent, not commit)
-    "authority_updated": 0xFF0000,  # red — full access-control regime swap
+# Embed color resolution. Two-tier:
+#
+#   1. Per-write-target color map — the bulk of colors derive from
+#      what state the emitter mutated. ``pendingOwner`` (intent)
+#      naturally orange where ``owner`` (commit) is red, etc.
+#   2. Per-event_type overrides for outcome- or phase-paired events
+#      whose tags collide. ``safe_tx_executed`` and ``safe_tx_failed``
+#      both have ``writes=["_safe_op"]``; the success/failure split
+#      doesn't fall out of the tag structure (the schema deliberately
+#      doesn't carry outcome flags), so it stays event_type-keyed.
+#      Same shape for timelock scheduled vs executed.
+
+_DEFAULT_EMBED_COLOR = 0x95A5A6  # neutral grey for unrecognized events
+
+_WRITE_TARGET_TO_COLOR: dict[str, int] = {
+    # RED — committed control-graph changes
+    "owner": 0xFF0000,
+    "authority": 0xFF0000,
     "paused": 0xFF0000,
-    "unpaused": 0xFF0000,
-    "upgraded": 0xFF9900,  # orange
-    "admin_changed": 0xFF9900,
-    "beacon_upgraded": 0xFF9900,
-    "timelock_executed": 0xFF9900,
-    "timelock_scheduled": 0x3498DB,  # blue
-    "signer_added": 0x3498DB,
-    "signer_removed": 0x3498DB,
-    "safe_tx_executed": 0x2ECC71,  # green — successful Safe tx execution
-    "safe_tx_failed": 0xE74C3C,  # red — Safe tx execution reverted
+    # ORANGE — upgrade-shape mutations + intent-phase ownership / impl
+    "pendingOwner": 0xFF9900,
+    "pendingImplementation": 0xFF9900,
+    "implementation": 0xFF9900,
+    "beacon": 0xFF9900,
+    "facets": 0xFF9900,
+    "admin": 0xFF9900,
+    # BLUE — Safe signer set changes
+    "owners": 0x3498DB,
+    # AMBER — operational parameters
+    "_roles": 0xF39C12,
+    "threshold": 0xF39C12,
+    "min_delay": 0xF39C12,
+}
+
+# Resolution order: when an event has multiple writes (e.g. Ownable2Step
+# acceptOwnership writes both owner and pendingOwner), the more-critical
+# color wins. Listed in priority order — first matching write target
+# determines the color.
+_COLOR_PRIORITY: tuple[str, ...] = (
+    "owner",
+    "authority",
+    "paused",
+    "pendingOwner",
+    "pendingImplementation",
+    "implementation",
+    "beacon",
+    "facets",
+    "admin",
+    "owners",
+    "_roles",
+    "threshold",
+    "min_delay",
+)
+
+_EVENT_TYPE_COLOR_OVERRIDES: dict[str, int] = {
+    # Outcome-paired Safe execution events
+    "safe_tx_executed": 0x2ECC71,  # green — success
     "safe_module_executed": 0x2ECC71,
+    "safe_tx_failed": 0xE74C3C,  # red — reverted
     "safe_module_failed": 0xE74C3C,
-    "role_granted": 0xF39C12,  # amber
-    "role_revoked": 0xF39C12,
-    "threshold_changed": 0xF39C12,
-    "delay_changed": 0xF39C12,
+    # Phase-paired Timelock ops
+    "timelock_scheduled": 0x3498DB,  # blue — queued
+    "timelock_executed": 0xFF9900,  # orange — applied
+    # Synthetic poll event — has no tags, has no decoder
     "state_changed_poll": 0x9B59B6,  # purple
 }
+
+
+def _resolve_embed_color(event_type: str, data: dict | None) -> int:
+    """Pick the Discord embed color for an event.
+
+    Per-event_type overrides win for outcome- / phase-paired events
+    whose writes collide. Otherwise walks ``effect_tags.writes`` in
+    priority order and returns the first matching write target's color.
+    Synthesizes tags from event_type for legacy events that lack them.
+    """
+    override = _EVENT_TYPE_COLOR_OVERRIDES.get(event_type)
+    if override is not None:
+        return override
+    tags = (data or {}).get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = set(tags.get("writes") or [])
+    for write_target in _COLOR_PRIORITY:
+        if write_target in writes:
+            return _WRITE_TARGET_TO_COLOR[write_target]
+    return _DEFAULT_EMBED_COLOR
+
+
+# Per-write-target render specs for ``_format_governance_embed``. Each
+# entry is a list of ``(label, data_key, inline)`` tuples. The renderer
+# walks ``effect_tags.writes``, looks up the spec, and appends one
+# Discord field per entry whose ``data[data_key]`` is populated.
+# Dedup is keyed by ``data_key`` so two writes that share a render arg
+# (Ownable2Step commit phase: owner + pendingOwner both → new_owner)
+# don't produce duplicate fields.
+#
+# Convention: render specs name the user-facing label, NOT the slot.
+# A write to ``admin`` renders "Old Admin" / "New Admin" — the slot
+# name is an implementation detail. Underscore-prefixed targets
+# (``_roles``, ``_timelock_op``, ``_safe_op``) are activity markers
+# with no canonical "before/after"; the render spec just surfaces the
+# meaningful event args.
+_WRITE_TARGET_TO_RENDER: dict[str, list[tuple[str, str, bool]]] = {
+    "owner": [
+        ("Old Owner", "old_owner", False),
+        ("New Owner", "new_owner", False),
+    ],
+    # Ownable2Step ``transferOwnership`` (intent) writes pendingOwner;
+    # the canonical semantic-key aliases land in old_owner / new_owner.
+    "pendingOwner": [
+        ("Old Owner", "old_owner", False),
+        ("New Owner", "new_owner", False),
+    ],
+    "authority": [
+        ("Old Authority", "old_authority", False),
+        ("New Authority", "new_authority", False),
+    ],
+    "implementation": [
+        ("New Implementation", "implementation", False),
+    ],
+    "beacon": [
+        ("Beacon", "beacon", False),
+    ],
+    "facets": [
+        # Diamond cuts: the upgrade-history decoder stores the first
+        # facet under ``implementation`` for backward compat with the
+        # generic proxy-upgrade rendering.
+        ("New Implementation", "implementation", False),
+    ],
+    "admin": [
+        ("Old Admin", "previous_admin", False),
+        ("New Admin", "new_admin", False),
+    ],
+    "paused": [
+        # paused / unpaused share writes=["paused"]; the renderer
+        # surfaces the account that flipped the flag.
+        ("Account", "account", False),
+    ],
+    "_roles": [
+        ("Role", "role", False),
+        ("Account", "account", True),
+        ("Sender", "sender", True),
+    ],
+    "owners": [
+        ("Signer", "owner", False),
+    ],
+    "threshold": [
+        ("New Threshold", "threshold", True),
+    ],
+    "min_delay": [
+        ("Old Delay", "old_delay", True),
+        ("New Delay", "new_delay", True),
+    ],
+}
+
+
+def _render_event_value(value: object) -> str:
+    """Format an event data value for Discord display. Wrap hex strings
+    in backticks (addresses, bytes32 roles); everything else as bare str."""
+    if isinstance(value, str) and value.startswith("0x"):
+        return f"`{value}`"
+    return str(value)
+
+
+def _generic_render_fallback(
+    write_target: str,
+    data: dict,
+    seen_keys: set[str],
+) -> list[dict]:
+    """Render fields for a write target with no entry in ``_WRITE_TARGET_TO_RENDER``.
+
+    Custom slots (``protocolAdmin``, ``feeRecipient``, …) flow through
+    here. The decoder populated ``data[input_name]`` for every event
+    arg, so we look for ``data["new<Cap>"]`` then ``data[write_target]``
+    and surface the value under a humanized "New <Cap>" label.
+
+    Underscore-prefixed targets are synthetic markers (no real data arg) —
+    skip them silently.
+    """
+    if write_target.startswith("_"):
+        return []
+    cap = write_target[:1].upper() + write_target[1:]
+    for data_key, label in ((f"new{cap}", f"New {cap}"), (write_target, cap)):
+        if data_key in seen_keys:
+            continue
+        value = data.get(data_key)
+        if value is None or value == "":
+            continue
+        seen_keys.add(data_key)
+        return [{"name": label, "value": _render_event_value(value), "inline": False}]
+    return []
 
 
 def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
@@ -173,56 +340,42 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     if contract_name:
         fields.insert(0, {"name": "Name", "value": contract_name, "inline": True})
 
-    # Add event-specific fields
-    if event.event_type in ("ownership_transferred", "ownership_transfer_started"):
-        if data.get("old_owner"):
-            fields.append({"name": "Old Owner", "value": f"`{data['old_owner']}`", "inline": False})
-        if data.get("new_owner"):
-            fields.append({"name": "New Owner", "value": f"`{data['new_owner']}`", "inline": False})
-    elif event.event_type == "authority_updated":
-        if data.get("old_authority"):
-            fields.append({"name": "Old Authority", "value": f"`{data['old_authority']}`", "inline": False})
-        if data.get("new_authority"):
-            fields.append({"name": "New Authority", "value": f"`{data['new_authority']}`", "inline": False})
-    elif event.event_type in ("upgraded", "new_implementation", "changed_master_copy", "target_updated"):
-        if data.get("implementation"):
-            fields.append({"name": "New Implementation", "value": f"`{data['implementation']}`", "inline": False})
-    elif event.event_type == "admin_changed":
-        if data.get("previous_admin"):
-            fields.append({"name": "Old Admin", "value": f"`{data['previous_admin']}`", "inline": False})
-        if data.get("new_admin"):
-            fields.append({"name": "New Admin", "value": f"`{data['new_admin']}`", "inline": False})
-    elif event.event_type == "beacon_upgraded":
-        if data.get("beacon"):
-            fields.append({"name": "Beacon", "value": f"`{data['beacon']}`", "inline": False})
-    elif event.event_type in ("paused", "unpaused"):
-        if data.get("account"):
-            fields.append({"name": "Account", "value": f"`{data['account']}`", "inline": False})
-    elif event.event_type in ("role_granted", "role_revoked"):
-        if data.get("role"):
-            fields.append({"name": "Role", "value": f"`{data['role']}`", "inline": False})
-        if data.get("account"):
-            fields.append({"name": "Account", "value": f"`{data['account']}`", "inline": True})
-        if data.get("sender"):
-            fields.append({"name": "Sender", "value": f"`{data['sender']}`", "inline": True})
-    elif event.event_type in ("signer_added", "signer_removed"):
-        if data.get("owner"):
-            fields.append({"name": "Signer", "value": f"`{data['owner']}`", "inline": False})
-    elif event.event_type == "threshold_changed":
-        if data.get("threshold"):
-            fields.append({"name": "New Threshold", "value": str(data["threshold"]), "inline": True})
-    elif event.event_type == "delay_changed":
-        if data.get("old_delay") is not None:
-            fields.append({"name": "Old Delay", "value": str(data["old_delay"]), "inline": True})
-        if data.get("new_delay") is not None:
-            fields.append({"name": "New Delay", "value": str(data["new_delay"]), "inline": True})
-    elif event.event_type == "state_changed_poll":
+    # Event-specific fields. Two paths:
+    #   1. state_changed_poll is a synthetic poll event with no decoder
+    #      and no effect_tags — render its (field, old, new) shape
+    #      directly.
+    #   2. Everything else flows through the tag-driven render table:
+    #      walk effect_tags.writes, look up the render spec, append
+    #      one Discord field per spec entry whose data key is populated.
+    #      Hand-rolled and per-contract events both carry effect_tags
+    #      from their decoders; legacy events without tags synthesize
+    #      them from event_type via _HANDROLLED_EVENT_TYPE_TO_TAGS.
+    if event.event_type == "state_changed_poll":
         if data.get("field"):
             fields.append({"name": "Field", "value": data["field"], "inline": True})
         if data.get("old_value"):
             fields.append({"name": "Old", "value": f"`{data['old_value']}`", "inline": True})
         if data.get("new_value"):
             fields.append({"name": "New", "value": f"`{data['new_value']}`", "inline": True})
+    else:
+        tags = data.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event.event_type) or {}
+        writes = tags.get("writes") or []
+        seen_keys: set[str] = set()
+        for write_target in writes:
+            if not isinstance(write_target, str):
+                continue
+            spec = _WRITE_TARGET_TO_RENDER.get(write_target)
+            if spec is None:
+                fields.extend(_generic_render_fallback(write_target, data, seen_keys))
+                continue
+            for label, data_key, inline in spec:
+                if data_key in seen_keys:
+                    continue
+                value = data.get(data_key)
+                if value is None or value == "":
+                    continue
+                seen_keys.add(data_key)
+                fields.append({"name": label, "value": _render_event_value(value), "inline": inline})
 
     if event.block_number:
         fields.append({"name": "Block", "value": str(event.block_number), "inline": True})
@@ -241,7 +394,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
             }
         )
 
-    color = _EVENT_COLORS.get(event.event_type, 0x95A5A6)
+    color = _resolve_embed_color(event.event_type, data)
 
     return {
         "title": title,
