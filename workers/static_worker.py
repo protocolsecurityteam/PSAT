@@ -32,7 +32,7 @@ from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 from utils.logging import record_degraded
-from utils.rpc import normalize_hex  # used for address comparison
+from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.static_worker")
@@ -64,6 +64,17 @@ def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, 
             phase=phase,
             error=error,
         )
+    )
+
+
+def _request_rpc_url(request: dict, *, public_fallback: bool = False) -> str | None:
+    explicit = request.get("rpc_url")
+    chain = request.get("chain")
+    return default_rpc_url(
+        explicit_rpc_url=explicit if isinstance(explicit, str) else None,
+        chain_id=request.get("chain_id"),
+        chain=chain if isinstance(chain, str) else None,
+        public_fallback=public_fallback,
     )
 
 
@@ -772,7 +783,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     if not cached_impl:
         return None
 
-    rpc_url = request.get("rpc_url") or os.getenv("ETH_RPC")
+    rpc_url = _request_rpc_url(request)
     if not rpc_url:
         return None
 
@@ -975,12 +986,8 @@ class StaticWorker(BaseWorker):
         """
         from services.discovery.classifier import classify_single
 
-        rpc_url = None
         request = job.request if isinstance(job.request, dict) else {}
-        if request:
-            rpc_url = request.get("rpc_url")
-        if not rpc_url:
-            rpc_url = os.getenv("ETH_RPC")
+        rpc_url = _request_rpc_url(request)
         if not rpc_url:
             logger.info("Job %s: no RPC available for proxy classification", job.id)
             store_artifact(
@@ -1294,8 +1301,9 @@ class StaticWorker(BaseWorker):
         self.update_detail(session, job, "Discovering dependencies")
 
         request = job.request if isinstance(job.request, dict) else {}
-        deps_rpc = request.get("rpc_url")
-        dynamic_rpc = request.get("dynamic_rpc") or deps_rpc
+        deps_rpc = _request_rpc_url(request)
+        dynamic_rpc_raw = request.get("dynamic_rpc")
+        dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
         dynamic_tx_limit = request.get("dynamic_tx_limit", 10)
         dynamic_tx_hashes = request.get("dynamic_tx_hashes")
 

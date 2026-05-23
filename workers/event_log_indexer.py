@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
 from db.queue import get_artifact
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -333,7 +334,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or os.getenv("ETH_RPC") or "https://ethereum-rpc.publicnode.com"
+    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
     fetchers = {1: RpcEventLogFetcher(rpc_url)}
     head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
     block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}

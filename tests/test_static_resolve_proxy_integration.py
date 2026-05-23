@@ -329,6 +329,7 @@ def test_no_rpc_stores_classification_skipped(monkeypatch):
 
     store_calls, created_jobs = _capture_store_and_create(monkeypatch)
     monkeypatch.delenv("ETH_RPC", raising=False)
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
@@ -362,6 +363,28 @@ def test_no_rpc_env_fallback_used_when_request_has_no_rpc(monkeypatch):
 
     assert captured_rpc == ["https://env-rpc.example"]
     assert store_calls[0][1]["is_proxy"] is True
+
+
+def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
+    """Configured eRPC route is used when request has a supported chain."""
+    worker = StaticWorker()
+    session = MagicMock()
+    job = _job(request={"chain": "base"})
+
+    store_calls, _created_jobs = _capture_store_and_create(monkeypatch)
+    monkeypatch.delenv("ETH_RPC", raising=False)
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+
+    captured_rpc = []
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda address, rpc_url: captured_rpc.append(rpc_url) or {"type": "regular"},
+    )
+
+    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+
+    assert captured_rpc == ["https://erpc-proxy.example/main/evm/8453"]
+    assert store_calls[0][1]["classification_type"] == "regular"
 
 
 # ---------------------------------------------------------------------------
