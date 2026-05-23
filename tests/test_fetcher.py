@@ -47,6 +47,28 @@ def test_parse_sources_preserves_standard_json_paths():
     ]
 
 
+def test_fetch_uses_requested_chain_id(monkeypatch):
+    calls = []
+
+    def fake_get_source(address, chain_id=1):
+        calls.append((address, chain_id))
+        return {"ContractName": "BaseVault", "SourceCode": "contract BaseVault {}"}
+
+    monkeypatch.setattr(fetcher, "get_source", fake_get_source)
+
+    result = fetcher.fetch("0x" + "a" * 40, chain="base")
+
+    assert result["ContractName"] == "BaseVault"
+    assert calls == [("0x" + "a" * 40, 8453)]
+
+
+def test_fetch_rejects_unsupported_chain():
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Unsupported Etherscan chain"):
+        fetcher.fetch("0x" + "a" * 40, chain="fantom")
+
+
 def test_parse_remappings_reads_standard_json_settings():
     remappings = fetcher.parse_remappings(STANDARD_JSON_RESULT)
 

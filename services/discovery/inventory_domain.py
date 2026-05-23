@@ -41,6 +41,14 @@ EXPLORER_CHAINS = {
     "polygon.blockscout.com": "polygon",
     "basescan.org": "base",
     "base.blockscout.com": "base",
+    "snowtrace.io": "avalanche",
+    "bscscan.com": "bsc",
+    "lineascan.build": "linea",
+    "scrollscan.com": "scroll",
+    "era.zksync.network": "zksync",
+    "blastscan.io": "blast",
+    "modescan.io": "mode",
+    "berascan.com": "berachain",
 }
 
 LOW_TRUST_DOMAINS = {
@@ -57,11 +65,27 @@ LOW_TRUST_DOMAINS = {
     "reddit.com",
 }
 
-CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "base": 4, "unknown": 99}
+CHAIN_SORT_ORDER = {
+    "ethereum": 0,
+    "arbitrum": 1,
+    "optimism": 2,
+    "polygon": 3,
+    "base": 4,
+    "avalanche": 5,
+    "bsc": 6,
+    "linea": 7,
+    "scroll": 8,
+    "zksync": 9,
+    "blast": 10,
+    "mode": 11,
+    "berachain": 12,
+    "unknown": 99,
+}
 
 # Etherscan v2 chain IDs for chains the inventory pipeline can discover.
 CHAIN_IDS: dict[str, int] = {
     "ethereum": 1,
+    "mainnet": 1,
     "arbitrum": 42161,
     "optimism": 10,
     "polygon": 137,
@@ -72,6 +96,9 @@ CHAIN_IDS: dict[str, int] = {
     "scroll": 534352,
     "zksync": 324,
     "blast": 81457,
+    "mode": 34443,
+    "bera": 80094,
+    "berachain": 80094,
 }
 
 
@@ -152,6 +179,22 @@ def _infer_chain(url: str, text: str) -> str:
         return "polygon"
     if "base" in lowered:
         return "base"
+    if "avalanche" in lowered or "avax" in lowered:
+        return "avalanche"
+    if "bsc" in lowered or "bnb chain" in lowered or "binance smart chain" in lowered:
+        return "bsc"
+    if "linea" in lowered:
+        return "linea"
+    if "scroll" in lowered:
+        return "scroll"
+    if "zksync" in lowered or "zk sync" in lowered:
+        return "zksync"
+    if "blast" in lowered:
+        return "blast"
+    if "mode" in lowered:
+        return "mode"
+    if "berachain" in lowered or "bera" in lowered:
+        return "berachain"
     if "ethereum" in lowered or "mainnet" in lowered:
         return "ethereum"
     return "unknown"
@@ -399,7 +442,7 @@ def _discover_contract_inventory_pages(
     for d in all_domains:
         site_results.extend(
             _tavily_search(
-                f"site:{d} {company} contract addresses deployments smart contracts",
+                f"site:{d} {company} contract addresses deployments chains multichain bridge smart contracts",
                 max_results=12,
                 queries_used=queries_used,
                 max_queries=max_queries,

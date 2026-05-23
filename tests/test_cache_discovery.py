@@ -314,6 +314,70 @@ def test_first_run_no_previous_inventory(db_session, monkeypatch):
     assert stored["contracts"][0]["address"] == ADDR_A
 
 
+def test_company_inventory_persists_grouped_multichain_deployments(db_session, monkeypatch):
+    """Grouped inventory entries are flattened into one DB row per deployment."""
+    from sqlalchemy import select
+
+    from db.models import Contract
+    from db.queue import get_artifact
+    from workers.base import JobHandledDirectly
+    from workers.discovery import DiscoveryWorker
+
+    eth_addr = "0x" + "1" * 40
+    base_addr = "0x" + "2" * 40
+    inventory = _mock_inventory(
+        [
+            {
+                "name": "OmniVault",
+                "chains": ["ethereum", "base"],
+                "confidence": 0.92,
+                "source": ["ai_inventory"],
+                "source_ids": ["s1"],
+                "deployments": [
+                    {"address": eth_addr, "chains": ["ethereum"]},
+                    {"address": base_addr, "chains": ["base"]},
+                ],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "services.discovery.run_discovery.run_discovery",
+        lambda *a, **kw: {
+            "audits": {"reports": [], "errors": [], "notes": []},
+            "addresses": inventory,
+            "meta": {"protocol": "TestProtocol", "estimated_cost_usd": 0.0},
+        },
+    )
+    monkeypatch.setattr("workers.discovery.search_protocol_inventory", lambda *a, **kw: inventory)
+
+    job = _make_company_job(db_session)
+    worker = DiscoveryWorker()
+    worker.update_detail = MagicMock()
+    monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
+
+    with pytest.raises(JobHandledDirectly):
+        worker._process_company(db_session, job)
+
+    rows = (
+        db_session.execute(select(Contract).where(Contract.address.in_([eth_addr, base_addr])).order_by(Contract.chain))
+        .scalars()
+        .all()
+    )
+    by_chain = {row.chain: row for row in rows}
+
+    assert set(by_chain) == {"base", "ethereum"}
+    assert by_chain["ethereum"].contract_name == "OmniVault"
+    assert by_chain["base"].contract_name == "OmniVault"
+    assert by_chain["ethereum"].chains == ["ethereum"]
+    assert by_chain["base"].chains == ["base"]
+
+    summary = get_artifact(db_session, job.id, "discovery_summary")
+    assert isinstance(summary, dict)
+    assert summary["inventory_contract_count"] == 1
+    assert summary["discovered_count"] == 2
+    assert summary["multichain_group_count"] == 1
+
+
 def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
     """Re-run merges previous inventory (decays old, keeps rediscovered)."""
     from db.models import JobStage, JobStatus

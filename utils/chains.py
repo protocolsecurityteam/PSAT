@@ -33,6 +33,10 @@ _CHAIN_ALIASES = {
     "zksync": "zksync",
     "zk sync": "zksync",
     "blast": "blast",
+    "mode": "mode",
+    "mode network": "mode",
+    "bera": "berachain",
+    "berachain": "berachain",
     "unknown": "unknown",
 }
 

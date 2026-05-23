@@ -17,6 +17,7 @@ from utils.chains import canonical_chain, canonical_chain_list
 from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
 from .deployer import expand_from_deployers
 from .inventory_domain import (
+    CHAIN_IDS,
     CHAIN_SORT_ORDER,
     _debug_log,
     _discover_contract_inventory_pages,
@@ -296,7 +297,7 @@ def search_protocol_inventory(
     # the real contract-inventory source.
     hint_domain = _maybe_domain(clean_company)
     broad_results = _tavily_search(
-        f'"{clean_company}" protocol smart contract addresses deployments docs',
+        f'"{clean_company}" protocol smart contract addresses deployments chains multichain bridge docs',
         max_results=10,
         queries_used=queries_used,
         max_queries=max_queries,
@@ -367,10 +368,27 @@ def search_protocol_inventory(
 
     deployer_entries: list[dict[str, Any]] = []
     if run_deployer and tavily_entries:
-        seed_addresses = sorted({e["address"] for e in tavily_entries})
+        seeds_by_chain: dict[str, set[str]] = defaultdict(set)
+        for entry in tavily_entries:
+            chain_key = canonical_chain(entry.get("chain")) or requested_chain or "ethereum"
+            if chain_key == "unknown":
+                chain_key = requested_chain or "ethereum"
+            seeds_by_chain[chain_key].add(entry["address"])
+        seed_addresses = sorted({address for addresses in seeds_by_chain.values() for address in addresses})
         _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
         try:
-            deployer_entries = expand_from_deployers(seed_addresses, debug=debug)
+            for chain_key, chain_seed_addresses in sorted(seeds_by_chain.items()):
+                chain_id = CHAIN_IDS.get(chain_key)
+                if chain_id is None:
+                    continue
+                chain_entries = expand_from_deployers(
+                    sorted(chain_seed_addresses),
+                    chain_id=chain_id,
+                    debug=debug,
+                )
+                for entry in chain_entries:
+                    entry["chain"] = chain_key
+                deployer_entries.extend(chain_entries)
             notes.append(f"Deployer expansion: {len(deployer_entries)} contract(s)")
         except Exception as exc:
             _debug_log(debug, f"Deployer expansion failed: {exc!r}")

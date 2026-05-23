@@ -52,6 +52,7 @@ export function ContractNode({ data }) {
         </button>
       )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
+      {m.chain ? <div className="ps-node-standards">{m.chain}</div> : null}
       <div className="ps-node-role" style={{ color: roleColor }}>{(ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "")}</div>
       {m.total_usd ? <div className="ps-node-balance">{formatUsd(m.total_usd)}</div> : null}
     </div>

@@ -299,13 +299,13 @@ def parallel_get(
     return results
 
 
-def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
+def get_contract_info(address: str, chain_id: int = 1) -> tuple[str | None, dict[str, str]]:
     """Fetch contract name and selector map in a single Etherscan call.
 
     Returns (name_or_None, {selector: function_name}).
     """
     try:
-        data = get("contract", "getsourcecode", address=address)
+        data = get("contract", "getsourcecode", chain_id=chain_id, address=address)
         result = data["result"][0]
     except Exception:
         return None, {}
@@ -314,15 +314,15 @@ def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
     return name, selector_map
 
 
-def get_contract_name(address: str) -> str | None:
+def get_contract_name(address: str, chain_id: int = 1) -> str | None:
     """Return the verified contract name for *address*, or None if unavailable."""
-    name, _ = get_contract_info(address)
+    name, _ = get_contract_info(address, chain_id=chain_id)
     return name
 
 
-def get_source(address: str) -> dict:
+def get_source(address: str, chain_id: int = 1) -> dict:
     """Fetch verified source code for a contract address. Returns the first result."""
-    data = get("contract", "getsourcecode", address=address)
+    data = get("contract", "getsourcecode", chain_id=chain_id, address=address)
     result = data["result"][0]
 
     if not result.get("SourceCode"):
