@@ -177,6 +177,130 @@ contract TestOwnable {
 }
 """
 
+SOLMATE_OWNED_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract TestSolmateOwned {
+    address public owner;
+    event OwnerUpdated(address indexed user, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnerUpdated(address(0), msg.sender);
+    }
+
+    function setOwner(address newOwner) external {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        owner = newOwner;
+        emit OwnerUpdated(msg.sender, newOwner);
+    }
+}
+"""
+
+DSAUTH_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// DSAuth shape used by Maker / MKR / DAI / Vat / Vow / Cat — single-arg
+// LogSetOwner with the address indexed. Topic0 differs from both OZ
+// and Solmate; the only arg is the new owner.
+contract TestDSAuth {
+    address public owner;
+    event LogSetOwner(address indexed owner);
+
+    constructor() {
+        owner = msg.sender;
+        emit LogSetOwner(msg.sender);
+    }
+
+    function setOwner(address newOwner) external {
+        require(msg.sender == owner, "not-authorized");
+        owner = newOwner;
+        emit LogSetOwner(newOwner);
+    }
+}
+"""
+
+COMPOUND_ADMIN_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Compound Comptroller / cToken admin shape: NewAdmin(address) with the
+// admin packed in data (non-indexed). Used across every Compound fork
+// (Sonne, Moonwell, Venus, Iron Bank, …).
+contract TestCompoundAdmin {
+    address public admin;
+    event NewAdmin(address newAdmin);
+
+    constructor() {
+        admin = msg.sender;
+        emit NewAdmin(msg.sender);
+    }
+
+    function _setAdmin(address newAdmin) external {
+        require(msg.sender == admin, "only admin");
+        admin = newAdmin;
+        emit NewAdmin(newAdmin);
+    }
+}
+"""
+
+OZ_OWNABLE2STEP_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// OZ Ownable2Step shape: OwnershipTransferStarted on transferOwnership
+// (intent), OwnershipTransferred on acceptOwnership (commit). The
+// Started event is invisible to the pre-fix scanner — its topic0 is
+// distinct from the OZ Ownable OwnershipTransferred topic0.
+contract TestOwnable2Step {
+    address public owner;
+    address public pendingOwner;
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    function transferOwnership(address newOwner) external {
+        require(msg.sender == owner, "not owner");
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        address old = owner;
+        owner = pendingOwner;
+        pendingOwner = address(0);
+        emit OwnershipTransferred(old, owner);
+    }
+}
+"""
+
+SOLMATE_AUTH_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract TestSolmateAuth {
+    address public owner;
+    address public authority;
+    event OwnerUpdated(address indexed user, address indexed newOwner);
+    event AuthorityUpdated(address indexed user, address indexed newAuthority);
+
+    constructor(address _authority) {
+        owner = msg.sender;
+        authority = _authority;
+        emit OwnerUpdated(address(0), msg.sender);
+        emit AuthorityUpdated(address(0), _authority);
+    }
+
+    function setAuthority(address newAuthority) external {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        authority = newAuthority;
+        emit AuthorityUpdated(msg.sender, newAuthority);
+    }
+}
+"""
+
 PAUSABLE_SOURCE = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -468,6 +592,303 @@ def test_ownership_transfer_detected(anvil_env, test_db):
     assert evt.event_type == "ownership_transferred"
     assert evt.data is not None
     assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+
+
+def test_solmate_owner_updated_detected(anvil_env, test_db):
+    """Deploy Solmate-style Owned, register with a tracked_topics entry for
+    OwnerUpdated, transfer ownership, scan, assert the scanner picks up the
+    Solmate event under the canonical ``ownership_transferred`` event_type.
+
+    Guards Bug 3: without the per-contract topic dispatch, OwnerUpdated's
+    topic0 isn't in the global eth_getLogs filter and the event is dropped
+    at the network layer before any decoder runs.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    owner_updated_topic0 = "0x" + keccak(text="OwnerUpdated(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": owner_updated_topic0,
+                "signature": "OwnerUpdated(address,address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [
+                    {"name": "user", "type": "address", "indexed": True},
+                    {"name": "newOwner", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transferred"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+
+
+def test_solmate_authority_updated_detected(anvil_env, test_db):
+    """Deploy Solmate-style Auth, register with a tracked_topics entry for
+    AuthorityUpdated, swap the authority, scan, assert the event is detected
+    under event_type='authority_updated' with the new authority value in the
+    decoded data.
+
+    AuthorityUpdated has no OZ counterpart — without per-contract topic
+    dispatch, an authority swap (entire access-control regime change) is
+    invisible to the scanner.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    initial_authority = "0x0000000000000000000000000000000000000001"
+    addr = _compile_and_deploy(
+        SOLMATE_AUTH_SOURCE,
+        "TestSolmateAuth",
+        [initial_authority],
+        rpc_url,
+        PRIVATE_KEY,
+        tmp_path,
+    )
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    authority_topic0 = "0x" + keccak(text="AuthorityUpdated(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "watch_authority": True,
+        "tracked_topics": [
+            {
+                "topic0": authority_topic0,
+                "signature": "AuthorityUpdated(address,address)",
+                "event_type": "authority_updated",
+                "controller_id": "external_contract:authority",
+                "inputs": [
+                    {"name": "user", "type": "address", "indexed": True},
+                    {"name": "newAuthority", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_authority = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
+    _cast_send(addr, "setAuthority(address)", [new_authority], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "authority_updated"
+    assert evt.data is not None
+    assert evt.data.get("new_authority", "").lower() == new_authority.lower()
+
+
+def test_dsauth_log_set_owner_detected(anvil_env, test_db):
+    """Maker / DSAuth-family LogSetOwner detection.
+
+    Why this test exists as part of the general-bug regression set:
+    DSAuth's ``LogSetOwner(address indexed owner)`` has a topic0
+    distinct from both OZ ``OwnershipTransferred`` and Solmate
+    ``OwnerUpdated``. Without per-contract topic dispatch the scanner's
+    eth_getLogs filter never includes its topic0, and the event is
+    dropped at the network layer — same shape of gap as Bug 3 but
+    against a completely different ABI family (Maker DSS, MKR, DAI,
+    Vat/Vow/Cat). Validates that the generic dispatcher generalizes
+    beyond Solmate.
+
+    Also exercises the *single-arg* decode + semantic-key fallback path:
+    LogSetOwner only carries the new owner (no previous), so the
+    decoder should fill ``new_owner`` without inventing an ``old_owner``.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(DSAUTH_SOURCE, "TestDSAuth", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="LogSetOwner(address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "LogSetOwner(address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [{"name": "owner", "type": "address", "indexed": True}],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transferred"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+    # Single-arg event carries no previous-owner value; decoder must
+    # not invent one.
+    assert "old_owner" not in evt.data
+
+
+def test_compound_new_admin_detected(anvil_env, test_db):
+    """Compound Comptroller / cToken NewAdmin detection.
+
+    Compound's ``NewAdmin(address newAdmin)`` packs the admin into the
+    log data field rather than a topic — exercises the eth_abi
+    non-indexed decode path. Distinct topic0 from every other ABI
+    family. Validates the dispatcher works for data-side decoding,
+    not just indexed-topic events.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(COMPOUND_ADMIN_SOURCE, "TestCompoundAdmin", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="NewAdmin(address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "NewAdmin(address)",
+                "event_type": "admin_changed",
+                "controller_id": "state_variable:admin",
+                "inputs": [{"name": "newAdmin", "type": "address", "indexed": False}],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_admin = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
+    _cast_send(addr, "_setAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "admin_changed"
+    assert evt.data is not None
+    assert evt.data.get("new_admin", "").lower() == new_admin.lower()
+
+
+def test_ozownable2step_transfer_started_detected(anvil_env, test_db):
+    """OZ Ownable2Step OwnershipTransferStarted detection.
+
+    Same ABI shape as the OZ Ownable ``OwnershipTransferred`` (two
+    indexed addresses, OZ-conventional ``previousOwner`` /
+    ``newOwner`` names), but a different event name → different
+    topic0. Without per-contract dispatch, the *intent* phase of a
+    two-step ownership move is invisible — only the final
+    ``OwnershipTransferred`` is registered. Defense-in-depth
+    monitoring wants both phases.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(OZ_OWNABLE2STEP_SOURCE, "TestOwnable2Step", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="OwnershipTransferStarted(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "OwnershipTransferStarted(address,address)",
+                "event_type": "ownership_transfer_started",
+                "controller_id": "state_variable:pendingOwner",
+                "inputs": [
+                    {"name": "previousOwner", "type": "address", "indexed": True},
+                    {"name": "newOwner", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transfer_started"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+    # previousOwner here is the deployer (account 0).
+    assert evt.data.get("old_owner", "").lower() == ACCOUNT0.lower()
+
+
+def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
+    """Regression guard for the *general* bug shape.
+
+    Deploys a Solmate-Owned, registers it with WATCH_OWNERSHIP=True
+    but *no* tracked_topics. Transfers ownership. Asserts the scanner
+    detects nothing — proves the pre-fix scanner behavior is preserved
+    when tracked_topics is absent (so the fix is purely additive: zero
+    new events when no tracking_plan has been threaded through
+    enrollment). Pair with ``test_solmate_owner_updated_detected``:
+    same contract + same on-chain action, only the monitoring_config
+    differs. If this test ever starts catching the event, something
+    has leaked Solmate's topic0 into the hand-rolled global filter.
+    """
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    # No tracked_topics — simulates a row that was enrolled before the
+    # general fix landed (or a contract whose tracking_plan is still
+    # pending materialization).
+    _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={"watch_ownership": True},
+    )
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert events == [], (
+        "Solmate OwnerUpdated detected without per-contract topic dispatch — "
+        "either the hand-rolled global registry leaked Solmate's topic0, or "
+        "tracked_topics is being inferred from somewhere unexpected. Both "
+        "would defeat the regression guard for the general-bug fix."
+    )
 
 
 def test_pause_unpause_detected(anvil_env, test_db):

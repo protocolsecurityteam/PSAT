@@ -264,6 +264,31 @@ contract TestOwnable {
 ROLE_PRINCIPAL_HOST_SOURCE = OWNABLE_SOURCE
 
 
+SOLMATE_OWNED_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Solmate Owned shape: OwnerUpdated(user, newOwner) — distinct topic0
+// from OZ OwnershipTransferred. Used to exercise the full enrollment
+// pipeline that consumes a tracking_plan instead of relying on the
+// hand-rolled global registry.
+contract TestSolmateOwned {
+    address public owner;
+    event OwnerUpdated(address indexed user, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnerUpdated(address(0), msg.sender);
+    }
+
+    function setOwner(address newOwner) external {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        owner = newOwner;
+        emit OwnerUpdated(msg.sender, newOwner);
+    }
+}
+"""
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -866,3 +891,161 @@ def test_late_protocol_id_stamp_converges_via_reconciler(anvil_env, test_db):
     addresses = {r.address for r in rows if r.is_active}
     assert high_addr.lower() in addresses
     assert orphan_addr.lower() in addresses
+
+
+def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
+    """End-to-end regression for the *general* bug fix.
+
+    Verifies the full enrollment → scan pipeline for a non-OZ ABI:
+
+      1. Deploy a Solmate-Owned contract on Anvil.
+      2. Seed Protocol + Contract + Job (completed) + ContractMaterialization
+         with an inline ``tracking_plan`` JSONB that lists the contract's
+         ``OwnerUpdated`` event (mirrors what the static analysis pipeline
+         persists for a real Solmate-derived protocol contract).
+      3. Call ``enroll_protocol_contracts`` and assert the resulting
+         MonitoredContract has ``monitoring_config.tracked_topics``
+         populated from the plan — i.e. enrollment did read the plan.
+      4. Trigger ``setOwner`` on the deployed contract.
+      5. Call ``scan_for_events`` and assert the event is detected with
+         ``event_type='ownership_transferred'`` and the new owner address
+         decoded into ``data.new_owner``.
+
+    Together this proves: the analysis pipeline's per-contract event
+    knowledge flows through enrollment into ``monitoring_config``,
+    through the scanner's union-topic filter onto the wire, and through
+    the generic decoder into a persisted ``MonitoredEvent``. None of
+    those hops worked end-to-end before the general-bug fix landed.
+
+    This test would fail under the pre-fix code on assertion (3) —
+    ``enroll_protocol_contracts`` did not look at
+    ``contract_materializations.tracking_plan`` and therefore wrote no
+    ``tracked_topics`` field; the scanner's filter then drops the
+    Solmate topic0 at the network layer and no MonitoredEvent is ever
+    created.
+    """
+    from eth_utils.crypto import keccak
+
+    from db.models import ContractMaterialization
+    from services.monitoring.enrollment import enroll_protocol_contracts
+    from services.monitoring.unified_watcher import scan_for_events
+
+    rpc_url, tmp_path = anvil_env
+
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, tmp_path)
+
+    # ContractMaterialization isn't protocol-scoped, so the fixture's
+    # PROTO_NAME teardown doesn't reach it. anvil's CREATE address is
+    # deterministic (deployer + nonce 0) across runs, so a stale row
+    # from a prior pass would collide on the (chain, address) unique
+    # index. Clear it up front; re-clear in the trailing finally.
+    test_db.execute(
+        delete(ContractMaterialization).where(
+            ContractMaterialization.chain == "ethereum",
+            ContractMaterialization.address == addr.lower(),
+        )
+    )
+    test_db.commit()
+
+    proto = _make_protocol(test_db)
+    _add_protocol_contract(test_db, proto.id, addr, contract_name="TestSolmateOwned")
+
+    # Persist a tracking_plan that lists the Solmate OwnerUpdated event,
+    # exactly as the static analysis pipeline would for a real Solmate-
+    # derived contract. The bytecode_keccak is arbitrary here — find_by_address
+    # uses the (chain, address) unique index, not the keccak PK.
+    owner_updated_sig = "OwnerUpdated(address,address)"
+    owner_updated_topic0 = "0x" + keccak(text=owner_updated_sig).hex()
+    tracking_plan = {
+        "schema_version": "0.1",
+        "contract_address": addr.lower(),
+        "contract_name": "TestSolmateOwned",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:owner",
+                "label": "owner",
+                "source": "state_variable",
+                "kind": "state_variable",
+                "read_spec": None,
+                "tracking_mode": "event_plus_state",
+                "event_watch": {
+                    "transport": "wss_logs",
+                    "contract_address": addr.lower(),
+                    "events": [
+                        {
+                            "name": "OwnerUpdated",
+                            "signature": owner_updated_sig,
+                            "topic0": owner_updated_topic0,
+                            "inputs": [
+                                {"name": "user", "type": "address", "indexed": True},
+                                {"name": "newOwner", "type": "address", "indexed": True},
+                            ],
+                        }
+                    ],
+                    "writer_functions": ["setOwner(address)"],
+                },
+                "polling_fallback": {
+                    "contract_address": addr.lower(),
+                    "polling_sources": ["owner"],
+                    "cadence": "realtime_confirm",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+    test_db.add(
+        ContractMaterialization(
+            chain="ethereum",
+            bytecode_keccak="0x" + "0" * 64,
+            address=addr.lower(),
+            contract_name="TestSolmateOwned",
+            tracking_plan=tracking_plan,
+            status="ready",
+        )
+    )
+    test_db.commit()
+
+    try:
+        # ---- Phase 1: enrollment consumes the tracking_plan -----------------
+        enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url)
+        assert len(enrolled) == 1
+        mc = enrolled[0]
+        config = mc.monitoring_config or {}
+        tracked = config.get("tracked_topics") or []
+        assert tracked, (
+            "enrollment did not read tracking_plan from contract_materializations — "
+            "monitoring_config.tracked_topics is empty. Pre-fix behavior; the "
+            "general fix wires _load_tracked_topics into the enroll loop."
+        )
+        matched = [t for t in tracked if (t.get("topic0") or "").lower() == owner_updated_topic0]
+        assert matched, f"OwnerUpdated topic0 missing from tracked_topics: {tracked}"
+        spec = matched[0]
+        assert spec["event_type"] == "ownership_transferred"
+        assert spec["controller_id"] == "state_variable:owner"
+        assert spec["signature"] == owner_updated_sig
+
+        # ---- Phase 2: scanner picks up the on-chain event -------------------
+        new_owner = ACCOUNT1
+        _cast_send(addr, "setOwner(address)", [new_owner], rpc_url)
+
+        events = scan_for_events(test_db, rpc_url)
+        detected = [e for e in events if e.event_type == "ownership_transferred"]
+        assert len(detected) == 1, (
+            f"expected one ownership_transferred event, got {len(detected)} "
+            f"(all events: {[(e.event_type, e.data) for e in events]})"
+        )
+        evt = detected[0]
+        assert evt.monitored_contract_id == mc.id
+        assert (evt.data or {}).get("new_owner", "").lower() == new_owner.lower()
+    finally:
+        # Cross-run cleanup: see leading comment for why the
+        # fixture's PROTO_NAME teardown can't reach this row.
+        test_db.execute(
+            delete(ContractMaterialization).where(
+                ContractMaterialization.chain == "ethereum",
+                ContractMaterialization.address == addr.lower(),
+            )
+        )
+        test_db.commit()
