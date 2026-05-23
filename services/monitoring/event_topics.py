@@ -258,3 +258,240 @@ def parse_any_log(log: dict) -> dict | None:
     if result is not None:
         return result
     return parse_governance_log(log)
+
+
+# ---------------------------------------------------------------------------
+# Per-contract topic extraction from the analysis tracking_plan
+# ---------------------------------------------------------------------------
+
+# Map controller_id → semantic event_type. Used by ``extract_governance_topics``
+# to tag per-contract governance events. Anything not listed falls back to a
+# ``controller_changed:<id>`` event_type — still persisted, just without a
+# dedicated state/relational sync handler.
+_CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
+    "owner": "ownership_transferred",
+    "_owner": "ownership_transferred",
+    "state_variable:owner": "ownership_transferred",
+    "state_variable:_owner": "ownership_transferred",
+    "state_variable:pendingOwner": "ownership_transfer_started",
+    "external_contract:authority": "authority_updated",
+    "state_variable:authority": "authority_updated",
+}
+
+
+# Per-event_type semantic key aliases used by downstream sync paths
+# (``_update_state_from_event`` / ``_sync_relational_tables``). 2-tuple
+# of ``(old_key, new_key)`` — the generic decoder populates them on top
+# of the ABI-name keys so existing handlers keep working when the
+# underlying event has different ABI input names.
+#
+# Fill strategy lives in ``_assign_semantic_keys``: name-aware first
+# (``new*``→new_key, ``previous*``/``old*``→old_key), with a positional
+# fallback only when arg count matches key count or there's a single
+# arg (interpreted as the new value — covers DSAuth LogSetOwner /
+# Compound NewAdmin shape where there's no "old" value to compare).
+_EVENT_TYPE_TO_SEMANTIC_KEYS: dict[str, tuple[str, str]] = {
+    "ownership_transferred": ("old_owner", "new_owner"),
+    "ownership_transfer_started": ("old_owner", "new_owner"),
+    "authority_updated": ("old_authority", "new_authority"),
+    "admin_changed": ("previous_admin", "new_admin"),
+}
+
+
+def _assign_semantic_keys(
+    event: dict,
+    event_type: str,
+    inputs: list[dict],
+    args_in_order: list[object],
+) -> None:
+    """Fill ``old_*`` / ``new_*`` semantic-key aliases on *event*.
+
+    Resolution order picks the right answer across every governance
+    ABI we've seen:
+
+      1. **Name-aware** — input names beginning ``new*`` claim the new
+         slot; ``previous*`` / ``old*`` claim the old slot. Wins for
+         OZ ``previousOwner`` / ``newOwner`` and Compound ``newAdmin``.
+      2. **Positional remainder for 2-arg events** — if exactly one
+         slot was filled by name, the *other* arg fills the other
+         slot. This is the Solmate ``user`` / ``newOwner`` case:
+         ``user`` doesn't name-match, but for a two-arg event whose
+         second arg already claimed ``new``, the first arg is the
+         old value. (Solmate's ``setOwner`` is gated by ``onlyOwner``
+         so ``msg.sender == currentOwner`` at emission, making the
+         ``user`` arg effectively the previous owner.)
+      3. **Two anonymous args** — neither name matches, positional
+         (old, new) by convention.
+      4. **Single arg event** — convention is "this is the new value",
+         no old recorded. DSAuth ``LogSetOwner(address indexed owner)``
+         and Compound ``NewAdmin(address newAdmin)`` both fall here
+         when name match misses.
+    """
+    keys = _EVENT_TYPE_TO_SEMANTIC_KEYS.get(event_type)
+    if not keys:
+        return
+    old_key, new_key = keys
+
+    new_idx: int | None = None
+    old_idx: int | None = None
+    for i, inp in enumerate(inputs):
+        name = (inp.get("name") or "").lower()
+        if name.startswith("new") and new_idx is None:
+            new_idx = i
+        elif (name.startswith("previous") or name.startswith("old")) and old_idx is None:
+            old_idx = i
+
+    n = len(args_in_order)
+    if n == 2:
+        if old_idx is None and new_idx is not None:
+            old_idx = 1 - new_idx
+        elif new_idx is None and old_idx is not None:
+            new_idx = 1 - old_idx
+        elif old_idx is None and new_idx is None:
+            old_idx, new_idx = 0, 1
+    elif n == 1 and new_idx is None:
+        new_idx = 0
+
+    if old_idx is not None and old_idx < n:
+        event[old_key] = args_in_order[old_idx]
+    if new_idx is not None and new_idx < n:
+        event[new_key] = args_in_order[new_idx]
+
+
+def _resolve_event_type(controller_id: str | None) -> str:
+    cid = (controller_id or "").strip()
+    if not cid:
+        return "controller_changed"
+    if cid in _CONTROLLER_ID_TO_EVENT_TYPE:
+        return _CONTROLLER_ID_TO_EVENT_TYPE[cid]
+    return f"controller_changed:{cid}"
+
+
+def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
+    """Walk a ``ControlTrackingPlan`` and return per-contract topic specs.
+
+    Each entry has shape ``{topic0, signature, event_type, controller_id,
+    inputs}``. Topic0s already in ``ALL_EVENT_TOPICS`` are skipped so the
+    hand-rolled decoders keep ownership of OZ / Safe / Timelock / proxy
+    events. Returns ``[]`` when *tracking_plan* is None or has no events.
+    """
+    if not tracking_plan:
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    for tc in tracking_plan.get("tracked_controllers") or []:
+        ew = tc.get("event_watch")
+        if not ew:
+            continue
+        controller_id = tc.get("controller_id")
+        for ev in ew.get("events") or []:
+            topic0 = (ev.get("topic0") or "").lower()
+            if not topic0 or not topic0.startswith("0x"):
+                continue
+            # Hand-rolled registry wins for OZ/Safe/Timelock/proxy events —
+            # those decoders carry semantics (batch indexing, calldata
+            # selectors, etc.) the generic path can't reproduce.
+            if topic0 in ALL_EVENT_TOPICS:
+                continue
+            if topic0 in seen:
+                continue
+            seen.add(topic0)
+            out.append(
+                {
+                    "topic0": topic0,
+                    "signature": ev.get("signature"),
+                    "event_type": _resolve_event_type(controller_id),
+                    "controller_id": controller_id,
+                    "inputs": list(ev.get("inputs") or []),
+                }
+            )
+    return out
+
+
+def parse_tracked_log(log: dict, spec: dict) -> dict | None:
+    """Generic per-contract event decoder driven by an ABI input list.
+
+    *spec* is one entry from ``extract_governance_topics``. Walks the
+    inputs splitting indexed (topics[1:]) from non-indexed (data) and
+    decodes each by type via ``eth_abi``. Outputs:
+
+      - ``event_type``, ``block_number``, ``tx_hash``, ``log_index``
+      - one key per input under its ABI name (``user``, ``newOwner``, …)
+      - semantic-key aliases (``old_owner``/``new_owner``, ``old_authority``/
+        ``new_authority``) when the event_type has a registered mapping, so
+        existing state/relational sync paths keep working.
+
+    Returns None when the log shape doesn't match the spec (wrong topic
+    count, undecodable non-indexed data, etc.) — caller treats None the
+    same as an unparseable hand-rolled log.
+    """
+    # Local import: eth_abi pulls in a chunk of typing/cython init on first
+    # use; keeping it lazy avoids paying the cost when no contract has any
+    # tracked_topics (the common case for pre-tracking-plan rows).
+    from eth_abi.abi import decode as eth_abi_decode
+
+    inputs = spec.get("inputs") or []
+    topics = log.get("topics") or []
+    data = log.get("data") or "0x"
+
+    indexed_inputs = [i for i in inputs if i.get("indexed")]
+    non_indexed_inputs = [i for i in inputs if not i.get("indexed")]
+
+    # topics[0] is the event sig; indexed args live in topics[1:].
+    if len(topics) < 1 + len(indexed_inputs):
+        return None
+
+    event: dict = {
+        "event_type": spec.get("event_type", "controller_changed"),
+        "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
+        "tx_hash": log.get("transactionHash"),
+        "log_index": _hex_to_int(log.get("logIndex", "0x0")),
+    }
+
+    # Decode indexed args from topics.
+    args_in_order: list[object] = []
+    for i, spec_in in enumerate(indexed_inputs):
+        topic = topics[1 + i]
+        sol_type = (spec_in.get("type") or "").strip()
+        decoded: object
+        if sol_type in ("address", "address payable"):
+            decoded = _topic_to_address(topic)
+        elif sol_type.startswith("uint") or sol_type.startswith("int"):
+            decoded = _hex_to_int(topic)
+        elif sol_type.startswith("bytes") and sol_type != "bytes":
+            decoded = topic  # fixed-size bytes ride as the raw 32-byte topic
+        else:
+            # Dynamic types (string, bytes, arrays) are stored as the
+            # keccak of the value when indexed — we can't recover the
+            # original, just preserve the hash.
+            decoded = topic
+        name = spec_in.get("name") or f"arg{i}"
+        event[name] = decoded
+        args_in_order.append(decoded)
+
+    # Decode non-indexed args from data.
+    if non_indexed_inputs:
+        try:
+            raw = bytes.fromhex((data or "0x").removeprefix("0x"))
+            sol_types = [str(i.get("type") or "") for i in non_indexed_inputs]
+            decoded_tuple = eth_abi_decode(sol_types, raw)
+        except Exception:
+            return None
+        for i, spec_in in enumerate(non_indexed_inputs):
+            val = decoded_tuple[i]
+            # Normalize bytes → 0x-hex so JSONB-serializability is preserved.
+            if isinstance(val, (bytes, bytearray)):
+                val = "0x" + bytes(val).hex()
+            name = spec_in.get("name") or f"arg{len(indexed_inputs) + i}"
+            event[name] = val
+            args_in_order.append(val)
+
+    # Semantic-key aliases (``old_owner`` / ``new_owner``, etc.) keyed
+    # off event_type. Name-aware fill so single-arg events
+    # (``LogSetOwner(address indexed owner)``,
+    # ``NewAdmin(address newAdmin)``) and two-arg variants with
+    # non-standard ABI names (Solmate's ``user`` / ``newOwner``) all
+    # surface the canonical sync keys.
+    _assign_semantic_keys(event, event["event_type"], inputs, args_in_order)
+
+    return event

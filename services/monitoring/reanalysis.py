@@ -39,6 +39,12 @@ REANALYSIS_EVENT_TYPES = frozenset(
         "admin_changed",
         # Ownership transferred — control graph needs re-resolution
         "ownership_transferred",
+        # Authority swap (Solmate Auth / DSAuth) — the entire role-based
+        # access-control regime just changed underneath us. Equivalent in
+        # blast radius to an admin swap on an OZ AccessControl contract:
+        # every gated function may now resolve to a different principal,
+        # so the control graph + effective permissions must be rebuilt.
+        "authority_updated",
     }
 )
 

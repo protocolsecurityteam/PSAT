@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from db.contract_materializations import find_by_address, hydrate_tracking_plan
 from db.models import (
     Contract,
     ContractSummary,
@@ -22,6 +23,7 @@ from db.models import (
     MonitoredContract,
     WatchedProxy,
 )
+from services.monitoring.event_topics import extract_governance_topics
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -148,8 +150,16 @@ def enroll_protocol_contracts(
         # Determine contract type
         contract_type = _determine_contract_type(contract, summary, cv_rows)
 
+        # Discover per-contract governance event topics from the static
+        # analysis tracking_plan. The plan lists every governance event
+        # the contract actually emits — including non-OZ ABIs (Solmate
+        # OwnerUpdated/AuthorityUpdated, DSAuth, Compound NewAdmin,
+        # Curve CommitOwnership, …) that the hand-rolled topic registry
+        # in ``event_topics.py`` can't cover protocol-by-protocol.
+        tracked_topics = _load_tracked_topics(session, contract)
+
         # Build monitoring config and initial state
-        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type)
+        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type, tracked_topics)
         initial_state = _build_initial_state(contract, cv_rows)
         needs_poll = _needs_polling(contract_type, contract)
 
@@ -301,10 +311,36 @@ def _needs_polling(contract_type: str, contract: Contract) -> bool:
     return False
 
 
+def _load_tracked_topics(session: Session, contract: Contract) -> list[dict]:
+    """Hydrate the analysis ``tracking_plan`` for *contract* and return the
+    per-contract topic specs the scanner should watch. Returns ``[]`` when
+    the materialization row is missing, status is not ready, or the plan
+    has no events — callers fall back to the hand-rolled global registry.
+    """
+    try:
+        row = find_by_address(session, chain=contract.chain or "ethereum", address=contract.address)
+        if row is None:
+            return []
+        plan = hydrate_tracking_plan(row)
+        return extract_governance_topics(plan)
+    except Exception as exc:
+        # A blob-fetch hiccup or schema drift in tracking_plan shouldn't
+        # block enrollment — the hand-rolled registry still catches the
+        # OZ/Safe/Timelock baseline.
+        logger.warning(
+            "Failed to load tracking_plan topics for %s: %s",
+            contract.address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        return []
+
+
 def _build_monitoring_config(
     summary: ContractSummary | None,
     controller_values: Sequence[ControllerValue],  # noqa: ARG001 — reserved for future use
     contract_type: str,
+    tracked_topics: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Build the monitoring_config JSONB based on detected capabilities."""
     config: dict[str, Any] = {
@@ -321,6 +357,15 @@ def _build_monitoring_config(
             config["watch_pause"] = True
         if summary.control_model and "role" in (summary.control_model or "").lower():
             config["watch_roles"] = True
+
+    if tracked_topics:
+        config["tracked_topics"] = tracked_topics
+        # Default-on the authority flag if any tracked event_type drives it.
+        # ``_should_watch`` falls back to True for missing keys, so the
+        # explicit set is more documentation than functional — but it keeps
+        # the config self-describing on inspection.
+        if any(t.get("event_type") == "authority_updated" for t in tracked_topics):
+            config["watch_authority"] = True
 
     return config
 

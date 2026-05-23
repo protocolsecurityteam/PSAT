@@ -115,6 +115,8 @@ def notify_upgrades(session: Session, events: list[ProxyUpgradeEvent]) -> None:
 # Color mapping by severity
 _EVENT_COLORS = {
     "ownership_transferred": 0xFF0000,  # red
+    "ownership_transfer_started": 0xFF9900,  # orange (intent, not commit)
+    "authority_updated": 0xFF0000,  # red — full access-control regime swap
     "paused": 0xFF0000,
     "unpaused": 0xFF0000,
     "upgraded": 0xFF9900,  # orange
@@ -172,11 +174,16 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
         fields.insert(0, {"name": "Name", "value": contract_name, "inline": True})
 
     # Add event-specific fields
-    if event.event_type == "ownership_transferred":
+    if event.event_type in ("ownership_transferred", "ownership_transfer_started"):
         if data.get("old_owner"):
             fields.append({"name": "Old Owner", "value": f"`{data['old_owner']}`", "inline": False})
         if data.get("new_owner"):
             fields.append({"name": "New Owner", "value": f"`{data['new_owner']}`", "inline": False})
+    elif event.event_type == "authority_updated":
+        if data.get("old_authority"):
+            fields.append({"name": "Old Authority", "value": f"`{data['old_authority']}`", "inline": False})
+        if data.get("new_authority"):
+            fields.append({"name": "New Authority", "value": f"`{data['new_authority']}`", "inline": False})
     elif event.event_type in ("upgraded", "new_implementation", "changed_master_copy", "target_updated"):
         if data.get("implementation"):
             fields.append({"name": "New Implementation", "value": f"`{data['implementation']}`", "inline": False})

@@ -28,6 +28,7 @@ from services.monitoring.event_topics import (
     ALL_EVENT_TOPICS,
     PROXY_EVENT_TOPICS,
     parse_any_log,
+    parse_tracked_log,
 )
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from utils.rpc import (
@@ -58,6 +59,9 @@ _GET_MIN_DELAY_SEL = "0xf27a0c92"  # getMinDelay()
 # to update only the real owner row, not unrelated controller values that
 # happen to contain "owner" in their name (e.g. token_owner_registry).
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
+# Solmate-Auth / DSAuth-style authority pointer. Sync target for the
+# ``authority_updated`` event emitted by Solmate's ``Auth.setAuthority``.
+_AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
 
 # Mapping from poll field names to scanner event types that detect the same
 # underlying state change.  Used by the poller to suppress duplicate events
@@ -103,6 +107,27 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
 
     contract_by_address: dict[str, MonitoredContract] = {c.address.lower(): c for c in contracts}
 
+    # Per-emitter map of topic0 → tracked-topic spec (from the static
+    # analysis ``tracking_plan``, persisted onto monitoring_config by
+    # enrollment). Lets the dispatcher decode events from ABIs the
+    # hand-rolled registry doesn't know about — Solmate OwnerUpdated /
+    # AuthorityUpdated, DSAuth LogSetOwner, Compound NewAdmin, etc.
+    tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
+    extra_topic0s: set[str] = set()
+    for addr, mc in contract_by_address.items():
+        topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
+        if not topics_list:
+            continue
+        spec_map: dict[str, dict] = {}
+        for spec in topics_list:
+            t0 = (spec.get("topic0") or "").lower()
+            if not t0:
+                continue
+            spec_map[t0] = spec
+            extra_topic0s.add(t0)
+        if spec_map:
+            tracked_specs_by_emitter[addr] = spec_map
+
     from_block = min(c.last_scanned_block for c in contracts)
     latest_block = get_latest_block(rpc_url)
 
@@ -119,7 +144,11 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     )
 
     new_events: list[MonitoredEvent] = []
-    topics = [list(ALL_EVENT_TOPICS.keys())]
+    # Union the hand-rolled global registry with per-contract topic0s
+    # discovered from the analysis tracking_plan. The hand-rolled set
+    # owns OZ / Safe / Timelock / proxy events (semantics beyond raw
+    # decode); per-contract topics cover the long tail of ABI variants.
+    topics = [sorted(set(ALL_EVENT_TOPICS.keys()) | extra_topic0s)]
 
     # Two-tier dedupe:
     #   ``db_events`` is loaded from already-persisted MonitoredEvent rows
@@ -185,11 +214,27 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             logs = []
 
         for log in logs:
+            emitter = normalize_hex(log.get("address", "")).lower()
             parsed = parse_any_log(log)
             if not parsed:
-                continue
+                # Fall through to the per-contract tracked-topic
+                # dispatcher: events from non-OZ ABIs (Solmate,
+                # DSAuth, Compound, …) the hand-rolled registry
+                # doesn't know about. Spec was attached at enrollment
+                # time from the analysis tracking_plan.
+                emitter_specs = tracked_specs_by_emitter.get(emitter)
+                if not emitter_specs:
+                    continue
+                log_topics = log.get("topics") or []
+                if not log_topics:
+                    continue
+                spec = emitter_specs.get((log_topics[0] or "").lower())
+                if not spec:
+                    continue
+                parsed = parse_tracked_log(log, spec)
+                if not parsed:
+                    continue
 
-            emitter = normalize_hex(log.get("address", "")).lower()
             mc = contract_by_address.get(emitter)
             if not mc:
                 continue
@@ -303,6 +348,8 @@ def _should_watch(mc: MonitoredContract, event_type: str) -> bool:
         "upgraded_revision": "watch_upgrades",
         "diamond_cut": "watch_upgrades",
         "ownership_transferred": "watch_ownership",
+        "ownership_transfer_started": "watch_ownership",
+        "authority_updated": "watch_authority",
         "paused": "watch_pause",
         "unpaused": "watch_pause",
         "role_granted": "watch_roles",
@@ -382,6 +429,8 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
 
     if event_type == "ownership_transferred" and parsed.get("new_owner"):
         state["owner"] = parsed["new_owner"]
+    elif event_type == "authority_updated" and parsed.get("new_authority"):
+        state["authority"] = parsed["new_authority"]
     elif event_type in ("paused", "unpaused"):
         state["paused"] = event_type == "paused"
     elif event_type == "threshold_changed" and parsed.get("threshold"):
@@ -475,6 +524,24 @@ def _sync_relational_tables(
         )
         for cv in cv_rows:
             cv.value = new_owner
+
+    # --- AuthorityUpdated → ControllerValue where controller_id is 'authority' ---
+    elif event_type == "authority_updated":
+        new_authority = parsed.get("new_authority")
+        if not new_authority:
+            return
+        cv_rows = (
+            session.execute(
+                select(ControllerValue).where(
+                    ControllerValue.contract_id == mc.contract_id,
+                    ControllerValue.controller_id.in_(_AUTHORITY_CONTROLLER_IDS),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for cv in cv_rows:
+            cv.value = new_authority
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:

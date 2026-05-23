@@ -247,6 +247,52 @@ class TestBuildMonitoringConfig:
         config = _build_monitoring_config(summary, [], "regular")
         assert config["watch_roles"] is True
 
+    def test_tracked_topics_persisted_when_supplied(self):
+        """tracked_topics passed in (from extract_governance_topics) must
+        land on monitoring_config so the scanner can union them into the
+        global topic filter and dispatch per-emitter."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        tracked = [
+            {
+                "topic0": "0x" + "a" * 64,
+                "signature": "OwnerUpdated(address,address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [],
+            }
+        ]
+        config = _build_monitoring_config(None, [], "regular", tracked)
+        assert config["tracked_topics"] == tracked
+
+    def test_authority_topic_sets_watch_authority_flag(self):
+        """Presence of an authority_updated tracked-topic flips on the
+        watch_authority flag explicitly — the flag-getter defaults to
+        True on missing keys, so this is documentation-on-inspection
+        rather than gating, but it keeps the config self-describing."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        tracked = [
+            {
+                "topic0": "0x" + "b" * 64,
+                "signature": "AuthorityUpdated(address,address)",
+                "event_type": "authority_updated",
+                "controller_id": "external_contract:authority",
+                "inputs": [],
+            }
+        ]
+        config = _build_monitoring_config(None, [], "regular", tracked)
+        assert config.get("watch_authority") is True
+
+    def test_empty_tracked_topics_omitted(self):
+        """No tracked_topics arg → no field on monitoring_config (avoids
+        polluting existing rows with empty lists during a reconcile)."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        config = _build_monitoring_config(None, [], "regular")
+        assert "tracked_topics" not in config
+        assert "watch_authority" not in config
+
 
 # ---------------------------------------------------------------------------
 # Tests for _build_initial_state
