@@ -621,7 +621,13 @@ def _create_completed_job(session, address, protocol_id):
 
 
 def _grant_primary_authority(
-    session, contract_id, principal_address, function_name="setOwner", resolved_type=None, effect_labels=None
+    session,
+    contract_id,
+    principal_address,
+    function_name="setOwner",
+    resolved_type=None,
+    effect_labels=None,
+    details=None,
 ):
     """Make ``principal_address`` a primary controller of the contract by
     attaching a ``FunctionPrincipal`` row. ``assign_primary_controllers``
@@ -644,11 +650,18 @@ def _grant_primary_authority(
         function_name=function_name,
         resolved_type=resolved_type,
         effect_labels=effect_labels,
+        details=details,
     )
 
 
 def _grant_shared_authority(
-    session, contract_id, principal_addresses, function_name="setOwner", resolved_type=None, effect_labels=None
+    session,
+    contract_id,
+    principal_addresses,
+    function_name="setOwner",
+    resolved_type=None,
+    effect_labels=None,
+    details=None,
 ):
     """Attach a single ``EffectiveFunction`` callable by *every* address in
     *principal_addresses*. The shared caller-set size is what the co-controller
@@ -671,6 +684,7 @@ def _grant_shared_authority(
                 address=addr,
                 principal_type="controller",
                 resolved_type=resolved_type,
+                details=details,
             )
         )
     session.flush()
@@ -1547,3 +1561,97 @@ class TestControlGraphTypeReconciliation:
         pg_session.flush()
         assert reconcile_control_graph_types(pg_session, [c.id]) == 0
         assert self._node_type(pg_session, c.id, addr) == "proxy_admin"
+
+    @staticmethod
+    def _node_details(session, contract_id, addr):
+        from db.models import ControlGraphNode
+
+        return (
+            session.execute(
+                select(ControlGraphNode.details).where(
+                    ControlGraphNode.contract_id == contract_id,
+                    ControlGraphNode.address == addr,
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    def test_folds_safe_owners_and_threshold_from_fp(self, pg_session):
+        """Upgrading a node to ``safe`` also folds the signer set + threshold
+        the classifier stored on FunctionPrincipal — so the node doesn't end up
+        asserting ``safe`` with no owners (the bug that hid a multisig's signers
+        on the Surface canvas)."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b1" * 20)
+        gov_safe = "0x" + "f1" * 20
+        owners = ["0x" + "11" * 20, "0x" + "22" * 20, "0x" + "33" * 20]
+        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            gov_safe,
+            function_name="cancel",
+            resolved_type="safe",
+            details={"owners": owners, "threshold": 2},
+        )
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
+        details = self._node_details(pg_session, c.id, gov_safe) or {}
+        assert details.get("owners") == owners
+        assert details.get("threshold") == 2
+
+    def test_backfills_config_onto_already_typed_node(self, pg_session):
+        """A node a prior *type-only* reconcile already flipped to ``safe`` (no
+        owners) is repaired on the next run — the selector revisits
+        governance-typed rows so existing data converges, and re-running once
+        backfilled changes nothing."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b2" * 20)
+        gov_safe = "0x" + "f2" * 20
+        owners = ["0x" + "44" * 20, "0x" + "55" * 20]
+        # Node is already 'safe' but carries no owners — the half-reconciled state.
+        self._add_cgn(pg_session, c.id, gov_safe, "safe")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            gov_safe,
+            function_name="cancel",
+            resolved_type="safe",
+            details={"owners": owners, "threshold": 2},
+        )
+        pg_session.commit()
+
+        # No type change, but config is backfilled → counts as one row changed.
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        pg_session.flush()
+        assert (self._node_details(pg_session, c.id, gov_safe) or {}).get("owners") == owners
+        # Converged: a second run touches nothing.
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+
+    def test_does_not_fold_owners_onto_disagreeing_type(self, pg_session):
+        """A safe's owners are never attached to a node the resolution stage
+        concretely typed ``timelock`` — type stays, and no safe-shaped config
+        leaks onto it."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b3" * 20)
+        addr = "0x" + "f3" * 20
+        self._add_cgn(pg_session, c.id, addr, "timelock")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            addr,
+            function_name="schedule",
+            resolved_type="safe",
+            details={"owners": ["0x" + "66" * 20], "threshold": 1},
+        )
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+        assert self._node_type(pg_session, c.id, addr) == "timelock"
+        assert not (self._node_details(pg_session, c.id, addr) or {}).get("owners")
