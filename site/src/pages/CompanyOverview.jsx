@@ -11,6 +11,45 @@ const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
 const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
 
+const CHAIN_ORDER = ["ethereum", "base", "arbitrum", "optimism", "linea", "scroll", "zksync", "blast"];
+
+function formatChainName(chain) {
+  const normalized = String(chain || "unknown").toLowerCase();
+  const labels = {
+    bsc: "BSC",
+    zksync: "zkSync",
+  };
+  if (labels[normalized]) return labels[normalized];
+  return normalized
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Unknown";
+}
+
+function buildChainEntries(contracts) {
+  const counts = new Map();
+  for (const contract of contracts || []) {
+    const chain = String(contract.chain || "unknown").toLowerCase();
+    counts.set(chain, (counts.get(chain) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([chain, count]) => ({
+      chain,
+      count,
+      label: formatChainName(chain),
+    }))
+    .sort((left, right) => {
+      const leftOrder = CHAIN_ORDER.indexOf(left.chain);
+      const rightOrder = CHAIN_ORDER.indexOf(right.chain);
+      if (leftOrder !== -1 || rightOrder !== -1) {
+        return (leftOrder === -1 ? 999 : leftOrder) - (rightOrder === -1 ? 999 : rightOrder);
+      }
+      if (right.count !== left.count) return right.count - left.count;
+      return left.label.localeCompare(right.label);
+    });
+}
+
 export default function CompanyOverview({ companyName, onSelectContract, onNavigateToSurface }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -45,6 +84,10 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
   if (!data) return <div className="page"><section className="panel"><p className="empty">Loading...</p></section></div>;
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
+  const chainEntries = buildChainEntries(contracts);
+  const chainSummary = chainEntries.map((entry) => `${entry.label} ${entry.count}`).join(" · ");
+  const chainCount = chainEntries.length;
+  const chainNoun = chainCount === 1 ? "chain" : "chains";
 
   // The score uses the full company payload: function-level authority,
   // principal details, upgrade state, and audit coverage. Functions
@@ -102,8 +145,16 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
             <p className="company-hero-eyebrow">Protocol</p>
             <h1 className="company-hero-title">{companyName}</h1>
             <p className="company-hero-subtitle">
-              {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? 0} reports on file
+              {contracts.length} contracts mapped across {chainCount} {chainNoun} · {auditCoverage?.audit_count ?? 0} reports on file
             </p>
+            <div className="company-chain-strip" aria-label="Discovered chains">
+              {chainEntries.map((entry) => (
+                <span key={entry.chain} className="company-chain-chip">
+                  <span>{entry.label}</span>
+                  <strong>{entry.count}</strong>
+                </span>
+              ))}
+            </div>
           </div>
         </div>
       </section>
@@ -150,6 +201,10 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
               <div className="company-hero-stat-value">{proxyCount}</div>
               <div className="company-hero-stat-label">Proxies</div>
             </div>
+            <div className="company-hero-stat">
+              <div className="company-hero-stat-value">{chainCount}</div>
+              <div className="company-hero-stat-label">Chains</div>
+            </div>
           </div>
         </div>
 
@@ -165,7 +220,7 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
           <div>
             <p className="eyebrow" style={{ margin: 0 }}>Control Surface</p>
             <h2 className="company-surface-band-title">
-              {contracts.length} contracts · {proxyCount} proxies · audits in the side panel
+              {contracts.length} contracts · {chainSummary || "No chain data"} · {proxyCount} proxies
             </h2>
           </div>
           <div className="company-surface-band-actions">

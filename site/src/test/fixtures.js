@@ -34,6 +34,7 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x1111111111111111111111111111111111111111",
       name: "Weeth",
+      chain: "ethereum",
       risk_level: "low",
       is_proxy: true,
       proxy_type: "ERC1967",
@@ -45,6 +46,7 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x2222222222222222222222222222222222222222",
       name: "LiquidityPool",
+      chain: "base",
       risk_level: "medium",
       upgrade_count: 0,
       controllers: {},
