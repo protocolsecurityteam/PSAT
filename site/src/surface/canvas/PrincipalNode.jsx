@@ -12,12 +12,13 @@ export function PrincipalNode({ data }) {
 
   return (
     <div
-      className={`ps-principal-node${data.focused ? " ps-node-focused" : ""}`}
+      className={`ps-principal-node${data.isGuardian ? " ps-principal-node--guardian" : ""}${data.focused ? " ps-node-focused" : ""}`}
       style={{ "--principal-color": color, cursor: data.onSelect ? "pointer" : "default" }}
       onClick={data.onSelect}
     >
       <Handle type="target" position={Position.Top} id="ctrl-in" className="ps-handle" />
       <Handle type="source" position={Position.Bottom} id="ctrl-out" className="ps-handle" />
+      {data.isGuardian && <div className="ps-principal-cocaption">co-controller</div>}
       <div className="ps-principal-badge" style={{ background: color + "22", color }}>
         {p.type === "safe" && threshold ? `${threshold}/${owners.length} SAFE` : p.type.toUpperCase()}
       </div>

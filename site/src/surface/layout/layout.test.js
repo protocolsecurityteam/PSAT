@@ -213,6 +213,46 @@ describe("buildGraphLayout", () => {
       );
     }
   });
+
+  it("renders every non-primary co-controller as a guardian node, including operator EOAs", () => {
+    // The Safe primary-owns machines[0] (→ group container). The Timelock and
+    // an operator EOA both co-control machines[0] without being primary, so
+    // each renders as its own guardian node (always visible, unlike an on-card
+    // label). EOAs are included on Surface even though monitoring drops them
+    // (an EOA that can pause/move funds is a controller worth showing). A
+    // principal already shown as a group is not duplicated into the rail.
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: [machines[0].address],
+      primary_for: p.resolved_type === "safe" ? [machines[0].address] : [],
+      co_controls: p.resolved_type === "timelock" ? [machines[0].address] : [],
+    }));
+    const eoaAddr = "0x" + "ee".repeat(20);
+    principals.push({
+      address: eoaAddr,
+      type: "eoa",
+      label: "ops-bot",
+      details: {},
+      controls: [machines[0].address],
+      primary_for: [],
+      co_controls: [machines[0].address],
+    });
+
+    const { nodes } = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
+    const principalNodes = nodes.filter((n) => n.type === "principal");
+    const timelock = principals.find((p) => p.type === "timelock");
+    const safe = principals.find((p) => p.type === "safe");
+
+    // The Timelock AND the operator EOA co-controllers both render as guardians.
+    expect(principalNodes.some((n) => n.id === timelock.address && n.data.isGuardian)).toBe(true);
+    expect(principalNodes.some((n) => n.id.toLowerCase() === eoaAddr && n.data.isGuardian)).toBe(true);
+    // The Safe is a group container, never duplicated as a guardian node.
+    expect(principalNodes.some((n) => n.id === safe.address)).toBe(false);
+    expect(nodes.some((n) => n.type === "group" && n.id === safe.address)).toBe(true);
+  });
 });
 
 describe("aggregateEdges", () => {

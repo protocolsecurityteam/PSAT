@@ -36,6 +36,21 @@ export function ContractNode({ data }) {
       {m.standards && m.standards.length > 0 && (
         <div className="ps-node-standards">{m.standards.join(" · ")}</div>
       )}
+      {data.otherCallers && data.otherCallers.length > 0 && (
+        <button
+          type="button"
+          className="ps-node-callers"
+          title={`${data.otherCallers.length} additional authorized caller(s) — click to inspect: ${data.otherCallers
+            .map((c) => `${c.type} ${c.address}`)
+            .join(", ")}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            data.onSelect?.();
+          }}
+        >
+          +{data.otherCallers.length} callers
+        </button>
+      )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
       <div className="ps-node-role" style={{ color: roleColor }}>{(ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "")}</div>
       {m.total_usd ? <div className="ps-node-balance">{formatUsd(m.total_usd)}</div> : null}

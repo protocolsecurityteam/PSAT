@@ -80,6 +80,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     // edges existed between the same pair.
     const connectedNodes = new Set();
     const selectionChips = new Map();
+    // Edges from a selected co-controller (a guardian-rail node, or a group)
+    // to the contracts it controls — drawn only while selected, so the rail
+    // stays a clean band rather than permanent cross-group fanout.
+    const coControllerEdges = [];
     if (sel) {
       connectedNodes.add(sel);
       const addChip = (addrLc, caps, direction) => {
@@ -148,16 +152,67 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       const selPrincipal = (principals || []).find(
         (p) => p.address?.toLowerCase() === sel,
       );
+      // Per-contract capability detail for the selected principal
+      // (server-computed principal.controls_detail, passthrough-resolved), so a
+      // chip says what the controller can actually DO ("pause, fund-out", or
+      // concrete function names) rather than a generic "<type>-controlled".
+      // Used for both the group children (primary) and the co-controlled set.
+      const detailByContract = new Map();
+      for (const d of selPrincipal?.controls_detail || []) {
+        if (d?.address) detailByContract.set(d.address.toLowerCase(), d);
+      }
+      const capsTextFor = (addrLc) => {
+        const d = detailByContract.get(addrLc);
+        const caps = d?.capabilities || [];
+        const fns = d?.functions || [];
+        return caps.length
+          ? caps.join(", ")
+          : fns.length
+          ? fns.slice(0, 3).join(", ") + (fns.length > 3 ? ` +${fns.length - 3}` : "")
+          : `${selPrincipal?.type || "principal"}-controlled`;
+      };
       for (const n of initNodes) {
         const nid = n.id?.toLowerCase();
         const pid = n.parentId?.toLowerCase();
         if (pid === sel) {
           connectedNodes.add(nid);
           if (selPrincipal) {
-            addChip(nid, `${selPrincipal.type || "principal"}-controlled`, "out");
+            addChip(nid, capsTextFor(nid), "out");
           }
         }
         if (nid === sel && pid) connectedNodes.add(pid);
+      }
+
+      // Co-controller selection. The selected principal (a guardian-rail node,
+      // or a group that also co-controls elsewhere) may hold authority on
+      // contracts it isn't the primary owner of (principal.co_controls). Those
+      // relationships have no permanent edge — the owner-grouping dropped
+      // principal→contract edges to kill fanout — so on select we light up the
+      // contracts it controls (and their containing groups, so a highlighted
+      // child isn't dimmed along with its box) and draw its edges, which all
+      // vanish on deselect.
+      const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
+      if (coControls.length) {
+        const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
+        for (const c of coControls) {
+          const t = c?.toLowerCase();
+          const tn = t && nodeByAddr.get(t);
+          if (!tn) continue;
+          connectedNodes.add(t);
+          if (tn.parentId) connectedNodes.add(tn.parentId.toLowerCase());
+          addChip(t, capsTextFor(t), "out");
+          coControllerEdges.push({
+            id: `co-${sel}-${t}`,
+            source: selPrincipal.address,
+            target: tn.id,
+            sourceHandle: "ctrl-out",
+            targetHandle: "ctrl-in",
+            type: "smoothstep",
+            style: { stroke: "#d99a4e", strokeWidth: 1.5, strokeDasharray: "4 3" },
+            animated: true,
+            data: { coControl: true },
+          });
+        }
       }
     }
 
@@ -231,7 +286,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       };
     });
 
-    setEdges(nextEdges);
+    setEdges(coControllerEdges.length ? [...nextEdges, ...coControllerEdges] : nextEdges);
   }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal]);
 
   return (

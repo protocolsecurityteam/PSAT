@@ -288,11 +288,16 @@ export function buildGraphLayout(machines, fundFlows, principals) {
     const pos = fallbackPositions[i] || { x: 0, y: 0 };
     contractPositions.set(m.address?.toLowerCase(), pos);
     const groupAddr = contractToGroup.get(m.address?.toLowerCase());
+    // Permissionless / lower-privilege callers (server-computed
+    // machine.other_callers = [{address, type, label}, …]): FP-authorized
+    // callers that aren't the primary owner or a guardian. Rendered in
+    // aggregate as the card's "+N callers" affordance so none is invisible,
+    // without minting a node (or edge) per bidder.
     const node = {
       id: m.address,
       type: "contract",
       position: pos,
-      data: { machine: m },
+      data: { machine: m, otherCallers: m.other_callers || [] },
     };
     if (groupAddr) {
       // The principal's original-cased address is what we used as the
@@ -304,11 +309,33 @@ export function buildGraphLayout(machines, fundFlows, principals) {
     nodes.push(node);
   }
 
-  // Every non-contract principal now lives as a group container or not
-  // at all — we no longer render the dashed standalone PrincipalNode.
-  // Principals that lost their candidate children to higher-priority
-  // owners simply disappear from the canvas; the sidebar and search
-  // still expose them via companyData.principals.
+  // Co-controller "guardians": principals that hold real authority on
+  // contracts they don't primary-own (principal.co_controls, server-computed
+  // — e.g. a pause / fund-recovery Safe on contracts a bigger governance Safe
+  // wins). They aren't group containers (they lost the primary contest), and a
+  // label on the governed card is invisible at fit-view — so each renders as
+  // its own node in a rail above the groups (positioned in elkLayout). Their
+  // cross-group edges are drawn only on select downstream, never as permanent
+  // fanout — the spaghetti the owner-grouping removed. ANY significant
+  // principal type qualifies, including operator EOAs: a key/bot that can pause
+  // or move funds is a controller worth showing even though monitoring can't
+  // watch an EOA's events (Surface and Monitoring intentionally diverge here).
+  // A principal already shown as a group is not duplicated. Addresses with no
+  // co-control authority (permissionless bidders, fund sinks, CGN noise) don't
+  // become guardians — the permissionless long tail renders as a per-contract
+  // "+N callers" affordance instead (machine.other_callers).
+  for (const p of principalList) {
+    const paddr = p.address?.toLowerCase();
+    if (!paddr) continue;
+    if (groupedPrincipals.has(paddr)) continue;
+    if (!(p.co_controls || []).some((c) => contractAddrs.has(c?.toLowerCase()))) continue;
+    nodes.push({
+      id: p.address,
+      type: "principal",
+      position: { x: 0, y: 0 },
+      data: { principal: p, isGuardian: true },
+    });
+  }
 
   const edges = [];
   for (const [, group] of byName) {
@@ -788,13 +815,17 @@ export async function elkLayout(machines, fundFlows, principals) {
     groupInteriors.set(n.id, layoutGroupInterior(kids, machines));
   }
 
-  const elkChildren = topLevel.map((n) => {
-    if (n.type === "group") {
-      const interior = groupInteriors.get(n.id);
-      return { id: n.id, width: interior.width, height: interior.height };
-    }
-    return { id: n.id, ...dimsFor(n) };
-  });
+  // Guardians (co-controller nodes) are positioned in their own rail below,
+  // not packed by ELK among the groups.
+  const elkChildren = topLevel
+    .filter((n) => !n.data?.isGuardian)
+    .map((n) => {
+      if (n.type === "group") {
+        const interior = groupInteriors.get(n.id);
+        return { id: n.id, width: interior.width, height: interior.height };
+      }
+      return { id: n.id, ...dimsFor(n) };
+    });
 
   // ELK only does the outer rectpacking pass over groups + standalone
   // contracts. No edges fed to ELK; intra-group routing is handled
@@ -817,6 +848,40 @@ export async function elkLayout(machines, fundFlows, principals) {
       topPos.set(child.id, { x: child.x || 0, y: child.y || 0 });
     }
 
+    // Guardians rail: a horizontal row of co-controller nodes above the
+    // ELK-positioned content. Always visible at fit-view (unlike an on-card
+    // label); their edges to the contracts they control only appear on select
+    // (SurfaceCanvas), so the rail stays a clean band rather than fanout.
+    const guardianRail = new Map();
+    const guardians = topLevel.filter((n) => n.data?.isGuardian);
+    if (guardians.length) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const pos of topPos.values()) {
+        if (pos.x < minX) minX = pos.x;
+        if (pos.y < minY) minY = pos.y;
+        if (pos.y > maxY) maxY = pos.y;
+      }
+      if (!Number.isFinite(minX)) {
+        minX = 0;
+        minY = 0;
+        maxY = 0;
+      }
+      // A vertical column to the LEFT of the content, centred against its
+      // height. Left/centre is the only canvas region clear of the surface's
+      // top search bar and bottom mode-chip rail, so the guardians stay
+      // visible and clickable instead of hiding under (or being click-blocked
+      // by) that chrome.
+      const STEP = PRINCIPAL_H + 48;
+      const railX = minX - PRINCIPAL_W - 160;
+      const centerY = (minY + maxY) / 2;
+      const startY = centerY - ((guardians.length - 1) / 2) * STEP;
+      guardians.forEach((n, i) => {
+        guardianRail.set(n.id, { x: Math.round(railX), y: Math.round(startY + i * STEP) });
+      });
+    }
+
     const laidOutNodes = rawNodes.map((n) => {
       if (n.parentId) {
         // Child positions come from the JS interior layout, relative
@@ -826,7 +891,7 @@ export async function elkLayout(machines, fundFlows, principals) {
         const pos = interior?.positions?.get(n.id) || n.position;
         return { ...n, position: pos };
       }
-      const next = { ...n, position: topPos.get(n.id) || n.position };
+      const next = { ...n, position: guardianRail.get(n.id) || topPos.get(n.id) || n.position };
       if (n.type === "group") {
         const interior = groupInteriors.get(n.id);
         if (interior) {
