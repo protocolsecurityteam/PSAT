@@ -252,7 +252,8 @@ class TestEnrollmentWithProxyContracts:
         enrolled = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
 
         assert enrolled is True
-        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", None)
+        # Fast-path hint skips the expensive primary-controller pass.
+        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", None, enroll_controllers=False)
 
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_exclude_job_id_threads_through_to_enroll(self, mock_enroll):
@@ -281,7 +282,9 @@ class TestEnrollmentWithProxyContracts:
             exclude_job_id=calling_job_id,
         )
         assert enrolled is True
-        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", calling_job_id)
+        mock_enroll.assert_called_once_with(
+            mock_session, 1, "http://rpc", "ethereum", calling_job_id, enroll_controllers=False
+        )
 
 
 # ---------------------------------------------------------------------------

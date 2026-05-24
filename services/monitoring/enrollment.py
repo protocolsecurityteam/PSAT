@@ -7,22 +7,20 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.contract_materializations import find_by_address, hydrate_tracking_plan
 from db.models import (
     Contract,
     ContractSummary,
-    ControlGraphNode,
     ControllerValue,
-    EffectiveFunction,
-    FunctionPrincipal,
     Job,
     JobStatus,
     MonitoredContract,
     WatchedProxy,
 )
+from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
@@ -75,7 +73,11 @@ def maybe_enroll_protocol(
         logger.debug("Protocol %s has no completed jobs, skipping enrollment", protocol_id)
         return False
 
-    enroll_protocol_contracts(session, protocol_id, rpc_url, chain, exclude_job_id)
+    # Fast-path hint: enroll contract rows immediately but skip the
+    # primary-controller pass (it runs build_governance_view per call). The
+    # reconciler converges controllers on its cadence; manual re-enroll runs
+    # them on demand.
+    enroll_protocol_contracts(session, protocol_id, rpc_url, chain, exclude_job_id, enroll_controllers=False)
     return True
 
 
@@ -85,15 +87,24 @@ def enroll_protocol_contracts(
     rpc_url: str,
     chain: str = "ethereum",
     calling_job_id: Any = None,
+    enroll_controllers: bool = True,
 ) -> list[MonitoredContract]:
     """Create MonitoredContract rows for all contracts in a protocol.
 
     Performs upsert (ON CONFLICT address+chain DO UPDATE) so this is
     idempotent. Also creates WatchedProxy rows for proxy contracts and
-    discovers controller addresses (safes, timelocks) from the control graph.
+    enrolls the protocol's primary controllers (safes, timelocks).
 
     *calling_job_id* is the job that triggered enrollment — it's still in
     ``processing`` status, so we include it alongside completed jobs.
+
+    *enroll_controllers* gates the primary-controller pass, which runs the
+    Surface governance computation (``build_governance_view``) and is the
+    expensive part. The per-job fast-path hint (``maybe_enroll_protocol``)
+    passes ``False`` so it stays cheap; the reconciler and the manual
+    re-enroll route leave it ``True``, so controllers converge on the
+    reconcile cadence (or immediately on demand). Contract rows and the CGN
+    type reconciliation run regardless.
 
     Returns list of created/updated MonitoredContract rows.
     """
@@ -124,6 +135,19 @@ def enroll_protocol_contracts(
     if not contracts:
         logger.info("Protocol %s has no analyzed contracts, nothing to enroll", protocol_id)
         return []
+
+    # Fold authoritative FunctionPrincipal typing back into control_graph_nodes.
+    # The resolution stage leaves a governance Safe/Timelock reachable only
+    # through per-function authority typed ``unknown`` (its graph walk never
+    # classified it). Enrollment itself no longer reads CGN types — it enrolls
+    # the primary controllers computed by ``build_governance_view`` — but the
+    # other CGN consumers (the chat context layer, the analysis-detail graph)
+    # still read these rows, so reconciling keeps the persisted graph
+    # consistent with FP. Idempotent; only upgrades unknown → concrete.
+    reconciled = reconcile_control_graph_types(session, [c.id for c in contracts])
+    if reconciled:
+        session.flush()
+        logger.info("Reconciled %d control-graph node types for protocol %s", reconciled, protocol_id)
 
     # Get current block number for last_scanned_block
     try:
@@ -216,11 +240,19 @@ def enroll_protocol_contracts(
 
         enrolled.append(mc)
 
-    # Discover controller addresses from the control graph
-    _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
-
-    # Flush so controller rows are visible to the stale-detection query below.
-    session.flush()
+    # Enroll the protocol's primary controllers. This runs
+    # build_governance_view (the Surface computation), so it's gated off the
+    # per-job fast-path hint and runs on the reconciler cadence + manual
+    # re-enroll instead — the low-latency-hint / cadence-convergence split the
+    # reconciler module documents. Controllers therefore land in the Monitoring
+    # tab within one reconcile interval of analysis, or immediately via
+    # ``POST /api/protocols/{id}/re-enroll``. The stale-detection below
+    # re-includes existing controller rows from the DB, so skipping this pass
+    # never deactivates controllers a prior reconciler enrolled.
+    if enroll_controllers:
+        _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
+        # Flush so controller rows are visible to the stale-detection query below.
+        session.flush()
 
     # Deactivate stale MonitoredContract rows for this protocol that are no
     # longer in the enrolled set (e.g. inventory addresses that were never
@@ -505,26 +537,10 @@ def _bridge_to_watched_proxy(
         mc.watched_proxy_id = wp.id
 
 
-# CGN ``resolved_type`` → principal type understood by
-# :func:`assign_primary_controllers`. EOAs are intentionally absent
-# even though they're valid principals — there's nothing useful to
-# monitor on an EOA (no contract events, no state), and the prior
-# enrollment behavior never materialized MonitoredContract rows for
-# them. The company-overview path keeps EOAs in its principal list so
-# they still surface as Surface group containers when they win
-# primary_for.
-_CGN_TYPE_TO_PRINCIPAL_TYPE = {
-    "safe": "safe",
-    "gnosis_safe": "safe",
-    "timelock": "timelock",
-    "proxy": "proxy_admin",
-    "proxy_admin": "proxy_admin",
-}
-
-
-# MonitoredContract.contract_type values populated by this module via
-# ``_CGN_TYPE_TO_PRINCIPAL_TYPE``. Pass 2 below scans the full set so
-# zombies of every flavor get caught.
+# MonitoredContract.contract_type values this module materializes for
+# controller principals. Pass 2 in ``_enroll_controller_addresses`` scans the
+# full set so a controller of any flavor gets demoted once it stops being a
+# primary controller.
 _CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
 
 
@@ -535,88 +551,42 @@ def _enroll_controller_addresses(
     chain: str,
     current_block: int,
 ) -> None:
-    """Discover and enroll controller addresses from control graph nodes.
+    """Enroll the protocol's primary controllers (Safes / Timelocks / proxy
+    admins) as MonitoredContract rows, and demote any that are no longer
+    primary.
 
-    A CGN principal (Safe / Timelock / proxy admin) is enrolled iff it
-    holds function-level authority on at least one protocol contract —
-    i.e. an address that appears in ``FunctionPrincipal`` for any
-    ``EffectiveFunction`` of one of *contracts*. CGN on its own
-    over-enrolls because the table also stores state-variable
-    destinations (``accountantState.payoutAddress`` pointing at a Safe
-    that's actually a fee sink, not a governor); ``FunctionPrincipal``
-    is the authoritative "can actually call something" signal already
-    trusted by ``services.aggregations.company_overview``.
+    The enrolled set is exactly the winner-take-all set the Surface canvas
+    groups by: :func:`primary_controllers_for_protocol` runs the same loaders
+    + ``build_governance_view`` the ``/company`` endpoint uses and returns
+    each principal that primary-controls at least one contract. Sharing that
+    single computation is what keeps the Monitoring tab and the Surface canvas
+    from disagreeing on who governs the protocol — deriving the set a second
+    way here is what historically let the two views drift (a fund-destination
+    Safe stored in a state variable landing in Monitoring but not on the
+    canvas; or, conversely, a real governance Safe whose control-graph node
+    was typed ``unknown`` showing on the canvas but never enrolled).
+    Non-primary FP callers — e.g. whitelisted auction bidders that can only
+    call ``createBid`` — and fund-destination Safes never win ``primary_for``,
+    so they're excluded by construction. EOAs are dropped upstream (nothing
+    event-bearing to monitor); ``proxy_admin`` is enrolled as the historical
+    ``'proxy'`` contract_type.
 
-    The Surface canvas uses a *single* primary controller per contract
-    (winner-take-all by :func:`assign_primary_controllers`) so groups
-    don't overlap. Enrollment intentionally uses the broader
-    *eligibility* check: a contract owned by both a Safe and a
-    Timelock needs both to be monitored (each emits its own events),
-    even though Surface only renders the Safe's group.
-
-    Demotion is symmetric with enrollment and is driven by the same FP
-    signal — every auto-enrolled controller row whose address has no
-    current FP authority on the protocol's contracts is deactivated
-    (``is_active=False``, ``enrollment_source="auto_deprimary"``),
-    regardless of whether CGN still surfaces it. That covers both the
-    "Safe lost its function gate" case (CGN still present) and the
-    "Safe fell out of CGN entirely" zombie case observed on prod
-    (timelocks enrolled in a prior run whose CGN nodes disappeared
-    when analysis was rebuilt — the deployed code had no path to
-    remove them). Demoted rows are kept rather than deleted so
-    MonitoredEvent history survives a re-promotion or audit.
+    Demotion is symmetric: an auto-enrolled controller row whose address is no
+    longer a primary controller is deactivated (``is_active=False``,
+    ``enrollment_source="auto_deprimary"``) rather than deleted, so its
+    MonitoredEvent history survives a later re-promotion or an audit.
+    Protocol-contract rows (owned by the main loop in
+    ``enroll_protocol_contracts``) are never touched.
     """
+    from services.aggregations.company_overview import primary_controllers_for_protocol
+
     enrolled_contract_addrs = {c.address.lower() for c in contracts}
+    primary_controllers = primary_controllers_for_protocol(session, protocol_id)
 
-    # Collect every candidate principal from the CGN walk.
-    candidates_by_addr: dict[str, str] = {}
-    for contract in contracts:
-        nodes = (
-            session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract.id)).scalars().all()
-        )
-        for node in nodes:
-            addr = node.address.lower() if node.address else ""
-            if not addr or addr in enrolled_contract_addrs:
-                continue
-            ptype = _CGN_TYPE_TO_PRINCIPAL_TYPE.get(node.resolved_type or "")
-            if not ptype:
-                continue
-            # First-write-wins; CGN-resolved type for an address shouldn't
-            # vary across contracts within a single protocol, and if it
-            # does the difference is uninteresting for the enrollment
-            # decision (we just need to know it's some kind of principal).
-            candidates_by_addr.setdefault(addr, ptype)
-
-    # Eligibility: the set of FP-tagged addresses across this protocol's
-    # contracts. An address is enrollment-eligible iff it appears here.
-    # We compute this even when candidates_by_addr is empty so Pass 2 can
-    # still demote zombies whose CGN evidence is gone.
-    contract_ids = [c.id for c in contracts]
-    fp_eligible_addrs: set[str] = set()
-    if contract_ids:
-        for (fp_addr,) in session.execute(
-            select(func.lower(FunctionPrincipal.address))
-            .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
-            .where(
-                EffectiveFunction.contract_id.in_(contract_ids),
-                FunctionPrincipal.address.is_not(None),
-                or_(
-                    FunctionPrincipal.principal_type != "signature_witness",
-                    FunctionPrincipal.principal_type.is_(None),
-                ),
-            )
-            .distinct()
-        ).all():
-            if fp_addr:
-                fp_eligible_addrs.add(fp_addr)
-
-    # Pass 1: enroll / re-promote candidates that currently hold FP authority.
-    for addr, ptype in candidates_by_addr.items():
-        if addr not in fp_eligible_addrs:
+    # Pass 1: enroll / re-promote each primary controller.
+    for addr, monitored_type in primary_controllers.items():
+        if not addr or addr in enrolled_contract_addrs:
             continue
-        # proxy_admin maps to MonitoredContract.contract_type='proxy'
-        # (schema's historical naming); other principal types pass through.
-        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
         existing = session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.address == addr,
@@ -629,13 +599,10 @@ def _enroll_controller_addresses(
             existing.is_active = True
             existing.enrollment_source = "auto"
         else:
-            # CGN-discovered controllers don't have a per-address tracking
-            # plan (they're principals on other contracts, not analyzed
-            # themselves), so the polling plan resolves to vendored
+            # Primary controllers are principals on *other* contracts, not
+            # analyzed themselves, so the polling plan resolves to vendored
             # entries only — Safe gets ``getThreshold``, Timelock gets
-            # ``getMinDelay``, proxy_admin (unknown proxy_type) gets
-            # nothing and stays needs_polling=False, matching the prior
-            # contract_type-keyed behavior.
+            # ``getMinDelay``, proxy_admin gets nothing (needs_polling=False).
             polling_plan = build_polling_plan(
                 contract_type=monitored_type,
                 proxy_type=None,
@@ -659,13 +626,12 @@ def _enroll_controller_addresses(
                 )
             )
 
-    # Pass 2: demote any active auto-enrolled controller row whose
-    # address has no FP authority on this protocol. Symmetric with
-    # Pass 1 — same signal, opposite direction. Catches both the
-    # "CGN-present, FP-absent" demotion AND the zombie case where the
-    # CGN row vanished entirely between enrollment runs. Protocol-
-    # contract rows are excluded so this never touches MC rows owned
-    # by the main contract loop in ``enroll_protocol_contracts``.
+    # Pass 2: demote any active auto-enrolled controller row that is no longer
+    # a primary controller. Symmetric with Pass 1 — same signal, opposite
+    # direction — covering both "lost its primary win" and the zombie case
+    # where the controller dropped out of the governance view entirely between
+    # runs. Protocol-contract rows are excluded so this never touches MC rows
+    # owned by the main contract loop in ``enroll_protocol_contracts``.
     existing_controllers = (
         session.execute(
             select(MonitoredContract).where(
@@ -682,7 +648,7 @@ def _enroll_controller_addresses(
         addr = (mc.address or "").lower()
         if not addr or addr in enrolled_contract_addrs:
             continue
-        if addr in fp_eligible_addrs:
+        if addr in primary_controllers:
             continue
         mc.is_active = False
         mc.enrollment_source = "auto_deprimary"

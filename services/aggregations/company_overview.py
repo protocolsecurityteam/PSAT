@@ -1620,3 +1620,40 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
         },
     )
     return payload
+
+
+def primary_controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, str]:
+    """Map ``principal_address_lc -> MonitoredContract.contract_type`` for every
+    principal that primary-controls at least one contract in the protocol.
+
+    This is the *same* winner-take-all set the Surface canvas groups by: it runs
+    the identical loaders + :func:`build_governance_view` the ``/company``
+    endpoint uses and reads each principal's ``primary_for``. Monitoring
+    enrollment consumes it so the Monitoring tab and the Surface canvas can't
+    disagree on who governs a protocol — the single source of truth
+    :mod:`services.governance.primary_controller` exists to provide.
+
+    EOAs are dropped (no contract events / state to monitor) and ``proxy_admin``
+    maps to the historical ``'proxy'`` contract_type. Read-only.
+    """
+    protocol = session.get(Protocol, protocol_id)
+    if protocol is None:
+        return {}
+    _protocol_row, jobs = resolve_company_jobs(session, protocol.name)
+    if not jobs:
+        return {}
+    contracts_by_job_id = prefetch_contracts(session, jobs)
+    impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+    governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
+
+    controllers: dict[str, str] = {}
+    for principal in governance.principals:
+        if not principal.get("primary_for"):
+            continue
+        ptype = principal.get("type")
+        if ptype not in ("safe", "timelock", "proxy_admin"):
+            continue
+        addr = (principal.get("address") or "").lower()
+        if addr:
+            controllers[addr] = "proxy" if ptype == "proxy_admin" else ptype
+    return controllers
