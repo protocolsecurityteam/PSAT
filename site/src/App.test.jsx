@@ -102,6 +102,9 @@ describe("App router smoke tests", () => {
     navigateTo("/company/etherfi");
     render(<App />);
     expect(await screen.findByRole("heading", { name: "etherfi" })).toBeInTheDocument();
+    expect(await screen.findByText(/2 chains/i)).toBeInTheDocument();
+    expect(screen.getByText("Ethereum")).toBeInTheDocument();
+    expect(screen.getByText("Base")).toBeInTheDocument();
     expectNoCrash();
   });
 

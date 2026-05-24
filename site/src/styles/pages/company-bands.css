@@ -34,6 +34,42 @@
   margin: 4px 0 0;
 }
 
+.company-chain-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.company-chain-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.08);
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.company-chain-chip strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* Score band: score + stats on left, radar on right. No panel. */
 .company-score-band {
   display: flex;
@@ -110,7 +146,7 @@
 /* Stats stacked under the score — no panel, tight grid */
 .company-score-left .company-hero-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, max-content));
+  grid-template-columns: repeat(5, minmax(0, max-content));
   gap: 28px;
   margin-top: 0;
 }
@@ -228,5 +264,4 @@
   .company-explore-band { padding: 16px 24px 24px; }
   .company-page-rest { padding: 8px 16px 32px; }
 }
-
 
