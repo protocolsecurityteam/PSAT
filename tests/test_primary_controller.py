@@ -9,11 +9,20 @@ and the FP-based eligibility rule are tested here in isolation.
 
 from __future__ import annotations
 
-from services.governance.primary_controller import assign_primary_controllers
+from services.governance.primary_controller import (
+    assign_co_controllers,
+    assign_primary_controllers,
+)
 
 
 def _p(addr: str, ptype: str) -> dict:
     return {"address": addr, "type": ptype}
+
+
+def _fn(callers: set[str], labels: set[str] | None = None) -> dict:
+    """One EffectiveFunction's caller set + effect labels, the shape
+    ``assign_co_controllers`` reads per contract."""
+    return {"callers": set(callers), "labels": set(labels or ())}
 
 
 def test_unknown_type_excluded():
@@ -204,3 +213,72 @@ def test_governance_passthrough_does_not_recurse_through_non_governance():
     # manager is NOT passed through → safe only owns manager, not vault.
     result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough=set())
     assert result[safe] == [manager]
+
+
+# --- assign_co_controllers -------------------------------------------------
+#
+# The pauser/guardian case: a Safe with real authority (pause, recover, …) on
+# contracts that a bigger governance Safe wins the primary contest for. It must
+# be recovered as a co-controller; a permissionless caller (createBid, shared by
+# many) must not be.
+
+
+def test_co_controller_privileged_label_kept_despite_losing_primary():
+    """A guardian Safe that can ``pause`` a contract the big Safe primary-owns
+    co-controls it: ``pause_toggle`` is a privileged label, so the wide
+    caller set is irrelevant. Mirrors EtherFi 0x2aca losing 8 contracts to the
+    timelock-passthrough Safe yet holding pause/recover on all of them."""
+    big, guardian, contract = "0xbig", "0xguardian", "0xc1"
+    primary_for = {big: [contract], guardian: []}
+    detail = {contract: [_fn({big, guardian, "0xeoa"}, {"pause_toggle"})]}
+    result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
+    assert result[guardian] == [contract]
+    # The primary is never listed as co-controlling what it already owns.
+    assert result[big] == []
+
+
+def test_co_controller_tight_gate_kept_even_without_strong_label():
+    """A sole-caller config/withdrawal gate (e.g. ``setCapacity`` / ``sweepFunds``
+    the analyzer only labels ``external_contract_call``) still counts: the gate
+    arm keeps it. Mirrors the ops timelock 0xcd425f44, kept with no strong
+    label because every function it holds is tightly gated."""
+    big, ops, contract = "0xbig", "0xops", "0xc1"
+    primary_for = {big: [contract], ops: []}
+    detail = {contract: [_fn({ops}, {"external_contract_call"})]}
+    result = assign_co_controllers([_p(big, "safe"), _p(ops, "timelock")], detail, primary_for)
+    assert result[ops] == [contract]
+
+
+def test_co_controller_permissionless_caller_excluded():
+    """A function shared by many callers with no privileged label is a broad
+    whitelist, not governance — none of its callers co-control. Mirrors
+    ``AuctionManager.createBid`` (33 bidders, ``external_contract_call``)."""
+    bidders = {f"0xbidder{i}" for i in range(8)}
+    contract = "0xauction"
+    principals = [_p(b, "safe") for b in bidders]
+    primary_for = {b: [] for b in bidders}
+    detail = {contract: [_fn(bidders, {"external_contract_call"})]}
+    result = assign_co_controllers(principals, detail, primary_for)
+    assert all(result[b] == [] for b in bidders)
+
+
+def test_co_controller_non_principal_types_ignored():
+    """Only safe/timelock/eoa/proxy_admin participate; a ``contract``-typed
+    caller on a significant function is not a co-controller."""
+    contract = "0xc1"
+    detail = {contract: [_fn({"0xinner", "0xsafe"}, {"pause_toggle"})]}
+    result = assign_co_controllers([_p("0xinner", "contract"), _p("0xsafe", "safe")], detail, {"0xsafe": []})
+    assert "0xinner" not in result
+    assert result["0xsafe"] == [contract]
+
+
+def test_co_controller_empty_and_shape():
+    """Empty inputs are safe, and every participating principal appears with at
+    least an empty list (so a consumer can tell 'co-controls nothing' from
+    'unknown principal')."""
+    assert assign_co_controllers([], {}, {}) == {}
+    assert assign_co_controllers([_p("0xa", "safe")], {}, {}) == {"0xa": []}
+    # Address casing is normalized on both sides.
+    detail = {"0xC1": [_fn({"0xAbC"}, {"role_management"})]}
+    result = assign_co_controllers([_p("0xABC", "safe")], detail, {})
+    assert result == {"0xabc": ["0xc1"]}

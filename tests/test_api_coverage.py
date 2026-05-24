@@ -1788,7 +1788,7 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         assert c["is_proxy"] is True
         assert "upgradeable" in c["capabilities"]
         assert "pause" in c["capabilities"]
-        assert "value-in" in c["capabilities"]
+        assert "fund-in" in c["capabilities"]  # asset_pull → shared "fund-in" tag (was "value-in")
         assert "delegatecall" in c["capabilities"]
         assert c["upgrade_count"] == 1
         assert c["has_timelock"] is True

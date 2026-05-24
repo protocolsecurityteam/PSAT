@@ -48,7 +48,7 @@ from db.models import (
     TvlSnapshot,
     UpgradeEvent,
 )
-from services.governance.primary_controller import assign_primary_controllers
+from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 
 logger = logging.getLogger("services.aggregations.company_overview")
@@ -299,6 +299,7 @@ def _prefetch_child_tables(
         "fp_governance_rows": {},
         "fp_in_contract_principals": {},
         "fp_all_addrs": {},
+        "fp_function_detail": {},
         "upgrade_events_count": {},
         "upgrade_events_last": {},
         "balances": {},
@@ -521,6 +522,60 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
+    def _fp_function_detail(s: Session) -> tuple[dict[int, list[dict[str, Any]]], int]:
+        """Per-contract, per-function ``{"function": str, "callers": set,
+        "labels": set}``. Drives two things:
+
+        * the co-controller rule in
+          :func:`services.governance.primary_controller.assign_co_controllers`,
+          which keeps a non-primary principal only when it holds authority on a
+          function that is privileged (a strong effect label) or tightly gated
+          (few authorized callers) — separating a real guardian/admin from a
+          permissionless caller (``createBid``, shared by dozens of bidders);
+        * the per-(controller, contract) capability detail surfaced on the
+          canvas (which concrete functions / effect categories each controller
+          can actually call), so a relationship reads as "pause · recover"
+          rather than a generic "controlled". ``function_name`` is carried for
+          that — effect labels alone are too coarse (``setCapacity`` is only
+          ``external_contract_call``).
+
+        ``signature_witness`` rows are excluded for the same reason as the
+        sibling FP projections: a signer of a message isn't a caller."""
+        by_ef: dict[int, dict[str, Any]] = {}
+        rows = 0
+        for cid, ef_id, fname, labels, addr in s.execute(
+            select(
+                EffectiveFunction.contract_id,
+                EffectiveFunction.id,
+                EffectiveFunction.function_name,
+                EffectiveFunction.effect_labels,
+                func.lower(FunctionPrincipal.address),
+            )
+            .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
+            .where(
+                EffectiveFunction.contract_id.in_(id_list),
+                FunctionPrincipal.address.is_not(None),
+                or_(
+                    FunctionPrincipal.principal_type != "signature_witness",
+                    FunctionPrincipal.principal_type.is_(None),
+                ),
+            )
+        ).all():
+            if not addr:
+                continue
+            entry = by_ef.get(ef_id)
+            if entry is None:
+                entry = {"contract_id": cid, "function": fname, "labels": set(labels or ()), "callers": set()}
+                by_ef[ef_id] = entry
+            entry["callers"].add(addr)
+            rows += 1
+        local: dict[int, list[dict[str, Any]]] = {}
+        for entry in by_ef.values():
+            local.setdefault(entry["contract_id"], []).append(
+                {"function": entry["function"], "labels": entry["labels"], "callers": entry["callers"]}
+            )
+        return local, rows
+
     def _upgrade_count(s: Session) -> tuple[dict[int, int], int]:
         local: dict[int, int] = {}
         for cid, count in s.execute(
@@ -599,6 +654,7 @@ def _prefetch_child_tables(
         ("fp_governance_rows", "fp_governance_rows", _fp_governance),
         ("fp_in_contract_principals", "fp_in_contract_principals", _fp_in_contract_principals),
         ("fp_all_addrs", "fp_all_addrs", _fp_all_addrs),
+        ("fp_function_detail", "fp_function_detail", _fp_function_detail),
         ("upgrade_events_count", "upgrade_events_count", _upgrade_count),
         ("upgrade_events_last", "upgrade_events_last", _upgrade_last),
     ]
@@ -831,6 +887,37 @@ def _principal_lookup_meta(
     }
 
 
+# THE single capability vocabulary, shared by both the per-contract
+# ``capabilities`` field (the contract card / contract-click chips) and the
+# per-(controller, contract) detail (guardian / co-controller chips, sidebar
+# "Can Call"). One map means the same power reads the same word no matter what
+# you click — a Safe's "fund-out" on EETH matches the chip you'd see clicking
+# EETH itself. ``external_contract_call`` / ``hook_update`` are intentionally
+# unmapped — too coarse to name a power (they cover everything from
+# ``setCapacity`` to ``createBid``); those functions are shown by name instead.
+_EFFECT_CAPABILITY: dict[str, str] = {
+    "pause_toggle": "pause",
+    "ownership_transfer": "ownership",
+    "role_management": "roles",
+    "implementation_update": "upgrade",
+    "asset_send": "fund-out",
+    "asset_pull": "fund-in",
+    "mint": "mint",
+    "burn": "burn",
+    "delegatecall_execution": "delegatecall",
+    "authority_update": "authority",
+    "contract_deployment": "deploy",
+    "arbitrary_external_call": "arbitrary-call",
+}
+
+
+def _capabilities_for(labels: set[str]) -> list[str]:
+    """Sorted, de-duplicated human capability tags for a set of effect labels.
+    Coarse labels with no clean tag drop out — concrete function names carry
+    those instead."""
+    return sorted({_EFFECT_CAPABILITY[label] for label in labels if label in _EFFECT_CAPABILITY})
+
+
 def build_governance_view(
     session: Session,
     jobs: list[Job],
@@ -850,6 +937,7 @@ def build_governance_view(
     cge_by_cid: dict[int, list[ControlGraphEdge]] = children["cge"]
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
+    fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 
     contracts: list[dict[str, Any]] = []
@@ -904,25 +992,17 @@ def build_governance_view(
                     if label not in value_effects:
                         value_effects.append(label)
 
-        capabilities: list[str] = []
+        # Contract capability tags, from the shared vocabulary (_EFFECT_CAPABILITY)
+        # so a contract's chips use the same words as the per-controller chips.
+        # Two non-label extras layered on: ``upgradeable`` (it's a proxy shell)
+        # and ``pause`` from the summary flag (a contract can be pausable without
+        # a pause_toggle EffectiveFunction surfacing).
+        caps_set = set(_capabilities_for(all_effects))
         if is_proxy:
-            capabilities.append("upgradeable")
-        if "implementation_update" in all_effects:
-            capabilities.append("upgrade")
-        if "pause_toggle" in all_effects or (summary_row and summary_row.is_pausable):
-            capabilities.append("pause")
-        if "ownership_transfer" in all_effects:
-            capabilities.append("ownership")
-        if "role_management" in all_effects:
-            capabilities.append("roles")
-        if "asset_pull" in all_effects or "mint" in all_effects:
-            capabilities.append("value-in")
-        if "asset_send" in all_effects or "burn" in all_effects:
-            capabilities.append("value-out")
-        if "delegatecall_execution" in all_effects:
-            capabilities.append("delegatecall")
-        if "arbitrary_external_call" in all_effects:
-            capabilities.append("arbitrary-call")
+            caps_set.add("upgradeable")
+        if summary_row and summary_row.is_pausable:
+            caps_set.add("pause")
+        capabilities: list[str] = sorted(caps_set)
 
         contract_name = None
         if is_proxy and impl_job:
@@ -1100,9 +1180,122 @@ def build_governance_view(
         fp_addrs_by_contract_addr,
         governance_passthrough=governance_passthrough,
     )
+
+    # Co-controllers: principals holding real (privileged or tightly-gated)
+    # authority on a contract they lost the primary contest for. Surfaced as
+    # their own guardian-rail nodes (not group containers) and enrolled in
+    # monitoring, so a pause / fund-recovery guardian Safe isn't invisible just
+    # because a bigger governance Safe won the same contracts. Built from
+    # per-function caller sets + effect labels keyed to the rendered (proxy)
+    # address — same keying as ``primary_for``; see
+    # ``services.governance.primary_controller.assign_co_controllers``.
+    fp_function_detail_by_addr: dict[str, list[dict[str, Any]]] = {}
+    for cid, functions in fp_function_detail_by_cid.items():
+        own_addr = contract_addr_by_cid.get(cid)
+        if not own_addr:
+            continue
+        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
+        fp_function_detail_by_addr.setdefault(rendered_addr, []).extend(functions)
+    co_controls = assign_co_controllers(principals, fp_function_detail_by_addr, primary_for)
+
+    principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
+
+    # Per-(controller, contract) capability detail: the concrete functions — and
+    # effect-category tags — each FP caller can actually invoke. Lets the canvas
+    # show "pause · recover" instead of a generic "controlled", from verified
+    # call rights (FunctionPrincipal), not the CGN-derived ``controls`` list.
+    # ``caller_detail[contract_lc][caller_lc] = {functions, labels}``. EVERY FP
+    # caller is kept here, including in-protocol governance *contracts*
+    # (timelocks / proxy-admins) — they're the passthrough hop a governance Safe
+    # reaches its contracts through, so the capability resolution below needs
+    # them. Non-principal callers are filtered out at the consumption points.
+    caller_detail: dict[str, dict[str, dict[str, set[str]]]] = {}
+    for caddr, functions in fp_function_detail_by_addr.items():
+        for fn in functions:
+            fname = fn.get("function")
+            fn_labels = fn.get("labels") or set()
+            for a in fn.get("callers", ()):
+                la = (a or "").lower()
+                if not la:
+                    continue
+                detail = caller_detail.setdefault(caddr, {}).setdefault(la, {"functions": set(), "labels": set()})
+                if fname:
+                    detail["functions"].add(fname)
+                detail["labels"].update(fn_labels)
+
+    # Invert to per-principal: the contracts it can call, with functions +
+    # capability tags. Drives the sidebar "Can Call" and the on-select chips for
+    # BOTH co-controllers and primaries. Two sources merged:
+    #   1. Direct FP authority (caller_detail).
+    #   2. Passthrough — capabilities held via an in-protocol governance
+    #      contract (timelock / proxy-admin) the principal controls, the same
+    #      hop assign_primary_controllers used to award primary_for. Without
+    #      this the governance Safe that acts only through its timelock would
+    #      show no capabilities on the 20 contracts it governs (just
+    #      "controlled"). One hop — covers Safe → Timelock → contracts.
+    detail_acc: dict[str, dict[str, dict[str, set[str]]]] = {}
+
+    def _accumulate(principal_lc: str, contract_lc: str, src: dict[str, set[str]]) -> None:
+        slot = detail_acc.setdefault(principal_lc, {}).setdefault(contract_lc, {"functions": set(), "labels": set()})
+        slot["functions"].update(src.get("functions", ()))
+        slot["labels"].update(src.get("labels", ()))
+
+    for caddr, callers_map in caller_detail.items():
+        for la, detail in callers_map.items():
+            if la in principal_meta:  # direct rights belong to principals, not contract callers
+                _accumulate(la, caddr, detail)
+    for la, owned in primary_for.items():
+        for caddr in owned:
+            for gov_addr, gov_detail in caller_detail.get(caddr, {}).items():
+                if gov_addr in governance_passthrough and la in caller_detail.get(gov_addr, {}):
+                    _accumulate(la, caddr, gov_detail)
+
+    detail_by_principal: dict[str, list[dict[str, Any]]] = {}
+    for la, by_contract in detail_acc.items():
+        rows = [
+            {"address": caddr, "functions": sorted(d["functions"]), "capabilities": _capabilities_for(d["labels"])}
+            for caddr, d in by_contract.items()
+        ]
+        rows.sort(key=lambda e: e["address"])
+        detail_by_principal[la] = rows
+
     for p in principals:
         p_addr_lc = (p.get("address") or "").lower()
         p["primary_for"] = primary_for.get(p_addr_lc, [])
+        p["co_controls"] = co_controls.get(p_addr_lc, [])
+        p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
+
+    # Per-contract "other callers": principal-callers holding FP authority that
+    # are neither the contract's primary owner nor a co-controller of it — the
+    # permissionless / lower-privilege long tail (e.g. AuctionManager's
+    # whitelisted ``createBid`` bidders). The canvas renders these in aggregate
+    # as a "+N callers" affordance per contract, so an authorized caller is
+    # never silently invisible, without drawing 30+ cross-group edges or minting
+    # a node per bidder. Each carries its own functions / capabilities so the
+    # sidebar list says what each caller can do. Restricted to FP-typed
+    # principals, so state-variable destinations / CGN noise don't leak in.
+    primary_by_contract: dict[str, str] = {c: paddr for paddr, owned in primary_for.items() for c in owned}
+    co_by_contract: dict[str, set[str]] = {}
+    for paddr, owned in co_controls.items():
+        for c in owned:
+            co_by_contract.setdefault(c, set()).add(paddr)
+    for entry in contracts:
+        addr = (entry.get("address") or "").lower()
+        cd = caller_detail.get(addr, {})
+        callers = {a for a in cd if a in principal_meta}  # contract callers aren't "other callers"
+        callers.discard(addr)
+        callers.discard(primary_by_contract.get(addr, ""))
+        callers -= co_by_contract.get(addr, set())
+        entry["other_callers"] = [
+            {
+                "address": a,
+                "type": (principal_meta.get(a) or {}).get("type"),
+                "label": (principal_meta.get(a) or {}).get("label"),
+                "functions": sorted(cd[a]["functions"]),
+                "capabilities": _capabilities_for(cd[a]["labels"]),
+            }
+            for a in sorted(callers)
+        ]
 
     return GovernanceView(
         contracts=contracts,
@@ -1622,16 +1815,27 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     return payload
 
 
-def primary_controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, str]:
+def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, str]:
     """Map ``principal_address_lc -> MonitoredContract.contract_type`` for every
-    principal that primary-controls at least one contract in the protocol.
+    principal that holds governing authority over at least one contract in the
+    protocol — its **primary controllers union its privileged co-controllers**.
 
-    This is the *same* winner-take-all set the Surface canvas groups by: it runs
-    the identical loaders + :func:`build_governance_view` the ``/company``
-    endpoint uses and reads each principal's ``primary_for``. Monitoring
-    enrollment consumes it so the Monitoring tab and the Surface canvas can't
-    disagree on who governs a protocol — the single source of truth
-    :mod:`services.governance.primary_controller` exists to provide.
+    Both sets come from the single source of truth
+    (:mod:`services.governance.primary_controller`) via the same loaders +
+    :func:`build_governance_view` the ``/company`` endpoint uses:
+
+    * ``primary_for`` — the winner-take-all set the Surface canvas groups by.
+    * ``co_controls`` — principals that hold real authority on a contract they
+      *lost* the primary contest for, restricted to privileged or tightly-gated
+      functions (:func:`assign_co_controllers`). This is what keeps a
+      pause / fund-recovery guardian Safe, or a withdrawal-ops timelock, from
+      going unmonitored just because a bigger governance Safe won the same
+      contracts. Permissionless callers (whitelisted auction bidders sharing
+      ``createBid``) and fund-destination Safes hold neither, so they stay out.
+
+    The canvas renders only ``primary_for`` (groups) and shows ``co_controls`` as
+    secondary annotations; monitoring intentionally watches the **union**,
+    because each controller — primary or co — emits its own governance events.
 
     EOAs are dropped (no contract events / state to monitor) and ``proxy_admin``
     maps to the historical ``'proxy'`` contract_type. Read-only.
@@ -1648,7 +1852,7 @@ def primary_controllers_for_protocol(session: Session, protocol_id: int) -> dict
 
     controllers: dict[str, str] = {}
     for principal in governance.principals:
-        if not principal.get("primary_for"):
+        if not (principal.get("primary_for") or principal.get("co_controls")):
             continue
         ptype = principal.get("type")
         if ptype not in ("safe", "timelock", "proxy_admin"):
