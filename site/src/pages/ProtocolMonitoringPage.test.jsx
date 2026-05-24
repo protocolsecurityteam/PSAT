@@ -120,6 +120,54 @@ describe("ProtocolMonitoringPage contract groups", () => {
   });
 });
 
+describe("ProtocolMonitoringPage contract names", () => {
+  // Regression: friendlyName used to return `name || implName`, so every
+  // proxy fell back to its generic template name ("UUPSProxy") and the
+  // whole Proxies group read identically. It must lead with the impl name,
+  // matching the addresses page's "Impl (via UUPSProxy)" form.
+  function mountWith(contracts, allAddresses) {
+    setFetchHandler(/\/api\/company\/[^/]+$/, () => ({ protocol_id: PROTOCOL_ID }));
+    setFetchHandler(/\/api\/company\/[^/]+\/addresses$/, () => ({ all_addresses: allAddresses }));
+    setFetchHandler(/\/api\/protocols\/[^/]+\/monitoring$/, () => contracts);
+    setFetchHandler(/\/api\/protocols\/[^/]+\/subscriptions$/, () => []);
+    setFetchHandler(/\/api\/protocols\/[^/]+\/events/, () => []);
+    return render(<ProtocolMonitoringPage companyName="acme" />);
+  }
+
+  it("shows proxies as 'Impl (via Template)' instead of collapsing to the template name", async () => {
+    const eeth = "0x35fa164735182de50811e8e2e824cfb9b6118ac2";
+    const weeth = "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee";
+    const contracts = [
+      makeContract({ id: "proxy-eeth", address: eeth, contract_type: "proxy" }),
+      makeContract({ id: "proxy-weeth", address: weeth, contract_type: "proxy" }),
+    ];
+    const addresses = [
+      { address: eeth, name: "UUPSProxy", implementation_name: "EETH", is_proxy: true, chain: "ethereum" },
+      { address: weeth, name: "UUPSProxy", implementation_name: "WeETH", is_proxy: true, chain: "ethereum" },
+    ];
+
+    mountWith(contracts, addresses);
+
+    await waitFor(() => expect(screen.getByText(/2 watched/i)).toBeTruthy());
+
+    // Each proxy is distinguishable by its implementation name…
+    expect(screen.getByText("EETH (via UUPSProxy)")).toBeTruthy();
+    expect(screen.getByText("WeETH (via UUPSProxy)")).toBeTruthy();
+    // …and no row renders as the bare template name.
+    expect(screen.queryByText("UUPSProxy")).toBeNull();
+  });
+
+  it("falls back to a shortened address when the inventory has no name", async () => {
+    const addr = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+    mountWith([makeContract({ id: "c-unknown", address: addr, contract_type: "proxy" })], []);
+
+    await waitFor(() => expect(screen.getByText(/1 watched/i)).toBeTruthy());
+
+    const row = document.querySelector('[data-contract-id="c-unknown"]');
+    expect(row.querySelector(".pm-name").textContent).toBe("0xa0b8...eb48");
+  });
+});
+
 describe("ProtocolMonitoringPage accessibility", () => {
   it("toggles an event filter chip via the keyboard (Enter/Space)", async () => {
     // Regression: filter chips were <span role="button"> with no onKeyDown

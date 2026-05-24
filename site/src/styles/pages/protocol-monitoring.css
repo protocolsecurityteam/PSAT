@@ -228,6 +228,15 @@
   font-weight: 600;
   font-size: 13.5px;
   color: var(--ink);
+  /* Take the row's free space and ellipsize: "Impl (via UUPSProxy)" labels
+     can outrun the fixed-width pane. min-width:0 lets the flex item shrink
+     below its content size; the leading impl name (the distinguishing part)
+     stays visible, full text in the title tooltip. */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pm-badge {
   font-size: 9.5px;

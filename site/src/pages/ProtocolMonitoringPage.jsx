@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { api } from "../api/client.js";
 import { blockExplorerAddressUrl } from "../blockExplorer.js";
+import { proxyDisplayName } from "../displayName.js";
 import { shortenAddress } from "../graph.js";
 import {
   decodeEvent,
@@ -100,6 +101,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
             map[key] = {
               name: a.name || null,
               implName: a.implementation_name || null,
+              isProxy: !!a.is_proxy,
               chain: a.chain || "ethereum",
             };
           }
@@ -145,8 +147,14 @@ export default function ProtocolMonitoringPage({ companyName }) {
     (addr) => {
       if (!addr) return "Unknown";
       const entry = labelMap[addr.toLowerCase()];
-      const raw = entry?.name || entry?.implName;
-      if (raw && !/^0x/i.test(raw)) return raw;
+      // Same "Impl (via UUPSProxy)" treatment as the addresses page so the
+      // sidebar's proxy rows don't all collapse to the bare template name.
+      const pretty = proxyDisplayName({
+        name: entry?.name,
+        isProxy: entry?.isProxy,
+        implName: entry?.implName,
+      });
+      if (pretty && !/^0x/i.test(pretty)) return pretty;
       return shortenAddress(addr);
     },
     [labelMap],
@@ -485,6 +493,7 @@ function ContractGroup({ group, selectedId, lastEventTimes, friendlyName, onSele
 function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, onToggleActive }) {
   const rows = useMemo(() => stateRows(contract), [contract]);
   const badge = contract.contract_type || "regular";
+  const name = friendlyName(contract.address);
   return (
     <button
       type="button"
@@ -494,7 +503,7 @@ function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, on
     >
       <div className="pm-c-top">
         <span className={`pm-badge ${badge}`}>{badge}</span>
-        <span className="pm-name">{friendlyName(contract.address)}</span>
+        <span className="pm-name" title={name}>{name}</span>
         <span className="pm-c-addr">{shortenAddress(contract.address)}</span>
       </div>
       <div className="pm-kv">
