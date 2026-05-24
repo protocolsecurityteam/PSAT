@@ -47,6 +47,7 @@ const COMPANY_ETHERFI = {
     {
       address: ETHERFI_ADDR,
       name: "Weeth",
+      chain: "ethereum",
       risk_level: "low",
       is_proxy: true,
       proxy_type: "ERC1967",
@@ -58,6 +59,7 @@ const COMPANY_ETHERFI = {
     {
       address: POOL_ADDR,
       name: "LiquidityPool",
+      chain: "base",
       risk_level: "medium",
       upgrade_count: 0,
       controllers: {},
