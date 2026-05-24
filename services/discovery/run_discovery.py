@@ -27,7 +27,7 @@ from services.discovery import inventory as inventory_mod
 from services.discovery import inventory_domain as inventory_domain_mod
 from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
-from services.discovery.chain_resolver import validate_claimed_chains
+from services.discovery.chain_resolver import probe_sibling_chains, validate_claimed_chains
 from utils import exa, llm
 from utils.chains import canonical_chain
 
@@ -202,9 +202,16 @@ def _audit_research_instructions(protocol: str) -> str:
 
 def _address_research_instructions(protocol: str) -> str:
     return (
-        f"Find the main deployed smart contract addresses for the {protocol} protocol. "
-        f"List core production contracts with their names and 0x-prefixed on-chain addresses "
-        f"and the chain each is deployed on."
+        f"Find the main deployed smart contract addresses for the {protocol} protocol "
+        f"across EVERY chain it is deployed on, not just Ethereum mainnet. "
+        f"Explicitly check Ethereum, Arbitrum, Optimism, Base, Polygon, BSC, Avalanche, "
+        f"Linea, Scroll, zkSync Era, Blast, Mode, Mantle, Celo, and Berachain. "
+        f"For each chain where {protocol} has live production deployments, list every "
+        f"core contract with its name, 0x-prefixed address, and the canonical chain key "
+        f"(use 'ethereum', 'arbitrum', 'optimism', 'base', 'polygon', 'bsc', 'avalanche', "
+        f"'linea', 'scroll', 'zksync', 'blast', 'mode', 'mantle', 'celo', 'berachain'). "
+        f"Do NOT collapse multichain deployments into a single Ethereum entry — if the "
+        f"same contract is deployed on N chains, return N separate entries."
     )
 
 
@@ -555,6 +562,15 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     except Exception as exc:
         logger.warning("claimed-chain sanity check failed for %s: %s", protocol, exc)
 
+    sibling_chain_hits = 0
+    try:
+        sibling_entries = probe_sibling_chains(inventory_result.get("contracts", []), debug=False)
+        if sibling_entries:
+            inventory_result.setdefault("contracts", []).extend(sibling_entries)
+            sibling_chain_hits = len(sibling_entries)
+    except Exception as exc:
+        logger.warning("sibling-chain probe failed for %s: %s", protocol, exc)
+
     # ---- Dependency two-pass (conditional) ----
     dependency_pass_triggered = _needs_dependency_pass(
         protocol,
@@ -583,6 +599,7 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
             "research_calls": budget.research_calls,
             "estimated_cost_usd": round(budget.estimated_cost_usd, 3),
             "dependency_pass_triggered": dependency_pass_triggered,
+            "sibling_chain_hits": sibling_chain_hits,
         },
     }
 

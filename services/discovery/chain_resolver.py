@@ -51,6 +51,10 @@ _ALCHEMY_CHAIN_SLUGS: dict[str, str] = {
     "scroll": "scroll-mainnet",
     "zksync": "zksync-mainnet",
     "blast": "blast-mainnet",
+    "mode": "mode-mainnet",
+    "mantle": "mantle-mainnet",
+    "celo": "celo-mainnet",
+    "berachain": "berachain-mainnet",
 }
 
 # Max addresses per JSON-RPC batch request.
@@ -282,6 +286,94 @@ def resolve_unknown_chains(
 
     _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
     return contracts
+
+
+def probe_sibling_chains(
+    contracts: list[dict[str, Any]],
+    *,
+    debug: bool = False,
+) -> list[dict[str, Any]]:
+    """Find sibling deployments by probing the same address on every supported chain.
+
+    Many protocols (LayerZero OFTs, deterministic CREATE2 deploys, governance
+    factories) live at the same address on multiple chains. The web-search and
+    Deep Research stages typically surface only one chain per address — usually
+    Ethereum. This sweep batches ``eth_getCode`` for every (discovered address,
+    supported chain) pair we haven't already recorded, and returns inventory
+    entries for any chain where bytecode is found.
+    """
+    if not contracts:
+        return []
+
+    known: dict[str, set[str]] = {}
+    name_by_address: dict[str, str] = {}
+
+    def _record(address: str, chain: str | None, name: str | None) -> None:
+        addr = address.lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            return
+        canonical = canonical_chain(chain) if chain else None
+        if canonical and canonical != "unknown":
+            known.setdefault(addr, set()).add(canonical)
+        else:
+            known.setdefault(addr, set())
+        if name and addr not in name_by_address:
+            name_by_address[addr] = name
+
+    for contract in contracts:
+        address = str(contract.get("address") or "")
+        chains = canonical_chain_list(contract.get("chains")) or []
+        for chain in chains or [None]:
+            _record(address, chain, contract.get("name"))
+        for deployment in contract.get("deployments") or []:
+            if not isinstance(deployment, dict):
+                continue
+            dep_chains = canonical_chain_list(deployment.get("chains")) or []
+            for chain in dep_chains or [None]:
+                _record(str(deployment.get("address") or ""), chain, deployment.get("name") or contract.get("name"))
+
+    if not known:
+        return []
+
+    try:
+        api_key = _get_alchemy_key()
+    except RuntimeError as exc:
+        _debug_log(debug, f"Sibling-chain probe skipped: {exc}")
+        return []
+
+    probe_chains = [ch for ch in CHAIN_IDS if ch in _ALCHEMY_CHAIN_SLUGS]
+    all_addrs = sorted(known.keys())
+
+    _debug_log(
+        debug,
+        f"Sibling-chain probe: {len(all_addrs)} address(es) × {len(probe_chains)} chain(s)",
+    )
+
+    matched: dict[str, list[str]] = {addr: [] for addr in all_addrs}
+    _probe_chains(all_addrs, probe_chains, api_key, matched, debug)
+
+    new_entries: list[dict[str, Any]] = []
+    for address, chains_found in matched.items():
+        existing = known.get(address, set())
+        for chain in chains_found:
+            canonical = canonical_chain(chain)
+            if not canonical or canonical == "unknown" or canonical in existing:
+                continue
+            entry: dict[str, Any] = {
+                "address": address,
+                "chains": [canonical],
+                "chain": canonical,
+                "confidence": 0.9,
+                "source": ["sibling_chain_probe"],
+                "evidence": {"sibling_chain_probe": 1},
+            }
+            if name_by_address.get(address):
+                entry["name"] = name_by_address[address]
+            new_entries.append(entry)
+            existing.add(canonical)
+
+    _debug_log(debug, f"Sibling-chain probe: added {len(new_entries)} new deployment(s)")
+    return new_entries
 
 
 def validate_claimed_chains(
