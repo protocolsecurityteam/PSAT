@@ -620,7 +620,9 @@ def _create_completed_job(session, address, protocol_id):
     return job
 
 
-def _grant_primary_authority(session, contract_id, principal_address, function_name="setOwner", resolved_type=None):
+def _grant_primary_authority(
+    session, contract_id, principal_address, function_name="setOwner", resolved_type=None, effect_labels=None
+):
     """Make ``principal_address`` a primary controller of the contract by
     attaching a ``FunctionPrincipal`` row. ``assign_primary_controllers``
     uses FP membership as eligibility, so any CGN principal needs at
@@ -630,20 +632,47 @@ def _grant_primary_authority(session, contract_id, principal_address, function_n
     ``resolved_type`` types the FP row (Safe / Timelock / proxy_admin).
     Enrollment seeds candidates from this when the address has no usable
     ``control_graph_nodes`` type, mirroring the Surface canvas.
+
+    ``effect_labels`` sets the function's effect labels, which the
+    co-controller rule reads — a privileged label (e.g. ``pause_toggle``)
+    keeps a non-primary caller as a monitored co-controller.
+    """
+    _grant_shared_authority(
+        session,
+        contract_id,
+        [principal_address],
+        function_name=function_name,
+        resolved_type=resolved_type,
+        effect_labels=effect_labels,
+    )
+
+
+def _grant_shared_authority(
+    session, contract_id, principal_addresses, function_name="setOwner", resolved_type=None, effect_labels=None
+):
+    """Attach a single ``EffectiveFunction`` callable by *every* address in
+    *principal_addresses*. The shared caller-set size is what the co-controller
+    rule uses to tell a tightly-gated governance function from a broad
+    permissionless whitelist (e.g. ``createBid`` shared by dozens of bidders),
+    so a faithful bidder model needs one function with many callers — not one
+    function per caller.
     """
     from db.models import EffectiveFunction, FunctionPrincipal
 
-    ef = EffectiveFunction(contract_id=contract_id, function_name=function_name, authority_public=False)
+    ef = EffectiveFunction(
+        contract_id=contract_id, function_name=function_name, authority_public=False, effect_labels=effect_labels
+    )
     session.add(ef)
     session.flush()
-    session.add(
-        FunctionPrincipal(
-            function_id=ef.id,
-            address=principal_address,
-            principal_type="controller",
-            resolved_type=resolved_type,
+    for addr in principal_addresses:
+        session.add(
+            FunctionPrincipal(
+                function_id=ef.id,
+                address=addr,
+                principal_type="controller",
+                resolved_type=resolved_type,
+            )
         )
-    )
     session.flush()
 
 
@@ -866,9 +895,9 @@ class TestEnrollmentIntegration:
     def test_enroll_enrolls_primary_controllers(self, pg_session):
         """Principals that primary-control a contract get their own
         MonitoredContract rows — Safe and Timelock — while EOAs are dropped
-        (nothing event-bearing to monitor). This is the same winner-take-all
-        set the Surface canvas groups by; enrollment shares that computation
-        via ``primary_controllers_for_protocol``.
+        (nothing event-bearing to monitor). These are the winner-take-all
+        primaries the Surface canvas groups by; enrollment shares that
+        computation via ``controllers_for_protocol``.
         """
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
@@ -984,11 +1013,13 @@ class TestEnrollmentIntegration:
         ).scalar_one_or_none()
         assert eoa_mc is None
 
-    def test_enroll_excludes_non_primary_safes(self, pg_session):
-        """A Safe with FP authority that LOSES the per-contract primary
-        contest is not enrolled. Mirrors EtherFi auction bidders: Safes
-        allowed to call ``createBid`` on AuctionManager but not governing it.
-        Without this the FP-authority signal alone over-enrolled every bidder.
+    def test_enroll_excludes_permissionless_bidder_safes(self, pg_session):
+        """Safes whose only authority is a broad, permissionless function are
+        not enrolled — neither as primary (they lose the contest) nor as
+        co-controllers (the function is shared by too many callers to read as a
+        governance gate). Mirrors EtherFi's ``createBid`` on AuctionManager,
+        shared by ~33 whitelisted bidders. The bare FP-authority signal alone
+        over-enrolled every bidder.
         """
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
@@ -997,8 +1028,10 @@ class TestEnrollmentIntegration:
         pg_session.add(proto)
         pg_session.flush()
 
-        big_safe = "0x" + "e6" * 20  # governs two contracts -> wins
-        bidder_safe = "0x" + "e7" * 20  # only a createBid caller -> loses
+        big_safe = "0x" + "e6" * 20  # governs the second contract -> wins, enrolled
+        # Many bidder safes share one createBid function -> permissionless,
+        # so the co-controller rule's caller-set arm drops them.
+        bidder_safes = ["0x" + f"{0xB0 + i:02x}" * 20 for i in range(6)]
 
         auction = Contract(
             address="0x" + "d1" * 20, chain="ethereum", protocol_id=proto.id, contract_name="AuctionManager"
@@ -1009,11 +1042,18 @@ class TestEnrollmentIntegration:
         _create_completed_job(pg_session, auction.address, proto.id)
         _create_completed_job(pg_session, governed.address, proto.id)
 
-        # Both Safes can call createBid on the auction; only big_safe also
-        # governs the second contract, so it owns more and wins the auction
-        # tiebreak too — the bidder wins nothing.
-        _grant_primary_authority(pg_session, auction.id, big_safe, function_name="createBid", resolved_type="safe")
-        _grant_primary_authority(pg_session, auction.id, bidder_safe, function_name="createBid", resolved_type="safe")
+        # One shared createBid function callable by big_safe + every bidder (7
+        # callers > the gate threshold), labelled only external_contract_call
+        # (no privileged label). big_safe also governs the second contract, so
+        # it wins the auction's primary contest and is the only one enrolled.
+        _grant_shared_authority(
+            pg_session,
+            auction.id,
+            [big_safe, *bidder_safes],
+            function_name="createBid",
+            resolved_type="safe",
+            effect_labels=["external_contract_call"],
+        )
         _grant_primary_authority(pg_session, governed.id, big_safe, function_name="setOwner", resolved_type="safe")
         pg_session.commit()
 
@@ -1027,13 +1067,73 @@ class TestEnrollmentIntegration:
             .contract_type
             == "safe"
         )
-        # The non-primary bidder Safe is NOT enrolled.
-        assert (
-            pg_session.execute(
-                select(MonitoredContract).where(MonitoredContract.address == bidder_safe)
-            ).scalar_one_or_none()
-            is None
+        # No permissionless bidder Safe is enrolled.
+        for bidder in bidder_safes:
+            assert (
+                pg_session.execute(
+                    select(MonitoredContract).where(MonitoredContract.address == bidder)
+                ).scalar_one_or_none()
+                is None
+            ), f"bidder {bidder} should not be enrolled"
+
+    def test_enroll_includes_privileged_co_controller(self, pg_session):
+        """A guardian Safe that holds a privileged power (``pause``) on a
+        contract it LOSES the primary contest for is still enrolled — as a
+        co-controller. Regression for EtherFi 0x2aca, a 4-of-7 pause /
+        fund-recovery multisig hidden from monitoring because the
+        timelock-passthrough governance Safe won all 8 of its contracts.
+        Monitoring must watch it even though the Surface canvas groups the
+        contract under the winner.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        gov_safe = "0x" + "e6" * 20  # governs both contracts -> wins both primaries
+        guardian = "0x" + "e7" * 20  # can pause one contract -> loses primary, co-controls
+
+        pool = Contract(address="0x" + "d1" * 20, chain="ethereum", protocol_id=proto.id, contract_name="LiquidityPool")
+        other = Contract(address="0x" + "d2" * 20, chain="ethereum", protocol_id=proto.id, contract_name="Other")
+        pg_session.add_all([pool, other])
+        pg_session.flush()
+        _create_completed_job(pg_session, pool.address, proto.id)
+        _create_completed_job(pg_session, other.address, proto.id)
+
+        # gov_safe governs both contracts (owns more) so it wins pool's primary
+        # over the guardian. The guardian's only authority is pause on pool — a
+        # privileged label, so it's kept as a co-controller despite losing.
+        _grant_primary_authority(pg_session, pool.id, gov_safe, function_name="setOwner", resolved_type="safe")
+        _grant_primary_authority(pg_session, other.id, gov_safe, function_name="setOwner", resolved_type="safe")
+        _grant_primary_authority(
+            pg_session,
+            pool.id,
+            guardian,
+            function_name="pauseContract",
+            resolved_type="safe",
+            effect_labels=["pause_toggle"],
         )
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        # The winner is enrolled (primary).
+        assert (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == gov_safe))
+            .scalar_one()
+            .contract_type
+            == "safe"
+        )
+        # The guardian is enrolled too — as a co-controller, not a primary.
+        guardian_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == guardian)
+        ).scalar_one()
+        assert guardian_mc.contract_type == "safe"
+        assert guardian_mc.is_active is True
+        assert guardian_mc.monitoring_config["watch_safe_signers"] is True
 
     def test_enroll_is_idempotent(self, pg_session):
         """Calling enroll_protocol_contracts twice doesn't duplicate rows."""

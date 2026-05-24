@@ -93,7 +93,8 @@ def enroll_protocol_contracts(
 
     Performs upsert (ON CONFLICT address+chain DO UPDATE) so this is
     idempotent. Also creates WatchedProxy rows for proxy contracts and
-    enrolls the protocol's primary controllers (safes, timelocks).
+    enrolls the protocol's controllers — primary + privileged co-controllers
+    (safes, timelocks, proxy admins).
 
     *calling_job_id* is the job that triggered enrollment — it's still in
     ``processing`` status, so we include it alongside completed jobs.
@@ -240,9 +241,9 @@ def enroll_protocol_contracts(
 
         enrolled.append(mc)
 
-    # Enroll the protocol's primary controllers. This runs
-    # build_governance_view (the Surface computation), so it's gated off the
-    # per-job fast-path hint and runs on the reconciler cadence + manual
+    # Enroll the protocol's controllers (primary + privileged co-controllers).
+    # This runs build_governance_view (the Surface computation), so it's gated
+    # off the per-job fast-path hint and runs on the reconciler cadence + manual
     # re-enroll instead — the low-latency-hint / cadence-convergence split the
     # reconciler module documents. Controllers therefore land in the Monitoring
     # tab within one reconcile interval of analysis, or immediately via
@@ -540,7 +541,7 @@ def _bridge_to_watched_proxy(
 # MonitoredContract.contract_type values this module materializes for
 # controller principals. Pass 2 in ``_enroll_controller_addresses`` scans the
 # full set so a controller of any flavor gets demoted once it stops being a
-# primary controller.
+# controller (primary or co-controller).
 _CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
 
 
@@ -551,40 +552,44 @@ def _enroll_controller_addresses(
     chain: str,
     current_block: int,
 ) -> None:
-    """Enroll the protocol's primary controllers (Safes / Timelocks / proxy
-    admins) as MonitoredContract rows, and demote any that are no longer
-    primary.
+    """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
+    MonitoredContract rows, and demote any that are no longer controllers.
 
-    The enrolled set is exactly the winner-take-all set the Surface canvas
-    groups by: :func:`primary_controllers_for_protocol` runs the same loaders
-    + ``build_governance_view`` the ``/company`` endpoint uses and returns
-    each principal that primary-controls at least one contract. Sharing that
-    single computation is what keeps the Monitoring tab and the Surface canvas
-    from disagreeing on who governs the protocol — deriving the set a second
-    way here is what historically let the two views drift (a fund-destination
-    Safe stored in a state variable landing in Monitoring but not on the
-    canvas; or, conversely, a real governance Safe whose control-graph node
-    was typed ``unknown`` showing on the canvas but never enrolled).
-    Non-primary FP callers — e.g. whitelisted auction bidders that can only
-    call ``createBid`` — and fund-destination Safes never win ``primary_for``,
-    so they're excluded by construction. EOAs are dropped upstream (nothing
-    event-bearing to monitor); ``proxy_admin`` is enrolled as the historical
-    ``'proxy'`` contract_type.
+    The enrolled set is :func:`controllers_for_protocol` — the protocol's
+    **primary controllers union its privileged co-controllers**, computed by the
+    same loaders + ``build_governance_view`` the ``/company`` endpoint uses, so
+    Monitoring and the Surface canvas share one source of truth (deriving the
+    set a second way here is what historically let the two views drift — a
+    fund-destination Safe stored in a state variable landing in Monitoring but
+    not on the canvas; or a real governance Safe typed ``unknown`` in the
+    control graph showing on the canvas but never enrolled).
+
+    Monitoring watches more than the canvas *groups*: the canvas renders one
+    primary controller per contract (winner-take-all) plus secondary
+    annotations, while enrollment also watches the co-controllers — a contract
+    governed by both a guardian Safe (pause / fund-recovery) and a bigger
+    governance Safe needs both monitored, since each emits its own events.
+    What's still excluded is genuine noise: permissionless callers (whitelisted
+    auction bidders sharing ``createBid``) and fund-destination Safes hold
+    neither a primary win nor privileged/tightly-gated authority, so
+    :func:`assign_co_controllers` drops them. EOAs are dropped upstream
+    (nothing event-bearing to monitor); ``proxy_admin`` is enrolled as the
+    historical ``'proxy'`` contract_type.
 
     Demotion is symmetric: an auto-enrolled controller row whose address is no
-    longer a primary controller is deactivated (``is_active=False``,
+    longer a controller is deactivated (``is_active=False``,
     ``enrollment_source="auto_deprimary"``) rather than deleted, so its
     MonitoredEvent history survives a later re-promotion or an audit.
     Protocol-contract rows (owned by the main loop in
     ``enroll_protocol_contracts``) are never touched.
     """
-    from services.aggregations.company_overview import primary_controllers_for_protocol
+    from services.aggregations.company_overview import controllers_for_protocol
 
     enrolled_contract_addrs = {c.address.lower() for c in contracts}
-    primary_controllers = primary_controllers_for_protocol(session, protocol_id)
+    controllers = controllers_for_protocol(session, protocol_id)
 
-    # Pass 1: enroll / re-promote each primary controller.
-    for addr, monitored_type in primary_controllers.items():
+    # Pass 1: enroll / re-promote each controller (primary + co-controller).
+    for addr, monitored_type in controllers.items():
         if not addr or addr in enrolled_contract_addrs:
             continue
         existing = session.execute(
@@ -627,11 +632,12 @@ def _enroll_controller_addresses(
             )
 
     # Pass 2: demote any active auto-enrolled controller row that is no longer
-    # a primary controller. Symmetric with Pass 1 — same signal, opposite
-    # direction — covering both "lost its primary win" and the zombie case
-    # where the controller dropped out of the governance view entirely between
-    # runs. Protocol-contract rows are excluded so this never touches MC rows
-    # owned by the main contract loop in ``enroll_protocol_contracts``.
+    # a controller (neither primary nor co-controller). Symmetric with Pass 1 —
+    # same signal, opposite direction — covering both "lost its authority" and
+    # the zombie case where the controller dropped out of the governance view
+    # entirely between runs. Protocol-contract rows are excluded so this never
+    # touches MC rows owned by the main contract loop in
+    # ``enroll_protocol_contracts``.
     existing_controllers = (
         session.execute(
             select(MonitoredContract).where(
@@ -648,7 +654,7 @@ def _enroll_controller_addresses(
         addr = (mc.address or "").lower()
         if not addr or addr in enrolled_contract_addrs:
             continue
-        if addr in primary_controllers:
+        if addr in controllers:
             continue
         mc.is_active = False
         mc.enrollment_source = "auto_deprimary"
