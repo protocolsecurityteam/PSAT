@@ -132,3 +132,75 @@ def test_output_is_sorted():
     fp = {"0xc3": {"0xa"}, "0xc1": {"0xa"}, "0xc2": {"0xa"}}
     result = assign_primary_controllers([_p("0xa", "safe")], fp)
     assert result["0xa"] == ["0xc1", "0xc2", "0xc3"]
+
+
+def test_governance_passthrough_resolves_safe_behind_timelock():
+    """Safe → Timelock → governed contract.
+
+    The ether.fi shape: the governed contract's only FP caller is an
+    in-protocol Timelock, which is itself a contract (never a principal). With
+    the Timelock marked as a pass-through, the Safe that controls the Timelock
+    becomes the contract's primary controller.
+    """
+    vault, timelock, safe = "0xc1", "0xtl", "0xsafe"
+    fp = {
+        vault: {timelock},  # vault.onlyOwner caller resolves to the timelock
+        timelock: {safe},  # timelock.execute caller resolves to the safe
+    }
+    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={timelock})
+    # Safe owns both the vault (through the timelock) and the timelock itself.
+    assert sorted(result[safe]) == sorted([vault, timelock])
+
+
+def test_governance_passthrough_off_is_unchanged_one_hop():
+    """Same graph, no pass-through set → the Safe is only a direct caller of
+    the timelock, not the vault. Proves the traversal — not some unrelated
+    change — is what restores the vault attribution, and that the default
+    (``None``) preserves the original one-hop behavior.
+    """
+    vault, timelock, safe = "0xc1", "0xtl", "0xsafe"
+    fp = {vault: {timelock}, timelock: {safe}}
+    result = assign_primary_controllers([_p(safe, "safe")], fp)
+    assert result[safe] == [timelock]  # vault is NOT attributed without pass-through
+
+
+def test_governance_passthrough_excludes_fee_destination():
+    """A fee-destination Safe with no FP row anywhere is not pulled in by the
+    pass-through traversal — only FP (call-authority) edges are followed.
+
+    This is the Monitoring-tab regression the parent PR fixed: a Safe stored in
+    a state variable (``accountantState.payoutAddress``) must never be promoted
+    to a governing controller. Even with governance pass-through enabled, it
+    stays out because it holds no function-level authority.
+    """
+    vault, timelock, gov_safe, fee_safe = "0xc1", "0xtl", "0xgov", "0xfee"
+    fp = {vault: {timelock}, timelock: {gov_safe}}  # fee_safe absent from every FP set
+    result = assign_primary_controllers(
+        [_p(gov_safe, "safe"), _p(fee_safe, "safe")],
+        fp,
+        governance_passthrough={timelock},
+    )
+    assert sorted(result[gov_safe]) == sorted([vault, timelock])
+    assert result[fee_safe] == []
+
+
+def test_governance_passthrough_is_cycle_and_depth_safe():
+    """A cyclic FP graph through pass-through contracts terminates (visited-set
+    breaks the cycle) and still resolves the reachable principal."""
+    a, b, safe = "0xa", "0xb", "0xsafe"
+    fp = {a: {b, safe}, b: {a}}  # a <-> b mutually reference; safe calls a
+    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={a, b})
+    assert sorted(result[safe]) == ["0xa", "0xb"]
+
+
+def test_governance_passthrough_does_not_recurse_through_non_governance():
+    """Only addresses in ``governance_passthrough`` are expanded. An in-protocol
+    contract that is an FP caller but is NOT a timelock/proxy-admin stays a
+    terminal — its own callers are not pulled up, so we don't over-attribute
+    through ordinary operational contracts.
+    """
+    vault, manager, safe = "0xc1", "0xmgr", "0xsafe"
+    fp = {vault: {manager}, manager: {safe}}
+    # manager is NOT passed through → safe only owns manager, not vault.
+    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough=set())
+    assert result[safe] == [manager]

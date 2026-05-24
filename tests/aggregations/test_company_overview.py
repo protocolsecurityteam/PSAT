@@ -1113,3 +1113,131 @@ def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
         "owner() must take precedence over pendingOwner(). "
         f"Expected {real_owner_addr.lower()}, got {target_entry['owner']}."
     )
+
+
+def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
+    """End-to-end pin for the ether.fi Surface ownership regression.
+
+    Shape under test (the timelock-mediated governance pattern that broke):
+
+        governance Safe --FP--> Timelock (in-protocol) --FP--> Vault (proxy)
+
+    The Vault's owner-gated functions resolve, in ``FunctionPrincipal``, to an
+    in-protocol Timelock contract; the Timelock's own functions resolve to an
+    external governance Safe. Because the Timelock is itself a protocol
+    contract it is never a *principal*, so a one-hop FP-membership check
+    attributes nothing and the canvas shows no owner — the reported bug.
+
+    Two things must hold after the fix, and both are protocol-agnostic:
+
+      1. The Vault's **proxy** address (not the implementation address its FP
+         rows physically live on) is attributed to the governance Safe,
+         resolved *through* the Timelock.
+
+      2. A fee-destination Safe — typed ``safe`` in the control graph (so it
+         IS a principal) but holding no ``FunctionPrincipal`` row — is
+         attributed to nothing. This is the ``payoutAddress`` fee-sink the
+         parent PR deliberately excluded; the transitive resolution must not
+         resurrect it, because it only follows call-authority (FP) edges.
+    """
+    p = _add_protocol(db_session, f"timelock-gov-{uuid.uuid4().hex[:8]}")
+
+    proxy_addr = _addr("vaultpx")
+    impl_addr = _addr("vaultim")
+    timelock_addr = _addr("timelock")
+    gov_safe = _addr("govsafe").lower()
+    fee_safe = _addr("feesafe").lower()
+
+    # Vault: proxy + implementation (FP rows live on the impl, as in prod).
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, is_proxy=True, name="Vault")
+    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="VaultImpl")
+    _add_contract(
+        db_session,
+        address=proxy_addr,
+        job=proxy_job,
+        protocol_id=p.id,
+        is_proxy=True,
+        implementation=impl_addr,
+        contract_name="Vault",
+    )
+    impl_contract = _add_contract(
+        db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="VaultImpl"
+    )
+
+    # In-protocol Timelock contract.
+    tl_job = _add_job(db_session, address=timelock_addr, protocol_id=p.id, name="Timelock")
+    tl_contract = _add_contract(
+        db_session, address=timelock_addr, job=tl_job, protocol_id=p.id, contract_name="ProtocolTimelock"
+    )
+
+    # Vault.setFee is owner-gated; its caller resolves to the Timelock. The FP
+    # row sits on the IMPL contract — the canvas keys off the proxy address.
+    ef_vault = EffectiveFunction(
+        contract_id=impl_contract.id,
+        function_name="setFee",
+        selector="0x11111111",
+        abi_signature="setFee(uint256)",
+        authority_public=False,
+    )
+    db_session.add(ef_vault)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef_vault.id,
+            address=timelock_addr.lower(),
+            resolved_type=None,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+
+    # Timelock.execute caller resolves to the governance Safe.
+    ef_tl = EffectiveFunction(
+        contract_id=tl_contract.id,
+        function_name="execute",
+        selector="0x22222222",
+        abi_signature="execute(address,uint256,bytes)",
+        authority_public=False,
+    )
+    db_session.add(ef_tl)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef_tl.id,
+            address=gov_safe,
+            resolved_type=None,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+
+    # Typing comes from the control graph: the Timelock is typed ``timelock``
+    # (so it is a pass-through), and both Safes are typed ``safe`` (so they
+    # surface as principals). The fee Safe is deliberately given NO FP row.
+    db_session.add(
+        ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
+    )
+    db_session.add(ControlGraphNode(contract_id=tl_contract.id, address=gov_safe, resolved_type="safe"))
+    db_session.add(ControlGraphNode(contract_id=impl_contract.id, address=fee_safe, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+
+    assert gov_safe in principals, "governance Safe should surface as a principal"
+    assert fee_safe in principals, "fee-destination Safe is a typed principal (just must own nothing)"
+
+    gov_primary = {a.lower() for a in (principals[gov_safe].get("primary_for") or [])}
+    assert proxy_addr.lower() in gov_primary, (
+        "governance Safe must be primary controller of the Vault PROXY address, "
+        "resolved through the in-protocol Timelock. "
+        f"Got primary_for={sorted(gov_primary)}"
+    )
+    assert impl_addr.lower() not in gov_primary, (
+        "primary_for must be keyed on the rendered proxy address, never the "
+        "implementation address the FunctionPrincipal rows physically live on"
+    )
+    assert principals[fee_safe].get("primary_for") == [], (
+        "a Safe with no FunctionPrincipal authority must never become a primary "
+        "controller — this is the payoutAddress fee-sink the parent PR excluded"
+    )

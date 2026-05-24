@@ -1054,18 +1054,52 @@ def build_governance_view(
     )
 
     # Reshape FP-by-contract-id into FP-by-contract-address so each principal
-    # gets a ``primary_for`` list — the contracts it canonically governs. Used
-    # by Surface (group containment) and monitoring enrollment (which Safes
-    # to actually watch); see ``services.governance.primary_controller``.
+    # gets a ``primary_for`` list — the contracts it canonically governs,
+    # consumed by Surface group containment (see
+    # ``services.governance.primary_controller``). Two transforms make this
+    # correct across protocols, not just for directly-Safe-owned contracts:
+    #
+    #   1. Proxy→impl keying. EffectiveFunction / FunctionPrincipal rows live
+    #      on the *implementation* contract, but the canvas renders and groups
+    #      by the *proxy* address. Map impl→proxy so a principal's primary_for
+    #      lands on the address the frontend actually draws; without this every
+    #      proxied contract silently drops out of all groups.
+    #
+    #   2. Governance pass-through. When a protocol is governed via an
+    #      in-protocol Timelock / ProxyAdmin, the governed contracts' direct FP
+    #      caller resolves to that governance contract — which is itself
+    #      in-protocol and therefore never a principal. We hand the set of such
+    #      contracts to ``assign_primary_controllers`` so it resolves authority
+    #      one hop further, to the terminal Safe/EOA. Only FP (call-authority)
+    #      edges are followed, so fund-destination Safes (which hold no FP row)
+    #      cannot be re-introduced.
     contract_addr_by_cid: dict[int, str] = {
         c.id: c.address.lower() for c in contracts_by_job_id.values() if c is not None and c.address
     }
+    impl_to_proxy: dict[str, str] = {
+        c["implementation"].lower(): c["address"].lower()
+        for c in contracts
+        if c.get("is_proxy") and c.get("implementation") and c.get("address")
+    }
     fp_addrs_by_contract_addr: dict[str, set[str]] = {}
     for cid, addrs in fp_all_addrs_by_cid.items():
-        addr_lc = contract_addr_by_cid.get(cid)
-        if addr_lc:
-            fp_addrs_by_contract_addr[addr_lc] = addrs
-    primary_for = assign_primary_controllers(principals, fp_addrs_by_contract_addr)
+        own_addr = contract_addr_by_cid.get(cid)
+        if not own_addr:
+            continue
+        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
+        fp_addrs_by_contract_addr.setdefault(rendered_addr, set()).update(addrs)
+
+    governance_passthrough = {
+        addr
+        for addr in fp_addrs_by_contract_addr
+        if principal_lookup.get(addr, {}).get("resolved_type") in {"timelock", "proxy_admin"}
+    }
+
+    primary_for = assign_primary_controllers(
+        principals,
+        fp_addrs_by_contract_addr,
+        governance_passthrough=governance_passthrough,
+    )
     for p in principals:
         p_addr_lc = (p.get("address") or "").lower()
         p["primary_for"] = primary_for.get(p_addr_lc, [])

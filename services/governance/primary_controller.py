@@ -42,10 +42,17 @@ PRINCIPAL_PRIORITY: dict[str, int] = {
     "proxy_admin": 1,
 }
 
+# Maximum number of governance contracts (Timelock / ProxyAdmin) an
+# ownership chain may traverse before we stop. Real stacks are 1–2 hops
+# (multisig → timelock → governed contract); the cap only guards against
+# pathological or cyclic FP graphs — the visited-set already breaks cycles.
+_MAX_GOVERNANCE_HOPS = 4
+
 
 def assign_primary_controllers(
     principals: list[dict[str, Any]],
     fp_addrs_by_contract: Mapping[str, set[str]],
+    governance_passthrough: set[str] | None = None,
 ) -> dict[str, list[str]]:
     """Pick one primary controller per contract.
 
@@ -57,6 +64,16 @@ def assign_primary_controllers(
     set of ``function_principals.address`` values (lower-cased) attached to
     any ``EffectiveFunction`` of that contract. The caller is expected to
     drop ``signature_witness`` rows before building this map.
+
+    *governance_passthrough* — addresses of in-protocol governance contracts
+    (Timelocks / ProxyAdmins) that *mediate* control rather than hold it: the
+    real authority calls them, and they in turn call the governed contracts.
+    When a contract's FP caller is one of these, eligibility is resolved one
+    hop further — through that governance contract's own FP callers — until a
+    terminal principal is reached. Because only FP (call-authority) edges are
+    traversed, fund-destination addresses (e.g. ``payoutAddress`` Safes, which
+    never hold an FP row) cannot be re-introduced. ``None`` ⇒ no traversal:
+    every caller is terminal, i.e. the original one-hop behavior.
 
     Returns ``{principal_address_lc: [contract_address_lc, ...]}`` for every
     eligible principal. Principals that lose every contract still appear in
@@ -72,16 +89,40 @@ def assign_primary_controllers(
             continue
         principal_by_addr[addr] = p
 
-    # eligibility[principal_lc] = set of contract addresses this principal
-    # could primary-control (FP row exists). Computed by walking the FP
-    # map once instead of N×M per-contract lookups.
-    eligibility: dict[str, set[str]] = {addr: set() for addr in principal_by_addr}
+    # Normalize the FP graph to lower-case keys/values once so the closure
+    # below can walk it directly (callers don't always normalize both sides).
+    fp_graph: dict[str, set[str]] = {}
     for contract_addr, fp_addrs in fp_addrs_by_contract.items():
-        contract_lc = contract_addr.lower()
-        for fp_addr in fp_addrs:
-            fp_lc = fp_addr.lower()
-            if fp_lc in eligibility:
-                eligibility[fp_lc].add(contract_lc)
+        fp_graph.setdefault(contract_addr.lower(), set()).update((a or "").lower() for a in fp_addrs)
+    passthrough = {(a or "").lower() for a in (governance_passthrough or ())}
+
+    def _effective_controllers(contract_lc: str) -> set[str]:
+        """Terminal controllers of *contract_lc*: its direct FP callers, with
+        any caller that is itself a ``passthrough`` governance contract
+        expanded into *its* callers. Depth-bounded; the visited set breaks
+        cycles and the ``addr != contract_lc`` guard avoids self-recursion."""
+        out: set[str] = set()
+        seen: set[str] = set()
+        stack: list[tuple[str, int]] = [(a, 1) for a in fp_graph.get(contract_lc, ())]
+        while stack:
+            addr, depth = stack.pop()
+            if addr in seen:
+                continue
+            seen.add(addr)
+            out.add(addr)
+            if addr != contract_lc and addr in passthrough and depth < _MAX_GOVERNANCE_HOPS:
+                stack.extend((nxt, depth + 1) for nxt in fp_graph.get(addr, ()) if nxt not in seen)
+        return out
+
+    # eligibility[principal_lc] = set of contract addresses this principal
+    # could primary-control. A principal is eligible for a contract iff it is
+    # one of that contract's effective controllers (its FP callers, resolved
+    # transitively through any in-protocol governance contract in between).
+    eligibility: dict[str, set[str]] = {addr: set() for addr in principal_by_addr}
+    for contract_lc in fp_graph:
+        for ctrl in _effective_controllers(contract_lc):
+            if ctrl in eligibility:
+                eligibility[ctrl].add(contract_lc)
 
     total_owned = {addr: len(owned) for addr, owned in eligibility.items()}
 
