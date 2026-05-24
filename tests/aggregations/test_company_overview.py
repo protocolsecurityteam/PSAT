@@ -1241,3 +1241,103 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         "a Safe with no FunctionPrincipal authority must never become a primary "
         "controller — this is the payoutAddress fee-sink the parent PR excluded"
     )
+
+
+def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session):
+    """The faithful ether.fi shape: the governing Safe is **not** a control-graph
+    node — it is known to be a Safe only because its ``FunctionPrincipal`` row
+    on the in-protocol Timelock carries ``resolved_type='safe'`` (populated at
+    write time by the policy stage's address classifier).
+
+    This pins the consumption half of the typing fix: a Safe reachable solely
+    through typed per-function authority (no CGN safe node, the exact reason
+    ether.fi's multisig was invisible) must still surface as a principal and,
+    via the Timelock pass-through, own the proxied Vault. If FP typing
+    regresses to NULL, ``_fp_governance`` drops the row and this fails.
+    """
+    p = _add_protocol(db_session, f"fp-typed-owner-{uuid.uuid4().hex[:8]}")
+
+    proxy_addr = _addr("vpx")
+    impl_addr = _addr("vim")
+    timelock_addr = _addr("tl")
+    gov_safe = _addr("gsafe").lower()
+
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, is_proxy=True, name="Vault")
+    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="VaultImpl")
+    _add_contract(
+        db_session,
+        address=proxy_addr,
+        job=proxy_job,
+        protocol_id=p.id,
+        is_proxy=True,
+        implementation=impl_addr,
+        contract_name="Vault",
+    )
+    impl_contract = _add_contract(
+        db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="VaultImpl"
+    )
+    tl_job = _add_job(db_session, address=timelock_addr, protocol_id=p.id, name="Timelock")
+    tl_contract = _add_contract(
+        db_session, address=timelock_addr, job=tl_job, protocol_id=p.id, contract_name="ProtocolTimelock"
+    )
+
+    # Vault.setFee -> Timelock (caller resolves to the in-protocol timelock; the
+    # finite_set row itself is untyped, exactly as the writer leaves it).
+    ef_vault = EffectiveFunction(
+        contract_id=impl_contract.id,
+        function_name="setFee",
+        selector="0x11111111",
+        abi_signature="setFee(uint256)",
+        authority_public=False,
+    )
+    db_session.add(ef_vault)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef_vault.id,
+            address=timelock_addr.lower(),
+            resolved_type=None,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+
+    # Timelock.execute -> gov_safe, TYPED 'safe' on the FP row (what the writer
+    # now does). gov_safe has NO control-graph node at all.
+    ef_tl = EffectiveFunction(
+        contract_id=tl_contract.id,
+        function_name="execute",
+        selector="0x22222222",
+        abi_signature="execute(address,uint256,bytes)",
+        authority_public=False,
+    )
+    db_session.add(ef_tl)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef_tl.id,
+            address=gov_safe,
+            resolved_type="safe",
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+
+    # Only the Timelock is typed in the control graph (so it is a pass-through);
+    # the Safe is intentionally absent from CGN.
+    db_session.add(
+        ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+
+    assert gov_safe in principals, (
+        "a Safe known only via a typed FunctionPrincipal row (no CGN node) must still surface as a principal"
+    )
+    gov_primary = {a.lower() for a in (principals[gov_safe].get("primary_for") or [])}
+    assert proxy_addr.lower() in gov_primary, (
+        "the FP-typed Safe must own the Vault proxy through the Timelock pass-through. "
+        f"Got primary_for={sorted(gov_primary)}"
+    )
