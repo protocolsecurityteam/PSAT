@@ -78,7 +78,9 @@ CHAIN_SORT_ORDER = {
     "zksync": 9,
     "blast": 10,
     "mode": 11,
-    "berachain": 12,
+    "mantle": 12,
+    "celo": 13,
+    "berachain": 14,
     "unknown": 99,
 }
 
@@ -97,6 +99,8 @@ CHAIN_IDS: dict[str, int] = {
     "zksync": 324,
     "blast": 81457,
     "mode": 34443,
+    "mantle": 5000,
+    "celo": 42220,
     "bera": 80094,
     "berachain": 80094,
 }
@@ -165,37 +169,41 @@ def _extract_addresses(*values: str) -> set[str]:
     return out
 
 
+_CHAIN_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("arbitrum", (r"arbitrum",)),
+    ("optimism", (r"optimism", r"optimistic")),
+    ("polygon", (r"polygon", r"matic")),
+    ("avalanche", (r"avalanche", r"avax")),
+    ("bsc", (r"bsc", r"bnb chain", r"bnb smart chain", r"binance smart chain")),
+    ("linea", (r"linea",)),
+    ("scroll", (r"scroll",)),
+    ("zksync", (r"zksync", r"zk sync", r"zk-sync")),
+    ("blast", (r"blast",)),
+    ("mode", (r"mode network", r"mode chain")),
+    ("mantle", (r"mantle",)),
+    ("celo", (r"celo",)),
+    ("berachain", (r"berachain", r"bera chain")),
+    ("base", (r"base chain", r"base mainnet", r"base l2", r"on base")),
+)
+
+
 def _infer_chain(url: str, text: str) -> str:
     domain = _get_domain(url)
     for known, chain in EXPLORER_CHAINS.items():
         if _domain_matches(domain, known):
             return chain
     lowered = text.lower()
-    if "arbitrum" in lowered:
-        return "arbitrum"
-    if "optimism" in lowered or "optimistic" in lowered:
-        return "optimism"
-    if "polygon" in lowered or "matic" in lowered:
-        return "polygon"
-    if "base" in lowered:
-        return "base"
-    if "avalanche" in lowered or "avax" in lowered:
-        return "avalanche"
-    if "bsc" in lowered or "bnb chain" in lowered or "binance smart chain" in lowered:
-        return "bsc"
-    if "linea" in lowered:
-        return "linea"
-    if "scroll" in lowered:
-        return "scroll"
-    if "zksync" in lowered or "zk sync" in lowered:
-        return "zksync"
-    if "blast" in lowered:
-        return "blast"
-    if "mode" in lowered:
-        return "mode"
-    if "berachain" in lowered or "bera" in lowered:
-        return "berachain"
-    if "ethereum" in lowered or "mainnet" in lowered:
+    # Non-ethereum hints win on word-boundary match. Bare-substring checks
+    # like ``"base" in text`` mis-tag everything that says "based on" or
+    # "database"; ``"mode" in text`` swallowed every "model"/"modern" page;
+    # ``"matic" in text`` matched "automatic". Require word boundaries so a
+    # passing mention of "Ethereum-compatible" on an Arbitrum docs page
+    # doesn't override the more specific chain hints below.
+    for chain, patterns in _CHAIN_KEYWORDS:
+        for pattern in patterns:
+            if re.search(rf"\b{pattern}\b", lowered):
+                return chain
+    if re.search(r"\b(ethereum|mainnet|ethereum l1)\b", lowered):
         return "ethereum"
     return "unknown"
 
