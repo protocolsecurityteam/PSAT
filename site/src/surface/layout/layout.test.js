@@ -13,7 +13,7 @@ import { buildMachines } from "./buildMachines.js";
 import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
-import { aggregateEdges, assignGroups, buildGraphLayout } from "./elkLayout.js";
+import { aggregateEdges, assignGroups, buildGraphLayout, estimateDetailHeight, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
 
 const functionData = Object.fromEntries(
   ETHERFI_COMPANY_RICH.contracts.map((c) => [c.address, c.functions || []]),
@@ -214,23 +214,33 @@ describe("buildGraphLayout", () => {
     }
   });
 
-  it("renders every non-primary co-controller as a guardian node, including operator EOAs", () => {
-    // The Safe primary-owns machines[0] (→ group container). The Timelock and
-    // an operator EOA both co-control machines[0] without being primary, so
-    // each renders as its own guardian node (always visible, unlike an on-card
-    // label). EOAs are included on Surface even though monitoring drops them
-    // (an EOA that can pause/move funds is a controller worth showing). A
-    // principal already shown as a group is not duplicated into the rail.
+  it("attaches a Controllers list to each group: primary first, then co-controllers scoped to the group", () => {
+    // The Safe primary-owns both contracts (→ one group container). The
+    // Timelock and an operator EOA each co-control machines[0] (VAULT) without
+    // being primary. Co-controllers no longer render as standalone guardian
+    // nodes — they live in the owning group's Controllers accordion
+    // (group.data.controllers), with the functions/caps they can call scoped
+    // to that group's contracts. EOAs are included on Surface even though
+    // monitoring drops them.
+    const eoaAddr = "0x" + "ee".repeat(20);
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
-      controls: [machines[0].address],
-      primary_for: p.resolved_type === "safe" ? [machines[0].address] : [],
+      controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
       co_controls: p.resolved_type === "timelock" ? [machines[0].address] : [],
+      controls_detail:
+        p.resolved_type === "safe"
+          ? [
+              { address: machines[0].address, functions: ["upgradeTo", "transferOwnership"], capabilities: ["ownership", "upgrade"] },
+              { address: machines[1].address, functions: ["upgradeTo"], capabilities: ["upgrade"] },
+            ]
+          : p.resolved_type === "timelock"
+          ? [{ address: machines[0].address, functions: ["pauseContract"], capabilities: ["pause"] }]
+          : [],
     }));
-    const eoaAddr = "0x" + "ee".repeat(20);
     principals.push({
       address: eoaAddr,
       type: "eoa",
@@ -239,19 +249,88 @@ describe("buildGraphLayout", () => {
       controls: [machines[0].address],
       primary_for: [],
       co_controls: [machines[0].address],
+      controls_detail: [{ address: machines[0].address, functions: ["sweepFunds"], capabilities: ["fund-out"] }],
     });
 
     const { nodes } = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
-    const principalNodes = nodes.filter((n) => n.type === "principal");
-    const timelock = principals.find((p) => p.type === "timelock");
     const safe = principals.find((p) => p.type === "safe");
 
-    // The Timelock AND the operator EOA co-controllers both render as guardians.
-    expect(principalNodes.some((n) => n.id === timelock.address && n.data.isGuardian)).toBe(true);
-    expect(principalNodes.some((n) => n.id.toLowerCase() === eoaAddr && n.data.isGuardian)).toBe(true);
-    // The Safe is a group container, never duplicated as a guardian node.
-    expect(principalNodes.some((n) => n.id === safe.address)).toBe(false);
-    expect(nodes.some((n) => n.type === "group" && n.id === safe.address)).toBe(true);
+    // No standalone principal/guardian nodes anymore.
+    expect(nodes.filter((n) => n.type === "principal")).toHaveLength(0);
+
+    const group = nodes.find((n) => n.type === "group" && n.id === safe.address);
+    expect(group).toBeTruthy();
+    const controllers = group.data.controllers;
+
+    // Primary first.
+    expect(controllers[0].isPrimary).toBe(true);
+    expect(controllers[0].address).toBe(safe.address);
+    // Capability summary is the verbatim union of the real tags, sorted.
+    expect(controllers[0].capabilities).toEqual(["ownership", "upgrade"]);
+    // Primary governs both contracts in the group.
+    expect(controllers[0].governs).toHaveLength(2);
+
+    // Both co-controllers appear, tagged non-primary, scoped to VAULT only.
+    const cos = controllers.filter((c) => !c.isPrimary);
+    expect(cos).toHaveLength(2);
+    const tl = cos.find((c) => c.address.toLowerCase() === RICH_ADDRESSES.TIMELOCK.toLowerCase());
+    const eoa = cos.find((c) => c.address.toLowerCase() === eoaAddr);
+    expect(tl.capabilities).toEqual(["pause"]);
+    expect(tl.governs).toHaveLength(1);
+    expect(tl.governs[0].functions).toEqual(["pauseContract"]);
+    expect(eoa.capabilities).toEqual(["fund-out"]);
+    // The header height grows with the number of controller rows.
+    expect(group.data.headerHeight).toBe(groupHeaderHeight(controllers.length));
+  });
+
+  it("grows a group's reserved header height when one of its controller rows is expanded", () => {
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
+      co_controls: [],
+      controls_detail:
+        p.resolved_type === "safe"
+          ? machines.map((m) => ({ address: m.address, functions: ["upgradeTo"], capabilities: ["upgrade"] }))
+          : [],
+    }));
+    const safe = principals.find((p) => p.type === "safe");
+    const nControllers = 1; // primary only (no co-controllers here)
+    const collapsed = groupHeaderHeight(nControllers);
+
+    // No expansion → collapsed reservation.
+    const base = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
+    expect(base.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(collapsed);
+
+    // Expanded with no measured height yet → collapsed + estimate.
+    const expanded = { groupId: safe.address, idx: 0 };
+    const estimated = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {});
+    const openRow = estimated.nodes.find((n) => n.id === safe.address).data.controllers[0];
+    expect(estimated.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(
+      collapsed + estimateDetailHeight(openRow.governs.length),
+    );
+
+    // Once GroupNode reports the measured band height for this open-row state,
+    // it's reserved verbatim, and layoutGroupInterior starts the first card
+    // below the grown band.
+    const grownHeader = 540;
+    const measured = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {
+      [`${safe.address}:0`]: grownHeader,
+    });
+    expect(measured.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(grownHeader);
+    const kids = measured.groupChildren.get(safe.address.toLowerCase());
+    const interior = layoutGroupInterior(
+      kids.map((id) => ({ id })),
+      machines,
+      grownHeader,
+    );
+    // Cards start at or below the reserved band (a small gap clears the
+    // group's border so the first card never tucks under the accordion).
+    const firstCardY = Math.min(...[...interior.positions.values()].map((pt) => pt.y));
+    expect(firstCardY).toBeGreaterThanOrEqual(grownHeader);
   });
 });
 

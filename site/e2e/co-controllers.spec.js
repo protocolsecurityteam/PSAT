@@ -3,11 +3,11 @@
  *
  * A co-controller is a principal that holds real authority on a contract it
  * isn't the primary owner of (e.g. EtherFi's pause/fund-recovery guardian
- * Safe, which the bigger governance Safe out-ranks for primary). The canvas
- * renders these as their own nodes in a guardians rail above the groups —
- * always visible at fit-view, unlike an on-card label. Their edges to the
- * contracts they control appear only on select, so the rail stays a clean
- * band rather than permanent cross-group fanout.
+ * Safe, which the bigger governance Safe out-ranks for primary). They used to
+ * render as illegible dots in a left "guardian rail"; now they live inside the
+ * owning group's Controllers accordion — one row per controller (the primary
+ * owner plus every co-controller), each expanding to the exact functions it
+ * can call per contract.
  */
 import { test, expect } from "@playwright/test";
 
@@ -37,8 +37,8 @@ const FIXTURE = {
         },
       ],
       // Permissionless / lower-privilege callers (server-computed): neither the
-      // primary owner nor a guardian. Rendered in aggregate as "+N callers",
-      // each carrying the functions / capabilities it can actually call.
+      // primary owner nor a co-controller. Rendered in aggregate as "+N
+      // callers", each carrying the functions / capabilities it can call.
       other_callers: [
         { address: "0x" + "41".repeat(20), type: "eoa", label: "bot-a", functions: ["createBid"], capabilities: [] },
         { address: "0x" + "42".repeat(20), type: "safe", label: "bidder-x", functions: ["createBid"], capabilities: [] },
@@ -47,7 +47,8 @@ const FIXTURE = {
     },
   ],
   principals: [
-    // Primary owner → renders as the group container around VAULT.
+    // Primary owner → renders as the group container around VAULT, and the
+    // PRIMARY row of its Controllers accordion.
     {
       address: GOV_SAFE,
       type: "safe",
@@ -56,8 +57,18 @@ const FIXTURE = {
       controls: [VAULT],
       primary_for: [VAULT],
       co_controls: [],
+      // A rich capability set (6 tags) so the row summary proves it shows ALL
+      // of them, comma-separated, never truncated to "+N".
+      controls_detail: [
+        {
+          address: VAULT,
+          functions: ["upgradeTo", "transferOwnership"],
+          capabilities: ["ownership", "upgrade", "pause", "fund-out", "roles", "authority"],
+        },
+      ],
     },
-    // Co-controller → no group of its own; surfaces as a chip on VAULT.
+    // Co-controller → no group of its own; surfaces as a CO row in GOV_SAFE's
+    // accordion, expanding to the functions it can call on VAULT.
     {
       address: GUARDIAN,
       type: "safe",
@@ -66,8 +77,6 @@ const FIXTURE = {
       controls: [VAULT],
       primary_for: [],
       co_controls: [VAULT],
-      // Verified per-contract call rights — drives the on-select capability
-      // chips and the sidebar "Can Call" list (vs a generic "controlled").
       controls_detail: [{ address: VAULT, functions: ["pauseContract"], capabilities: ["pause"] }],
     },
   ],
@@ -84,31 +93,73 @@ async function goToSurface(page) {
 }
 
 test.describe("Surface co-controllers", () => {
-  test("renders a co-controller as a guardian node, visible by default", async ({ page }) => {
+  test("lists the primary and every co-controller in the group's accordion", async ({ page }) => {
     await goToSurface(page);
 
-    // The guardian is its own node in the rail (always visible at fit-view),
-    // tagged "co-controller" to distinguish it from a primary group owner.
-    const guardian = page.locator(".ps-principal-node--guardian");
-    await expect(guardian).toBeVisible();
-    await expect(guardian).toContainText("co-controller");
-    // No co-control edges are drawn until it's selected.
-    expect(await page.locator(".react-flow__edge").count()).toBe(0);
+    // The old guardian rail is gone — no standalone co-controller node.
+    expect(await page.locator(".ps-principal-node--guardian").count()).toBe(0);
+
+    // The primary owner is the first accordion row, tagged PRIMARY, with its
+    // capability summary showing EVERY tag (verbatim, comma-separated) — not
+    // truncated to "+N".
+    const primary = page.locator(".ps-ctrl-row--primary");
+    await expect(primary).toBeVisible();
+    await expect(primary).toContainText("primary");
+    const capsText = await primary.locator(".ps-ctrl-caps").innerText();
+    for (const tag of ["authority", "fund-out", "ownership", "pause", "roles", "upgrade"]) {
+      expect(capsText).toContain(tag);
+    }
+    expect(capsText).not.toContain("+"); // no "+N" truncation
+    expect(capsText).toContain(","); // comma-separated like the rest of the app
+
+    // The co-controller is a CO row in the same box, scoped to VAULT.
+    const co = page.locator(".ps-ctrl-row--co");
+    await expect(co).toBeVisible();
+    await expect(co).toContainText("co");
+    await expect(co.locator(".ps-ctrl-caps")).toContainText("pause");
+    await expect(co.locator(".ps-ctrl-governs")).toContainText("governs 1");
+
+    // Collapsed by default — no function detail until a row is expanded.
+    expect(await page.locator(".ps-ctrl-detail").count()).toBe(0);
   });
 
-  test("selecting a guardian draws its edges to the contracts it controls", async ({ page }) => {
+  test("clicking a controller highlights the contracts it governs without zooming the camera", async ({ page }) => {
     await goToSurface(page);
 
-    await page.locator(".ps-principal-node--guardian").click();
-
-    // Edges from the guardian to its governed contract appear on select...
-    await expect(page.locator(".react-flow__edge").first()).toBeVisible({ timeout: 5000 });
-    // ...the on-card chip says what it can DO (its capability), not "controlled"...
+    // Click the co-controller row → it reads as selected, and VAULT (the
+    // contract it governs) gets an on-card capability chip, mirroring a click
+    // on the group header.
+    await page.locator(".ps-ctrl-row--co .ps-ctrl-head").click();
+    await expect(page.locator(".ps-ctrl-row--co.ps-ctrl-row--selected")).toBeVisible();
     await expect(page.locator(".ps-node-chip--out", { hasText: "pause" }).first()).toBeVisible();
-    // ...the sidebar lists the verified call rights per contract...
-    await expect(page.locator(".ps-principal-cancall-caps", { hasText: "pause" }).first()).toBeVisible();
-    // ...and selecting it focuses it (URL focus param), like any principal.
-    await expect(page).toHaveURL(/focus=/);
+
+    // The primary controller IS a group node, so selecting it used to pan/zoom
+    // the camera to it. Clicking its row highlights (selects) without moving
+    // the camera — no focus param is written to the URL.
+    await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
+    await expect(page.locator(".ps-ctrl-row--primary.ps-ctrl-row--selected")).toBeVisible();
+    await expect(page).not.toHaveURL(/focus=/);
+  });
+
+  test("expanding a controller row reveals the exact functions it can call", async ({ page }) => {
+    await goToSurface(page);
+
+    await page.locator(".ps-ctrl-row--co .ps-ctrl-head").click();
+
+    // The detail overlay lists VAULT and the function the co-controller can
+    // actually invoke on it.
+    const detail = page.locator(".ps-ctrl-row--co .ps-ctrl-detail");
+    await expect(detail).toBeVisible();
+    await expect(detail).toContainText("Vault");
+    await expect(detail.locator(".ps-ctrl-fnchip", { hasText: "pauseContract" })).toBeVisible();
+
+    // Exclusive expansion: opening the primary closes the co row.
+    await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
+    await expect(page.locator(".ps-ctrl-row--co .ps-ctrl-detail")).toHaveCount(0);
+    await expect(page.locator(".ps-ctrl-row--primary .ps-ctrl-detail")).toBeVisible();
+    await expect(
+      page.locator(".ps-ctrl-row--primary .ps-ctrl-fnchip", { hasText: "transferOwnership" }),
+    ).toBeVisible();
   });
 
   test("aggregates permissionless callers into a '+N callers' affordance + sidebar list", async ({ page }) => {
