@@ -1053,6 +1053,180 @@ def test_external_authority_inlining_binds_msg_sender_argument(session):
 
 
 @requires_postgres
+def test_external_authority_inlining_through_empty_proxy_artifact(session):
+    """Regression mirroring live EtherFi data (PR-95): an authority contract
+    that is a UUPS proxy has an *empty-but-present* ``predicate_trees`` artifact
+    of its own — the static pipeline writes ``{"trees": {}}`` for the logicless
+    proxy. The implementation child job holds the real
+    ``onlyProtocolUpgrader(account) => _owner == account`` tree, and the
+    implementation's ``_owner`` ControllerValue is the EtherFiTimelock.
+
+    Before the fix, ``find_analysis_job_for_address`` accepted the proxy job
+    because its empty artifact counted as "present", shadowing the
+    implementation's trees. The inliner then saw an empty tree set, fell through
+    to event-materialization (which cannot resolve a void-revert
+    ``onlyProtocolUpgrader`` — it never returns a bool), and emitted
+    ``external_check_only`` with **zero principals**. The net effect on the
+    Surface: every UUPS upgrade function in the protocol (19 on EtherFi) was
+    ownerless, with the true upgrade authority (the timelock behind the
+    RoleRegistry) missing entirely.
+
+    The sibling ``test_external_authority_inlining_binds_msg_sender_argument``
+    seeds the proxy with *no* artifact (``predicate_trees=None`` skips
+    ``store_artifact``), so it never exercised the empty-artifact short-circuit
+    that the real pipeline produces. This test pins exactly that gap: the empty
+    proxy artifact must not shadow the implementation's trees, and the gate must
+    resolve via the registry's real ``_owner == account`` check.
+    """
+    from db.models import Contract, ControllerValue, Protocol
+    from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    target_addr = "0x" + uuid.uuid4().hex[:8] + "e1" * 16
+    registry_proxy = "0x" + uuid.uuid4().hex[:8] + "e2" * 16
+    registry_impl = "0x" + uuid.uuid4().hex[:8] + "e3" * 16
+    timelock = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"  # EtherFiTimelock (real)
+
+    proto = Protocol(name=f"capres_empty_proxy_{uuid.uuid4().hex[:8]}")
+    session.add(proto)
+    session.flush()
+
+    target_artifact = {
+        "schema_version": "semantic",
+        "contract_name": "PriorityWithdrawalQueue",
+        "trees": {
+            "upgradeTo(address)": {
+                "op": "LEAF",
+                "leaf": {
+                    "kind": "external_bool",
+                    "operator": "truthy",
+                    "authority_role": "delegated_authority",
+                    "operands": [
+                        {
+                            "source": "external_call",
+                            "callee": "onlyProtocolUpgrader",
+                            "callee_selector": "0x5006bb7b",
+                            "callee_signature": "onlyProtocolUpgrader(address)",
+                        },
+                        {"source": "msg_sender"},
+                    ],
+                    "set_descriptor": {
+                        "kind": "external_set",
+                        "authority_contract": {
+                            "address_source": {
+                                "source": "state_variable",
+                                "state_variable_name": "roleRegistry",
+                            }
+                        },
+                        "callee_signature": "onlyProtocolUpgrader(address)",
+                        "callee_selector": "0x5006bb7b",
+                    },
+                    "references_msg_sender": True,
+                    "parameter_indices": [],
+                    "expression": "roleRegistry.onlyProtocolUpgrader(msg.sender)",
+                    "basis": ["external call must not revert"],
+                },
+            }
+        },
+    }
+    target_job = _seed_job_with_artifact(session, address=target_addr, predicate_trees=target_artifact)
+    target_contract = Contract(address=target_addr, chain="ethereum", protocol_id=proto.id, job_id=target_job.id)
+    session.add(target_contract)
+    session.flush()
+    session.add(
+        ControllerValue(
+            contract_id=target_contract.id,
+            controller_id="external_contract:roleRegistry",
+            value=registry_proxy,
+            resolved_type="contract",
+            source="state_variable",
+        )
+    )
+
+    # The crux: the proxy job carries an empty-but-present predicate_trees
+    # artifact (what the static pipeline writes for a logicless proxy), NOT a
+    # missing one. This is the exact shape the sibling test never seeded.
+    proxy_job = _seed_job_with_artifact(
+        session,
+        address=registry_proxy,
+        predicate_trees={"schema_version": "semantic", "contract_name": "RoleRegistry", "trees": {}},
+    )
+    session.add(
+        Contract(
+            address=registry_proxy,
+            chain="ethereum",
+            protocol_id=proto.id,
+            job_id=proxy_job.id,
+            is_proxy=True,
+            implementation=registry_impl,
+        )
+    )
+
+    registry_artifact = {
+        "schema_version": "semantic",
+        "contract_name": "RoleRegistry",
+        "trees": {
+            "onlyProtocolUpgrader(address)": {
+                "op": "LEAF",
+                "leaf": {
+                    "kind": "equality",
+                    "operator": "eq",
+                    "authority_role": "business",
+                    "operands": [
+                        {"source": "state_variable", "state_variable_name": "_owner"},
+                        {"source": "parameter", "parameter_name": "account", "parameter_index": 0},
+                    ],
+                    "references_msg_sender": False,
+                    "parameter_indices": [0],
+                    "expression": "owner() != account",
+                    "basis": ["if-revert via successor NodeType.EXPRESSION"],
+                },
+            }
+        },
+    }
+    impl_job = _seed_job_with_artifact(session, address=registry_impl, predicate_trees=registry_artifact)
+    impl_job.request = {
+        "address": registry_impl,
+        "name": "RoleRegistry: (impl)",
+        "chain": "ethereum",
+        "parent_job_id": str(proxy_job.id),
+        "proxy_address": registry_proxy,
+    }
+    impl_contract = Contract(address=registry_impl, chain="ethereum", protocol_id=proto.id, job_id=impl_job.id)
+    session.add(impl_contract)
+    session.flush()
+    session.add(
+        ControllerValue(
+            contract_id=impl_contract.id,
+            controller_id="state_variable:_owner",
+            value=timelock,
+            resolved_type="timelock",
+            source="state_variable",
+        )
+    )
+    session.commit()
+
+    out = resolve_contract_capabilities(session, address=target_addr, chain_id=1, job_id=target_job.id)
+    assert out is not None
+    cap = out["upgradeTo(address)"]
+    assert cap["kind"] == "finite_set", (
+        f"empty proxy predicate_trees must not shadow the implementation's onlyProtocolUpgrader "
+        f"tree; expected finite_set([timelock]) but got kind={cap.get('kind')} "
+        f"(external_check_only here is the bug: the upgrade gate resolved to zero principals)"
+    )
+    assert [m.lower() for m in (cap.get("members") or [])] == [timelock], (
+        f"expected the EtherFiTimelock resolved from RoleRegistry._owner; got {cap.get('members')}"
+    )
+    # Resolved via the registry's real `_owner == account` check (read from the
+    # ControllerValue), not a heuristic owner() guess — so exact / enumerable.
+    assert cap.get("membership_quality") == "exact", (
+        f"expected exact membership from the real check logic; got {cap.get('membership_quality')}"
+    )
+    assert cap.get("confidence") == "enumerable", (
+        f"expected enumerable confidence from the real check logic; got {cap.get('confidence')}"
+    )
+
+
+@requires_postgres
 def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
     from eth_utils.crypto import keccak
 
