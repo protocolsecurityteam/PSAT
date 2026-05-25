@@ -13,10 +13,12 @@ import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
 import { FocusOnNode } from "./FocusOnNode.jsx";
 import { GroupNode } from "./GroupNode.jsx";
-import { PrincipalNode } from "./PrincipalNode.jsx";
 import { PrincipalTourNav } from "./PrincipalTourNav.jsx";
 
-const nodeTypes = { contract: ContractNode, principal: PrincipalNode, group: GroupNode };
+// Co-controllers live inside the owning group's Controllers accordion now, so
+// the canvas only renders contract cards and their owning group boxes — there
+// is no standalone "principal"/guardian-rail node type any more.
+const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
 // Selection-time legend. Renders only while a contract is selected so
@@ -114,10 +116,6 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     // edges existed between the same pair.
     const connectedNodes = new Set();
     const selectionChips = new Map();
-    // Edges from a selected co-controller (a guardian-rail node, or a group)
-    // to the contracts it controls — drawn only while selected, so the rail
-    // stays a clean band rather than permanent cross-group fanout.
-    const coControllerEdges = [];
     if (sel) {
       connectedNodes.add(sel);
       const addChip = (addrLc, caps, direction) => {
@@ -217,23 +215,17 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         if (nid === sel && pid) connectedNodes.add(pid);
       }
 
-      // Co-controller selection. The selected principal (a guardian-rail node,
-      // or a group that also co-controls elsewhere) may hold authority on
-      // contracts it isn't the primary owner of (principal.co_controls). Those
-      // relationships have no permanent edge — the owner-grouping dropped
-      // principal→contract edges to kill fanout — so on select we light up the
-      // contracts it controls (and their containing groups, so a highlighted
-      // child isn't dimmed along with its box) and draw its edges, which all
-      // vanish on deselect.
+      // Co-controller selection: the selected principal may hold authority on
+      // contracts it isn't the primary owner of (principal.co_controls). On
+      // select we light up those contracts — and their containing groups, so a
+      // highlighted child isn't dimmed along with its box — and chip them with
+      // what the controller can do. This is the same dim+chip highlight a
+      // primary gets for its own children. We deliberately draw NO edges: the
+      // cross-group dashed lines read as the fanout spaghetti the owner-
+      // grouping removed, and the highlight alone conveys the reach.
       const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
       if (coControls.length) {
         const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
-        // A co-controller selected from inside a group's accordion has no node
-        // of its own (it isn't a primary group), so we can't anchor an edge to
-        // it — the chips + dimming below still convey what it governs. Only
-        // draw the dashed edges when the selected principal IS a node on the
-        // canvas (i.e. a primary group that also co-controls elsewhere).
-        const selHasNode = nodeByAddr.has(sel);
         for (const c of coControls) {
           const t = c?.toLowerCase();
           const tn = t && nodeByAddr.get(t);
@@ -241,18 +233,6 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           connectedNodes.add(t);
           if (tn.parentId) connectedNodes.add(tn.parentId.toLowerCase());
           addChip(t, capsTextFor(t), "out");
-          if (!selHasNode) continue;
-          coControllerEdges.push({
-            id: `co-${sel}-${t}`,
-            source: selPrincipal.address,
-            target: tn.id,
-            sourceHandle: "ctrl-out",
-            targetHandle: "ctrl-in",
-            type: "smoothstep",
-            style: { stroke: "#d99a4e", strokeWidth: 1.5, strokeDasharray: "4 3" },
-            animated: true,
-            data: { coControl: true },
-          });
         }
       }
     }
@@ -341,7 +321,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       };
     });
 
-    setEdges(coControllerEdges.length ? [...nextEdges, ...coControllerEdges] : nextEdges);
+    setEdges(nextEdges);
   }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, expanded, toggleController, selectController, measureBand]);
 
   return (
