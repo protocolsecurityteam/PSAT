@@ -99,7 +99,14 @@ class ResolutionWorker(BaseWorker):
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
+        getter_fallback_address: str | None = None
         if proxy_address:
+            # Reading impl state via the proxy is correct for storage-backed
+            # vars, but immutable authority addresses live in the impl bytecode
+            # and revert when the proxy doesn't delegatecall to this impl
+            # (beacon / per-instance patterns, e.g. EtherFiNode). Keep the impl
+            # address as a getter fallback so those reverting reads recover.
+            getter_fallback_address = tracking_plan.get("contract_address")
             tracking_plan = {**tracking_plan, "contract_address": proxy_address}
             contract_analysis = {
                 **contract_analysis,
@@ -118,6 +125,7 @@ class ResolutionWorker(BaseWorker):
             cast(ControlTrackingPlan, tracking_plan),
             rpc_url,
             heartbeat=lambda: self._heartbeat(session, job),
+            getter_fallback_address=getter_fallback_address,
         )
         logger.info(
             "resolution phase complete: control snapshot",

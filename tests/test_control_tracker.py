@@ -226,6 +226,82 @@ def test_build_control_snapshot_handles_reverting_getter(monkeypatch):
     assert "execution reverted" in str(value["details"]["error"])
 
 
+def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monkeypatch):
+    """Regression mirroring real EtherFi data (EtherFiNode): authority addresses
+    declared ``immutable`` live in the implementation bytecode, not proxy
+    storage. EtherFiNode's runtime/proxy address (0x3c55986c) does not
+    delegatecall to its analyzed impl (0xa91f8a52) — its EIP-1967/beacon slots
+    are zero — so ``etherFiNodesManager()`` reverts there but resolves on the
+    impl. The snapshot must fall back to the impl address so the controller is
+    recovered, not recorded null (which left 13 EtherFiNode functions ownerless
+    on the Surface, with the EtherFiNodesManager controller missing entirely).
+    """
+    proxy = "0x3c55986cfee455e2533f4d29006634ecf9b7c03f"  # runtime addr — getter reverts here
+    impl = "0xa91f8a52f0c1b4d3fdc256fc5bebca4d627da392"  # immutable lives in this bytecode
+    manager = "8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"  # EtherFiNodesManager
+    plan: ControlTrackingPlan = {
+        "schema_version": "0.1",
+        "contract_address": proxy,
+        "contract_name": "EtherFiNode",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:etherFiNodesManager",
+                "label": "etherFiNodesManager",
+                "source": "etherFiNodesManager",
+                "kind": "state_variable",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "etherFiNodesManager",
+                    "kind": "state_variable",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+                "tracking_mode": "state_only",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": proxy,
+                    "polling_sources": ["etherFiNodesManager"],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            to = params[0]["to"].lower()
+            if to == proxy:  # immutable getter reverts on the non-delegating proxy
+                raise RuntimeError("{'code': 3, 'message': 'execution reverted', 'data': '0x'}")
+            if to == impl:  # resolves on the implementation where the immutable lives
+                return "0x" + "00" * 12 + manager
+            return "0x"
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+    monkeypatch.setattr(
+        "services.resolution.tracking.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+
+    # With the impl fallback, the reverting proxy read recovers from the impl.
+    recovered = build_control_snapshot(plan, "https://rpc.example", getter_fallback_address=impl)
+    cv = recovered["controller_values"]["state_variable:etherFiNodesManager"]
+    assert cv["value"] == "0x" + manager, f"expected impl-fallback to recover the manager; got {cv}"
+    assert cv["observed_via"] == "eth_call_impl_fallback"
+    assert cv["resolved_type"] == "contract"
+
+    # Without a fallback (the default), the prior behavior holds: recorded null.
+    nulled = build_control_snapshot(plan, "https://rpc.example")
+    cv2 = nulled["controller_values"]["state_variable:etherFiNodesManager"]
+    assert cv2["value"] is None
+    assert cv2["observed_via"] == "eth_call_error"
+
+
 def test_build_control_snapshot_preserves_role_identifier_for_capability_resolver(monkeypatch):
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",
