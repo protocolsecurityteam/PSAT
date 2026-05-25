@@ -14,6 +14,7 @@ from eth_abi.abi import decode
 
 from schemas.contract_analysis import AssociatedEvent, ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
+from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
@@ -481,11 +482,22 @@ def build_control_snapshot(
     )
     controller_values: dict[str, Any] = {}
 
-    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any]]:
-        """Pure function: compute one controller's value dict."""
+    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
+        """Pure function: compute one controller's value dict, or None to skip."""
         controller_id = controller["controller_id"]
         source = controller["source"]
         read_spec = controller.get("read_spec")
+        # Primitive-scalar state vars are admitted to the plan only so the event
+        # pathway can watch them — the value snapshot is address-only (every
+        # consumer reads ``value`` as a 0x-address). Reading a scalar slot and
+        # classifying it as an address mints phantom EOA principals: a uint
+        # _minDelay==864000 resolves to 0x…0d2f00, has no code, classifies
+        # "eoa", and is promoted to a controller of every contract declaring it.
+        # Skip only primitive scalars — address/contract slots are real
+        # principals, and mapping/array/struct slots are enumerated elsewhere
+        # (a bare getter reverts on them) so they must pass through untouched.
+        if controller["kind"] == "state_variable" and is_primitive_scalar_read_spec(read_spec):
+            return controller_id, None
         try:
             value = _read_polling_source(
                 rpc_url,
@@ -540,6 +552,8 @@ def build_control_snapshot(
             # entry. Anything reaching here is a genuine bug — surface it.
             raise outcome
         cid, entry = outcome
+        if entry is None:
+            continue
         controller_values[cid] = entry
 
     return {

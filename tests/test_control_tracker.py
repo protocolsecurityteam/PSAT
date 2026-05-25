@@ -1,17 +1,20 @@
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from eth_abi.abi import encode
 
-from schemas.control_tracking import ControlTrackingPlan
+from schemas.control_tracking import ControlTrackingPlan, TrackedController
 from services.resolution.tracking import build_control_snapshot, clear_classify_cache
 from services.resolution.tracking import (
     classify_resolved_address as _classify_resolved_address,
 )
+from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from utils.rpc import selector
 
 
 @pytest.fixture(autouse=True)
@@ -478,3 +481,246 @@ def test_build_control_snapshot_parity_parallel_vs_sequential(monkeypatch):
         }
 
     assert _canon(seq) == _canon(par)
+
+
+# ---------------------------------------------------------------------------
+# Phantom-EOA regression. tracking_plan admits non-address state vars (uints,
+# bools, mappings) so the *event* pathway can watch them, on the documented
+# promise that "the poller filters by type_kind itself". build_control_snapshot
+# is that poller for the resolution pathway — and the single choke point whose
+# controller_values feed the ControllerValue table, the recursive control graph
+# (recursive.py:911), and effective_permissions, all of which read ``value`` as
+# a 0x-address. Before the fix it read every tracked controller's slot and ran
+# classify_resolved_address on it: a scalar < 2**160 (e.g. uint _minDelay ==
+# 864000) coerces to a no-code address, classifies "eoa", and is promoted to a
+# controller of every contract declaring that variable. These are the real
+# etherfi phantoms observed on the PR95 live DB.
+# ---------------------------------------------------------------------------
+
+
+def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
+    """Primitive-scalar state vars must not enter the value snapshot as principals.
+
+    Uses the exact live PR95 read_specs (``type_kind="primitive"``,
+    ``strategy="getter_call"`` with a target getter) and the real scalar values
+    those getters return, driving the real snapshot builder (block read,
+    parallel_map, decode, classify). Only the address-typed ``owner`` should
+    survive; if the guard regresses, the scalar getters get polled + classified
+    "eoa" and the set-equality assertion below fails.
+    """
+    target = "0x1111111111111111111111111111111111111111"
+    owner_addr = "cc" * 20
+
+    def _sv(source: str, read_spec: Any) -> TrackedController:
+        return {
+            "controller_id": f"state_variable:{source}",
+            "label": source,
+            "source": source,
+            "kind": "state_variable",
+            "read_spec": read_spec,
+            "tracking_mode": "event_plus_state",
+            "event_watch": None,
+            "polling_fallback": {
+                "contract_address": target,
+                "polling_sources": [source],
+                "cadence": "state_only",
+                "notes": [],
+            },
+            "notes": [],
+        }
+
+    def _primitive(getter: str, sol_type: str) -> dict[str, str]:
+        # Verbatim shape the static stage emits for a primitive state var.
+        return {
+            "strategy": "getter_call",
+            "target": getter,
+            "kind": "state_variable",
+            "type": sol_type,
+            "type_kind": "primitive",
+        }
+
+    # (source, read_spec, scalar the getter returns) — verbatim live PR95
+    # phantoms. Each scalar is < 2**160, so absent the guard it coerces to a
+    # no-code address and classifies "eoa".
+    scalars = [
+        ("_minDelay", _primitive("getMinDelay", "uint256"), 864_000),
+        ("threshold", _primitive("threshold", "uint256"), 3),
+        ("maxBidAmount", _primitive("maxBidAmount", "uint64"), 5 * 10**18),
+        ("BEACON_GENESIS_TIME", _primitive("beaconGenesisTimestamp", "uint32"), 1_606_824_023),
+        ("executorRequired", _primitive("executorRequired", "bool"), 1),
+        ("eapMerkleRoot", _primitive("eapMerkleRoot", "bytes32"), 0x894CDDB13B9795954D6DA83044AF04D85F90A179),
+    ]
+
+    owner_spec = {
+        "strategy": "getter_call",
+        "target": "owner",
+        "kind": "state_variable",
+        "type": "address",
+        "type_kind": "address",
+    }
+    plan: ControlTrackingPlan = {
+        "schema_version": "0.1",
+        "contract_address": target,
+        "contract_name": "MockMixedTypes",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [_sv("owner", owner_spec), *[_sv(src, rs) for src, rs, _v in scalars]],
+    }
+
+    # Map each getter selector (keyed by read_spec target) to its 32-byte word,
+    # so that *if the guard were removed* the scalars would be read + coerced.
+    word_by_selector = {selector(f"{rs['target']}()"): "0x" + format(val, "064x") for _src, rs, val in scalars}
+    word_by_selector[selector("owner()")] = "0x" + "00" * 12 + owner_addr
+
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            data = params[0]["data"]
+            if data not in word_by_selector:
+                raise AssertionError(f"Unexpected getter selector: {data}")
+            return word_by_selector[data]
+        if method == "eth_getCode":
+            return "0x"  # no code anywhere -> scalars would all classify "eoa"
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+
+    snapshot = build_control_snapshot(plan, "https://rpc.example")
+    cvs = snapshot["controller_values"]
+
+    # The address-typed controller survives and resolves normally...
+    assert set(cvs) == {"state_variable:owner"}
+    assert cvs["state_variable:owner"]["value"] == "0x" + owner_addr
+    assert cvs["state_variable:owner"]["resolved_type"] == "eoa"
+
+    # ...and not one primitive slot produced a (phantom) controller value, so no
+    # downstream consumer can mint an "eoa" principal from them.
+    for src, _rs, _v in scalars:
+        assert f"state_variable:{src}" not in cvs
+
+
+def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch):
+    """The guard is conservative: a state var with no/unknown type info is
+    still classified, so real address principals are never dropped when the
+    static stage failed to record a type_kind."""
+    target = "0x1111111111111111111111111111111111111111"
+    plan: ControlTrackingPlan = {
+        "schema_version": "0.1",
+        "contract_address": target,
+        "contract_name": "Mock",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:owner",
+                "label": "owner",
+                "source": "owner",
+                "kind": "state_variable",
+                "read_spec": None,  # no type info recorded
+                "tracking_mode": "state_only",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": target,
+                    "polling_sources": ["owner"],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+
+    def fake_rpc(_rpc_url, method, _params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            return "0x" + "00" * 12 + "ab" * 20
+        if method == "eth_getCode":
+            return "0x"
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+
+    snapshot = build_control_snapshot(plan, "https://rpc.example")
+    assert snapshot["controller_values"]["state_variable:owner"]["value"] == "0x" + "ab" * 20
+
+
+def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
+    """The guard skips ONLY primitive scalars. A mapping-typed state var
+    (e.g. an OZ AccessControl ``_roles`` / etherfi ``registered`` role map,
+    type_kind="mapping") must pass through untouched — a bare getter reverts on
+    it (value=None) and its members are enumerated elsewhere — so the real Safe
+    principals enumerated from those maps are never dropped.
+    """
+    target = "0x1111111111111111111111111111111111111111"
+    plan: ControlTrackingPlan = {
+        "schema_version": "0.1",
+        "contract_address": target,
+        "contract_name": "Mock",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:registered",
+                "label": "registered",
+                "source": "registered",
+                "kind": "state_variable",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "registered",
+                    "kind": "state_variable",
+                    "type": "mapping(address => bool)",
+                    "type_kind": "mapping",
+                },
+                "tracking_mode": "event_plus_state",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": target,
+                    "polling_sources": ["registered"],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+
+    def fake_rpc(_rpc_url, method, _params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            raise RuntimeError("execution reverted")  # bare mapping getter reverts
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+
+    cvs = build_control_snapshot(plan, "https://rpc.example")["controller_values"]
+    # Not skipped: the mapping controller still appears (as a reverting/unknown
+    # entry), exactly as before the fix — so mapping enumeration is untouched.
+    assert "state_variable:registered" in cvs
+    assert cvs["state_variable:registered"]["value"] is None
+    assert cvs["state_variable:registered"]["resolved_type"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "read_spec, expected",
+    [
+        # Primitive scalars (the phantom source) -> True == skip from snapshot.
+        ({"type_kind": "primitive"}, True),  # the live shape for uint/bool/bytes
+        ({"type_kind": "primitive", "type": "uint64"}, True),
+        ({"type": "uint256"}, True),  # type-only fallback (no type_kind)
+        ({"type": "bool"}, True),
+        ({"type": "bytes32"}, True),
+        ({"type": "int128"}, True),
+        # Real principals / enumerated refs -> False == keep.
+        ({"type_kind": "address"}, False),
+        ({"type_kind": "contract"}, False),
+        ({"type_kind": "mapping"}, False),  # role maps -> real Safe members
+        ({"type_kind": "array"}, False),
+        ({"type_kind": "struct"}, False),
+        ({"type_kind": "unknown"}, False),  # ambiguous -> conservatively kept
+        ({"type": "address"}, False),
+        (None, False),  # missing read_spec -> kept
+        ({}, False),  # no type info -> kept
+    ],
+)
+def test_is_primitive_scalar_read_spec(read_spec, expected):
+    assert is_primitive_scalar_read_spec(read_spec) is expected
