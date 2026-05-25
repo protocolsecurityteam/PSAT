@@ -3,6 +3,8 @@
 
 import ELK from "elkjs/lib/elk.bundled.js";
 
+import { principalBadge } from "../format.js";
+
 const elk = new ELK();
 
 // Every principal (Safe / Timelock / EOA / proxy admin) that owns at
@@ -205,7 +207,90 @@ export function assignGroups(machines, principals) {
   };
 }
 
-export function buildGraphLayout(machines, fundFlows, principals) {
+// Build the Controllers-accordion model for one group: the primary owner
+// first, then every co-controller that holds authority on a contract inside
+// this group. Each row carries the contracts it governs WITHIN this group,
+// with the concrete functions + capability tags it can call on each — all
+// scoped to the group's own children, so a co-controller spanning several
+// groups shows only the authority relevant to the box it's rendered in.
+//
+// Capability tags are taken verbatim from controls_detail[].capabilities
+// (the shared _EFFECT_CAPABILITY vocabulary: pause / upgrade / fund-out / …)
+// and unioned per row — never remapped, so a row reads the same word the
+// per-contract chips do.
+function buildGroupControllers(primary, kids, principalList, nameByAddr) {
+  const childOrder = kids; // group's child addresses (lc), in owned order
+  const childSet = new Set(kids);
+
+  const rowFor = (principal, isPrimary) => {
+    const detailByAddr = new Map();
+    for (const d of principal.controls_detail || []) {
+      const a = d?.address?.toLowerCase();
+      if (a) detailByAddr.set(a, d);
+    }
+    const governs = [];
+    const caps = new Set();
+    const funcs = new Set();
+    for (const childLc of childOrder) {
+      const d = detailByAddr.get(childLc);
+      if (!d) continue;
+      const functions = Array.isArray(d.functions) ? d.functions : [];
+      const capabilities = Array.isArray(d.capabilities) ? d.capabilities : [];
+      if (functions.length === 0 && capabilities.length === 0) continue;
+      governs.push({ address: childLc, name: nameByAddr.get(childLc) || childLc, capabilities, functions });
+      for (const c of capabilities) caps.add(c);
+      for (const f of functions) funcs.add(f);
+    }
+    governs.sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      address: principal.address,
+      type: principal.type,
+      isPrimary,
+      label: principalBadge(principal),
+      capabilities: [...caps].sort(),
+      // Unioned function names — the row summary falls back to these (like the
+      // sidebar's "Can Call") for controllers whose functions map to no
+      // high-level capability tag, so the summary is never blank.
+      functions: [...funcs].sort(),
+      governs,
+    };
+  };
+
+  const primaryAddrLc = primary.address?.toLowerCase();
+  const controllers = [rowFor(primary, true)];
+
+  const coRows = [];
+  for (const q of principalList) {
+    const qLc = q.address?.toLowerCase();
+    if (!qLc || qLc === primaryAddrLc) continue;
+    const co = Array.isArray(q.co_controls) ? q.co_controls : [];
+    if (!co.some((c) => childSet.has(c?.toLowerCase()))) continue;
+    const row = rowFor(q, false);
+    // co_controls says it has authority here; if we have no verified
+    // function detail for any of this group's contracts there's nothing to
+    // show, so skip the empty row rather than render "governs 0".
+    if (row.governs.length === 0) continue;
+    coRows.push(row);
+  }
+  // Most-capable co-controllers first; deterministic tie-breaks keep the
+  // layout (and visual snapshots) stable across renders.
+  coRows.sort(
+    (a, b) =>
+      b.governs.length - a.governs.length ||
+      b.capabilities.length - a.capabilities.length ||
+      a.address.localeCompare(b.address),
+  );
+  return controllers.concat(coRows);
+}
+
+// `expanded` ({ groupId, idx } | null) and `bandHeights` ({ "groupId:idx|c":
+// px }) drive the grow-on-expand behavior. GroupNode measures the rendered
+// header band (colored bar + accordion, including any open row's in-flow
+// detail and any wrapped capability summaries) and reports it per
+// (group, open-row) state; we reserve that exact height so ELK re-packs the
+// canvas to fit (rather than the content floating over / overlapping cards).
+// Until a state is measured we fall back to a constant estimate.
+export function buildGraphLayout(machines, fundFlows, principals, expanded = null, bandHeights = {}) {
   const sorted = [...machines].sort((a, b) => b.totalFunctions - a.totalFunctions);
   const principalList = principals || [];
   const principalByAddr = new Map();
@@ -213,7 +298,7 @@ export function buildGraphLayout(machines, fundFlows, principals) {
     if (p.address) principalByAddr.set(p.address.toLowerCase(), p);
   }
 
-  const { contractToGroup, groupChildren, groupedPrincipals } = assignGroups(sorted, principalList);
+  const { contractToGroup, groupChildren } = assignGroups(sorted, principalList);
 
   // Layout contracts only — principals get positioned relative to what they control
   const contractEntities = sorted.map((m) => ({ address: m.address?.toLowerCase(), kind: "contract" }));
@@ -261,12 +346,36 @@ export function buildGraphLayout(machines, fundFlows, principals) {
     if (total > 0) groupTotalUsd.set(principalAddr, total);
   }
 
+  const nameByAddr = new Map();
+  for (const m of sorted) {
+    if (m.address) nameByAddr.set(m.address.toLowerCase(), m.name || m.address);
+  }
+
   // Build group container nodes first — React Flow needs the parent
   // in the array before its children for stable rendering.
   const nodes = [];
   for (const [principalAddr, kids] of groupChildren) {
     const p = principalByAddr.get(principalAddr);
     if (!p) continue;
+    // Controllers accordion model (primary first, then co-controllers) +
+    // the header height it reserves, so layoutGroupInterior can start the
+    // cards below it and GroupNode can pin the rendered band to the same
+    // number. See buildGroupControllers / groupHeaderHeight.
+    const controllers = buildGroupControllers(p, kids, principalList, nameByAddr);
+    // Reserve the measured band height for this group's current open-row state
+    // (collapsed = "c") so the band grows in-flow and the cards — and
+    // everything ELK packs below — shift down instead of being overlapped.
+    // Falls back to a constant estimate (+ the open row's detail) until
+    // GroupNode reports the real height.
+    const openIdx = expanded && expanded.groupId === p.address ? expanded.idx : null;
+    const measuredBand = bandHeights[`${p.address}:${openIdx ?? "c"}`];
+    let headerHeight;
+    if (measuredBand != null) {
+      headerHeight = measuredBand;
+    } else {
+      headerHeight = groupHeaderHeight(controllers.length);
+      if (openIdx != null && controllers[openIdx]) headerHeight += estimateDetailHeight(controllers[openIdx].governs.length);
+    }
     nodes.push({
       id: p.address,
       type: "group",
@@ -278,6 +387,8 @@ export function buildGraphLayout(machines, fundFlows, principals) {
         principal: p,
         childCount: kids.length,
         totalUsd: groupTotalUsd.get(principalAddr) || 0,
+        controllers,
+        headerHeight,
       },
     });
   }
@@ -309,33 +420,14 @@ export function buildGraphLayout(machines, fundFlows, principals) {
     nodes.push(node);
   }
 
-  // Co-controller "guardians": principals that hold real authority on
-  // contracts they don't primary-own (principal.co_controls, server-computed
-  // — e.g. a pause / fund-recovery Safe on contracts a bigger governance Safe
-  // wins). They aren't group containers (they lost the primary contest), and a
-  // label on the governed card is invisible at fit-view — so each renders as
-  // its own node in a rail above the groups (positioned in elkLayout). Their
-  // cross-group edges are drawn only on select downstream, never as permanent
-  // fanout — the spaghetti the owner-grouping removed. ANY significant
-  // principal type qualifies, including operator EOAs: a key/bot that can pause
-  // or move funds is a controller worth showing even though monitoring can't
-  // watch an EOA's events (Surface and Monitoring intentionally diverge here).
-  // A principal already shown as a group is not duplicated. Addresses with no
-  // co-control authority (permissionless bidders, fund sinks, CGN noise) don't
-  // become guardians — the permissionless long tail renders as a per-contract
-  // "+N callers" affordance instead (machine.other_callers).
-  for (const p of principalList) {
-    const paddr = p.address?.toLowerCase();
-    if (!paddr) continue;
-    if (groupedPrincipals.has(paddr)) continue;
-    if (!(p.co_controls || []).some((c) => contractAddrs.has(c?.toLowerCase()))) continue;
-    nodes.push({
-      id: p.address,
-      type: "principal",
-      position: { x: 0, y: 0 },
-      data: { principal: p, isGuardian: true },
-    });
-  }
+  // Co-controllers — principals that hold real authority on contracts they
+  // don't primary-own (principal.co_controls) — are no longer rendered as
+  // standalone "guardian" rail nodes. They now live inside the owning group's
+  // Controllers accordion (see buildGroupControllers / GroupNode), which lists
+  // the exact functions each can call per contract instead of an illegible
+  // dot in a rail. A co-controller spanning several groups appears in each.
+  // The permissionless long tail still renders as a per-contract "+N callers"
+  // affordance (machine.other_callers), not a node per caller.
 
   const edges = [];
   for (const [, group] of byName) {
@@ -627,15 +719,53 @@ export function assignEdgeLanes(nodes, edges) {
   });
 }
 
-// Group container chrome sizing. Padding leaves room for the ~46px
-// header strip plus visible breathing room between the colored border
-// and the children inside. Child dimensions are sized a touch larger
-// than the .ps-node CSS naturally renders so rectpacking gives each
-// card its own column of slack — without this, cards on neighbouring
+// Group container chrome sizing. The top reservation is dynamic now: it
+// holds the colored primary bar PLUS the collapsed Controllers accordion
+// (one fixed-height row per controller), so the contract cards always start
+// below the accordion. The side/bottom padding give breathing room between
+// the colored border and the children inside. Child dimensions are sized a
+// touch larger than the .ps-node CSS naturally renders so rectpacking gives
+// each card its own column of slack — without this, cards on neighbouring
 // rows in dense groups visually butt up against each other.
-const GROUP_PADDING_TOP = 74;
+//
+// groupHeaderHeight() is only the INITIAL estimate of the collapsed band —
+// GroupNode measures the real rendered height (rows can grow when a capability
+// summary wraps) and reports it back, after which we reserve that exact value.
+// The constants just need to roughly track layout.css so the first frame is
+// close; the band is clipped (overflow:hidden) until the measured value lands,
+// so an off estimate is never an overlap.
+const GROUP_HEADER_BAR_H = 62; // colored primary bar (badge row + count)
+const GROUP_ACC_LABEL_H = 26; // "Controllers" eyebrow strip
+const GROUP_ACC_ROW_H = 32; // one collapsed single-line controller row (~.ps-ctrl-head + margin)
+const GROUP_ACC_PAD_BOTTOM = 10; // breathing room below the last row
+export function groupHeaderHeight(numControllers) {
+  return GROUP_HEADER_BAR_H + GROUP_ACC_LABEL_H + numControllers * GROUP_ACC_ROW_H + GROUP_ACC_PAD_BOTTOM;
+}
+
+// Initial guess at an expanded row's in-flow detail height, used only for the
+// first layout frame before GroupNode measures the real height and feeds it
+// back (see SurfaceCanvas onMeasureDetail). Assumes ~one wrapped line per
+// governed contract; the band clips any under-guess so the cards are never
+// overlapped while the measured value converges.
+export function estimateDetailHeight(governsCount) {
+  return 16 + governsCount * 26;
+}
+const GROUP_PADDING_TOP = groupHeaderHeight(1);
 const GROUP_PADDING_SIDE = 24;
 const GROUP_PADDING_BOTTOM = 24;
+// Floor on a group's width so the Controllers accordion row reads without
+// clipping. A row's fixed parts (caret + tag + badge + short address +
+// "governs N") need ~350px; this leaves room for a capability tag or two
+// beside them before the summary wraps. Narrow groups (1–2 small cards) would
+// otherwise be ~306px and crop the row (the band is overflow:hidden). The
+// cards stay centered in the widened interior.
+const GROUP_MIN_WIDTH = 440;
+// Gap between the header band's bottom and the first contract card. The band
+// is `position:absolute; top:0` so it sits inside the group's 2px border,
+// while React Flow positions child cards relative to the group's outer edge —
+// without this the first card's top tucks ~2px under the band. The rest is
+// breathing room below the accordion (~on par with GROUP_PADDING_BOTTOM).
+const GROUP_HEADER_GAP = 28;
 // Child cell sized for the widest contract card the .ps-node CSS
 // actually renders (no max-width; long names like
 // "EtherFiRedemptionManager" / "AuctionManager" stretch the card to
@@ -700,9 +830,9 @@ const CHILD_V_GAP = 70;
 // Returns: { positions: Map<address, {x,y}>, width, height }
 // All coords are relative to the group container's origin; React Flow
 // adds the parent offset.
-export function layoutGroupInterior(kids, machines) {
+export function layoutGroupInterior(kids, machines, headerHeight = GROUP_PADDING_TOP) {
   if (!kids || kids.length === 0) {
-    return { positions: new Map(), width: CHILD_W + 2 * GROUP_PADDING_SIDE, height: GROUP_PADDING_TOP + GROUP_PADDING_BOTTOM };
+    return { positions: new Map(), width: Math.max(CHILD_W + 2 * GROUP_PADDING_SIDE, GROUP_MIN_WIDTH), height: headerHeight + GROUP_PADDING_BOTTOM };
   }
 
   const machineByAddr = new Map();
@@ -752,14 +882,16 @@ export function layoutGroupInterior(kids, machines) {
     };
   });
 
-  // Group interior width = widest band's width. Each band gets
-  // centred horizontally within that width so the layout looks
-  // balanced regardless of how lopsided the role distribution is.
-  const interiorW = Math.max(0, ...bandPlans.filter(Boolean).map((b) => b.width));
+  // Group interior width = widest band's width, floored so the Controllers
+  // accordion row fits (see GROUP_MIN_WIDTH). Each band is centred within that
+  // width so the layout looks balanced regardless of role distribution — and a
+  // narrow card band sits centered in the accordion-driven width.
+  const bandW = Math.max(0, ...bandPlans.filter(Boolean).map((b) => b.width));
+  const interiorW = Math.max(bandW, GROUP_MIN_WIDTH - 2 * GROUP_PADDING_SIDE);
   const totalWidth = interiorW + 2 * GROUP_PADDING_SIDE;
 
   const positions = new Map();
-  let curY = GROUP_PADDING_TOP;
+  let curY = headerHeight + GROUP_HEADER_GAP;
   for (const plan of bandPlans) {
     if (!plan) continue;
     const offsetX = GROUP_PADDING_SIDE + (interiorW - plan.width) / 2;
@@ -778,8 +910,8 @@ export function layoutGroupInterior(kids, machines) {
   return { positions, width: totalWidth, height: totalHeight };
 }
 
-export async function elkLayout(machines, fundFlows, principals) {
-  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals);
+export async function elkLayout(machines, fundFlows, principals, expanded = null, bandHeights = {}) {
+  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, expanded, bandHeights);
 
   // Split nodes into top-level vs grouped-children. ELK only sees the
   // top level now: each group is handed to it as a single sized box.
@@ -812,20 +944,18 @@ export async function elkLayout(machines, fundFlows, principals) {
   for (const n of topLevel) {
     if (n.type !== "group") continue;
     const kids = childByParent.get(n.id) || [];
-    groupInteriors.set(n.id, layoutGroupInterior(kids, machines));
+    // headerHeight reserves the colored bar + collapsed Controllers
+    // accordion, so the first card lands below it (see groupHeaderHeight).
+    groupInteriors.set(n.id, layoutGroupInterior(kids, machines, n.data?.headerHeight));
   }
 
-  // Guardians (co-controller nodes) are positioned in their own rail below,
-  // not packed by ELK among the groups.
-  const elkChildren = topLevel
-    .filter((n) => !n.data?.isGuardian)
-    .map((n) => {
-      if (n.type === "group") {
-        const interior = groupInteriors.get(n.id);
-        return { id: n.id, width: interior.width, height: interior.height };
-      }
-      return { id: n.id, ...dimsFor(n) };
-    });
+  const elkChildren = topLevel.map((n) => {
+    if (n.type === "group") {
+      const interior = groupInteriors.get(n.id);
+      return { id: n.id, width: interior.width, height: interior.height };
+    }
+    return { id: n.id, ...dimsFor(n) };
+  });
 
   // ELK only does the outer rectpacking pass over groups + standalone
   // contracts. No edges fed to ELK; intra-group routing is handled
@@ -848,40 +978,6 @@ export async function elkLayout(machines, fundFlows, principals) {
       topPos.set(child.id, { x: child.x || 0, y: child.y || 0 });
     }
 
-    // Guardians rail: a horizontal row of co-controller nodes above the
-    // ELK-positioned content. Always visible at fit-view (unlike an on-card
-    // label); their edges to the contracts they control only appear on select
-    // (SurfaceCanvas), so the rail stays a clean band rather than fanout.
-    const guardianRail = new Map();
-    const guardians = topLevel.filter((n) => n.data?.isGuardian);
-    if (guardians.length) {
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      for (const pos of topPos.values()) {
-        if (pos.x < minX) minX = pos.x;
-        if (pos.y < minY) minY = pos.y;
-        if (pos.y > maxY) maxY = pos.y;
-      }
-      if (!Number.isFinite(minX)) {
-        minX = 0;
-        minY = 0;
-        maxY = 0;
-      }
-      // A vertical column to the LEFT of the content, centred against its
-      // height. Left/centre is the only canvas region clear of the surface's
-      // top search bar and bottom mode-chip rail, so the guardians stay
-      // visible and clickable instead of hiding under (or being click-blocked
-      // by) that chrome.
-      const STEP = PRINCIPAL_H + 48;
-      const railX = minX - PRINCIPAL_W - 160;
-      const centerY = (minY + maxY) / 2;
-      const startY = centerY - ((guardians.length - 1) / 2) * STEP;
-      guardians.forEach((n, i) => {
-        guardianRail.set(n.id, { x: Math.round(railX), y: Math.round(startY + i * STEP) });
-      });
-    }
-
     const laidOutNodes = rawNodes.map((n) => {
       if (n.parentId) {
         // Child positions come from the JS interior layout, relative
@@ -891,7 +987,7 @@ export async function elkLayout(machines, fundFlows, principals) {
         const pos = interior?.positions?.get(n.id) || n.position;
         return { ...n, position: pos };
       }
-      const next = { ...n, position: guardianRail.get(n.id) || topPos.get(n.id) || n.position };
+      const next = { ...n, position: topPos.get(n.id) || n.position };
       if (n.type === "group") {
         const interior = groupInteriors.get(n.id);
         if (interior) {
