@@ -67,14 +67,25 @@ _FALLBACK_WORKERS = 4
 
 
 def _get_alchemy_key() -> str:
-    """Extract the Alchemy API key from ETH_RPC."""
+    """Return the Alchemy API key used to mint per-chain RPC URLs.
+
+    Prefers the dedicated ``ALCHEMY_API_KEY`` env var. Falls back to
+    extracting the key from ``ETH_RPC`` for legacy single-chain configs.
+    PR #94 routed ``ETH_RPC`` through eRPC so the embedded key is no
+    longer a valid Alchemy v2 key on its own — without this fallback
+    order, every per-chain probe gets 403 Forbidden and silently
+    reports zero hits.
+    """
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    key = (os.getenv("ALCHEMY_API_KEY") or "").strip()
+    if key:
+        return key
     rpc = os.getenv("ETH_RPC", "")
-    # Key is the last path segment: https://<slug>.g.alchemy.com/v2/<key>
     key = rpc.rstrip("/").rsplit("/", 1)[-1] if "/v2/" in rpc else ""
     if not key:
         raise RuntimeError(
-            "Chain resolution requires ETH_RPC set to an Alchemy URL (https://<network>.g.alchemy.com/v2/<key>)"
+            "Chain resolution requires ALCHEMY_API_KEY or ETH_RPC set to an Alchemy URL "
+            "(https://<network>.g.alchemy.com/v2/<key>)"
         )
     return key
 
