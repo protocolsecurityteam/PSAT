@@ -414,14 +414,16 @@ export default function ProtocolSurface({
   // (opens the detail panel with signers / delay / controlled contracts)
   // and focuses it — same behaviour as clicking a single-principal guard
   // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal) => {
+  const handleSelectPrincipal = useCallback((principal, opts) => {
     if (!principal) return;
     setSelectedPrincipal(principal);
     setSelectedMachine(null);
     setSelectedGuard(null);
     setRadarExampleSelection(null);
     setPrincipalTour(null);
-    if (principal.address) triggerFocus(principal.address);
+    // opts.focus === false selects without moving the camera (controller-row
+    // clicks just want the highlight, not a pan/zoom to the principal's node).
+    if (principal.address && opts?.focus !== false) triggerFocus(principal.address);
   }, [triggerFocus]);
 
   const visiblePrincipals = useMemo(() => {
@@ -692,9 +694,9 @@ export default function ProtocolSurface({
               if (m && sidebarMode !== "detail") setSidebarMode("detail");
               handleSelectMachine(m);
             }}
-            onSelectPrincipal={(p) => {
+            onSelectPrincipal={(p, opts) => {
               if (p && sidebarMode !== "detail") setSidebarMode("detail");
-              handleSelectPrincipal(p);
+              handleSelectPrincipal(p, opts);
             }}
             principalTour={principalTour}
             onTourGo={(nextIndex) => {

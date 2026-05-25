@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Background,
   Controls,
@@ -45,17 +45,51 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
+  // Which controller row (if any) is expanded, and the measured header-band
+  // height per (group, open-row) state (keyed "groupId:idx" / "groupId:c").
+  // Both feed elkLayout so the open row's group grows its header band and ELK
+  // re-packs the canvas to make room — the group extends rather than
+  // overlapping cards/neighbours. GroupNode reports the real band height via
+  // onMeasureBand; we only re-store (and thus re-layout) when it actually
+  // changes, so it converges.
+  const [expanded, setExpanded] = useState(null);
+  const [bandHeights, setBandHeights] = useState({});
+
   // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
-    elkLayout(machines, fundFlows, principals).then(({ nodes: n, edges: e }) => {
+    elkLayout(machines, fundFlows, principals, expanded, bandHeights).then(({ nodes: n, edges: e }) => {
       if (!cancelled) {
         setInitNodes(n);
         setInitEdges(e);
       }
     });
     return () => { cancelled = true; };
-  }, [machines, fundFlows, principals]);
+  }, [machines, fundFlows, principals, expanded, bandHeights]);
+
+  const toggleController = useCallback((groupId, idx) => {
+    setExpanded((cur) => (cur && cur.groupId === groupId && cur.idx === idx ? null : { groupId, idx }));
+  }, []);
+
+  const measureBand = useCallback((groupId, idx, height) => {
+    setBandHeights((cur) => {
+      const key = `${groupId}:${idx ?? "c"}`;
+      if (Math.abs((cur[key] || 0) - height) <= 1) return cur;
+      return { ...cur, [key]: height };
+    });
+  }, []);
+
+  // Clicking a controller row selects that principal so the existing logic
+  // highlights the contracts it governs (dims everything else + chips them) and
+  // opens its sidebar. Looks the full principal up from the list so the sidebar
+  // gets every field. focus:false keeps the camera put — selecting the primary
+  // would otherwise pan/zoom to its (large) group node, which the user reads as
+  // an unwanted zoom-in; we only want the highlight.
+  const selectController = useCallback((addr) => {
+    const lc = addr?.toLowerCase();
+    const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
+    if (p && onSelectPrincipal) onSelectPrincipal(p, { focus: false });
+  }, [principals, onSelectPrincipal]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -194,6 +228,12 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
       if (coControls.length) {
         const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
+        // A co-controller selected from inside a group's accordion has no node
+        // of its own (it isn't a primary group), so we can't anchor an edge to
+        // it — the chips + dimming below still convey what it governs. Only
+        // draw the dashed edges when the selected principal IS a node on the
+        // canvas (i.e. a primary group that also co-controls elsewhere).
+        const selHasNode = nodeByAddr.has(sel);
         for (const c of coControls) {
           const t = c?.toLowerCase();
           const tn = t && nodeByAddr.get(t);
@@ -201,6 +241,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           connectedNodes.add(t);
           if (tn.parentId) connectedNodes.add(tn.parentId.toLowerCase());
           addChip(t, capsTextFor(t), "out");
+          if (!selHasNode) continue;
           coControllerEdges.push({
             id: `co-${sel}-${t}`,
             source: selPrincipal.address,
@@ -255,6 +296,20 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
             onSelect: n.data.principal
               ? () => onSelectPrincipal && onSelectPrincipal(n.data.principal)
               : () => onSelectMachine(n.data.machine),
+            // Controllers-accordion wiring for group nodes: which row is open
+            // (so GroupNode renders its detail), which controller is currently
+            // selected (so the row reads as active), plus the toggle / select /
+            // measure callbacks that drive expansion, highlighting, and the
+            // grow-on-expand re-layout.
+            ...(n.type === "group"
+              ? {
+                  expandedIdx: expanded && expanded.groupId === n.id ? expanded.idx : null,
+                  selectedControllerAddr: sel || null,
+                  onToggleController: (idx) => toggleController(n.id, idx),
+                  onSelectController: (addr) => selectController(addr),
+                  onMeasureBand: (idx, h) => measureBand(n.id, idx, h),
+                }
+              : null),
           },
         };
       })
@@ -287,7 +342,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     });
 
     setEdges(coControllerEdges.length ? [...nextEdges, ...coControllerEdges] : nextEdges);
-  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal]);
+  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, expanded, toggleController, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">
