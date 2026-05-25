@@ -14,6 +14,19 @@ export function formatDelay(seconds) {
   return `${Math.round(value / 60)}m`;
 }
 
+// Short type badge for a principal — "6/10 SAFE", "TL · 2d", or the bare
+// type ("EOA", "PROXY_ADMIN"). Shared by the group header, the controllers
+// accordion rows, and anywhere a principal needs a one-glance label so they
+// never drift apart.
+export function principalBadge(p) {
+  const owners = Array.isArray(p?.details?.owners) ? p.details.owners : [];
+  const threshold = p?.details?.threshold;
+  const delay = p?.details?.delay;
+  if (p?.type === "safe" && threshold) return `${threshold}/${owners.length || "?"} SAFE`;
+  if (p?.type === "timelock" && delay) return `TL · ${formatDelay(delay)}`;
+  return (p?.type || "").toUpperCase();
+}
+
 export function maskWebhook(url) {
   if (!url) return "";
   const value = String(url);
