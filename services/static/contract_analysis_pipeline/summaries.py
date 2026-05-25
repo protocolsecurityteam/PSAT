@@ -271,6 +271,29 @@ _LABEL_TO_FLOW_DIRECTION = {
 }
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 
+# Canonical 4-byte selectors for standardized access-control entrypoints,
+# keyed by ABI selector (interface params normalized to ``address``). Matched
+# on the *standard* — a contract can't stay IAccessControl / Solmate-Auth
+# compatible while changing these — so a rename can't dodge detection, while a
+# bespoke scheme falls through to its function name (a false-negative by
+# design, never a wrong tag). Both labels carry a capability tag downstream
+# ("roles" / "authority").
+#
+# Role MEMBERSHIP is matched here, not by the predicate post-pass: a
+# caller-keyed *data* map (e.g. LayerZero's per-sender ``composeQueue``) is
+# structurally indistinguishable from a caller-keyed ACL, so "writes a
+# caller_authority membership var" over-fires (``sendCompose`` reads as role
+# management). Ownership has no such ambiguity — a scalar compared to the
+# caller is an owner — so it stays in the post-pass.
+_ACCESS_CONTROL_SELECTORS: dict[str, str] = {
+    "0x2f2ff15d": "role_management",  # grantRole(bytes32,address)                   OZ AccessControl
+    "0xd547741f": "role_management",  # revokeRole(bytes32,address)                  OZ AccessControl
+    "0x67aff484": "role_management",  # setUserRole(address,uint8,bool)              Solmate RolesAuthority
+    "0x7d40583d": "role_management",  # setRoleCapability(uint8,address,bytes4,bool) Solmate RolesAuthority
+    "0xc6b0263e": "role_management",  # setPublicCapability(address,bytes4,bool)     Solmate RolesAuthority
+    "0x7a9e5e4b": "authority_update",  # setAuthority(address)                       Solmate Auth / DSAuth
+}
+
 
 def _label_for_selector(selector: object) -> str | None:
     if not isinstance(selector, str):
@@ -289,6 +312,20 @@ def _selector_for_signature(signature: str | None) -> str | None:
     if not isinstance(signature, str) or "(" not in signature or not signature.endswith(")"):
         return None
     return "0x" + keccak(text=signature)[:4].hex()
+
+
+def _access_control_label(function) -> str | None:
+    """Effect label for a standardized access-control entrypoint (OZ
+    AccessControl role grants, Solmate RolesAuthority setters, Solmate Auth
+    setAuthority), matched by the function's own canonical ABI selector.
+    Returns None for everything else."""
+    try:
+        signature = function.solidity_signature
+    except (ValueError, AttributeError):
+        # solidity_signature raises for struct-param functions; not relevant here.
+        return None
+    selector = _selector_for_signature(signature)
+    return _ACCESS_CONTROL_SELECTORS.get(selector) if selector else None
 
 
 def _callee_signature_from_ir(call_ir: Any) -> str | None:
@@ -663,6 +700,17 @@ def _effect_labels(function, graph_entry: dict | None) -> list[str]:
     # Hook: writes an address var that a mapping-writing function calls
     if _writes_hook_reference(function):
         labels.add("hook_update")
+
+    # Ownership mutation is labelled by a cross-function post-pass
+    # (``apply_authority_effect_labels`` in effects.py) that reads the
+    # predicate trees' caller_authority equality leaves — it knows precisely
+    # which scalar authorizes the caller, which a single-function scan cannot.
+    # Roles/authority are matched by canonical selector instead (see
+    # _ACCESS_CONTROL_SELECTORS for why membership can't go through the
+    # post-pass).
+    access_control = _access_control_label(function)
+    if access_control:
+        labels.add(access_control)
 
     if sink_kinds.intersection({"contract_creation"}):
         labels.add("contract_deployment")

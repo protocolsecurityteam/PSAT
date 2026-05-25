@@ -378,3 +378,87 @@ def build_effects(contract: Any) -> EffectsArtifact:
         "contract_name": getattr(contract, "name", None),
         "functions": functions,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-function ownership post-pass.
+#
+# ``transferOwnership`` looks like a plain address setter until you know
+# ``owner`` is the var its gate compares to the caller. The predicate pipeline
+# already resolves that — through the ``owner()`` / ``_checkOwner`` getter
+# chain — into a ``caller_authority`` *equality* leaf naming the exact scalar.
+# This pass reads those leaves and tags the functions that write the scalar:
+# precise (an incidental ``require(config != 0)`` read is a ``business`` leaf,
+# never ``caller_authority``) and name-agnostic.
+#
+# Only the scalar-equality (ownership) shape is harvested. Role *membership*
+# maps are matched by selector instead (summaries._ACCESS_CONTROL_SELECTORS):
+# a caller-keyed data map (e.g. LayerZero ``composeQueue``) is structurally a
+# caller_authority membership leaf too, so writing one is not reliably "role
+# management".
+# ---------------------------------------------------------------------------
+
+# The coarse fallbacks a precise ownership label supersedes on the same fn.
+_COARSE_AUTHORITY_LABELS = ("hook_update", "external_contract_call")
+
+
+def _iter_predicate_leaves(tree: Any) -> Any:
+    """Yield every leaf dict in a predicate tree (op/LEAF/children shape)."""
+    if not isinstance(tree, dict):
+        return
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if isinstance(leaf, dict):
+            yield leaf
+        return
+    for child in tree.get("children") or []:
+        yield from _iter_predicate_leaves(child)
+
+
+def _owner_vars_from_predicate_trees(predicate_trees_artifact: Any) -> set[str]:
+    """State-var names that a ``caller_authority`` *equality* leaf compares to
+    the caller (``owner == msg.sender``), across every function's predicate
+    tree — i.e. the scalar owner/admin pointers."""
+    trees = predicate_trees_artifact.get("trees") if isinstance(predicate_trees_artifact, dict) else None
+    if not isinstance(trees, dict):
+        return set()
+    owner_vars: set[str] = set()
+    for tree in trees.values():
+        for leaf in _iter_predicate_leaves(tree):
+            if leaf.get("authority_role") != "caller_authority":
+                continue
+            if leaf.get("kind") == "equality" and leaf.get("references_msg_sender"):
+                for operand in leaf.get("operands") or []:
+                    name = operand.get("state_variable_name") if isinstance(operand, dict) else None
+                    if name:
+                        owner_vars.add(name)
+    return owner_vars
+
+
+def apply_authority_effect_labels(
+    contract: Any,
+    effects_artifact: Any,
+    predicate_trees_artifact: Any,
+) -> None:
+    """Tag a function ``ownership_transfer`` when it writes a scalar the
+    predicate trees identify as the caller-authorizing var (an owner/admin
+    pointer). Supersedes the coarse ``hook_update`` / ``external_contract_call``
+    fallbacks on that function and refreshes its action summary. Mutates
+    ``effects_artifact`` in place; a no-op if either artifact errored."""
+    functions = effects_artifact.get("functions") if isinstance(effects_artifact, dict) else None
+    if not isinstance(functions, dict):
+        return
+    owner_vars = _owner_vars_from_predicate_trees(predicate_trees_artifact)
+    if not owner_vars:
+        return
+    for fn in getattr(contract, "functions", []) or []:
+        info = functions.get(_function_full_name(fn))
+        if not isinstance(info, dict):
+            continue
+        written = {getattr(var, "name", None) for var in fn.all_state_variables_written()}
+        if "ownership_transfer" in (info.get("effect_labels") or []) or not (written & owner_vars):
+            continue
+        labels = [label for label in (info.get("effect_labels") or []) if label not in _COARSE_AUTHORITY_LABELS]
+        labels.append("ownership_transfer")
+        info["effect_labels"] = labels
+        info["action_summary"] = _action_summary(labels, list(info.get("effect_targets") or []))
