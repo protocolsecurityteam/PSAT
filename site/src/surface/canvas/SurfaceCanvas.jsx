@@ -116,6 +116,19 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     // edges existed between the same pair.
     const connectedNodes = new Set();
     const selectionChips = new Map();
+    // Cross-group contract selection state (populated in the block below).
+    // The contract→group-bottom stubs themselves are permanent layout edges
+    // now (see elkLayout) and highlight through the normal edge logic; this
+    // pair just makes the shared bundle the stub feeds light up with it:
+    //   relatedEdgeIds — the SPECIFIC group→group bundles the contract feeds,
+    //                    force-highlighted by id (not via group membership in
+    //                    connectedNodes, which would also light unrelated
+    //                    bundles between two groups the contract happens to
+    //                    touch separately)
+    //   brightGroups  — target group boxes to un-dim, kept out of connectedNodes
+    //                    so it doesn't leak into the edge-relatedness check
+    const relatedEdgeIds = new Set();
+    const brightGroups = new Set();
     if (sel) {
       connectedNodes.add(sel);
       const addChip = (addrLc, caps, direction) => {
@@ -235,6 +248,35 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           addChip(t, capsTextFor(t), "out");
         }
       }
+
+      // Cross-group contract selection: a grouped contract's permanent stub
+      // runs down to its group's bottom edge and the shared group→group bundle
+      // carries on from there. The stub lights via the normal directly-connected
+      // rule (its source IS the selected contract); here we just make the bundle
+      // it feeds light up too, so the whole path reads as one highlighted line.
+      // We match the bundle by id (not by adding the groups to connectedNodes,
+      // which would also light unrelated bundles between them) and separately
+      // un-dim the two group boxes it joins via brightGroups.
+      const selNode = initNodes.find((n) => n.id?.toLowerCase() === sel);
+      if (selNode && selNode.type === "contract" && selNode.parentId) {
+        const groupAddrs = new Set(
+          initNodes.filter((n) => n.type === "group").map((n) => n.id?.toLowerCase()),
+        );
+        for (const e of initEdges) {
+          const eSrc = e.source?.toLowerCase();
+          const eTgt = e.target?.toLowerCase();
+          // cross-group bundles only (both endpoints are group boxes)
+          if (!groupAddrs.has(eSrc) || !groupAddrs.has(eTgt) || eSrc === eTgt) continue;
+          let touchesC = false;
+          for (const s of e.data?.samples || []) {
+            if (s.from?.toLowerCase() === sel || s.to?.toLowerCase() === sel) { touchesC = true; break; }
+          }
+          if (!touchesC) continue;
+          relatedEdgeIds.add(e.id);
+          brightGroups.add(eSrc);
+          brightGroups.add(eTgt);
+        }
+      }
     }
 
     // Audit-coverage highlight takes precedence when active: non-covered
@@ -248,7 +290,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
         const inAudit = hiActive && highlightedAddresses.has(nid);
-        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid));
+        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
         const focused = foc && nid === foc;
         // Merge — don't replace — n.style. Group containers carry
         // ELK-computed width/height in n.style and we'd otherwise blow
@@ -307,9 +349,18 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       // address directly.
       const edgeInAudit = hiActive && highlightedAddresses.has(src) && highlightedAddresses.has(tgt);
       const directlyConnected = src === sel || tgt === sel;
+      // A cross-group stub belongs to its CONTRACT endpoint (the other end is
+      // just the group box where the bundle joins). Light it whenever that
+      // contract is in the connected set — so selecting either end of a
+      // cross-group link lights the whole path: source's outbound stub → the
+      // shared bundle → the target's inbound stub. (Checking only the contract
+      // end avoids lighting every stub that merely shares the selected
+      // contract's group box.)
+      const stubContractEnd = e.data?.stub ? (e.data.inbound ? tgt : src) : null;
+      const stubRelated = stubContractEnd != null && connectedNodes.has(stubContractEnd);
       const related = hiActive
         ? edgeInAudit
-        : (!sel || directlyConnected || (connectedNodes.has(src) && connectedNodes.has(tgt)));
+        : (!sel || directlyConnected || relatedEdgeIds.has(e.id) || stubRelated || (connectedNodes.has(src) && connectedNodes.has(tgt)));
       return {
         ...e,
         style: {

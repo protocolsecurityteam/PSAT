@@ -136,11 +136,16 @@ export function GroupNode({ data }) {
       {chip?.in && (
         <div className="ps-node-chip ps-node-chip--in">{chip.in}</div>
       )}
-      {/* Edges still terminate on the group itself when a cross-group
-          edge points at the principal — give it real handles so React
-          Flow can route them, just like the standalone PrincipalNode. */}
+      {/* Edges terminate on the group itself: ctrl-in (top) / ctrl-out
+          (bottom) carry the aggregated cross-group bundles. stub-bottom (a
+          target at the same bottom-centre spot ctrl-out leaves from) is where an
+          outbound contract stub lands. stub-top (top-centre, same spot the
+          inbound bundle arrives) is where an inbound stub leaves to drop down to
+          the contract it feeds. */}
       <Handle type="target" position={Position.Top} id="ctrl-in" className="ps-handle" />
       <Handle type="source" position={Position.Bottom} id="ctrl-out" className="ps-handle" />
+      <Handle type="target" position={Position.Bottom} id="stub-bottom" className="ps-handle" />
+      <Handle type="source" position={Position.Top} id="stub-top" className="ps-handle" />
 
       {/* Header band: pinned to the exact height the layout reserved
           (data.headerHeight, derived from the measured inner content) so the

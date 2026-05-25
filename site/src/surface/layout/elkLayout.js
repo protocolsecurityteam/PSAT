@@ -528,7 +528,82 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
       });
     }
   }
-  const finalEdges = [...intraGroupRendered, ...aggregatedCrossEdges];
+  // Always-visible cross-group connectors. A grouped contract whose
+  // cross-group calls were aggregated into a box→box bundle would otherwise
+  // look unconnected. We add a short stub at each contract that participates in
+  // a bundle, so you can see which contracts reach outside the box while the
+  // bundle still carries the long-haul (no per-contract cross-canvas fanout).
+  // These are ordinary channeled edges that dim/brighten with selection.
+  //   - OUTBOUND (the bundle's source contract): drops to its group's BOTTOM
+  //     edge, the exact point the bundle leaves from. Routed around sibling
+  //     cards (attachObstacles) and landed cleanly via ChanneledStepEdge.
+  //   - INBOUND (the bundle's target contract): drops from just under its
+  //     group's header to the contract's top. The bundle still arrives at the
+  //     box top "as normal"; the stub only draws the part BELOW the header, so
+  //     the header reads as hiding the segment between them (the "invisible
+  //     line through the header" the connection appears to continue along).
+  const contractCanonicalByLc = new Map();
+  for (const m of sorted) {
+    if (m.address) contractCanonicalByLc.set(m.address.toLowerCase(), m.address);
+  }
+  const groupNodeByAddr = new Map();
+  for (const n of nodes) {
+    if (n.type === "group") groupNodeByAddr.set(n.id.toLowerCase(), n);
+  }
+  const stubEdges = [];
+  const outStubbed = new Set();
+  const inStubbed = new Set();
+  for (const bundle of aggregatedCrossEdges) {
+    const srcGroupLc = bundle.source?.toLowerCase();
+    const tgtGroupLc = bundle.target?.toLowerCase();
+    for (const s of bundle.data?.samples || []) {
+      const fromLc = s.from?.toLowerCase();
+      const toLc = s.to?.toLowerCase();
+      // Outbound: source contract → its group's bottom (where the bundle leaves).
+      // The group-membership check also guarantees bundle.source is a group, so
+      // the stub-bottom handle exists.
+      if (fromLc && !outStubbed.has(fromLc) && contractToGroup.get(fromLc) === srcGroupLc) {
+        const c = contractCanonicalByLc.get(fromLc);
+        if (c) {
+          outStubbed.add(fromLc);
+          stubEdges.push({
+            id: `stub-out-${fromLc}`,
+            source: c,
+            sourceHandle: "ctrl-out",
+            target: bundle.source,
+            targetHandle: "stub-bottom",
+            type: "channeled",
+            style: { stroke: bundle.style?.stroke || "#94a3b8", strokeWidth: 1 },
+            animated: false,
+            data: { stub: true },
+          });
+        }
+      }
+      // Inbound: from under the target group's header down to the target
+      // contract's top. headerHeight tells ChanneledStepEdge where the header
+      // ends so it can start the visible drop there.
+      if (toLc && !inStubbed.has(toLc) && contractToGroup.get(toLc) === tgtGroupLc) {
+        const c = contractCanonicalByLc.get(toLc);
+        const g = groupNodeByAddr.get(tgtGroupLc);
+        if (c && g) {
+          inStubbed.add(toLc);
+          stubEdges.push({
+            id: `stub-in-${toLc}`,
+            source: bundle.target,
+            sourceHandle: "stub-top",
+            target: c,
+            targetHandle: "ctrl-in",
+            type: "channeled",
+            style: { stroke: bundle.style?.stroke || "#94a3b8", strokeWidth: 1 },
+            animated: false,
+            data: { stub: true, inbound: true, headerHeight: g.data?.headerHeight || 0 },
+          });
+        }
+      }
+    }
+  }
+
+  const finalEdges = [...intraGroupRendered, ...aggregatedCrossEdges, ...stubEdges];
   return {
     nodes,
     edges: finalEdges,
@@ -1066,7 +1141,9 @@ function attachObstacles(edges, nodes) {
 
   return edges.map((e) => {
     let obstacles = topLevel;
-    if (e.data?.intraGroup) {
+    // Stubs live inside their source group (contract → that group's bottom
+    // edge), so they route around the same siblings the intra-group edges do.
+    if (e.data?.intraGroup || e.data?.stub) {
       const src = nodeById.get(e.source);
       const parentId = src?.parentId;
       const siblings = parentId ? siblingsByParent.get(parentId) : null;
