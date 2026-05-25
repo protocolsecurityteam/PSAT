@@ -2,22 +2,12 @@
 
 After the inventory pipeline builds contracts, some entries have
 ``chains=["unknown"]``.  This module probes ``eth_getCode`` via JSON-RPC
-batch requests to Alchemy endpoints to determine where each contract
-is actually deployed.
+batch requests to determine where each contract is actually deployed.
 
-Requires ``ETH_RPC`` to be set to an Alchemy URL
-(``https://<network>.g.alchemy.com/v2/<key>``).  The API key is
-extracted and used to derive per-chain endpoints so all chains can be
-probed **in parallel** (~1-2 seconds for hundreds of addresses across
-10+ chains).
-
-Strategy
---------
-1. Extract the Alchemy API key from ``ETH_RPC``.
-2. **Phase 1** -- probe every unknown address on every known chain in
-   parallel using JSON-RPC batch requests.
-3. **Phase 2** -- for addresses that matched nothing in phase 1, probe
-   the remaining supported chains (also in parallel).
+Per-chain RPC URLs come from eRPC (``ERPC_BASE_URL``), which proxies to
+the configured upstream providers and is auth'd via the
+``X-ERPC-Secret-Token`` header. Each probe runs in parallel so hundreds
+of addresses across 15+ chains finish in a few seconds.
 """
 
 from __future__ import annotations
@@ -34,11 +24,13 @@ from typing import Any
 from dotenv import load_dotenv
 
 from utils.chains import canonical_chain, canonical_chain_list
+from utils.rpc import erpc_url_for_chain_id, rpc_headers
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
 from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
 
-# Alchemy network slugs matching CHAIN_IDS keys.
+# Legacy direct-Alchemy fallback used only when ``ERPC_BASE_URL`` isn't
+# configured (e.g. local dev with raw Alchemy keys).
 _ALCHEMY_CHAIN_SLUGS: dict[str, str] = {
     "ethereum": "eth-mainnet",
     "arbitrum": "arb-mainnet",
@@ -66,36 +58,48 @@ _RPC_RATE_LIMIT = int(os.getenv("RPC_RATE_LIMIT", "15"))
 _FALLBACK_WORKERS = 4
 
 
-def _get_alchemy_key() -> str:
-    """Return the Alchemy API key used to mint per-chain RPC URLs.
+def _get_alchemy_key() -> str | None:
+    """Legacy Alchemy key lookup, used only when eRPC isn't configured.
 
-    Prefers the dedicated ``ALCHEMY_API_KEY`` env var. Falls back to
-    extracting the key from ``ETH_RPC`` for legacy single-chain configs.
-    PR #94 routed ``ETH_RPC`` through eRPC so the embedded key is no
-    longer a valid Alchemy v2 key on its own — without this fallback
-    order, every per-chain probe gets 403 Forbidden and silently
-    reports zero hits.
+    Returns ``None`` if no key is available. ``rpc_url_for_chain`` callers
+    handle the None case so eRPC remains the preferred path.
     """
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     key = (os.getenv("ALCHEMY_API_KEY") or "").strip()
     if key:
         return key
     rpc = os.getenv("ETH_RPC", "")
-    key = rpc.rstrip("/").rsplit("/", 1)[-1] if "/v2/" in rpc else ""
-    if not key:
-        raise RuntimeError(
-            "Chain resolution requires ALCHEMY_API_KEY or ETH_RPC set to an Alchemy URL "
-            "(https://<network>.g.alchemy.com/v2/<key>)"
-        )
-    return key
+    if "/v2/" in rpc:
+        return rpc.rstrip("/").rsplit("/", 1)[-1] or None
+    return None
 
 
 def _alchemy_rpc(chain_name: str, api_key: str) -> str | None:
-    """Build an Alchemy RPC URL for a given chain."""
+    """Build an Alchemy RPC URL for a given chain (legacy fallback)."""
     slug = _ALCHEMY_CHAIN_SLUGS.get(chain_name)
     if not slug:
         return None
     return f"https://{slug}.g.alchemy.com/v2/{api_key}"
+
+
+def rpc_url_for_chain(chain_name: str) -> str | None:
+    """Return the RPC URL for a chain, preferring eRPC over direct Alchemy.
+
+    With ``ERPC_BASE_URL`` set, builds ``{base}/{project}/evm/{chain_id}``
+    and the eRPC secret header is attached automatically by ``rpc_headers``.
+    Falls back to a direct Alchemy URL only when eRPC isn't configured —
+    keeps local dev with raw Alchemy keys working.
+    """
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    chain_id = CHAIN_IDS.get(chain_name)
+    if chain_id is not None:
+        erpc_url = erpc_url_for_chain_id(chain_id)
+        if erpc_url:
+            return erpc_url
+    api_key = _get_alchemy_key()
+    if not api_key:
+        return None
+    return _alchemy_rpc(chain_name, api_key)
 
 
 def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:
@@ -129,15 +133,11 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
                 for idx, addr in enumerate(batch)
             ]
         ).encode("utf-8")
-        request = urllib.request.Request(
+        headers = rpc_headers(
             rpc_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "getContractAddresses/1.0",
-            },
+            {"Accept": "application/json", "User-Agent": "getContractAddresses/1.0"},
         )
+        request = urllib.request.Request(rpc_url, data=payload, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=max(RPC_TIMEOUT_SECONDS, 30)) as response:
                 body = json.loads(response.read().decode("utf-8"))
@@ -177,13 +177,12 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
 def _probe_chain_batch(
     addresses: list[str],
     chain_name: str,
-    api_key: str,
     debug: bool = False,
 ) -> set[str]:
-    """Probe all *addresses* on a single chain via Alchemy JSON-RPC batch."""
-    rpc_url = _alchemy_rpc(chain_name, api_key)
+    """Probe all *addresses* on a single chain via JSON-RPC batch (eRPC preferred)."""
+    rpc_url = rpc_url_for_chain(chain_name)
     if not rpc_url:
-        _debug_log(debug, f"  {chain_name}: no Alchemy slug configured, skipping")
+        _debug_log(debug, f"  {chain_name}: no RPC URL available, skipping")
         return set()
 
     try:
@@ -197,20 +196,17 @@ def _probe_chain_batch(
 def _probe_chains(
     addresses: list[str],
     chains: list[str],
-    api_key: str,
     matched: dict[str, list[str]],
     debug: bool = False,
 ) -> None:
-    """Probe multiple chains in parallel using Alchemy batch endpoints."""
+    """Probe multiple chains in parallel via per-chain eRPC endpoints."""
     with ThreadPoolExecutor(max_workers=min(len(chains), 10)) as executor:
         # Per-chain context copy preserves the caller's trace context inside
         # each per-chain batch RPC call.
         future_to_chain = {}
         for chain_name in chains:
             ctx = contextvars.copy_context()
-            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, api_key, debug)] = (
-                chain_name
-            )
+            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, debug)] = chain_name
         for future in as_completed(future_to_chain):
             chain_name = future_to_chain[future]
             try:
@@ -245,13 +241,6 @@ def resolve_unknown_chains(
         _debug_log(debug, "Chain resolution: no unknown-chain contracts to resolve")
         return contracts
 
-    api_key = _get_alchemy_key()
-
-    # Warn about chains in CHAIN_IDS that have no Alchemy slug configured.
-    uncovered = sorted(ch for ch in CHAIN_IDS if ch not in _ALCHEMY_CHAIN_SLUGS)
-    if uncovered:
-        _debug_log(debug, f"WARNING: no Alchemy slug for chain(s): {uncovered} -- these will be skipped")
-
     # Determine which chains this protocol is known to use -- probe these first.
     known_chains: list[str] = []
     seen: set[str] = set()
@@ -277,14 +266,14 @@ def resolve_unknown_chains(
     all_addrs = list(matched.keys())
 
     # Phase 1: probe ALL unknowns on ALL known chains in parallel.
-    _probe_chains(all_addrs, known_chains, api_key, matched, debug)
+    _probe_chains(all_addrs, known_chains, matched, debug)
 
     # Phase 2: for addresses that matched NOTHING on known chains, probe the
     # remaining chains in parallel.
     unresolved = [addr for addr, chains in matched.items() if not chains]
     if unresolved and remaining_chains:
         _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
-        _probe_chains(unresolved, remaining_chains, api_key, matched, debug)
+        _probe_chains(unresolved, remaining_chains, matched, debug)
 
     # Apply results.
     resolved_count = 0
@@ -346,13 +335,13 @@ def probe_sibling_chains(
     if not known:
         return []
 
-    try:
-        api_key = _get_alchemy_key()
-    except RuntimeError as exc:
-        _debug_log(debug, f"Sibling-chain probe skipped: {exc}")
-        return []
-
-    probe_chains = [ch for ch in CHAIN_IDS if ch in _ALCHEMY_CHAIN_SLUGS]
+    # Limit to chains the resolver can actually reach: eRPC-routable chain_ids,
+    # or chains with a legacy Alchemy slug as fallback when eRPC is absent.
+    probe_chains = [
+        ch
+        for ch in CHAIN_IDS
+        if erpc_url_for_chain_id(CHAIN_IDS[ch]) or ch in _ALCHEMY_CHAIN_SLUGS
+    ]
     all_addrs = sorted(known.keys())
 
     _debug_log(
@@ -361,7 +350,7 @@ def probe_sibling_chains(
     )
 
     matched: dict[str, list[str]] = {addr: [] for addr in all_addrs}
-    _probe_chains(all_addrs, probe_chains, api_key, matched, debug)
+    _probe_chains(all_addrs, probe_chains, matched, debug)
 
     new_entries: list[dict[str, Any]] = []
     for address, chains_found in matched.items():
@@ -412,18 +401,16 @@ def validate_claimed_chains(
     if not targets:
         return contracts
 
-    api_key = _get_alchemy_key()
-
     for contract, address, claimed in targets:
         matched: dict[str, list[str]] = {address: []}
-        _probe_chains([address], claimed, api_key, matched, debug)
+        _probe_chains([address], claimed, matched, debug)
         if matched[address]:
             contract["chains"] = canonical_chain_list(matched[address])
             continue
 
         remaining = [chain for chain in CHAIN_IDS if chain not in set(claimed)]
         if remaining:
-            _probe_chains([address], remaining, api_key, matched, debug)
+            _probe_chains([address], remaining, matched, debug)
         if matched[address]:
             corrected = canonical_chain_list(matched[address]) or ["unknown"]
             contract["chains"] = corrected
