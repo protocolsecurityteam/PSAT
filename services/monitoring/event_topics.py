@@ -91,6 +91,104 @@ GOVERNANCE_EVENT_TOPICS: dict[str, str] = {
 ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOPICS}
 
 # ---------------------------------------------------------------------------
+# Synthetic effect_tags for hand-rolled events
+# ---------------------------------------------------------------------------
+
+# Synthesizes ``effect_tags`` from a canonical event_type. Two consumers:
+#
+#   1. ``parse_governance_log`` / ``parse_any_log`` attach tags to every
+#      hand-rolled event so downstream sees the same shape ``parse_tracked_log``
+#      produces from the static analysis tracking_plan.
+#   2. ``_update_state_from_event`` / ``_should_watch`` /
+#      ``_sync_relational_tables`` / ``should_trigger_reanalysis`` fall
+#      back to this map when ``parsed["effect_tags"]`` is missing —
+#      catches legacy monitoring_config specs persisted before tags
+#      landed in the spec shape, and bare-event_type callers.
+#
+# Tag-driven dispatch unifies hand-rolled and per-contract event handling
+# under one shape; the previous parallel event_type → config_keys maps
+# in unified_watcher and reanalysis collapse into a single source of
+# truth.
+#
+# Conventions:
+#   - Real state-variable names ("owner", "admin", "implementation",
+#     "paused", "owners", "threshold", "min_delay", "beacon", "facets")
+#     match what the static analyzer emits for those slots.
+#   - Underscore-prefixed names are synthetic markers for events that
+#     don't mutate a single named slot — used so the watcher's config
+#     gating still has something to key off:
+#       ``_roles``        — RoleGranted / RoleRevoked (AccessControl
+#                            doesn't expose a single state-var name)
+#       ``_timelock_op``  — CallScheduled / CallExecuted (activity,
+#                            no persistent state change)
+#       ``_safe_op``      — ExecutionSuccess / ExecutionFailure (Safe
+#                            tx wrapper activity)
+#       ``_safe_module_op`` — ExecutionFromModule[Success|Failure]
+#                            (Safe module call activity)
+#   - ``delegates: True`` marks events that signal a delegate-target swap.
+#     Set on every proxy-impl event (Upgraded, NewImplementation,
+#     BeaconUpgraded, DiamondCut, etc.) so the upgrade-triggered paths
+#     (reanalysis, coverage refresh, UpgradeEvent insert) fire uniformly.
+_HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
+    # Proxy / upgrade events — see services/discovery/upgrade_history.py
+    "upgraded": {"writes": ["implementation"], "delegates": True},
+    "admin_changed": {"writes": ["admin"]},
+    "beacon_upgraded": {"writes": ["beacon"], "delegates": True},
+    "changed_master_copy": {"writes": ["implementation"], "delegates": True},
+    "new_implementation": {"writes": ["implementation"], "delegates": True},
+    "new_pending_implementation": {"writes": ["pendingImplementation"]},
+    "target_updated": {"writes": ["implementation"], "delegates": True},
+    "upgraded_revision": {"writes": ["implementation"], "delegates": True},
+    "diamond_cut": {"writes": ["facets"], "delegates": True},
+    # Governance events
+    "ownership_transferred": {"writes": ["owner"]},
+    "paused": {"writes": ["paused"]},
+    "unpaused": {"writes": ["paused"]},
+    "role_granted": {"writes": ["_roles"]},
+    "role_revoked": {"writes": ["_roles"]},
+    "signer_added": {"writes": ["owners"]},
+    "signer_removed": {"writes": ["owners"]},
+    "threshold_changed": {"writes": ["threshold"]},
+    "timelock_scheduled": {"writes": ["_timelock_op"]},
+    "timelock_executed": {"writes": ["_timelock_op"]},
+    "delay_changed": {"writes": ["min_delay"]},
+    "safe_tx_executed": {"writes": ["_safe_op"]},
+    "safe_tx_failed": {"writes": ["_safe_op"]},
+    "safe_module_executed": {"writes": ["_safe_module_op"]},
+    "safe_module_failed": {"writes": ["_safe_module_op"]},
+    # Per-contract canonical types from ``parse_tracked_log``. Events
+    # produced through that path already carry tags from the spec; the
+    # entries here are the synthesis fallback for callers that pass only
+    # an event_type (legacy specs without tags, bare reanalysis checks).
+    "ownership_transfer_started": {"writes": ["pendingOwner"]},
+    "authority_updated": {"writes": ["authority"]},
+    "initialized": {"writes": ["_initialized"], "is_initializer": True},
+    "signer_updated": {"writes": ["owners"]},
+}
+
+
+def _attach_effect_tags(event: dict | None) -> dict | None:
+    """If *event* carries a canonical hand-rolled event_type, attach the
+    matching ``effect_tags`` (in place) so the watcher's tag-driven
+    dispatch sees the same shape it gets from ``parse_tracked_log``.
+
+    No-op when event_type isn't in the synthesis map — e.g. an unknown
+    or per-contract event with tags already in its spec.
+    """
+    if not event:
+        return event
+    event_type = event.get("event_type")
+    if not isinstance(event_type, str):
+        return event
+    tags = _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type)
+    if tags is None:
+        return event
+    # Copy so the module-level dict is never mutated by callers.
+    event["effect_tags"] = {k: (list(v) if isinstance(v, list) else v) for k, v in tags.items()}
+    return event
+
+
+# ---------------------------------------------------------------------------
 # Governance log parser
 # ---------------------------------------------------------------------------
 
@@ -246,6 +344,7 @@ def parse_governance_log(log: dict) -> dict | None:
         if len(topics) >= 2 and topics[1]:
             event["module"] = _topic_to_address(topics[1])
 
+    _attach_effect_tags(event)
     return event
 
 
@@ -256,5 +355,337 @@ def parse_any_log(log: dict) -> dict | None:
     """
     result = parse_upgrade_log(log)
     if result is not None:
-        return result
+        # ``parse_upgrade_log`` lives in services/discovery/upgrade_history.py
+        # — importing the tag synthesizer there would create a circular
+        # import. Attach tags here at the consolidated entry point so the
+        # watcher always sees tagged events regardless of which decoder
+        # produced them.
+        return _attach_effect_tags(result)
     return parse_governance_log(log)
+
+
+# ---------------------------------------------------------------------------
+# Per-contract topic extraction from the analysis tracking_plan
+# ---------------------------------------------------------------------------
+
+# Map canonical event_type → ``(old_key, new_key)`` semantic-key pair.
+# Drives the name-aware arg fill in ``_assign_semantic_keys`` so that
+# downstream state/relational sync can read ``parsed["new_owner"]``
+# regardless of whether the ABI named the input ``newOwner``,
+# ``new_owner``, ``user``, or nothing at all.
+_EVENT_TYPE_TO_SEMANTIC_KEYS: dict[str, tuple[str, str]] = {
+    "ownership_transferred": ("old_owner", "new_owner"),
+    "ownership_transfer_started": ("old_owner", "new_owner"),
+    "authority_updated": ("old_authority", "new_authority"),
+    "admin_changed": ("previous_admin", "new_admin"),
+    "threshold_changed": ("old_threshold", "new_threshold"),
+}
+
+
+# Legacy controller_id → event_type map. Preserved only for monitoring_config
+# rows persisted before effect_tags landed in the spec shape — once those rows
+# get re-enrolled (every protocol re-analysis), this can be deleted.
+_CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
+    "owner": "ownership_transferred",
+    "_owner": "ownership_transferred",
+    "state_variable:owner": "ownership_transferred",
+    "state_variable:_owner": "ownership_transferred",
+    "state_variable:pendingOwner": "ownership_transfer_started",
+    "external_contract:authority": "authority_updated",
+    "state_variable:authority": "authority_updated",
+}
+
+
+def _classify_from_writes(writes: list[str] | set[str] | None) -> str | None:
+    """Derive a canonical event_type from the state vars an event's emitter
+    writes. Returns None when no canonical type matches — caller falls
+    back to controller_id or ``controller_changed:<id>``.
+
+    Priority order resolves multi-write emitters:
+      1. ``owner`` / ``_owner`` — commit-phase ownership transfer wins
+         over the started-phase even when both are written (OZ
+         Ownable2Step ``acceptOwnership``).
+      2. ``pendingOwner`` — start-phase only when ``owner`` is untouched
+         (OZ Ownable2Step ``transferOwnership``).
+      3. ``authority`` — Solmate Auth / DSAuth registry swap.
+      4. ``admin`` family — Compound, Aave, Curve admin slots.
+      5. Initializer slots — OZ Initializable ``_initialized`` /
+         ``_initializing``.
+      6. Safe-shaped — ``owners`` array, ``threshold``.
+    """
+    if not writes:
+        return None
+    write_set = set(writes)
+    # Explicit priority — owner wins over pendingOwner so Ownable2Step
+    # commit phase classifies correctly when both are written.
+    for canonical, candidates in (
+        ("ownership_transferred", ("owner", "_owner")),
+        ("ownership_transfer_started", ("pendingOwner", "_pendingOwner")),
+        ("authority_updated", ("authority",)),
+        ("admin_changed", ("admin", "_admin", "pendingAdmin", "future_admin")),
+        ("initialized", ("_initialized", "_initializing")),
+        ("signer_updated", ("owners",)),
+        ("threshold_changed", ("threshold",)),
+    ):
+        if write_set & set(candidates):
+            return canonical
+    return None
+
+
+def _classify_from_tags(effect_tags: dict | None) -> str | None:
+    """Tag-driven event_type derivation. Tries writes first, then falls
+    back to the is_initializer flag for cases where the slot isn't named
+    ``_initialized`` (rare but possible in OZ forks)."""
+    if not isinstance(effect_tags, dict):
+        return None
+    by_writes = _classify_from_writes(effect_tags.get("writes"))
+    if by_writes:
+        return by_writes
+    if effect_tags.get("is_initializer"):
+        return "initialized"
+    if effect_tags.get("delegates"):
+        # Bare delegatecall in the emitter body (not just storing an
+        # impl slot) means the function pivots delegate execution
+        # itself — proxy fallback patterns, custom upgrade choreography.
+        return "upgraded"
+    return None
+
+
+def _assign_semantic_keys(
+    event: dict,
+    event_type: str,
+    inputs: list[dict],
+    args_in_order: list[object],
+) -> None:
+    """Fill ``old_*`` / ``new_*`` semantic-key aliases on *event*.
+
+    Resolution order picks the right answer across every governance
+    ABI we've seen:
+
+      1. **Name-aware** — input names beginning ``new*`` claim the new
+         slot; ``previous*`` / ``old*`` claim the old slot. Wins for
+         OZ ``previousOwner`` / ``newOwner`` and Compound ``newAdmin``.
+      2. **Positional remainder for 2-arg events** — if exactly one
+         slot was filled by name, the *other* arg fills the other
+         slot. This is the Solmate ``user`` / ``newOwner`` case:
+         ``user`` doesn't name-match, but for a two-arg event whose
+         second arg already claimed ``new``, the first arg is the
+         old value. (Solmate's ``setOwner`` is gated by ``onlyOwner``
+         so ``msg.sender == currentOwner`` at emission, making the
+         ``user`` arg effectively the previous owner.)
+      3. **Two anonymous args** — neither name matches, positional
+         (old, new) by convention.
+      4. **Single arg event** — convention is "this is the new value",
+         no old recorded. DSAuth ``LogSetOwner(address indexed owner)``
+         and Compound ``NewAdmin(address newAdmin)`` both fall here
+         when name match misses.
+    """
+    keys = _EVENT_TYPE_TO_SEMANTIC_KEYS.get(event_type)
+    if not keys:
+        return
+    old_key, new_key = keys
+
+    new_idx: int | None = None
+    old_idx: int | None = None
+    for i, inp in enumerate(inputs):
+        name = (inp.get("name") or "").lower()
+        if name.startswith("new") and new_idx is None:
+            new_idx = i
+        elif (name.startswith("previous") or name.startswith("old")) and old_idx is None:
+            old_idx = i
+
+    n = len(args_in_order)
+    if n == 2:
+        if old_idx is None and new_idx is not None:
+            old_idx = 1 - new_idx
+        elif new_idx is None and old_idx is not None:
+            new_idx = 1 - old_idx
+        elif old_idx is None and new_idx is None:
+            old_idx, new_idx = 0, 1
+    elif n == 1 and new_idx is None:
+        new_idx = 0
+
+    if old_idx is not None and old_idx < n:
+        event[old_key] = args_in_order[old_idx]
+    if new_idx is not None and new_idx < n:
+        event[new_key] = args_in_order[new_idx]
+
+
+def _resolve_event_type(
+    controller_id: str | None,
+    effect_tags: dict | None = None,
+) -> str:
+    """Pick the canonical event_type for a tracked event.
+
+    Resolution order:
+      1. ``effect_tags`` — primary signal. The emitter's state writes are
+         deterministic and ABI-independent, so e.g. Compound's
+         ``NewAdmin`` and OZ's ``OwnershipTransferred`` classify
+         correctly without per-ABI rules once their emitters are tagged.
+      2. ``_CONTROLLER_ID_TO_EVENT_TYPE`` — back-compat path for legacy
+         specs without effect_tags (older monitoring_config rows). Falls
+         away once everything re-enrolls.
+      3. ``controller_changed:<id>`` — terminal fallback. Persisted but
+         not semantically classified.
+    """
+    by_tags = _classify_from_tags(effect_tags)
+    if by_tags:
+        return by_tags
+    cid = (controller_id or "").strip()
+    if not cid:
+        return "controller_changed"
+    if cid in _CONTROLLER_ID_TO_EVENT_TYPE:
+        return _CONTROLLER_ID_TO_EVENT_TYPE[cid]
+    return f"controller_changed:{cid}"
+
+
+def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
+    """Walk a ``ControlTrackingPlan`` and return per-contract topic specs.
+
+    Each entry has shape ``{topic0, signature, event_type, controller_id,
+    inputs, effect_tags}``. Topic0s already in ``ALL_EVENT_TOPICS`` are
+    skipped so the hand-rolled decoders keep ownership of OZ / Safe /
+    Timelock / proxy events. Returns ``[]`` when *tracking_plan* is None
+    or has no events.
+
+    ``effect_tags`` flows through from the static analysis pipeline
+    (``services/static/contract_analysis_pipeline/tracking.py``). The
+    watcher reads them to classify and route events without falling
+    back on a hand-curated event-name list.
+    """
+    if not tracking_plan:
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    for tc in tracking_plan.get("tracked_controllers") or []:
+        ew = tc.get("event_watch")
+        if not ew:
+            continue
+        controller_id = tc.get("controller_id")
+        for ev in ew.get("events") or []:
+            topic0 = (ev.get("topic0") or "").lower()
+            if not topic0 or not topic0.startswith("0x"):
+                continue
+            # Hand-rolled registry wins for OZ/Safe/Timelock/proxy events —
+            # those decoders carry semantics (batch indexing, calldata
+            # selectors, etc.) the generic path can't reproduce.
+            if topic0 in ALL_EVENT_TOPICS:
+                continue
+            if topic0 in seen:
+                continue
+            seen.add(topic0)
+            effect_tags = ev.get("effect_tags") if isinstance(ev.get("effect_tags"), dict) else None
+            spec: dict = {
+                "topic0": topic0,
+                "signature": ev.get("signature"),
+                "event_type": _resolve_event_type(controller_id, effect_tags),
+                "controller_id": controller_id,
+                "inputs": list(ev.get("inputs") or []),
+            }
+            if effect_tags:
+                spec["effect_tags"] = effect_tags
+            out.append(spec)
+    return out
+
+
+def parse_tracked_log(log: dict, spec: dict) -> dict | None:
+    """Generic per-contract event decoder driven by an ABI input list.
+
+    *spec* is one entry from ``extract_governance_topics``. Walks the
+    inputs splitting indexed (topics[1:]) from non-indexed (data) and
+    decodes each by type via ``eth_abi``. Outputs:
+
+      - ``event_type``, ``block_number``, ``tx_hash``, ``log_index``
+      - one key per input under its ABI name (``user``, ``newOwner``, …)
+      - semantic-key aliases (``old_owner``/``new_owner``, ``old_authority``/
+        ``new_authority``) when the event_type has a registered mapping, so
+        existing state/relational sync paths keep working.
+
+    Returns None when the log shape doesn't match the spec (wrong topic
+    count, undecodable non-indexed data, etc.) — caller treats None the
+    same as an unparseable hand-rolled log.
+    """
+    # Local import: eth_abi pulls in a chunk of typing/cython init on first
+    # use; keeping it lazy avoids paying the cost when no contract has any
+    # tracked_topics (the common case for pre-tracking-plan rows).
+    from eth_abi.abi import decode as eth_abi_decode
+
+    inputs = spec.get("inputs") or []
+    topics = log.get("topics") or []
+    data = log.get("data") or "0x"
+
+    indexed_inputs = [i for i in inputs if i.get("indexed")]
+    non_indexed_inputs = [i for i in inputs if not i.get("indexed")]
+
+    # topics[0] is the event sig; indexed args live in topics[1:].
+    if len(topics) < 1 + len(indexed_inputs):
+        return None
+
+    event: dict = {
+        "event_type": spec.get("event_type", "controller_changed"),
+        "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
+        "tx_hash": log.get("transactionHash"),
+        "log_index": _hex_to_int(log.get("logIndex", "0x0")),
+    }
+    # Effect tags ride along on the parsed event so the watcher can
+    # branch on them (state sync, relational sync, reanalysis trigger)
+    # without re-deriving from event_type. Absent on hand-rolled
+    # events (parse_governance_log path), present on every per-contract
+    # event whose tracking_plan carries them.
+    spec_tags = spec.get("effect_tags")
+    if isinstance(spec_tags, dict) and spec_tags:
+        event["effect_tags"] = spec_tags
+    # Attach the ABI input list (declaration order, not topic order) so
+    # downstream write-target resolution can do positional / name-prefix
+    # heuristics for non-OZ ABIs. Compound's ``NewAdmin(address newAdmin)``
+    # and similar shapes need this to map a custom write_target like
+    # ``protocolAdmin`` to the ``newAdmin`` arg.
+    event["_inputs"] = list(inputs)
+
+    # Decode indexed args from topics.
+    args_in_order: list[object] = []
+    for i, spec_in in enumerate(indexed_inputs):
+        topic = topics[1 + i]
+        sol_type = (spec_in.get("type") or "").strip()
+        decoded: object
+        if sol_type in ("address", "address payable"):
+            decoded = _topic_to_address(topic)
+        elif sol_type.startswith("uint") or sol_type.startswith("int"):
+            decoded = _hex_to_int(topic)
+        elif sol_type.startswith("bytes") and sol_type != "bytes":
+            decoded = topic  # fixed-size bytes ride as the raw 32-byte topic
+        else:
+            # Dynamic types (string, bytes, arrays) are stored as the
+            # keccak of the value when indexed — we can't recover the
+            # original, just preserve the hash.
+            decoded = topic
+        name = spec_in.get("name") or f"arg{i}"
+        event[name] = decoded
+        args_in_order.append(decoded)
+
+    # Decode non-indexed args from data.
+    if non_indexed_inputs:
+        try:
+            raw = bytes.fromhex((data or "0x").removeprefix("0x"))
+            sol_types = [str(i.get("type") or "") for i in non_indexed_inputs]
+            decoded_tuple = eth_abi_decode(sol_types, raw)
+        except Exception:
+            return None
+        for i, spec_in in enumerate(non_indexed_inputs):
+            val = decoded_tuple[i]
+            # Normalize bytes → 0x-hex so JSONB-serializability is preserved.
+            if isinstance(val, (bytes, bytearray)):
+                val = "0x" + bytes(val).hex()
+            name = spec_in.get("name") or f"arg{len(indexed_inputs) + i}"
+            event[name] = val
+            args_in_order.append(val)
+
+    # Semantic-key aliases (``old_owner`` / ``new_owner``, etc.) keyed
+    # off event_type. Name-aware fill so single-arg events
+    # (``LogSetOwner(address indexed owner)``,
+    # ``NewAdmin(address newAdmin)``) and two-arg variants with
+    # non-standard ABI names (Solmate's ``user`` / ``newOwner``) all
+    # surface the canonical sync keys.
+    _assign_semantic_keys(event, event["event_type"], inputs, args_in_order)
+
+    return event

@@ -268,6 +268,7 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
                 {"name": "user", "type": "address", "indexed": True},
                 {"name": "newOwner", "type": "address", "indexed": True},
             ],
+            "effect_tags": {"writes": ["owner"]},
         }
     ]
     assert {writer["function"] for writer in owner_tracking["writer_functions"]} == {"transferOwnership(address)"}
@@ -283,6 +284,7 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
                 {"name": "user", "type": "address", "indexed": True},
                 {"name": "newAuthority", "type": "address", "indexed": True},
             ],
+            "effect_tags": {"writes": ["authority"]},
         }
     ]
     assert {writer["function"] for writer in authority_tracking["writer_functions"]} == {"setAuthority(AuthorityLike)"}

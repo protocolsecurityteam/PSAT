@@ -49,10 +49,38 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.reanalysis import (
-    REANALYSIS_EVENT_TYPES,
-    REANALYSIS_POLL_FIELDS,
+    _REANALYSIS_WRITE_TARGETS,
+    REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
+)
+
+# Poll fields that should trigger reanalysis post-tag-migration: vendored
+# triggers (``implementation``) plus the analyzer's control-relevant
+# write targets (``owner``, ``_owner``, ``pendingOwner``, ``authority``,
+# the admin family, ``_initialized``/``_initializing``). The poll path
+# and the event path now share this vocabulary.
+_REANALYSIS_POLL_FIELDS = REANALYSIS_POLL_FIELDS_VENDORED | _REANALYSIS_WRITE_TARGETS
+
+# Canonical event types that should trigger a full re-analysis job. The
+# tag-driven dispatch in ``should_trigger_reanalysis`` derives the same
+# verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — these are the
+# event_types whose synthesized tags either write a control-relevant
+# slot, set ``delegates``, or set ``is_initializer``. ``upgraded_revision``
+# is included because Aave V2's revision bump IS a delegate-target
+# swap (was missing from the pre-tag-migration set).
+_TRIGGERING_EVENT_TYPES = (
+    "upgraded",
+    "new_implementation",
+    "changed_master_copy",
+    "target_updated",
+    "upgraded_revision",
+    "diamond_cut",
+    "beacon_upgraded",
+    "admin_changed",
+    "ownership_transferred",
+    "authority_updated",
+    "initialized",
 )
 
 # ---------------------------------------------------------------------------
@@ -371,7 +399,51 @@ def _make_monitored_contract(
     protocol_id: int | None = None,
     chain: str = "ethereum",
     needs_polling: bool = False,
+    proxy_type: str | None = None,
 ) -> MonitoredContract:
+    from services.monitoring.polling_plan import build_polling_plan
+
+    # PROXY_SOURCE in this test module writes to the EIP-1967 slot via
+    # assembly; default to the matching vendored entry so the storage-
+    # slot poll dispatch actually reads the upgraded value.
+    plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
+    tracking_plan: dict | None = None
+    if contract_type in ("regular", "pausable", "proxy"):
+        tracked: list[dict] = [
+            {
+                "controller_id": "state_variable:owner",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "owner",
+                    "kind": "state_variable",
+                    "state_variable_name": "owner",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+            },
+        ]
+        if contract_type == "pausable":
+            tracked.append(
+                {
+                    "controller_id": "state_variable:paused",
+                    "read_spec": {
+                        "strategy": "getter_call",
+                        "target": "paused",
+                        "kind": "state_variable",
+                        "state_variable_name": "paused",
+                        "type": "bool",
+                        "type_kind": "primitive",
+                    },
+                }
+            )
+        tracking_plan = {"tracked_controllers": tracked}
+    polling_plan = build_polling_plan(
+        contract_type=contract_type,
+        proxy_type=plan_proxy_type,
+        tracking_plan=tracking_plan,
+        tracked_topics=None,
+    )
+
     mc = MonitoredContract(
         id=uuid.uuid4(),
         address=address.lower(),
@@ -385,6 +457,7 @@ def _make_monitored_contract(
             "watch_roles": False,
             "watch_safe_signers": contract_type == "safe",
             "watch_timelock": contract_type == "timelock",
+            "polling_plan": polling_plan,
         },
         last_known_state={},
         last_scanned_block=last_scanned_block,
@@ -405,7 +478,7 @@ def _make_monitored_contract(
 class TestShouldTriggerReanalysis:
     """Pure logic tests — no DB needed."""
 
-    @pytest.mark.parametrize("event_type", sorted(REANALYSIS_EVENT_TYPES))
+    @pytest.mark.parametrize("event_type", sorted(_TRIGGERING_EVENT_TYPES))
     def test_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is True
 
@@ -427,17 +500,106 @@ class TestShouldTriggerReanalysis:
     def test_non_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is False
 
-    @pytest.mark.parametrize("field", sorted(REANALYSIS_POLL_FIELDS))
+    @pytest.mark.parametrize("field", sorted(_REANALYSIS_POLL_FIELDS))
     def test_poll_triggering_fields(self, field):
         assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is True
 
-    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay"])
+    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay", "owners"])
     def test_poll_non_triggering_fields(self, field):
         assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is False
 
     def test_poll_no_data(self):
         assert should_trigger_reanalysis("state_changed_poll") is False
         assert should_trigger_reanalysis("state_changed_poll", {}) is False
+
+    def test_effect_tags_writes_owner_triggers(self):
+        """Generic-classification fallback: an event_type the canonical
+        set doesn't recognize, but whose effect_tags say the emitter
+        writes ``owner``, still triggers reanalysis. Covers protocols
+        whose admin slots are renamed (e.g. fork ``protocolOwner``)."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:owner",
+                {"effect_tags": {"writes": ["owner"]}},
+            )
+            is True
+        )
+
+    def test_effect_tags_writes_unrelated_does_not_trigger(self):
+        """Writes to a non-control-relevant slot (e.g. ``feeRecipient``)
+        should not trigger reanalysis even when the event_type isn't
+        canonical."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:state_variable:feeRecipient",
+                {"effect_tags": {"writes": ["feeRecipient"]}},
+            )
+            is False
+        )
+
+    def test_effect_tags_delegates_triggers(self):
+        """A DELEGATECALL in the emitter body is unconditionally
+        upgrade-equivalent — proxy fallback / custom upgrade
+        choreography. Trigger reanalysis."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:custom",
+                {"effect_tags": {"delegates": True}},
+            )
+            is True
+        )
+
+    def test_effect_tags_is_initializer_triggers(self):
+        """Re-init detected by the modifier rather than the slot name —
+        OZ forks that rename ``_initialized`` still get caught."""
+        assert (
+            should_trigger_reanalysis(
+                "controller_changed:custom",
+                {"effect_tags": {"is_initializer": True}},
+            )
+            is True
+        )
+
+    def test_handrolled_ownership_transferred_data_synthesizes_tags(self):
+        """An ``ownership_transferred`` event passing through the
+        hand-rolled decoder (``parse_governance_log``) now carries
+        ``effect_tags={"writes": ["owner"]}`` in its data. Verify the
+        reanalysis check fires when given that shape — i.e. the
+        synthesis path produces a tag-equivalent verdict to the bare
+        event_type path. This is the production path: scan_for_events
+        always passes event_data (which includes effect_tags) when it
+        queues a reanalysis job."""
+        data = {
+            "old_owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "new_owner": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+            "effect_tags": {"writes": ["owner"]},
+        }
+        assert should_trigger_reanalysis("ownership_transferred", data) is True
+
+    def test_handrolled_upgraded_data_synthesizes_tags(self):
+        """Same shape as above but for proxy Upgraded — verifies the
+        ``delegates: True`` path fires when the hand-rolled decoder
+        attaches it."""
+        data = {
+            "implementation": "0x" + "aa" * 20,
+            "effect_tags": {"writes": ["implementation"], "delegates": True},
+        }
+        assert should_trigger_reanalysis("upgraded", data) is True
+
+    def test_bare_event_type_without_data_uses_synthesis_fallback(self):
+        """Some queue dedupe paths call ``should_trigger_reanalysis``
+        with only an event_type (no decoded data). The synthesis
+        fallback in ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` must produce
+        the same verdict so those paths don't drift from the production
+        scan path."""
+        # Triggers
+        assert should_trigger_reanalysis("ownership_transferred") is True
+        assert should_trigger_reanalysis("upgraded") is True
+        assert should_trigger_reanalysis("admin_changed") is True
+        # Non-triggers
+        assert should_trigger_reanalysis("paused") is False
+        assert should_trigger_reanalysis("role_granted") is False
+        assert should_trigger_reanalysis("signer_added") is False
 
 
 # ---------------------------------------------------------------------------
