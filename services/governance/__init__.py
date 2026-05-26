@@ -12,6 +12,7 @@ Two slices live here:
   the analyses listing.
 """
 
+from .primary_controller import PRINCIPAL_PRIORITY, assign_primary_controllers
 from .principals import (
     _build_company_function_entry,
     _function_principal_payload,
@@ -22,10 +23,12 @@ from .proxies import GENERIC_PROXY_NAMES, _display_name, _merge_proxy_impl_entri
 
 __all__ = [
     "GENERIC_PROXY_NAMES",
+    "PRINCIPAL_PRIORITY",
     "_build_company_function_entry",
     "_display_name",
     "_function_principal_payload",
     "_is_generic_authority_contract_principal",
     "_merge_proxy_impl_entries",
     "_role_value_from_origin",
+    "assign_primary_controllers",
 ]
