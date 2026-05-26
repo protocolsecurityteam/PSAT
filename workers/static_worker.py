@@ -540,8 +540,16 @@ def _detect_solc_version(sources: dict[str, str]) -> str:
     min_tuple = tuple(int(x) for x in _MIN_SOLC.split("."))
     versions = []
     for content in sources.values():
-        for m in re.finditer(r"pragma\s+solidity\s+[\^~>=<]*\s*(0\.\d+\.\d+)", content):
-            versions.append(m.group(1))
+        for m in re.finditer(r"pragma\s+solidity\s+(<=|>=|[<>^~=]?)\s*(0\.\d+\.\d+)", content):
+            op, ver = m.group(1), m.group(2)
+            # ``<``/``<=`` is a *ceiling* (e.g. ``pragma solidity <0.9.0``), not a
+            # target. Treating it as the compiler version pins a solc that may
+            # not exist — 0.9.0 has no release artifact, so ``forge build`` dies
+            # with "version not found in artifacts for this platform: 0.9.0".
+            # Keep ^ ~ >= = and bare versions; drop upper bounds.
+            if op in ("<", "<="):
+                continue
+            versions.append(ver)
     if not versions:
         return _MIN_SOLC
     detected = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
