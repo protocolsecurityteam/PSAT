@@ -269,15 +269,30 @@ def _analysis_lookup_for_runtime_job(
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    if _job_has_artifact(session, runtime_job, required_artifact):
+    # A proxy's own predicate_trees artifact is present but *empty* — it has no
+    # logic of its own, so the analyzable functions live on the implementation
+    # child job. Treating that empty artifact as "present" (the old
+    # ``_job_has_artifact`` check) returns the proxy job and shadows the
+    # implementation's real trees, which strands cross-contract authority
+    # inlining with an empty tree set and drops the true controller (e.g. an
+    # upgrade gate delegating to RoleRegistry.onlyProtocolUpgrader never
+    # resolves its owner/timelock). Prefer whichever job carries a *substantive*
+    # artifact; only fall back to a present-but-empty one when neither does (a
+    # contract that genuinely has no gated functions).
+    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
+    if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    if impl_job is None:
-        return None
-    if not _job_has_artifact(session, impl_job, required_artifact):
-        return None
-    return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
+    impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
+    if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
+        return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
+
+    if isinstance(runtime_artifact, dict):
+        return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
+    if impl_job is not None and isinstance(impl_artifact, dict):
+        return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
+    return None
 
 
 def _jobs_for_address(
@@ -353,9 +368,19 @@ def _job_chain(job: Job) -> str | None:
     return chain if isinstance(chain, str) and chain else None
 
 
-def _job_has_artifact(session: Session, job: Job, artifact_name: str) -> bool:
-    artifact = get_artifact(session, job.id, artifact_name)
-    return isinstance(artifact, dict)
+def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
+    """Whether an artifact carries usable content — not merely that a row exists.
+
+    A proxy contract's ``predicate_trees`` artifact is present but empty (no
+    logic of its own), so ``predicate_trees`` counts as substantive only when it
+    carries at least one ``trees``/``check_trees`` entry. Other artifact kinds
+    count as substantive whenever the row is a dict.
+    """
+    if not isinstance(artifact, dict):
+        return False
+    if artifact_name == "predicate_trees":
+        return bool(artifact.get("trees") or artifact.get("check_trees"))
+    return True
 
 
 def _load_state_var_values(

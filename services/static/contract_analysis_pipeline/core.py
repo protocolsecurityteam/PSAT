@@ -16,7 +16,7 @@ from slither.slither import Slither
 
 from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
 
-from .effects import EffectsArtifact, build_effects
+from .effects import EffectsArtifact, apply_authority_effect_labels, build_effects
 from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
@@ -220,6 +220,15 @@ def collect_contract_analysis_with_artifacts(
     except Exception as exc:
         logger.exception("semantic effects emit failed for %s", project_dir)
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
+
+    # Cross-reference the two artifacts: label ownership/role mutation from the
+    # predicate trees' caller_authority leaves (single source of truth, per the
+    # note above). Must run before semantic_control, which reads effect_labels.
+    with _phase("authority_effect_labels", durations_ms):
+        try:
+            apply_authority_effect_labels(subject_contract, effects_artifact, predicate_trees_artifact)
+        except Exception:
+            logger.exception("authority effect-label post-pass failed for %s", project_dir)
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)

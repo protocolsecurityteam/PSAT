@@ -98,16 +98,26 @@ def _index_base_mapping_name_and_keys(index_ir: Any, definitions: dict[str, Any]
         if left_name:
             visited.add(left_name)
         defining = definitions.get(left_name)
+        # A ``Member`` chain between Index levels either resolves to an inner
+        # Index (nested mapping ``m[k].field[j]`` — keep walking) or bottoms out
+        # at a struct base. When that base is a storage struct reached through a
+        # pointer (OZ v5 / ERC-7201 namespaced storage,
+        # ``$._roles[role][account]``), ``left`` is only a synthetic ref, so the
+        # *field* name (``_roles``) is the logical mapping — capture the field
+        # closest to the Index and prefer it when bottoming out.
+        member_field: str | None = None
         while _ir_name(defining) == "Member":
+            if member_field is None:
+                member_field = _var_name(getattr(defining, "variable_right", None)) or None
             base = getattr(defining, "variable_left", None)
             base_name = _var_name(base)
             if base_name in visited:
-                return left_name or None, keys
+                return (member_field or left_name) or None, keys
             if base_name:
                 visited.add(base_name)
             defining = definitions.get(base_name)
         if _ir_name(defining) != "Index":
-            return left_name or None, keys
+            return (member_field or left_name) or None, keys
         current = defining
     return None, keys
 
@@ -260,9 +270,10 @@ def discover_mapping_writer_events(contract: Any) -> list[WriterEventSpec]:
     for function in _contract_functions(contract):
         if getattr(function, "is_constructor", False):
             continue
-        written = _written_mappings(function)
-        if not written:
-            continue
+        # ``_extract_index_writes`` is the authoritative signal: it resolves
+        # writes through struct-field / storage-pointer Member chains (OZ v5
+        # namespaced storage) that ``_written_mappings`` — contract-level
+        # mapping state variables only — does not see. Gate on it directly.
         index_writes = _extract_index_writes(function)
         if not index_writes:
             continue

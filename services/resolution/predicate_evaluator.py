@@ -393,6 +393,66 @@ def _condition_group_description(conditions: list[Condition]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _nullary_getter_selector(name: str | None) -> str | None:
+    """4-byte selector for ``<name>()`` — the auto-getter of a public state
+    variable. ``None`` for an empty name."""
+    if not isinstance(name, str) or not name:
+        return None
+    return _selector_for_signature(f"{name}()")
+
+
+def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None) -> CapabilityExpr | None:
+    """Resolve ``msg.sender == X`` by reading ``X`` live when the static
+    ``state_var_values`` feed didn't carry it.
+
+    ``msg.sender == owner()`` / ``== governor()`` / ``== <stateVar>`` names a
+    single authorized caller; the persisted ``ControllerValue`` feed is the
+    only thing :func:`_resolve_equality_principal` consults, so an
+    owner()/governor()-gated function whose value was never captured (or was
+    captured under a different key) dropped every principal. This reads the
+    getter on the contract under analysis and materializes the result.
+
+    Returns ``finite_set([addr], exact)`` for a concrete non-zero address,
+    ``finite_set([], exact)`` when the getter returns the zero address
+    (genuinely unset / renounced), or ``None`` when nothing could be read — no
+    RPC reachable through the outer context, a malformed selector, or a revert
+    — in which case the caller keeps the ``lower_bound`` placeholder. Gating on
+    a reachable ``rpc_url`` keeps pure-unit evaluations (no RPC) on their
+    existing empty-placeholder behaviour."""
+    if ctx is None or not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
+        return None
+    outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
+    rpc_url = getattr(outer, "rpc_url", None)
+    contract = getattr(outer, "contract_address", None) or ctx.contract_address
+    block = getattr(outer, "block", None) if outer is not None else ctx.block
+    if not isinstance(rpc_url, str) or not rpc_url:
+        return None
+    if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
+        return None
+    try:
+        from utils.rpc import rpc_request
+
+        raw = rpc_request(
+            rpc_url,
+            "eth_call",
+            [{"to": contract.lower(), "data": selector}, hex(block) if isinstance(block, int) else "latest"],
+            retries=1,
+        )
+    except Exception:
+        return None
+    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
+        return None
+    addr = "0x" + raw[-40:].lower()
+    if _is_zero_address(addr):
+        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+    return CapabilityExpr.finite_set(
+        [addr],
+        quality="exact",
+        confidence="enumerable",
+        trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
+    )
+
+
 def _resolve_equality_principal(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
@@ -432,6 +492,18 @@ def _resolve_equality_principal(
                     quality="exact",
                     confidence="enumerable",
                 )
+        # state_var_values miss. For a bare (non-struct-member) variable the
+        # equality ``msg.sender == X`` names X as the sole authorized caller,
+        # so reading X's getter live recovers the principal the persisted
+        # ControllerValue feed didn't carry (or carried under a different key,
+        # e.g. an owner()/governor() gate). Struct members
+        # (``accountantState.payoutAddress``) have no nullary getter and
+        # describe fund destinations, not callers — left as the placeholder so
+        # the FP-only attribution can't re-introduce fee-destination noise.
+        if not op.get("member_path"):
+            live = _live_resolve_authority(ctx, _nullary_getter_selector(op.get("state_variable_name")))
+            if live is not None:
+                return live
         # Fallback: we know there's a guarding state-var but haven't
         # enumerated it yet (no ControllerValue row, or non-address
         # value). UI surfaces this as 'guarded but unresolved'.
@@ -448,7 +520,29 @@ def _resolve_equality_principal(
         return CapabilityExpr.unsupported("self_address_without_contract")
 
     if src == "view_call":
-        # Same as state_variable: resolved via adapter recursion.
+        # ``msg.sender == owner()`` / ``== governor()``: the static stage
+        # recorded the getter but couldn't read it. Resolve it live against the
+        # contract under analysis. This branch previously returned an empty
+        # lower_bound placeholder unconditionally, which dropped every
+        # owner()/governor()-gated function's principal (the etherfi SyncPool /
+        # LRTSquaredCore recall gap). Falls back to the placeholder when no RPC
+        # is reachable.
+        # Only nullary getters (owner()/governor()) are read live — a view
+        # taking args (e.g. roleAdmin(role)) can't be called with empty
+        # calldata, so leave it to the placeholder.
+        selector = None
+        if not op.get("callee_args"):
+            selector = op.get("callee_selector")
+            if not (isinstance(selector, str) and selector.startswith("0x") and len(selector) == 10):
+                signature = op.get("callee_signature")
+                selector = (
+                    _selector_for_signature(signature)
+                    if isinstance(signature, str) and signature.endswith("()")
+                    else None
+                )
+        live = _live_resolve_authority(ctx, selector)
+        if live is not None:
+            return live
         return CapabilityExpr.finite_set(
             [],
             quality="lower_bound",

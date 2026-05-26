@@ -55,6 +55,15 @@ GNOSIS_SLOT0_PATTERN = "73" + "ff" * 20 + "60005416"
 # Max bytecode hex-char length for the DELEGATECALL heuristic (300 bytes).
 SHORT_BYTECODE_THRESHOLD = 600
 
+# Max bytecode size (bytes) for trusting the generic implementation()-getter
+# proxy signal (step 7). Real forwarding proxies are tiny — EIP-1967 / OZ / USDC
+# proxies in practice top out ~2.5 KB. A large contract that merely *exposes*
+# implementation() is a logic contract using it as a domain getter (e.g. EtherFi
+# StakingManager, 16.5 KB, returns the EtherFiNode template it deploys), not a
+# delegating proxy. 8 KB sits well above the largest real proxy and well below
+# such logic contracts.
+GENERIC_IMPL_PROXY_MAX_BYTES = 8192
+
 # Function selectors
 IMPLEMENTATION_SELECTOR = "0x5c60da1b"  # implementation()
 FACET_ADDRESSES_SELECTOR = "0x52ef6b2c"  # facetAddresses() — EIP-2535
@@ -421,12 +430,27 @@ def classify_single(
             return info
 
     # 7. implementation() call — catches custom proxies with non-standard
-    #    storage slots that still expose the standard interface.
-    impl_call = _try_implementation_call(rpc_url, address)
-    if impl_call:
-        logger.debug("%s → custom proxy (implementation() call), impl=%s", address, impl_call)
-        info.update(type="proxy", proxy_type="custom", implementation=impl_call)
-        return info
+    #    storage slots that still expose the standard interface. Guarded by a
+    #    bytecode-size ceiling: a real forwarding proxy is tiny, so a large
+    #    contract exposing implementation() is a logic contract using it as a
+    #    domain getter (e.g. EtherFi StakingManager returns the EtherFiNode
+    #    template it deploys), not a delegation pointer. Every standard proxy
+    #    type is already caught deterministically above, so this size-gated
+    #    soft signal is the last resort.
+    raw_bc = bytecode[2:] if bytecode.startswith("0x") else bytecode
+    if len(raw_bc) // 2 <= GENERIC_IMPL_PROXY_MAX_BYTES:
+        impl_call = _try_implementation_call(rpc_url, address)
+        if impl_call:
+            logger.debug("%s → custom proxy (implementation() call), impl=%s", address, impl_call)
+            info.update(type="proxy", proxy_type="custom", implementation=impl_call)
+            return info
+    else:
+        logger.debug(
+            "%s exposes implementation() but bytecode is %d bytes (> %d) — treating as logic, not proxy",
+            address,
+            len(raw_bc) // 2,
+            GENERIC_IMPL_PROXY_MAX_BYTES,
+        )
 
     # 8. Heuristic: short bytecode (<= 300 bytes) with DELEGATECALL opcode.
     #    When tracing is available, probe with synthetic calldata to confirm

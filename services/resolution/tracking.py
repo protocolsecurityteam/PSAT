@@ -14,6 +14,7 @@ from eth_abi.abi import decode
 
 from schemas.contract_analysis import AssociatedEvent, ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
+from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
@@ -457,6 +458,7 @@ def build_control_snapshot(
     block_tag: str = "latest",
     *,
     heartbeat: Callable[[], None] | None = None,
+    getter_fallback_address: str | None = None,
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
@@ -464,6 +466,13 @@ def build_control_snapshot(
     ``classify_resolved_address``); the previous per-snapshot cache was an
     unsynchronised dict that becomes a race once the level fan-out runs in
     threads, and the global cache already handles dedup with a lock.
+
+    ``getter_fallback_address`` — the implementation address to retry a getter
+    against when the primary read (usually a proxy) reverts. Storage-backed
+    state lives in the proxy, but ``immutable`` authority addresses live in the
+    implementation bytecode and revert when the runtime address doesn't
+    delegatecall to that impl (beacon / per-instance patterns). Defaults to
+    ``None`` (no fallback), preserving the prior reverting-getter behavior.
     """
     from utils.concurrency import parallel_map
 
@@ -481,30 +490,38 @@ def build_control_snapshot(
     )
     controller_values: dict[str, Any] = {}
 
-    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any]]:
-        """Pure function: compute one controller's value dict."""
+    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
+        """Pure function: compute one controller's value dict, or None to skip."""
         controller_id = controller["controller_id"]
         source = controller["source"]
         read_spec = controller.get("read_spec")
-        try:
-            value = _read_polling_source(
-                rpc_url,
-                plan["contract_address"],
-                source,
-                controller["kind"],
-                block_tag,
-                read_spec=read_spec if isinstance(read_spec, dict) else None,
-            )
+        # Primitive-scalar state vars are admitted to the plan only so the event
+        # pathway can watch them — the value snapshot is address-only (every
+        # consumer reads ``value`` as a 0x-address). Reading a scalar slot and
+        # classifying it as an address mints phantom EOA principals: a uint
+        # _minDelay==864000 resolves to 0x…0d2f00, has no code, classifies
+        # "eoa", and is promoted to a controller of every contract declaring it.
+        # Skip only primitive scalars — address/contract slots are real
+        # principals, and mapping/array/struct slots are enumerated elsewhere
+        # (a bare getter reverts on them) so they must pass through untouched.
+        if controller["kind"] == "state_variable" and is_primitive_scalar_read_spec(read_spec):
+            return controller_id, None
+        spec = read_spec if isinstance(read_spec, dict) else None
+
+        def _read_entry(read_address: str, observed_via: str) -> dict[str, Any]:
+            value = _read_polling_source(rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec)
             if controller["kind"] == "role_identifier":
-                return controller_id, {
+                return {
                     "source": source,
                     "value": value,
                     "block_number": block_number,
-                    "observed_via": "eth_call",
+                    "observed_via": observed_via,
                     "resolved_type": "unknown",
                     "details": {
                         "source": source,
                         "role_id": value,
+                        # Membership is enforced at the runtime address even when
+                        # the role-id constant was read from the implementation.
                         "authority_contract": plan["contract_address"],
                         "principal_source": "capability_expr",
                     },
@@ -513,13 +530,29 @@ def build_control_snapshot(
                 "source": source,
                 "value": value,
                 "block_number": block_number,
-                "observed_via": "eth_call",
+                "observed_via": observed_via,
             }
             resolved_type, details = classify_resolved_address(rpc_url, value, block_tag)
             entry["resolved_type"] = resolved_type
             entry["details"] = details
-            return controller_id, entry
+            return entry
+
+        try:
+            return controller_id, _read_entry(plan["contract_address"], "eth_call")
         except Exception as exc:
+            # Storage-backed getters live in the proxy, but immutable-backed
+            # authority addresses live in the implementation bytecode and revert
+            # when the runtime address doesn't delegatecall to that impl (beacon
+            # / per-instance patterns — e.g. EtherFiNode, whose
+            # etherFiNodesManager/delegationManager are immutable). Retry against
+            # the implementation: impl storage reads as zero so a storage getter
+            # just yields the empty answer, while an immutable getter recovers
+            # its real value instead of being recorded null.
+            if getter_fallback_address and getter_fallback_address.lower() != str(plan["contract_address"]).lower():
+                try:
+                    return controller_id, _read_entry(getter_fallback_address, "eth_call_impl_fallback")
+                except Exception:
+                    pass
             return controller_id, {
                 "source": source,
                 "value": None,
@@ -540,6 +573,8 @@ def build_control_snapshot(
             # entry. Anything reaching here is a genuine bug — surface it.
             raise outcome
         cid, entry = outcome
+        if entry is None:
+            continue
         controller_values[cid] = entry
 
     return {

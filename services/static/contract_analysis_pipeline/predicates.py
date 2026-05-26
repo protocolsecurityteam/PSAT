@@ -2120,16 +2120,23 @@ def _find_index_base(ir: Any, function: Any | None = None) -> Any | None:
         if function is None:
             return left
         defining = _find_defining_ir(left, None, function)
+        # When the chain bottoms out through a ``Member`` access on a storage
+        # struct reached via a pointer (ERC-7201 namespaced storage), ``left``
+        # is a synthetic ref; the field being accessed (``_roles``) is the
+        # logical storage variable. Prefer that field over the ref.
+        member_field = None
         while isinstance(defining, Member):
-            base = defining.variable_left
+            if member_field is None:
+                member_field = getattr(defining, "variable_right", None)
+            base = getattr(defining, "variable_left", None)
             base_name = getattr(base, "name", None)
             if base_name in visited:
-                return left
+                return member_field if member_field is not None else left
             if base_name is not None:
                 visited.add(base_name)
             defining = _find_defining_ir(base, None, function)
         if not isinstance(defining, Index):
-            return left
+            return member_field if member_field is not None else left
         current = defining
     return None
 

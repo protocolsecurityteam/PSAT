@@ -30,7 +30,7 @@ downstream
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import is_dataclass
 from typing import Any
 
@@ -77,6 +77,24 @@ def _principal_rows_for_capability(
     ).principal_rows
 
 
+def _classify_principal(
+    address: str,
+    resolver: Callable[[str], tuple[str | None, dict[str, Any] | None]],
+    memo: dict[str, tuple[str | None, dict[str, Any] | None]],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve one principal address to ``(resolved_type, details)`` via
+    *resolver*, memoized per writer call so an address shared across functions
+    is classified once. A resolver failure leaves the row untyped rather than
+    aborting the whole contract's FunctionPrincipal write."""
+    key = (address or "").lower()
+    if key not in memo:
+        try:
+            memo[key] = resolver(address)
+        except Exception:
+            memo[key] = (None, None)
+    return memo[key]
+
+
 def _column_values_for_capability(
     cap_dict: dict[str, Any],
 ) -> dict[str, Any]:
@@ -102,9 +120,22 @@ def write_effective_function_rows(
     function_records: list[dict[str, Any]],
     capability_by_function: Mapping[str, CapabilityExpr | dict[str, Any]] | None,
     safe_address_lookup: dict[str, str] | None = None,
+    resolve_principal_type: Callable[[str], tuple[str | None, dict[str, Any] | None]] | None = None,
 ) -> int:
     """Replace this contract's ``EffectiveFunction`` rows with semantic
     rows and their associated ``FunctionPrincipal`` rows.
+
+    ``resolve_principal_type`` — optional ``address -> (resolved_type,
+    details)`` classifier. The capability surface only knows caller
+    *addresses* (finite_set members carry ``resolved_type=None``); when this
+    is supplied, each untyped caller row is classified so
+    ``function_principals.resolved_type`` carries Safe / Timelock / EOA /
+    proxy_admin. That is the signal ``_fp_governance`` and the
+    primary-controller assignment key on — without it those rows are NULL and
+    a governance Safe reachable only through per-function authority never
+    surfaces. Callers pass the same resolver used for principal labels (the
+    resolution-stage classify cache + a live ``classify_resolved_address``
+    fallback). ``None`` preserves the prior write-time-untyped behavior.
 
     ``function_records`` is the list of per-function dicts emitted by
     ``build_effective_permissions``. Each must carry at minimum
@@ -129,6 +160,9 @@ def write_effective_function_rows(
     session.flush()
 
     added_principals = 0
+    # Per-call address→(type, details) memo so a caller shared across many
+    # functions is classified once.
+    type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
     for fn in function_records:
         fn_signature = str(fn.get("function") or fn.get("abi_signature") or "")
         function_name = fn_signature.split("(")[0] if "(" in fn_signature else fn_signature
@@ -206,14 +240,36 @@ def write_effective_function_rows(
                 if key in seen:
                     continue
                 seen.add(key)
+                resolved_type = row.get("resolved_type")
+                details = row.get("details")
+                # finite_set rows arrive untyped (the surface only knows the
+                # address). Classify callers so resolved_type is populated.
+                # signature_witness rows are signers, not callers, and are
+                # excluded from the governance/primary-controller consumers —
+                # skip the probe for them.
+                if (
+                    resolve_principal_type is not None
+                    and row.get("principal_type") != "signature_witness"
+                    and (not resolved_type or resolved_type == "unknown")
+                ):
+                    classified_type, classified_details = _classify_principal(
+                        row["address"], resolve_principal_type, type_memo
+                    )
+                    if classified_type:
+                        resolved_type = classified_type
+                        if isinstance(classified_details, dict) and classified_details:
+                            merged = dict(classified_details)
+                            if isinstance(details, dict):
+                                merged.update(details)
+                            details = merged
                 session.add(
                     FunctionPrincipal(
                         function_id=ef.id,
                         address=row["address"],
-                        resolved_type=row.get("resolved_type"),
+                        resolved_type=resolved_type,
                         origin=row.get("origin"),
                         principal_type=row.get("principal_type"),
-                        details=row.get("details"),
+                        details=details,
                     )
                 )
                 added_principals += 1
