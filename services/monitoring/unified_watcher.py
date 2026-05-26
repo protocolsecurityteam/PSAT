@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 from sqlalchemy import select
@@ -25,14 +26,16 @@ from db.models import (
     WatchedProxy,
 )
 from services.monitoring.event_topics import (
+    _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
     PROXY_EVENT_TOPICS,
     parse_any_log,
+    parse_tracked_log,
 )
+from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from utils.rpc import (
     normalize_hex,
-    parse_address_result,
     rpc_batch_request,
     rpc_request,
 )
@@ -45,38 +48,13 @@ MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
 
-# Storage slots for proxy resolution
-_EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-
-# Selectors for state polling
-_OWNER_SEL = "0x8da5cb5b"  # owner()
-_PAUSED_SEL = "0x5c975abb"  # paused()
-_GET_THRESHOLD_SEL = "0xe75235b8"  # getThreshold()
-_GET_MIN_DELAY_SEL = "0xf27a0c92"  # getMinDelay()
-
 # Controller IDs that represent the contract owner. Used by relational sync
 # to update only the real owner row, not unrelated controller values that
 # happen to contain "owner" in their name (e.g. token_owner_registry).
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
-
-# Mapping from poll field names to scanner event types that detect the same
-# underlying state change.  Used by the poller to suppress duplicate events
-# when the event scanner has already recorded the change via an on-chain log.
-_POLL_FIELD_TO_SCAN_EVENTS: dict[str, frozenset[str]] = {
-    "implementation": frozenset(
-        {
-            "upgraded",
-            "new_implementation",
-            "changed_master_copy",
-            "target_updated",
-            "beacon_upgraded",
-        }
-    ),
-    "owner": frozenset({"ownership_transferred"}),
-    "paused": frozenset({"paused", "unpaused"}),
-    "threshold": frozenset({"threshold_changed"}),
-    "min_delay": frozenset({"delay_changed"}),
-}
+# Solmate-Auth / DSAuth-style authority pointer. Sync target for the
+# ``authority_updated`` event emitted by Solmate's ``Auth.setAuthority``.
+_AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
 
 
 def get_latest_block(rpc_url: str) -> int:
@@ -103,6 +81,27 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
 
     contract_by_address: dict[str, MonitoredContract] = {c.address.lower(): c for c in contracts}
 
+    # Per-emitter map of topic0 → tracked-topic spec (from the static
+    # analysis ``tracking_plan``, persisted onto monitoring_config by
+    # enrollment). Lets the dispatcher decode events from ABIs the
+    # hand-rolled registry doesn't know about — Solmate OwnerUpdated /
+    # AuthorityUpdated, DSAuth LogSetOwner, Compound NewAdmin, etc.
+    tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
+    extra_topic0s: set[str] = set()
+    for addr, mc in contract_by_address.items():
+        topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
+        if not topics_list:
+            continue
+        spec_map: dict[str, dict] = {}
+        for spec in topics_list:
+            t0 = (spec.get("topic0") or "").lower()
+            if not t0:
+                continue
+            spec_map[t0] = spec
+            extra_topic0s.add(t0)
+        if spec_map:
+            tracked_specs_by_emitter[addr] = spec_map
+
     from_block = min(c.last_scanned_block for c in contracts)
     latest_block = get_latest_block(rpc_url)
 
@@ -119,7 +118,11 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     )
 
     new_events: list[MonitoredEvent] = []
-    topics = [list(ALL_EVENT_TOPICS.keys())]
+    # Union the hand-rolled global registry with per-contract topic0s
+    # discovered from the analysis tracking_plan. The hand-rolled set
+    # owns OZ / Safe / Timelock / proxy events (semantics beyond raw
+    # decode); per-contract topics cover the long tail of ABI variants.
+    topics = [sorted(set(ALL_EVENT_TOPICS.keys()) | extra_topic0s)]
 
     # Two-tier dedupe:
     #   ``db_events`` is loaded from already-persisted MonitoredEvent rows
@@ -185,11 +188,27 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             logs = []
 
         for log in logs:
+            emitter = normalize_hex(log.get("address", "")).lower()
             parsed = parse_any_log(log)
             if not parsed:
-                continue
+                # Fall through to the per-contract tracked-topic
+                # dispatcher: events from non-OZ ABIs (Solmate,
+                # DSAuth, Compound, …) the hand-rolled registry
+                # doesn't know about. Spec was attached at enrollment
+                # time from the analysis tracking_plan.
+                emitter_specs = tracked_specs_by_emitter.get(emitter)
+                if not emitter_specs:
+                    continue
+                log_topics = log.get("topics") or []
+                if not log_topics:
+                    continue
+                spec = emitter_specs.get((log_topics[0] or "").lower())
+                if not spec:
+                    continue
+                parsed = parse_tracked_log(log, spec)
+                if not parsed:
+                    continue
 
-            emitter = normalize_hex(log.get("address", "")).lower()
             mc = contract_by_address.get(emitter)
             if not mc:
                 continue
@@ -197,7 +216,7 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             event_type = parsed["event_type"]
 
             # Check monitoring config
-            if mc.monitoring_config and not _should_watch(mc, event_type):
+            if mc.monitoring_config and not _should_watch(mc, parsed):
                 continue
 
             # First gate: have we already stored ANY row for this
@@ -288,61 +307,93 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     return new_events
 
 
-def _should_watch(mc: MonitoredContract, event_type: str) -> bool:
-    """Check if the monitoring config allows this event type."""
+# Per-write-target → monitoring_config flag gates. Tag-driven dispatch
+# routes each ``effect_tags.writes`` entry through this map; if any of
+# the resulting flags is enabled the event passes the watch filter.
+#
+# ``admin``-family writes route to both watch_upgrades (EIP-1967 proxy
+# admin slot is the upgrader role) AND watch_ownership (Compound/Aave/
+# Curve "admin" is the principal owner) because the underlying mutation
+# is "the privileged controller changed" — the monitoring intent depends
+# on what the contract IS, not what the event is named.
+_WRITE_TARGET_TO_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    # Ownership
+    "owner": ("watch_ownership",),
+    "_owner": ("watch_ownership",),
+    "pendingOwner": ("watch_ownership",),
+    "_pendingOwner": ("watch_ownership",),
+    # Admin family — both upgrade- and ownership-gated
+    "admin": ("watch_upgrades", "watch_ownership"),
+    "_admin": ("watch_upgrades", "watch_ownership"),
+    "pendingAdmin": ("watch_upgrades", "watch_ownership"),
+    "future_admin": ("watch_upgrades", "watch_ownership"),
+    # Upgrade-relevant slot writes (also any delegates=True event)
+    "implementation": ("watch_upgrades",),
+    "beacon": ("watch_upgrades",),
+    "facets": ("watch_upgrades",),
+    "pendingImplementation": ("watch_upgrades",),
+    "_initialized": ("watch_upgrades",),
+    "_initializing": ("watch_upgrades",),
+    # Authority
+    "authority": ("watch_authority",),
+    # Pause
+    "paused": ("watch_pause",),
+    # Roles
+    "_roles": ("watch_roles",),
+    # Safe signers / Safe + Timelock activity
+    "owners": ("watch_safe_signers",),
+    "threshold": ("watch_safe_signers",),
+    "_safe_op": ("watch_safe_signers",),
+    "_safe_module_op": ("watch_safe_signers",),
+    "_timelock_op": ("watch_timelock",),
+    "min_delay": ("watch_timelock",),
+}
+
+
+def _should_watch(mc: MonitoredContract, parsed: dict) -> bool:
+    """Check if the monitoring config allows this event.
+
+    Tag-driven: derive the set of monitoring_config flags this event is
+    gated on from ``effect_tags.writes`` + ``effect_tags.delegates``,
+    then pass if any flag is enabled (or defaults on). Legacy events
+    without tags synthesize them from event_type via
+    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
+    """
     config = mc.monitoring_config or {}
+    event_type = parsed.get("event_type", "")
 
-    type_to_config = {
-        "upgraded": "watch_upgrades",
-        "admin_changed": "watch_upgrades",
-        "beacon_upgraded": "watch_upgrades",
-        "changed_master_copy": "watch_upgrades",
-        "new_implementation": "watch_upgrades",
-        "new_pending_implementation": "watch_upgrades",
-        "target_updated": "watch_upgrades",
-        "upgraded_revision": "watch_upgrades",
-        "diamond_cut": "watch_upgrades",
-        "ownership_transferred": "watch_ownership",
-        "paused": "watch_pause",
-        "unpaused": "watch_pause",
-        "role_granted": "watch_roles",
-        "role_revoked": "watch_roles",
-        "signer_added": "watch_safe_signers",
-        "signer_removed": "watch_safe_signers",
-        "threshold_changed": "watch_safe_signers",
-        "timelock_scheduled": "watch_timelock",
-        "timelock_executed": "watch_timelock",
-        "delay_changed": "watch_timelock",
-        # Safe execution events ride along with the existing safe-signers
-        # config flag — same monitoring intent ("watch this safe's
-        # activity"), and adding a separate flag would force every
-        # MonitoredContract row to be migrated.
-        "safe_tx_executed": "watch_safe_signers",
-        "safe_tx_failed": "watch_safe_signers",
-        # Module-triggered Safe executions (ExecutionFromModule*) — same
-        # monitoring intent. Ride the same flag.
-        "safe_module_executed": "watch_safe_signers",
-        "safe_module_failed": "watch_safe_signers",
-    }
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
+    delegates = bool(tags.get("delegates"))
 
-    config_key = type_to_config.get(event_type)
-    if config_key is None:
-        return True  # Unknown event type — allow
+    config_keys: set[str] = set()
+    if delegates:
+        config_keys.add("watch_upgrades")
+    for write_target in writes:
+        if not isinstance(write_target, str):
+            continue
+        keys = _WRITE_TARGET_TO_CONFIG_KEYS.get(write_target)
+        if keys:
+            config_keys.update(keys)
 
-    # Legacy alias support: `watch_signers` predates the rename to
-    # `watch_safe_signers` (which now also gates safe_tx_* /
-    # safe_module_* execution events). Accept either flag for the
-    # safe-signers config key so historic MonitoredContract rows
-    # written before the rename keep working without a migration.
-    if config_key == "watch_safe_signers":
+    if not config_keys:
+        return True  # Unrecognized event — allow rather than silently drop.
+
+    # Legacy alias: ``watch_signers`` predates the rename to
+    # ``watch_safe_signers``. Accept either flag so historic
+    # MonitoredContract rows written before the rename keep working
+    # without a migration. Only kicks in when the event's gating
+    # reduces to watch_safe_signers alone — multi-gate events
+    # (admin_changed) flow through the general path.
+    if config_keys == {"watch_safe_signers"}:
         if config.get("watch_safe_signers") or config.get("watch_signers"):
             return True
-        # Both keys absent — fall through to the default-on behaviour
-        # below (return True when neither key is set).
         if "watch_safe_signers" in config or "watch_signers" in config:
             return False
-        return True
-    return config.get(config_key, True)
+        # Neither key set — default-on, fall through to the general path.
+
+    # Allow if ANY relevant flag is set (or defaults to True via .get()).
+    return any(config.get(key, True) for key in config_keys)
 
 
 def _write_through_proxy_event(
@@ -375,30 +426,212 @@ def _write_through_proxy_event(
         wp.last_scanned_block = parsed["block_number"]
 
 
+def _extract_new_owner(parsed: dict) -> object:
+    return parsed.get("new_owner")
+
+
+def _extract_new_authority(parsed: dict) -> object:
+    return parsed.get("new_authority")
+
+
+def _extract_paused_bool(parsed: dict) -> object:
+    # paused/unpaused share writes=["paused"]; the event_type discriminates
+    # the new state. The arg on the wire is the account that flipped the
+    # flag, not the flag value — so we ignore parsed["account"] and read
+    # the semantic from event_type.
+    et = parsed.get("event_type")
+    if et == "paused":
+        return True
+    if et == "unpaused":
+        return False
+    return None
+
+
+def _extract_threshold(parsed: dict) -> object:
+    # GnosisSafe ChangedThreshold(uint256 threshold) decodes to ``threshold``.
+    # Tracked Safe-shaped ABIs may use new_threshold via semantic-key aliasing.
+    val = parsed.get("threshold")
+    if val is None:
+        val = parsed.get("new_threshold")
+    return val
+
+
+def _extract_implementation(parsed: dict) -> object:
+    return parsed.get("implementation")
+
+
+def _extract_new_admin(parsed: dict) -> object:
+    return parsed.get("new_admin")
+
+
+def _extract_beacon(parsed: dict) -> object:
+    return parsed.get("beacon")
+
+
+def _extract_new_delay(parsed: dict) -> object:
+    return parsed.get("new_delay")
+
+
+def _extract_initialized_version(parsed: dict) -> object:
+    # OZ Initializable Initialized(uint64 version). Canonical ABI names
+    # the arg ``version``; some forks use ``initVersion``. Either way the
+    # value goes into last_known_state so reanalysis can compare against
+    # the next observation.
+    version = parsed.get("version")
+    if version is None:
+        version = parsed.get("initVersion")
+    return version
+
+
+_StateExtractor = Callable[[dict], object]
+
+# Per-write-target dispatch for ``_update_state_from_event``. Maps a tag
+# write target → (state_key, extractor). The state_key may differ from
+# the write target (``_initialized`` writes to ``initialized_version``);
+# the extractor pulls the right value out of the decoded event. Targets
+# absent here fall through to the generic name-match reflection so
+# custom slots (e.g. ``protocolAdmin``) work without per-slot code.
+_WRITE_TARGET_TO_STATE: dict[str, tuple[str, _StateExtractor]] = {
+    "owner": ("owner", _extract_new_owner),
+    "authority": ("authority", _extract_new_authority),
+    "paused": ("paused", _extract_paused_bool),
+    "threshold": ("threshold", _extract_threshold),
+    "implementation": ("implementation", _extract_implementation),
+    "admin": ("admin", _extract_new_admin),
+    "beacon": ("beacon", _extract_beacon),
+    "min_delay": ("min_delay", _extract_new_delay),
+    "_initialized": ("initialized_version", _extract_initialized_version),
+}
+
+
+def _resolve_value_for_write_target(parsed: dict, write_target: str) -> object | None:
+    """Pull the new value an event reports for *write_target* using the
+    most specific signal available, falling back to ABI conventions
+    when the analyzer's tag is the only structural pin.
+
+    Resolution order:
+
+      1. **Bare-name match** — ``parsed[write_target]`` works for
+         single-arg events whose only arg is the new value
+         (DSAuth ``LogSetOwner(address indexed owner)`` with
+         write_target ``owner``).
+      2. **OZ ``new<Cap>`` convention** — ``parsed[f"new{Cap}"]`` covers
+         the OZ family (``newOwner``, ``newAdmin``, ``newImplementation``).
+      3. **Tag-pinned ``new*`` arg from the ABI inputs spec** — when the
+         analyzer attached ``_inputs`` (per-contract tracked events via
+         ``parse_tracked_log``), find any input whose name starts with
+         "new" (case-insensitive) and return its value. Catches
+         Compound-shape ``NewAdmin(address newAdmin)`` /
+         ``ProtocolAdminChanged(previousAdmin, newAdmin)`` for a
+         write_target like ``protocolAdmin`` where neither the bare
+         name nor the OZ ``new<Cap>`` convention applies.
+      4. **Positional last-arg fallback** — for single-write events the
+         "new value" is conventionally the last arg even when no naming
+         convention applies (Solady, custom ABIs that just name the
+         arg ``account`` or ``to``). Only fires when ``_inputs`` is
+         present and (3) didn't match.
+
+    Underscore-prefixed write_targets (``_roles``, ``_timelock_op``,
+    ``_safe_op``, ``_safe_module_op``) are synthetic activity markers
+    not real slots; they short-circuit to ``None`` so the fallback
+    doesn't false-positive on the third-arg ``sender`` of a RoleGranted
+    event (which has no canonical extractor and would otherwise hit
+    pass (4) and overwrite ``state["_roles"]`` with a sender address).
+    """
+    if write_target.startswith("_"):
+        return None
+
+    candidate = parsed.get(write_target)
+    if candidate is not None:
+        return candidate
+
+    cap = write_target[:1].upper() + write_target[1:]
+    candidate = parsed.get(f"new{cap}")
+    if candidate is not None:
+        return candidate
+
+    inputs = parsed.get("_inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return None
+
+    # Pass 3: any input whose name starts with "new" (case-insensitive).
+    # First match wins; the analyzer's tag tells us there's a single
+    # write target here, so the convention "the new value of THAT slot
+    # is named new<something>" is reliable.
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = inp.get("name") or ""
+        if name.lower().startswith("new") and name in parsed:
+            return parsed[name]
+
+    # Pass 4: positional last-arg. The analyzer's tag pins this event
+    # as writing exactly one slot, so the last arg is the conventional
+    # location of the new value across every governance ABI we've seen
+    # (Solady, custom). Skipped when (3) matched.
+    last = inputs[-1]
+    if isinstance(last, dict):
+        name = last.get("name") or ""
+        if name and name in parsed:
+            return parsed[name]
+    return None
+
+
 def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
-    """Update last_known_state based on a detected event."""
+    """Reflect the event's mutations into ``last_known_state``.
+
+    Tag-driven: each ``effect_tags.writes`` target either resolves to a
+    canonical (state_key, extractor) in ``_WRITE_TARGET_TO_STATE`` or
+    falls back to generic name-match reflection so custom slots like
+    ``protocolAdmin`` flow through without per-slot code.
+
+    Legacy events without ``effect_tags`` synthesize them from event_type
+    via ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — covers monitoring_config
+    rows persisted before tag synthesis landed.
+    """
     state = dict(mc.last_known_state or {})
     event_type = parsed["event_type"]
 
-    if event_type == "ownership_transferred" and parsed.get("new_owner"):
-        state["owner"] = parsed["new_owner"]
-    elif event_type in ("paused", "unpaused"):
-        state["paused"] = event_type == "paused"
-    elif event_type == "threshold_changed" and parsed.get("threshold"):
-        state["threshold"] = parsed["threshold"]
-    elif event_type in ("upgraded", "new_implementation", "changed_master_copy", "target_updated"):
-        impl = parsed.get("implementation")
-        if impl:
-            state["implementation"] = impl
-    elif event_type == "admin_changed" and parsed.get("new_admin"):
-        state["admin"] = parsed["new_admin"]
-    elif event_type == "beacon_upgraded" and parsed.get("beacon"):
-        state["beacon"] = parsed["beacon"]
-    elif event_type == "delay_changed" and parsed.get("new_delay") is not None:
-        state["min_delay"] = parsed["new_delay"]
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
+
+    for write_target in writes:
+        if not isinstance(write_target, str):
+            continue
+        mapping = _WRITE_TARGET_TO_STATE.get(write_target)
+        if mapping is not None:
+            state_key, extractor = mapping
+            value = extractor(parsed)
+            if value is not None:
+                state[state_key] = value
+            continue
+        # Generic resolution for custom slots — uses bare-name match,
+        # OZ ``new<Cap>`` convention, ABI-pinned ``new*`` arg, and last-
+        # arg positional fallback. Unlike the canonical branch we DO
+        # overwrite an existing state entry — this path is the only one
+        # that updates custom slots, so a subsequent observation must
+        # take precedence.
+        candidate = _resolve_value_for_write_target(parsed, write_target)
+        if candidate is not None:
+            state[write_target] = candidate
 
     mc.last_known_state = state
     flag_modified(mc, "last_known_state")
+
+
+def _new_value_for_write_target(write_target: str, parsed: dict) -> object | None:
+    """Pull the new value for *write_target* out of a parsed event.
+
+    Tries the canonical extractor in ``_WRITE_TARGET_TO_STATE`` first,
+    then defers to ``_resolve_value_for_write_target`` for custom slots
+    so the event-side relational sync and the state-update sync share
+    one resolution chain.
+    """
+    mapping = _WRITE_TARGET_TO_STATE.get(write_target)
+    if mapping is not None:
+        _, extractor = mapping
+        return extractor(parsed)
+    return _resolve_value_for_write_target(parsed, write_target)
 
 
 def _sync_relational_tables(
@@ -409,72 +642,71 @@ def _sync_relational_tables(
     """Propagate a detected event to the relational Contract / ControllerValue /
     UpgradeEvent tables so the API serves up-to-date data.
 
+    Tag-driven: each ``effect_tags.writes`` target drives one row update.
+    Legacy events without tags synthesize them from event_type via
+    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
+
     Only updates rows when the MonitoredContract has a linked contract_id.
     """
     if not mc.contract_id:
         return
 
     event_type = parsed["event_type"]
+    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
+    writes = tags.get("writes") or []
+    delegates = bool(tags.get("delegates"))
 
-    # --- Proxy upgrade events → Contract.implementation + UpgradeEvent row ---
-    if event_type in (
-        "upgraded",
-        "new_implementation",
-        "changed_master_copy",
-        "target_updated",
-    ):
-        new_impl = parsed.get("implementation")
-        if not new_impl:
-            return
-        contract = session.get(Contract, mc.contract_id)
-        if not contract:
-            return
+    contract: Contract | None = None
 
-        old_impl = contract.implementation
-        contract.implementation = new_impl
+    def _get_contract() -> Contract | None:
+        nonlocal contract
+        if contract is None:
+            contract = session.get(Contract, mc.contract_id)
+        return contract
 
-        session.add(
-            UpgradeEvent(
-                contract_id=contract.id,
-                proxy_address=mc.address,
-                old_impl=old_impl,
-                new_impl=new_impl,
-                block_number=parsed.get("block_number"),
-                tx_hash=parsed.get("tx_hash"),
-            )
-        )
-        # Coverage windows are derived from UpgradeEvent history, so a
-        # new upgrade can change which audits apply to the previous impl
-        # (it's now bounded) and the new one (newly current). Rebuild
-        # coverage for every audit in the protocol — it's idempotent.
-        _refresh_coverage_after_upgrade(session, contract.protocol_id)
-
-    # --- AdminChanged → Contract.admin ---
-    elif event_type == "admin_changed":
-        new_admin = parsed.get("new_admin")
-        if not new_admin:
-            return
-        contract = session.get(Contract, mc.contract_id)
-        if contract:
-            contract.admin = new_admin
-
-    # --- OwnershipTransferred → ControllerValue where controller_id is 'owner' ---
-    elif event_type == "ownership_transferred":
-        new_owner = parsed.get("new_owner")
-        if not new_owner:
-            return
-        cv_rows = (
-            session.execute(
-                select(ControllerValue).where(
-                    ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(_OWNER_CONTROLLER_IDS),
+    # Upgrade path: a delegate-target swap → Contract.implementation,
+    # UpgradeEvent row, coverage refresh. Load-bearing semantics that
+    # generic ControllerValue reflection can't reproduce.
+    impl_writes = {"implementation", "beacon", "facets"}
+    if delegates and any(w in impl_writes for w in writes if isinstance(w, str)):
+        new_impl = parsed.get("implementation") or parsed.get("beacon")
+        if new_impl:
+            c = _get_contract()
+            if c is not None:
+                old_impl = c.implementation
+                c.implementation = new_impl
+                session.add(
+                    UpgradeEvent(
+                        contract_id=c.id,
+                        proxy_address=mc.address,
+                        old_impl=old_impl,
+                        new_impl=new_impl,
+                        block_number=parsed.get("block_number"),
+                        tx_hash=parsed.get("tx_hash"),
+                    )
                 )
-            )
-            .scalars()
-            .all()
-        )
-        for cv in cv_rows:
-            cv.value = new_owner
+                # Coverage windows are derived from UpgradeEvent history, so a
+                # new upgrade can change which audits apply to the previous impl
+                # (it's now bounded) and the new one (newly current). Rebuild
+                # coverage for every audit in the protocol — it's idempotent.
+                _refresh_coverage_after_upgrade(session, c.protocol_id)
+
+    # Per-write-target row sync: top-level Contract.admin shadow for
+    # admin writes, plus ControllerValue rows keyed by any of the common
+    # prefix forms ({target}, state_variable:{target}, external_contract:{target}).
+    for write_target in writes:
+        if not isinstance(write_target, str):
+            continue
+        new_value = _new_value_for_write_target(write_target, parsed)
+        if new_value is None:
+            continue
+
+        if write_target == "admin":
+            c = _get_contract()
+            if c is not None:
+                c.admin = str(new_value)
+
+        _update_controller_value_rows(session, mc, write_target, new_value)
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:
@@ -509,6 +741,43 @@ def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -
         )
 
 
+def _update_controller_value_rows(
+    session: Session,
+    mc: MonitoredContract,
+    write_target: str,
+    new_value: object,
+) -> None:
+    """Write *new_value* into every ControllerValue row keyed by the
+    three canonical controller_id forms the analyzer emits
+    (``{name}``, ``state_variable:{name}``, ``external_contract:{name}``).
+
+    Shared between event-driven sync (``_sync_relational_tables``) and
+    poll-driven sync (``_sync_relational_from_poll``) so the two paths
+    converge on the same row-keying rules and a custom slot like
+    ``protocolAdmin`` propagates through either path without per-slot
+    code.
+    """
+    if not mc.contract_id:
+        return
+    controller_ids = (
+        write_target,
+        f"state_variable:{write_target}",
+        f"external_contract:{write_target}",
+    )
+    cv_rows = (
+        session.execute(
+            select(ControllerValue).where(
+                ControllerValue.contract_id == mc.contract_id,
+                ControllerValue.controller_id.in_(controller_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for cv in cv_rows:
+        cv.value = str(new_value)
+
+
 def _sync_relational_from_poll(
     session: Session,
     mc: MonitoredContract,
@@ -516,7 +785,14 @@ def _sync_relational_from_poll(
     new_value: object,
     old_value: object,
 ) -> None:
-    """Propagate a polling-detected state change to relational tables."""
+    """Propagate a polling-detected state change to relational tables.
+
+    ``implementation`` keeps the dedicated branch — the
+    Contract.implementation shadow + UpgradeEvent row + coverage refresh
+    are side effects ControllerValue can't reproduce. Every other field
+    flows through the generic ControllerValue updater so custom slots
+    (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
+    """
     if not mc.contract_id:
         return
 
@@ -535,20 +811,9 @@ def _sync_relational_from_poll(
                 )
             )
             _refresh_coverage_after_upgrade(session, contract.protocol_id)
+        return
 
-    elif field_name == "owner":
-        cv_rows = (
-            session.execute(
-                select(ControllerValue).where(
-                    ControllerValue.contract_id == mc.contract_id,
-                    ControllerValue.controller_id.in_(_OWNER_CONTROLLER_IDS),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for cv in cv_rows:
-            cv.value = str(new_value)
+    _update_controller_value_rows(session, mc, field_name, new_value)
 
 
 # ---------------------------------------------------------------------------
@@ -556,11 +821,44 @@ def _sync_relational_from_poll(
 # ---------------------------------------------------------------------------
 
 
-def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
-    """Poll for state changes on contracts that need polling.
+def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list] | None:
+    """Translate a polling-plan entry into a JSON-RPC ``(method, params)``
+    pair. Returns ``None`` for unrecognized entry kinds — the loop drops
+    those silently so a forward-compatible schema addition can't break
+    a running watcher."""
+    kind = entry.get("kind")
+    if kind == "getter_call":
+        selector = entry.get("selector")
+        if not selector:
+            return None
+        return ("eth_call", [{"to": address, "data": selector}, "latest"])
+    if kind == "storage_slot":
+        slot = entry.get("slot")
+        if not slot:
+            return None
+        return ("eth_getStorageAt", [address, slot, "latest"])
+    return None
 
-    Batches RPC calls based on contract_type and compares against
-    last_known_state. Returns list of new MonitoredEvent records for changes.
+
+def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
+    """Poll for state changes by walking each contract's persisted
+    ``polling_plan``.
+
+    The plan is built at enrollment (``polling_plan.build_polling_plan``)
+    from the static analyzer's tracked_controllers, plus vendored proxy
+    storage slots and Safe/Timelock standard ABIs. Each tick:
+
+      1. Expand every entry into a batched RPC call.
+      2. Decode each result by the entry's ``type_kind`` / ``type``.
+      3. Compare against ``mc.last_known_state[entry["field"]]``; if it
+         changed, persist the new value, emit a ``state_changed_poll``
+         event, and run downstream sync (relational, reanalysis,
+         per-entry suppression of scanner duplicates).
+
+    Contracts whose ``monitoring_config`` lacks a ``polling_plan`` are
+    skipped — the reconciler (``services/monitoring/reconciler.py``)
+    backfills the plan within its interval (default 600s) so this is a
+    bounded transient on freshly-migrated rows.
     """
     contracts = (
         session.execute(
@@ -575,33 +873,22 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     if not contracts:
         return []
 
-    # Build batch calls
     batch_calls: list[tuple[str, list]] = []
-    # (contract, start_idx, field_name)
-    poll_plan: list[tuple[MonitoredContract, int, str]] = []
+    # (contract, batch_index, entry_dict)
+    poll_dispatch: list[tuple[MonitoredContract, int, dict]] = []
 
     for mc in contracts:
-        ct = mc.contract_type
-        if ct == "proxy":
-            start = len(batch_calls)
-            batch_calls.append(("eth_getStorageAt", [mc.address, _EIP1967_IMPL_SLOT, "latest"]))
-            poll_plan.append((mc, start, "implementation"))
-        if ct in ("proxy", "regular", "pausable", "role_control"):
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _OWNER_SEL}, "latest"]))
-            poll_plan.append((mc, start, "owner"))
-        if ct in ("pausable",):
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _PAUSED_SEL}, "latest"]))
-            poll_plan.append((mc, start, "paused"))
-        if ct == "safe":
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _GET_THRESHOLD_SEL}, "latest"]))
-            poll_plan.append((mc, start, "threshold"))
-        if ct == "timelock":
-            start = len(batch_calls)
-            batch_calls.append(("eth_call", [{"to": mc.address, "data": _GET_MIN_DELAY_SEL}, "latest"]))
-            poll_plan.append((mc, start, "min_delay"))
+        plan = (mc.monitoring_config or {}).get("polling_plan") or []
+        if not isinstance(plan, list):
+            continue
+        for entry in plan:
+            if not isinstance(entry, dict):
+                continue
+            call = _rpc_call_for_entry(mc.address, entry)
+            if call is None:
+                continue
+            poll_dispatch.append((mc, len(batch_calls), entry))
+            batch_calls.append(call)
 
     if not batch_calls:
         return []
@@ -614,145 +901,128 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 
     new_events: list[MonitoredEvent] = []
 
-    for mc, idx, field_name in poll_plan:
+    for mc, idx, entry in poll_dispatch:
         raw = results[idx]
-        state = dict(mc.last_known_state or {})
-        old_value = state.get(field_name)
-
-        if field_name == "implementation":
-            new_value = parse_address_result(raw)
-        elif field_name == "owner":
-            new_value = parse_address_result(raw)
-        elif field_name == "paused":
-            if not raw:
-                new_value = None
-            elif raw != "0x" + "0" * 64:
-                new_value = True
-            else:
-                new_value = False
-        elif field_name in ("threshold", "min_delay"):
-            if raw and raw != "0x":
-                try:
-                    new_value = int(raw, 16)
-                except (ValueError, TypeError):
-                    new_value = None
-            else:
-                new_value = None
-        else:
-            new_value = None
-
+        field_name = entry.get("field")
+        if not isinstance(field_name, str) or not field_name:
+            continue
+        new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
         if new_value is None:
             continue
 
-        if new_value != old_value:
-            # Always record the new value in last_known_state
-            state[field_name] = new_value
-            mc.last_known_state = state
-            flag_modified(mc, "last_known_state")
+        state = dict(mc.last_known_state or {})
+        old_value = state.get(field_name)
+        if new_value == old_value:
+            continue
 
-            # Skip emitting an event when old_value is None — that's the
-            # first observation after enrollment, not an actual state change.
-            if old_value is None:
+        # Always record the new value in last_known_state, even on the
+        # first observation — subsequent polls then have a baseline.
+        state[field_name] = new_value
+        mc.last_known_state = state
+        flag_modified(mc, "last_known_state")
+
+        # First observation after enrollment isn't a real state change.
+        if old_value is None:
+            logger.debug(
+                "Initial %s observation on %s: %s (no event emitted)",
+                field_name,
+                mc.address,
+                new_value,
+            )
+            continue
+
+        # Suppress when the event scanner already recorded the same
+        # mutation. Per-entry suppress lists come from the enrollment-
+        # time projection: vendored entries carry the canonical
+        # event_types for their slot, analyzer-derived entries carry
+        # event_types whose ``effect_tags.writes`` includes this field.
+        scan_types = entry.get("suppress_when_scan_event_types") or []
+        if isinstance(scan_types, list) and scan_types:
+            suppression_cutoff = datetime.now(timezone.utc) - timedelta(
+                seconds=DEFAULT_POLL_INTERVAL * 2,
+            )
+            already = session.execute(
+                select(MonitoredEvent.id)
+                .where(
+                    MonitoredEvent.monitored_contract_id == mc.id,
+                    MonitoredEvent.event_type.in_(scan_types),
+                    MonitoredEvent.detected_at >= suppression_cutoff,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if already is not None:
                 logger.debug(
-                    "Initial %s observation on %s: %s (no event emitted)",
-                    field_name,
+                    "Suppressing poll event for %s/%s — scanner already detected it",
                     mc.address,
-                    new_value,
+                    field_name,
                 )
                 continue
 
-            # Suppress if the event scanner already recorded this change.
-            # This handles the race condition where the scanner and poller
-            # processes both detect the same underlying change (e.g., a proxy
-            # upgrade is visible as both an Upgraded log and a storage-slot
-            # change).
-            scan_types = _POLL_FIELD_TO_SCAN_EVENTS.get(field_name)
-            if scan_types:
-                suppression_cutoff = datetime.now(timezone.utc) - timedelta(
-                    seconds=DEFAULT_POLL_INTERVAL * 2,
+        event = MonitoredEvent(
+            id=uuid.uuid4(),
+            monitored_contract_id=mc.id,
+            event_type="state_changed_poll",
+            block_number=0,
+            tx_hash="",
+            data={
+                "field": field_name,
+                "old_value": str(old_value),
+                "new_value": str(new_value),
+            },
+        )
+        session.add(event)
+        new_events.append(event)
+
+        logger.info(
+            "Poll detected %s change on %s: %s -> %s",
+            field_name,
+            mc.address,
+            old_value,
+            new_value,
+        )
+
+        # Write-through for proxy implementation changes
+        if field_name == "implementation" and mc.watched_proxy_id:
+            wp = session.get(WatchedProxy, mc.watched_proxy_id)
+            if wp:
+                upgrade_event = ProxyUpgradeEvent(
+                    watched_proxy_id=wp.id,
+                    block_number=0,
+                    tx_hash="",
+                    old_implementation=str(old_value) if old_value else None,
+                    new_implementation=str(new_value),
+                    event_type="storage_poll",
                 )
-                already = session.execute(
-                    select(MonitoredEvent.id)
-                    .where(
-                        MonitoredEvent.monitored_contract_id == mc.id,
-                        MonitoredEvent.event_type.in_(scan_types),
-                        MonitoredEvent.detected_at >= suppression_cutoff,
-                    )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if already is not None:
-                    logger.debug(
-                        "Suppressing poll event for %s/%s — scanner already detected it",
-                        mc.address,
-                        field_name,
-                    )
-                    continue
+                session.add(upgrade_event)
+                wp.last_known_implementation = str(new_value)
 
-            event = MonitoredEvent(
-                id=uuid.uuid4(),
-                monitored_contract_id=mc.id,
-                event_type="state_changed_poll",
-                block_number=0,
-                tx_hash="",
-                data={
-                    "field": field_name,
-                    "old_value": str(old_value),
-                    "new_value": str(new_value),
-                },
+        # Propagate to relational tables
+        _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
+
+        # Queue a re-analysis job if the state change warrants it
+        try:
+            poll_data = {
+                "field": field_name,
+                "old_value": str(old_value),
+                "new_value": str(new_value),
+            }
+            reanalysis_job = maybe_queue_reanalysis(
+                session,
+                mc,
+                "state_changed_poll",
+                poll_data,
             )
-            session.add(event)
-            new_events.append(event)
-
-            logger.info(
-                "Poll detected %s change on %s: %s -> %s",
-                field_name,
+            if reanalysis_job:
+                updated = dict(event.data or {})
+                updated["reanalysis_job_id"] = str(reanalysis_job.id)
+                event.data = updated
+        except Exception as exc:
+            logger.warning(
+                "Failed to queue re-analysis for %s: %s",
                 mc.address,
-                old_value,
-                new_value,
+                exc,
+                extra={"exc_type": type(exc).__name__},
             )
-
-            # Write-through for proxy implementation changes
-            if field_name == "implementation" and mc.watched_proxy_id:
-                wp = session.get(WatchedProxy, mc.watched_proxy_id)
-                if wp:
-                    upgrade_event = ProxyUpgradeEvent(
-                        watched_proxy_id=wp.id,
-                        block_number=0,
-                        tx_hash="",
-                        old_implementation=str(old_value) if old_value else None,
-                        new_implementation=str(new_value),
-                        event_type="storage_poll",
-                    )
-                    session.add(upgrade_event)
-                    wp.last_known_implementation = str(new_value)
-
-            # Propagate to relational tables
-            _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
-
-            # Queue a re-analysis job if the state change warrants it
-            try:
-                poll_data = {
-                    "field": field_name,
-                    "old_value": str(old_value),
-                    "new_value": str(new_value),
-                }
-                reanalysis_job = maybe_queue_reanalysis(
-                    session,
-                    mc,
-                    "state_changed_poll",
-                    poll_data,
-                )
-                if reanalysis_job:
-                    updated = dict(event.data or {})
-                    updated["reanalysis_job_id"] = str(reanalysis_job.id)
-                    event.data = updated
-            except Exception as exc:
-                logger.warning(
-                    "Failed to queue re-analysis for %s: %s",
-                    mc.address,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
 
     session.commit()
     return new_events
@@ -763,9 +1033,27 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 # ---------------------------------------------------------------------------
 
 
+def _boot_reconcile(rpc_url: str) -> None:
+    """Best-effort enrollment reconcile on watcher startup.
+
+    Catches the case where a migration / admin fix-up landed while the
+    watcher was down. The reconciler converges on every tick anyway, so
+    a failure here is non-fatal — but the boot pass closes the deploy-
+    window gap so monitored_contracts is correct before the first scan.
+    """
+    try:
+        from services.monitoring.reconciler import reconcile_enrollments
+
+        with SessionLocal() as session:
+            reconcile_enrollments(session, rpc_url)
+    except Exception as exc:
+        logger.warning("Boot reconcile failed: %s", exc, extra={"exc_type": type(exc).__name__})
+
+
 def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None:
     """Run the unified event scanner in a blocking loop."""
     logger.info("Starting unified protocol monitor (interval=%ss)", interval)
+    _boot_reconcile(rpc_url)
     while True:
         try:
             with SessionLocal() as session:
@@ -786,6 +1074,7 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
 def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None:
     """Run the unified state polling loop."""
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
+    _boot_reconcile(rpc_url)
     while True:
         try:
             with SessionLocal() as session:

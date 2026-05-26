@@ -345,6 +345,48 @@ def _setup_monitored(
     watched_proxy_id: uuid.UUID | None = None,
     initial_state: dict | None = None,
 ) -> MonitoredContract:
+    from services.monitoring.polling_plan import build_polling_plan
+
+    # Match what enrollment would produce for these contract shapes so
+    # tests that flip needs_polling=True after setup exercise the same
+    # poll dispatch the production path uses.
+    plan_proxy_type = (contract.proxy_type or None) or ("custom" if contract_type == "proxy" else None)
+    tracking_plan: dict | None = None
+    if contract_type in ("regular", "pausable", "proxy"):
+        tracked: list[dict] = [
+            {
+                "controller_id": "state_variable:owner",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "owner",
+                    "kind": "state_variable",
+                    "state_variable_name": "owner",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+            },
+        ]
+        if contract_type == "pausable":
+            tracked.append(
+                {
+                    "controller_id": "state_variable:paused",
+                    "read_spec": {
+                        "strategy": "getter_call",
+                        "target": "paused",
+                        "kind": "state_variable",
+                        "state_variable_name": "paused",
+                        "type": "bool",
+                        "type_kind": "primitive",
+                    },
+                }
+            )
+        tracking_plan = {"tracked_controllers": tracked}
+    polling_plan = build_polling_plan(
+        contract_type=contract_type,
+        proxy_type=plan_proxy_type,
+        tracking_plan=tracking_plan,
+        tracked_topics=None,
+    )
     config = {
         "watch_upgrades": contract_type == "proxy",
         "watch_ownership": True,
@@ -352,6 +394,7 @@ def _setup_monitored(
         "watch_roles": contract_type == "role_control",
         "watch_safe_signers": contract_type == "safe",
         "watch_timelock": contract_type == "timelock",
+        "polling_plan": polling_plan,
     }
     mc = MonitoredContract(
         id=uuid.uuid4(),
@@ -606,12 +649,17 @@ class TestUpgradePollingUpdatesRelational:
         current_block = int(_cast(["block-number"], rpc_url))
 
         proto = _setup_protocol(pg_session)
+        # The PROXY_SOURCE writes to the EIP-1967 slot via assembly and
+        # has no ``implementation()`` getter, so its proxy_type is
+        # ``eip1967`` even though the test framing uses the word
+        # "custom". The polling-plan builder reads proxy_type to pick
+        # the right vendored entry (storage slot vs. getter call).
         contract = _setup_contract(
             pg_session,
             proxy_addr,
             proto,
             is_proxy=True,
-            proxy_type="custom",
+            proxy_type="eip1967",
             implementation=impl_v1,
         )
         mc = _setup_monitored(
@@ -625,7 +673,9 @@ class TestUpgradePollingUpdatesRelational:
         mc.needs_polling = True
         pg_session.commit()
 
-        # Upgrade directly (no event — simulating a custom proxy)
+        # Upgrade by calling the proxy's upgradeTo. The poll reads the
+        # EIP-1967 slot directly — the storage-slot path is what the
+        # ``eip1967`` vendored entry resolves to.
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = poll_for_state_changes(pg_session, rpc_url)

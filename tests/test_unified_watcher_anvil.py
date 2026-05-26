@@ -177,6 +177,130 @@ contract TestOwnable {
 }
 """
 
+SOLMATE_OWNED_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract TestSolmateOwned {
+    address public owner;
+    event OwnerUpdated(address indexed user, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnerUpdated(address(0), msg.sender);
+    }
+
+    function setOwner(address newOwner) external {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        owner = newOwner;
+        emit OwnerUpdated(msg.sender, newOwner);
+    }
+}
+"""
+
+DSAUTH_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// DSAuth shape used by Maker / MKR / DAI / Vat / Vow / Cat — single-arg
+// LogSetOwner with the address indexed. Topic0 differs from both OZ
+// and Solmate; the only arg is the new owner.
+contract TestDSAuth {
+    address public owner;
+    event LogSetOwner(address indexed owner);
+
+    constructor() {
+        owner = msg.sender;
+        emit LogSetOwner(msg.sender);
+    }
+
+    function setOwner(address newOwner) external {
+        require(msg.sender == owner, "not-authorized");
+        owner = newOwner;
+        emit LogSetOwner(newOwner);
+    }
+}
+"""
+
+COMPOUND_ADMIN_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Compound Comptroller / cToken admin shape: NewAdmin(address) with the
+// admin packed in data (non-indexed). Used across every Compound fork
+// (Sonne, Moonwell, Venus, Iron Bank, …).
+contract TestCompoundAdmin {
+    address public admin;
+    event NewAdmin(address newAdmin);
+
+    constructor() {
+        admin = msg.sender;
+        emit NewAdmin(msg.sender);
+    }
+
+    function _setAdmin(address newAdmin) external {
+        require(msg.sender == admin, "only admin");
+        admin = newAdmin;
+        emit NewAdmin(newAdmin);
+    }
+}
+"""
+
+OZ_OWNABLE2STEP_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// OZ Ownable2Step shape: OwnershipTransferStarted on transferOwnership
+// (intent), OwnershipTransferred on acceptOwnership (commit). The
+// Started event is invisible to the pre-fix scanner — its topic0 is
+// distinct from the OZ Ownable OwnershipTransferred topic0.
+contract TestOwnable2Step {
+    address public owner;
+    address public pendingOwner;
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    function transferOwnership(address newOwner) external {
+        require(msg.sender == owner, "not owner");
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        address old = owner;
+        owner = pendingOwner;
+        pendingOwner = address(0);
+        emit OwnershipTransferred(old, owner);
+    }
+}
+"""
+
+SOLMATE_AUTH_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract TestSolmateAuth {
+    address public owner;
+    address public authority;
+    event OwnerUpdated(address indexed user, address indexed newOwner);
+    event AuthorityUpdated(address indexed user, address indexed newAuthority);
+
+    constructor(address _authority) {
+        owner = msg.sender;
+        authority = _authority;
+        emit OwnerUpdated(address(0), msg.sender);
+        emit AuthorityUpdated(address(0), _authority);
+    }
+
+    function setAuthority(address newAuthority) external {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        authority = newAuthority;
+        emit AuthorityUpdated(msg.sender, newAuthority);
+    }
+}
+"""
+
 PAUSABLE_SOURCE = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -405,6 +529,51 @@ def test_db():
         engine.dispose()
 
 
+def _synthetic_tracking_plan_for(contract_type: str) -> dict | None:
+    """Mint a minimal ``ControlTrackingPlan``-shaped dict for tests
+    whose anvil-deployed contracts never went through the static
+    analyzer.
+
+    Mirrors what the analyzer would emit for the canonical Ownable /
+    Pausable shapes the test fixtures use (OWNABLE_SOURCE,
+    PAUSABLE_SOURCE). Vendored entries (proxy slot, Safe getThreshold,
+    Timelock getMinDelay) come from ``build_polling_plan`` directly via
+    contract_type, so this only fills the analyzer-driven gap.
+    """
+    controllers: list[dict] = []
+    if contract_type in ("regular", "pausable", "role_control", "proxy"):
+        controllers.append(
+            {
+                "controller_id": "state_variable:owner",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "owner",
+                    "kind": "state_variable",
+                    "state_variable_name": "owner",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+            }
+        )
+    if contract_type == "pausable":
+        controllers.append(
+            {
+                "controller_id": "state_variable:paused",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "paused",
+                    "kind": "state_variable",
+                    "state_variable_name": "paused",
+                    "type": "bool",
+                    "type_kind": "primitive",
+                },
+            }
+        )
+    if not controllers:
+        return None
+    return {"tracked_controllers": controllers}
+
+
 def _register_contract(
     session: SASession,
     address: str,
@@ -412,8 +581,30 @@ def _register_contract(
     last_scanned_block: int,
     monitoring_config: dict | None = None,
     watched_proxy_id: uuid.UUID | None = None,
+    proxy_type: str | None = None,
 ) -> MonitoredContract:
-    """Register a MonitoredContract in the test DB."""
+    """Register a MonitoredContract in the test DB.
+
+    Builds a synthetic polling plan from ``contract_type`` (and
+    ``proxy_type`` when given) using ``build_polling_plan`` so the
+    runtime poll path sees the same shape it would after a real
+    enrollment. When *monitoring_config* is provided, the polling plan
+    is merged in unless the caller already supplied one.
+    """
+    from services.monitoring.polling_plan import build_polling_plan
+
+    # Build the polling plan first so it can ride along with whatever
+    # monitoring_config the caller hands us (or the default below).
+    # PROXY_SOURCE in this module writes to the EIP-1967 slot via
+    # assembly, so default proxy contracts to that vendored entry.
+    plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
+    polling_plan = build_polling_plan(
+        contract_type=contract_type,
+        proxy_type=plan_proxy_type,
+        tracking_plan=_synthetic_tracking_plan_for(contract_type),
+        tracked_topics=None,
+    )
+
     if monitoring_config is None:
         monitoring_config = {
             "watch_upgrades": contract_type == "proxy",
@@ -423,6 +614,8 @@ def _register_contract(
             "watch_safe_signers": contract_type == "safe",
             "watch_timelock": contract_type == "timelock",
         }
+    monitoring_config = dict(monitoring_config)
+    monitoring_config.setdefault("polling_plan", polling_plan)
 
     mc = MonitoredContract(
         id=uuid.uuid4(),
@@ -432,7 +625,7 @@ def _register_contract(
         monitoring_config=monitoring_config,
         last_known_state={},
         last_scanned_block=last_scanned_block,
-        needs_polling=contract_type in ("proxy", "safe", "timelock"),
+        needs_polling=bool(monitoring_config.get("polling_plan")),
         is_active=True,
         enrollment_source="manual",
         watched_proxy_id=watched_proxy_id,
@@ -468,6 +661,303 @@ def test_ownership_transfer_detected(anvil_env, test_db):
     assert evt.event_type == "ownership_transferred"
     assert evt.data is not None
     assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+
+
+def test_solmate_owner_updated_detected(anvil_env, test_db):
+    """Deploy Solmate-style Owned, register with a tracked_topics entry for
+    OwnerUpdated, transfer ownership, scan, assert the scanner picks up the
+    Solmate event under the canonical ``ownership_transferred`` event_type.
+
+    Guards Bug 3: without the per-contract topic dispatch, OwnerUpdated's
+    topic0 isn't in the global eth_getLogs filter and the event is dropped
+    at the network layer before any decoder runs.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    owner_updated_topic0 = "0x" + keccak(text="OwnerUpdated(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": owner_updated_topic0,
+                "signature": "OwnerUpdated(address,address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [
+                    {"name": "user", "type": "address", "indexed": True},
+                    {"name": "newOwner", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transferred"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+
+
+def test_solmate_authority_updated_detected(anvil_env, test_db):
+    """Deploy Solmate-style Auth, register with a tracked_topics entry for
+    AuthorityUpdated, swap the authority, scan, assert the event is detected
+    under event_type='authority_updated' with the new authority value in the
+    decoded data.
+
+    AuthorityUpdated has no OZ counterpart — without per-contract topic
+    dispatch, an authority swap (entire access-control regime change) is
+    invisible to the scanner.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    initial_authority = "0x0000000000000000000000000000000000000001"
+    addr = _compile_and_deploy(
+        SOLMATE_AUTH_SOURCE,
+        "TestSolmateAuth",
+        [initial_authority],
+        rpc_url,
+        PRIVATE_KEY,
+        tmp_path,
+    )
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    authority_topic0 = "0x" + keccak(text="AuthorityUpdated(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "watch_authority": True,
+        "tracked_topics": [
+            {
+                "topic0": authority_topic0,
+                "signature": "AuthorityUpdated(address,address)",
+                "event_type": "authority_updated",
+                "controller_id": "external_contract:authority",
+                "inputs": [
+                    {"name": "user", "type": "address", "indexed": True},
+                    {"name": "newAuthority", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_authority = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
+    _cast_send(addr, "setAuthority(address)", [new_authority], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "authority_updated"
+    assert evt.data is not None
+    assert evt.data.get("new_authority", "").lower() == new_authority.lower()
+
+
+def test_dsauth_log_set_owner_detected(anvil_env, test_db):
+    """Maker / DSAuth-family LogSetOwner detection.
+
+    Why this test exists as part of the general-bug regression set:
+    DSAuth's ``LogSetOwner(address indexed owner)`` has a topic0
+    distinct from both OZ ``OwnershipTransferred`` and Solmate
+    ``OwnerUpdated``. Without per-contract topic dispatch the scanner's
+    eth_getLogs filter never includes its topic0, and the event is
+    dropped at the network layer — same shape of gap as Bug 3 but
+    against a completely different ABI family (Maker DSS, MKR, DAI,
+    Vat/Vow/Cat). Validates that the generic dispatcher generalizes
+    beyond Solmate.
+
+    Also exercises the *single-arg* decode + semantic-key fallback path:
+    LogSetOwner only carries the new owner (no previous), so the
+    decoder should fill ``new_owner`` without inventing an ``old_owner``.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(DSAUTH_SOURCE, "TestDSAuth", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="LogSetOwner(address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "LogSetOwner(address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [{"name": "owner", "type": "address", "indexed": True}],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transferred"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+    # Single-arg event carries no previous-owner value; decoder must
+    # not invent one.
+    assert "old_owner" not in evt.data
+
+
+def test_compound_new_admin_detected(anvil_env, test_db):
+    """Compound Comptroller / cToken NewAdmin detection.
+
+    Compound's ``NewAdmin(address newAdmin)`` packs the admin into the
+    log data field rather than a topic — exercises the eth_abi
+    non-indexed decode path. Distinct topic0 from every other ABI
+    family. Validates the dispatcher works for data-side decoding,
+    not just indexed-topic events.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(COMPOUND_ADMIN_SOURCE, "TestCompoundAdmin", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="NewAdmin(address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "NewAdmin(address)",
+                "event_type": "admin_changed",
+                "controller_id": "state_variable:admin",
+                "inputs": [{"name": "newAdmin", "type": "address", "indexed": False}],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_admin = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
+    _cast_send(addr, "_setAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "admin_changed"
+    assert evt.data is not None
+    assert evt.data.get("new_admin", "").lower() == new_admin.lower()
+
+
+def test_ozownable2step_transfer_started_detected(anvil_env, test_db):
+    """OZ Ownable2Step OwnershipTransferStarted detection.
+
+    Same ABI shape as the OZ Ownable ``OwnershipTransferred`` (two
+    indexed addresses, OZ-conventional ``previousOwner`` /
+    ``newOwner`` names), but a different event name → different
+    topic0. Without per-contract dispatch, the *intent* phase of a
+    two-step ownership move is invisible — only the final
+    ``OwnershipTransferred`` is registered. Defense-in-depth
+    monitoring wants both phases.
+    """
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(OZ_OWNABLE2STEP_SOURCE, "TestOwnable2Step", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="OwnershipTransferStarted(address,address)").hex()
+    monitoring_config = {
+        "watch_ownership": True,
+        "tracked_topics": [
+            {
+                "topic0": topic0,
+                "signature": "OwnershipTransferStarted(address,address)",
+                "event_type": "ownership_transfer_started",
+                "controller_id": "state_variable:pendingOwner",
+                "inputs": [
+                    {"name": "previousOwner", "type": "address", "indexed": True},
+                    {"name": "newOwner", "type": "address", "indexed": True},
+                ],
+            }
+        ],
+    }
+    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.event_type == "ownership_transfer_started"
+    assert evt.data is not None
+    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
+    # previousOwner here is the deployer (account 0).
+    assert evt.data.get("old_owner", "").lower() == ACCOUNT0.lower()
+
+
+def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
+    """Regression guard for the *general* bug shape.
+
+    Deploys a Solmate-Owned, registers it with WATCH_OWNERSHIP=True
+    but *no* tracked_topics. Transfers ownership. Asserts the scanner
+    detects nothing — proves the pre-fix scanner behavior is preserved
+    when tracked_topics is absent (so the fix is purely additive: zero
+    new events when no tracking_plan has been threaded through
+    enrollment). Pair with ``test_solmate_owner_updated_detected``:
+    same contract + same on-chain action, only the monitoring_config
+    differs. If this test ever starts catching the event, something
+    has leaked Solmate's topic0 into the hand-rolled global filter.
+    """
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    # No tracked_topics — simulates a row that was enrolled before the
+    # general fix landed (or a contract whose tracking_plan is still
+    # pending materialization).
+    _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={"watch_ownership": True},
+    )
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+
+    assert events == [], (
+        "Solmate OwnerUpdated detected without per-contract topic dispatch — "
+        "either the hand-rolled global registry leaked Solmate's topic0, or "
+        "tracked_topics is being inferred from somewhere unexpected. Both "
+        "would defeat the regression guard for the general-bug fix."
+    )
 
 
 def test_pause_unpause_detected(anvil_env, test_db):
@@ -1301,3 +1791,759 @@ def test_poll_still_creates_event_when_no_scanner_event(anvil_env, test_db):
     poll_events = poll_for_state_changes(test_db, rpc_url)
     impl_changes = [e for e in poll_events if e.data and e.data.get("field") == "implementation"]
     assert len(impl_changes) == 1, "Poller should create event when no scanner event exists"
+
+
+# ---------------------------------------------------------------------------
+# Polling-plan regression tests — custom-named slots end-to-end.
+#
+# These prove the post-refactor invariants the new ``polling_plan`` shape
+# is supposed to guarantee:
+#
+#   1. A custom-named state-var (``protocolAdmin``, ``feeRecipient``) is
+#      visible to the poll path purely via the analyzer-derived
+#      polling-plan entry — no contract_type branching, no per-slot
+#      selector constant, no hand-rolled event-type entry.
+#   2. The first-observation-no-event rule still holds for custom slots.
+#   3. Per-contract scan/poll suppression derives from ``tracked_topics``
+#      so a custom event fired by the scanner suppresses the matching
+#      poll observation.
+#   4. The poll path and the event path write to the same
+#      ``last_known_state`` key for the same slot, regardless of which
+#      path observed the change first.
+#   5. End-to-end enrollment from a ``ContractMaterialization`` row
+#      projects the analyzer's tracked_controllers into a polling_plan.
+#   6. Poll-detected changes to canonical-name admin slots
+#      (``admin``) trigger reanalysis through the unified
+#      write-target vocabulary, not a special-case poll-field whitelist.
+# ---------------------------------------------------------------------------
+
+
+CUSTOM_ADMIN_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+// Custom-named control slot whose name is invisible to the pre-refactor
+// hardcoded poll selectors. The analyzer-derived polling plan should
+// surface ``protocolAdmin`` and ``feeRecipient`` from this contract's
+// ``read_spec.target`` values without any per-slot code in the watcher.
+contract CustomAdminContract {
+    address public protocolAdmin;
+    address public feeRecipient;
+    event ProtocolAdminChanged(address indexed previousAdmin, address indexed newAdmin);
+    event FeeRecipientChanged(address indexed previousRecipient, address indexed newRecipient);
+
+    constructor() {
+        protocolAdmin = msg.sender;
+        feeRecipient = msg.sender;
+    }
+
+    function setProtocolAdmin(address newAdmin) external {
+        require(msg.sender == protocolAdmin, "not admin");
+        address prev = protocolAdmin;
+        protocolAdmin = newAdmin;
+        emit ProtocolAdminChanged(prev, newAdmin);
+    }
+
+    function setFeeRecipient(address newRecipient) external {
+        require(msg.sender == protocolAdmin, "not admin");
+        address prev = feeRecipient;
+        feeRecipient = newRecipient;
+        emit FeeRecipientChanged(prev, newRecipient);
+    }
+}
+"""
+
+
+def _custom_admin_polling_plan(extra_controllers: list[dict] | None = None) -> list[dict]:
+    """Mint a polling_plan with the ``protocolAdmin`` and ``feeRecipient``
+    analyzer-derived entries CustomAdminContract would yield in a real
+    tracking-plan projection. Callers can append extra entries via
+    *extra_controllers* (e.g. to add a tracked-topic-driven suppress
+    list)."""
+    from services.monitoring.polling_plan import build_polling_plan
+
+    tracked_controllers: list[dict] = [
+        {
+            "controller_id": "state_variable:protocolAdmin",
+            "read_spec": {
+                "strategy": "getter_call",
+                "target": "protocolAdmin",
+                "kind": "state_variable",
+                "state_variable_name": "protocolAdmin",
+                "type": "address",
+                "type_kind": "address",
+            },
+        },
+        {
+            "controller_id": "state_variable:feeRecipient",
+            "read_spec": {
+                "strategy": "getter_call",
+                "target": "feeRecipient",
+                "kind": "state_variable",
+                "state_variable_name": "feeRecipient",
+                "type": "address",
+                "type_kind": "address",
+            },
+        },
+    ]
+    if extra_controllers:
+        tracked_controllers.extend(extra_controllers)
+    return build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={"tracked_controllers": tracked_controllers},
+        tracked_topics=None,
+    )
+
+
+def test_poll_detects_custom_named_slot_change(anvil_env, test_db):
+    """Custom-named slot polling via analyzer-derived plan entry.
+
+    Regression for the pre-refactor blind spot: the old poller hardcoded
+    selectors for ``owner()`` / ``paused()`` / ``getThreshold()`` /
+    ``getMinDelay()`` and the EIP-1967 slot, so a slot named
+    ``protocolAdmin`` was invisible to the poll path even after the
+    analyzer correctly surfaced it. The new design derives the selector
+    from ``read_spec.target`` at enrollment time and dispatches on the
+    persisted polling_plan entry."""
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import poll_for_state_changes
+
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    plan = _custom_admin_polling_plan()
+    assert any(e["field"] == "protocolAdmin" for e in plan), (
+        "polling_plan builder did not surface protocolAdmin from the analyzer-derived entry — "
+        "the analyzer-driven dispatch is the only way this slot becomes visible"
+    )
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={"polling_plan": plan, "watch_ownership": False},
+    )
+    mc.last_known_state = {"protocolAdmin": ACCOUNT0.lower()}
+    test_db.commit()
+
+    new_admin = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setProtocolAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
+
+    events = poll_for_state_changes(test_db, rpc_url)
+
+    custom_changes = [e for e in events if e.data and e.data.get("field") == "protocolAdmin"]
+    assert len(custom_changes) == 1, f"expected exactly one protocolAdmin change, got {[e.event_type for e in events]}"
+    assert custom_changes[0].data is not None
+    assert custom_changes[0].data["new_value"].lower() == new_admin.lower()
+    assert custom_changes[0].data["old_value"].lower() == ACCOUNT0.lower()
+
+    # State key must also be the analyzer-emitted state_variable_name so
+    # subsequent poll/event observations converge on the same slot key.
+    test_db.refresh(mc)
+    state = mc.last_known_state or {}
+    assert state.get("protocolAdmin", "").lower() == new_admin.lower()
+
+
+def test_poll_custom_slot_first_observation_no_event(anvil_env, test_db):
+    """First observation of a custom slot seeds state but emits no event.
+
+    Regression for the post-refactor first-observation rule: when
+    ``last_known_state[field]`` is absent for a polling-plan field, the
+    first successful read records the value but does NOT fire a
+    state_changed_poll (it isn't a state CHANGE — it's a first read).
+    Critical for custom slots because they have no
+    ``contract.implementation``-style column to seed from."""
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import poll_for_state_changes
+
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={"polling_plan": _custom_admin_polling_plan(), "watch_ownership": False},
+    )
+    # Deliberately leave last_known_state empty for the custom slots.
+    mc.last_known_state = {}
+    test_db.commit()
+
+    events = poll_for_state_changes(test_db, rpc_url)
+
+    # No events emitted on first observation.
+    custom_events = [e for e in events if e.data and e.data.get("field") in ("protocolAdmin", "feeRecipient")]
+    assert custom_events == [], f"first-observation should not emit events, got {[e.data for e in custom_events]}"
+
+    # But state IS seeded so the second observation has a baseline.
+    test_db.refresh(mc)
+    state = mc.last_known_state or {}
+    assert state.get("protocolAdmin", "").lower() == ACCOUNT0.lower()
+    assert state.get("feeRecipient", "").lower() == ACCOUNT0.lower()
+
+
+def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
+    """Per-contract suppress list derives from ``tracked_topics``.
+
+    Regression for the suppression generalization: the old poller had a
+    global ``_POLL_FIELD_TO_SCAN_EVENTS`` table covering only the five
+    vendored fields. Custom slots had no suppression at all. The new
+    design derives ``suppress_when_scan_event_types`` per-entry from the
+    contract's ``tracked_topics`` so a scanner-detected custom-event
+    suppresses the matching poll observation."""
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.polling_plan import build_polling_plan
+    from services.monitoring.unified_watcher import poll_for_state_changes
+
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    # ``tracked_topics`` carries the per-contract event spec for
+    # ProtocolAdminChanged with effect_tags.writes=["protocolAdmin"].
+    # The polling-plan builder reads these to seed the suppress list.
+    topic0 = "0x" + keccak(text="ProtocolAdminChanged(address,address)").hex()
+    custom_event_type = "controller_changed:state_variable:protocolAdmin"
+    tracked_topics = [
+        {
+            "topic0": topic0,
+            "signature": "ProtocolAdminChanged(address,address)",
+            "event_type": custom_event_type,
+            "controller_id": "state_variable:protocolAdmin",
+            "inputs": [
+                {"name": "previousAdmin", "type": "address", "indexed": True},
+                {"name": "newAdmin", "type": "address", "indexed": True},
+            ],
+            "effect_tags": {"writes": ["protocolAdmin"]},
+        }
+    ]
+    plan = build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={
+            "tracked_controllers": [
+                {
+                    "controller_id": "state_variable:protocolAdmin",
+                    "read_spec": {
+                        "strategy": "getter_call",
+                        "target": "protocolAdmin",
+                        "state_variable_name": "protocolAdmin",
+                        "type": "address",
+                        "type_kind": "address",
+                    },
+                }
+            ]
+        },
+        tracked_topics=tracked_topics,
+    )
+    pa_entry = next(e for e in plan if e["field"] == "protocolAdmin")
+    assert custom_event_type in (pa_entry.get("suppress_when_scan_event_types") or []), (
+        "polling-plan builder did not derive the per-contract suppress list from tracked_topics"
+    )
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={
+            "polling_plan": plan,
+            "tracked_topics": tracked_topics,
+            "watch_ownership": False,
+        },
+    )
+    mc.last_known_state = {"protocolAdmin": ACCOUNT0.lower()}
+    test_db.commit()
+
+    new_admin = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setProtocolAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
+
+    # Pre-insert the scanner's MonitoredEvent for this change.
+    scanner_event = MonitoredEvent(
+        id=uuid.uuid4(),
+        monitored_contract_id=mc.id,
+        event_type=custom_event_type,
+        block_number=current_block + 1,
+        tx_hash="0x" + "ef" * 32,
+        data={"previousAdmin": ACCOUNT0.lower(), "newAdmin": new_admin.lower()},
+    )
+    test_db.add(scanner_event)
+    test_db.commit()
+
+    poll_events = poll_for_state_changes(test_db, rpc_url)
+    custom_polls = [e for e in poll_events if e.data and e.data.get("field") == "protocolAdmin"]
+    assert custom_polls == [], (
+        "poll should suppress the custom-slot change because the per-contract tracked-topic event already recorded it"
+    )
+
+
+def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
+    """Poll path and event path converge on the same ``last_known_state`` key.
+
+    Regression for the state-key naming contract: the poll path writes
+    to ``last_known_state[entry["field"]]`` which is the analyzer's
+    ``state_variable_name``. The event-side generic resolver
+    (``_resolve_value_for_write_target``) also writes to
+    ``last_known_state[write_target]`` for the same name. If they ever
+    diverged (e.g. poll writes ``protocolAdmin`` but event writes
+    ``newProtocolAdmin``) a single mutation would create two separate
+    ghost entries.
+
+    Uses Compound-shape event arg names (``previousAdmin`` / ``newAdmin``
+    for a ``protocolAdmin`` write target) to exercise the ``new*`` ABI
+    heuristic in the resolver — neither the bare-name match nor the OZ
+    ``new<Cap>`` convention applies here, so this is the path that
+    catches non-OZ ABIs."""
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import poll_for_state_changes, scan_for_events
+
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    # tracked_topics so the scanner can decode + dispatch the custom event.
+    # Compound-style arg names so neither parsed["protocolAdmin"] nor
+    # parsed["newProtocolAdmin"] matches — the resolver has to fall back
+    # to walking _inputs and finding ``newAdmin`` via the "starts with
+    # new" heuristic.
+    topic0 = "0x" + keccak(text="ProtocolAdminChanged(address,address)").hex()
+    tracked_topics = [
+        {
+            "topic0": topic0,
+            "signature": "ProtocolAdminChanged(address,address)",
+            "event_type": "controller_changed:state_variable:protocolAdmin",
+            "controller_id": "state_variable:protocolAdmin",
+            "inputs": [
+                {"name": "previousAdmin", "type": "address", "indexed": True},
+                {"name": "newAdmin", "type": "address", "indexed": True},
+            ],
+            "effect_tags": {"writes": ["protocolAdmin"]},
+        }
+    ]
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={
+            "polling_plan": _custom_admin_polling_plan(),
+            "tracked_topics": tracked_topics,
+            "watch_ownership": False,
+        },
+    )
+    mc.last_known_state = {"protocolAdmin": ACCOUNT0.lower()}
+    test_db.commit()
+
+    # Path 1: event → state update via _update_state_from_event's
+    # generic name-match fallback (no canonical tag entry for ``protocolAdmin``).
+    admin_b = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setProtocolAdmin(address)", [admin_b], rpc_url, PRIVATE_KEY)
+    scan_for_events(test_db, rpc_url)
+
+    test_db.refresh(mc)
+    state_after_event = dict(mc.last_known_state or {})
+    assert state_after_event.get("protocolAdmin", "").lower() == admin_b.lower(), (
+        f"event-side state write went to a different key — got state {state_after_event}"
+    )
+    # Critical: the state must be keyed on the analyzer's write_target
+    # (``protocolAdmin``), not on the ABI's arg name (``newAdmin``) —
+    # otherwise the poll path would read state[protocolAdmin] and the
+    # event path would write state[newAdmin] and they'd never converge.
+    assert "newAdmin" not in state_after_event
+    assert "newProtocolAdmin" not in state_after_event
+
+    # Path 2: poll → state update on a subsequent change. ACCOUNT2 owns
+    # the new admin role now, so we use its key to perform the next call.
+    account2_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    admin_c = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    _cast_send(addr, "setProtocolAdmin(address)", [admin_c], rpc_url, account2_key)
+
+    poll_for_state_changes(test_db, rpc_url)
+    test_db.refresh(mc)
+    state_after_poll = dict(mc.last_known_state or {})
+    assert state_after_poll.get("protocolAdmin", "").lower() == admin_c.lower(), (
+        f"poll-side state write went to a different key — got state {state_after_poll}"
+    )
+
+
+def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil_env, test_db):
+    """End-to-end: ContractMaterialization tracking_plan → polling_plan.
+
+    Validates the full enrollment pipeline:
+      * ``_load_tracking_plan_artifacts`` reads the materialization
+      * ``build_polling_plan`` projects ``tracked_controllers`` to entries
+      * The persisted ``MonitoredContract.monitoring_config["polling_plan"]``
+        carries the analyzer-derived custom-slot entry alongside any
+        vendored entries
+
+    This is the integration regression for the "custom slots become
+    visible to polling once the analyzer surfaces them" claim — proves
+    the data flow works without test-helper short-circuits."""
+    from db.models import Contract, ContractMaterialization, Job, Protocol
+    from services.monitoring.enrollment import enroll_protocol_contracts
+
+    rpc_url, tmp_path = anvil_env
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))  # noqa: F841 — block reference for parity with other tests
+
+    # Compute the contract's bytecode keccak so the materialization row
+    # matches what ``find_by_address`` would resolve.
+    code = _cast(["code", addr], rpc_url).strip()
+    bytecode_keccak = "0x" + keccak_text(code if code.startswith("0x") else "0x" + code)
+
+    # Anvil re-uses deterministic deploy addresses across tests in the
+    # same module and the ``test_db`` fixture doesn't clean Contract /
+    # Job / ContractMaterialization rows between tests — make the test
+    # idempotent against leftover state from earlier runs.
+    proto = Protocol(name=f"custom_admin_protocol_{uuid.uuid4().hex[:8]}")
+    test_db.add(proto)
+    test_db.flush()
+
+    contract = test_db.execute(
+        select(Contract).where(Contract.address == addr.lower(), Contract.chain == "ethereum")
+    ).scalar_one_or_none()
+    if contract is None:
+        contract = Contract(
+            address=addr.lower(),
+            chain="ethereum",
+            protocol_id=proto.id,
+            contract_name="CustomAdminContract",
+        )
+        test_db.add(contract)
+        test_db.flush()
+    else:
+        contract.protocol_id = proto.id
+
+    existing_job = test_db.execute(select(Job).where(func.lower(Job.address) == addr.lower())).scalar_one_or_none()
+    if existing_job is None:
+        _add_completed_job(test_db, addr.lower(), proto.id)
+    else:
+        existing_job.protocol_id = proto.id
+        from db.models import JobStatus
+
+        existing_job.status = JobStatus.completed
+        test_db.flush()
+
+    from sqlalchemy import delete as sa_delete
+
+    test_db.execute(
+        sa_delete(ContractMaterialization).where(
+            ContractMaterialization.chain == "ethereum",
+            ContractMaterialization.address == addr.lower(),
+        )
+    )
+    test_db.flush()
+
+    tracking_plan = {
+        "schema_version": "0.1",
+        "contract_address": addr.lower(),
+        "contract_name": "CustomAdminContract",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:protocolAdmin",
+                "label": "protocolAdmin",
+                "source": "protocolAdmin",
+                "kind": "state_variable",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "protocolAdmin",
+                    "kind": "state_variable",
+                    "state_variable_name": "protocolAdmin",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+                "tracking_mode": "event_plus_state",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": addr.lower(),
+                    "polling_sources": ["protocolAdmin"],
+                    "cadence": "realtime_confirm",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+    test_db.add(
+        ContractMaterialization(
+            chain="ethereum",
+            bytecode_keccak=bytecode_keccak,
+            address=addr.lower(),
+            contract_name="CustomAdminContract",
+            tracking_plan=tracking_plan,
+            status="ready",
+        )
+    )
+    test_db.commit()
+
+    enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    assert len(enrolled) == 1
+
+    mc = enrolled[0]
+    plan = (mc.monitoring_config or {}).get("polling_plan") or []
+    fields = sorted(e.get("field") for e in plan)
+    assert "protocolAdmin" in fields, (
+        f"enrollment did not project the tracking_plan's protocolAdmin controller "
+        f"into the polling_plan — got fields {fields}"
+    )
+
+    pa_entry = next(e for e in plan if e["field"] == "protocolAdmin")
+    assert pa_entry["kind"] == "getter_call"
+    assert pa_entry["target"] == "protocolAdmin"
+    assert pa_entry["type_kind"] == "address"
+    # Selector is keccak("protocolAdmin()")[:4]; pinning this catches a
+    # regression where the projection forgets to pre-compute the selector
+    # and the poll loop would fail at dispatch time.
+    from services.monitoring.polling_plan import selector_for
+
+    assert pa_entry["selector"] == selector_for("protocolAdmin")
+
+    # Needs polling must be True since the projection produced a non-empty plan.
+    assert mc.needs_polling is True
+
+
+def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env, test_db):
+    """Poll-detected change to an ``admin``-named slot triggers reanalysis.
+
+    Regression for the tag-vocabulary unification: pre-refactor,
+    ``REANALYSIS_POLL_FIELDS = {"implementation", "owner"}`` was the
+    only allowlist — a custom contract whose admin slot was just named
+    ``admin`` (Compound shape) wouldn't trigger reanalysis on poll
+    detection even though the event-side already would (via
+    ``_REANALYSIS_WRITE_TARGETS``). The unified design routes both
+    paths through the same write-target set."""
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.polling_plan import build_polling_plan
+    from services.monitoring.unified_watcher import poll_for_state_changes
+
+    addr = _compile_and_deploy(COMPOUND_ADMIN_SOURCE, "TestCompoundAdmin", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    # Build a polling plan with just the ``admin`` analyzer-derived
+    # entry — no vendored Safe/Timelock/Proxy entries, no ownership entry.
+    plan = build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={
+            "tracked_controllers": [
+                {
+                    "controller_id": "state_variable:admin",
+                    "read_spec": {
+                        "strategy": "getter_call",
+                        "target": "admin",
+                        "state_variable_name": "admin",
+                        "type": "address",
+                        "type_kind": "address",
+                    },
+                }
+            ]
+        },
+        tracked_topics=None,
+    )
+    assert any(e["field"] == "admin" for e in plan)
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={"polling_plan": plan, "watch_ownership": False},
+    )
+    mc.last_known_state = {"admin": ACCOUNT0.lower()}
+    test_db.commit()
+
+    new_admin = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "_setAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
+
+    poll_events = poll_for_state_changes(test_db, rpc_url)
+    admin_changes = [e for e in poll_events if e.data and e.data.get("field") == "admin"]
+    assert len(admin_changes) == 1
+
+    # A reanalysis job must have been queued — proves the poll path uses
+    # the same write-target vocabulary the event path uses.
+    from db.models import Job
+
+    jobs = (
+        test_db.execute(
+            select(Job).where(
+                func.lower(Job.address) == addr.lower(),
+                Job.status.in_(("queued", "processing")),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(jobs) == 1, (
+        f"poll-detected admin change did not trigger reanalysis through the unified "
+        f"write-target vocabulary — got jobs {[(j.address, j.status) for j in jobs]}"
+    )
+
+
+def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_db):
+    """``_resolve_value_for_write_target`` handles non-OZ ABI shapes
+    for custom-named slots.
+
+    Deploys CustomAdminContract (which emits ``FeeRecipientChanged
+    (address indexed previousRecipient, address indexed newRecipient)``)
+    and tags the event in ``tracked_topics`` as writing the
+    ``feeRecipient`` slot. Neither parsed["feeRecipient"] nor
+    parsed["newFeeRecipient"] matches; the resolver has to walk
+    ``_inputs`` and find ``newRecipient`` via the "starts with new"
+    heuristic. Validates the post-refactor claim that custom slots
+    work end-to-end regardless of the ABI's arg-naming convention."""
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="FeeRecipientChanged(address,address)").hex()
+    tracked_topics = [
+        {
+            "topic0": topic0,
+            "signature": "FeeRecipientChanged(address,address)",
+            "event_type": "controller_changed:state_variable:feeRecipient",
+            "controller_id": "state_variable:feeRecipient",
+            "inputs": [
+                # Compound-shape: neither name matches feeRecipient or
+                # newFeeRecipient directly. The resolver must pick
+                # ``newRecipient`` via the ``new*`` ABI heuristic.
+                {"name": "previousRecipient", "type": "address", "indexed": True},
+                {"name": "newRecipient", "type": "address", "indexed": True},
+            ],
+            "effect_tags": {"writes": ["feeRecipient"]},
+        }
+    ]
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={
+            "polling_plan": _custom_admin_polling_plan(),
+            "tracked_topics": tracked_topics,
+            "watch_ownership": False,
+        },
+    )
+    mc.last_known_state = {"feeRecipient": ACCOUNT0.lower()}
+    test_db.commit()
+
+    new_recipient = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setFeeRecipient(address)", [new_recipient], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+    recipient_events = [e for e in events if e.event_type == "controller_changed:state_variable:feeRecipient"]
+    assert len(recipient_events) == 1, (
+        f"scanner did not pick up the FeeRecipientChanged event — got {[e.event_type for e in events]}"
+    )
+
+    test_db.refresh(mc)
+    state = dict(mc.last_known_state or {})
+    assert state.get("feeRecipient", "").lower() == new_recipient.lower(), (
+        f"resolver did not pull newRecipient via the ABI new* heuristic — got state {state}"
+    )
+    # No ghost arg-named keys.
+    assert "newRecipient" not in state
+    assert "newFeeRecipient" not in state
+
+
+def test_event_state_write_resolves_single_arg_dsauth_shape(anvil_env, test_db):
+    """``_resolve_value_for_write_target`` handles DSAuth single-arg
+    events via the bare-name match.
+
+    DSAuth's ``LogSetOwner(address indexed owner)`` has a single arg
+    named ``owner`` — bare-name match should resolve it directly even
+    without an OZ-style ``new`` prefix. This is the simplest path in
+    the resolver but worth pinning because the prior fallback already
+    handled it and we mustn't regress."""
+    from eth_utils.crypto import keccak
+
+    rpc_url, tmp_path = anvil_env
+    from services.monitoring.unified_watcher import scan_for_events
+
+    addr = _compile_and_deploy(DSAUTH_SOURCE, "TestDSAuth", [], rpc_url, PRIVATE_KEY, tmp_path)
+    current_block = int(_cast(["block-number"], rpc_url))
+
+    topic0 = "0x" + keccak(text="LogSetOwner(address)").hex()
+    # Even with effect_tags writes=["owner"], _WRITE_TARGET_TO_STATE
+    # catches "owner" via the canonical _extract_new_owner extractor
+    # which reads parsed["new_owner"]. The semantic-key assignment in
+    # parse_tracked_log fills that for the canonical
+    # ``ownership_transferred`` event_type — so attach that here.
+    tracked_topics = [
+        {
+            "topic0": topic0,
+            "signature": "LogSetOwner(address)",
+            "event_type": "ownership_transferred",
+            "controller_id": "state_variable:owner",
+            "inputs": [
+                {"name": "owner", "type": "address", "indexed": True},
+            ],
+            "effect_tags": {"writes": ["owner"]},
+        }
+    ]
+
+    mc = _register_contract(
+        test_db,
+        addr,
+        "regular",
+        current_block,
+        monitoring_config={
+            "polling_plan": [],
+            "tracked_topics": tracked_topics,
+            "watch_ownership": True,
+        },
+    )
+    mc.last_known_state = {"owner": ACCOUNT0.lower()}
+    test_db.commit()
+
+    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
+
+    events = scan_for_events(test_db, rpc_url)
+    owner_events = [e for e in events if e.event_type == "ownership_transferred"]
+    assert len(owner_events) == 1
+
+    test_db.refresh(mc)
+    state = dict(mc.last_known_state or {})
+    assert state.get("owner", "").lower() == new_owner.lower(), (
+        f"DSAuth single-arg event did not update state[owner] — got {state}"
+    )
+
+
+def keccak_text(text: str) -> str:
+    """Helper to compute the keccak-256 of an EVM hex bytestring.
+
+    Used by the enrollment integration test to derive the
+    ``bytecode_keccak`` primary key for the materialization row.
+    """
+    from eth_utils.crypto import keccak
+
+    if isinstance(text, str) and text.startswith("0x"):
+        return keccak(hexstr=text).hex()
+    return keccak(text=text).hex()
+
+
+def _add_completed_job(session, address: str, protocol_id: int) -> None:
+    """Insert a completed Job so ``enroll_protocol_contracts``'s
+    ``analyzed_addrs`` filter includes *address*."""
+    from db.models import Job, JobStage, JobStatus
+
+    session.add(
+        Job(
+            address=address,
+            protocol_id=protocol_id,
+            status=JobStatus.completed,
+            stage=JobStage.done,
+        )
+    )
+    session.flush()

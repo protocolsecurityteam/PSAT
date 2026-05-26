@@ -172,11 +172,35 @@ class AssociatedEventInput(TypedDict):
     indexed: bool
 
 
-class AssociatedEvent(TypedDict):
+class EffectTags(TypedDict, total=False):
+    """Structural side-effect summary for the union of functions that emit
+    an event. Populated by ``_writer_records_from_effects`` from the
+    ``effects`` artifact.
+
+    The watcher uses these tags to classify events without relying on a
+    controller_id → event_type lookup. ``writes`` is the union of
+    state-variable names mutated by any emitter; ``delegates`` is True
+    when any emitter contains a DELEGATECALL sink (i.e. the event signals
+    a delegate-target swap). ``is_initializer`` flags the OZ
+    Initializable pattern — any emitter modified by ``initializer`` /
+    ``reinitializer`` — so the watcher can fire reanalysis on unexpected
+    re-inits without a hand-rolled Initialized topic.
+    """
+
+    writes: list[str]
+    delegates: bool
+    is_initializer: bool
+
+
+class AssociatedEventRequired(TypedDict):
     name: str
     signature: str
     topic0: str
     inputs: list[AssociatedEventInput]
+
+
+class AssociatedEvent(AssociatedEventRequired, total=False):
+    effect_tags: EffectTags
 
 
 class ControllerTypeComponent(TypedDict):

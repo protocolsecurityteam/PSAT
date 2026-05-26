@@ -21,6 +21,7 @@ from schemas.contract_analysis import (
     ControllerTrackingTarget,
     ControllerTypeComponent,
     ControllerWriterFunction,
+    EffectTags,
     Evidence,
     SemanticControlAnalysis,
 )
@@ -353,6 +354,50 @@ def _collect_external_contract_state_vars_from_effects(
     return out
 
 
+def _effect_tags_for_signature(
+    function_signature: str,
+    effects: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project a single emitter function's sinks down to the small tag
+    set the watcher needs to classify events without name matching.
+
+    Returns a dict with ``writes`` (set of state-var names) and
+    ``delegates`` (bool). The watcher unions these across all emitters
+    of an event signature, so the final tags describe the event's
+    full effect surface — not just one branch.
+    """
+    out: dict[str, Any] = {"writes": set(), "delegates": False}
+    if not isinstance(effects, dict):
+        return out
+    info = (effects.get("functions") or {}).get(function_signature)
+    if not isinstance(info, dict):
+        return out
+    for sink in info.get("sinks") or []:
+        if not isinstance(sink, dict):
+            continue
+        kind = sink.get("kind")
+        if kind == "state_write":
+            target = sink.get("target")
+            if isinstance(target, str) and target:
+                out["writes"].add(target)
+        elif kind == "delegatecall":
+            out["delegates"] = True
+    return out
+
+
+def _function_is_initializer(function: Any) -> bool:
+    """Detect the OZ Initializable pattern — function modified by
+    ``initializer`` or ``reinitializer``. Used to tag the Initialized
+    event so reanalysis fires on unexpected re-inits without needing
+    a hand-rolled Initialized topic in the global registry.
+    """
+    for modifier in getattr(function, "modifiers", []) or []:
+        name = getattr(modifier, "name", "") or ""
+        if name in ("initializer", "reinitializer", "onlyInitializing"):
+            return True
+    return False
+
+
 def _state_writers_from_effects(
     effects: Mapping[str, Any] | None,
 ) -> dict[str, set[str]]:
@@ -400,6 +445,11 @@ def _writer_records_from_effects(
     functions_by_signature = _functions_by_signature(contract)
     writer_functions: list[ControllerWriterFunction] = []
     aggregated_events: dict[str, AssociatedEvent] = {}
+    # Union of effects across every emitter of a given event signature. Each
+    # event's downstream classification (ownership / admin / upgrade / etc.)
+    # is decided from this aggregate, not from the event's name — see the
+    # tag-driven dispatch in services/monitoring/event_topics.py.
+    tags_by_event_sig: dict[str, dict[str, Any]] = {}
     for signature in sorted(writes_by_signature):
         function = functions_by_signature.get(signature)
         if function is None:
@@ -407,8 +457,20 @@ def _writer_records_from_effects(
         writes = sorted(writes_by_signature[signature])
         event_records = _collect_events(function, project_dir, event_lookup, set())
         event_refs = _dedupe_event_refs(event_records)
+        fn_tags = _effect_tags_for_signature(signature, effects)
+        fn_is_initializer = _function_is_initializer(function)
         for event_ref in event_refs:
-            aggregated_events[event_ref["signature"]] = event_ref
+            sig = event_ref["signature"]
+            agg = tags_by_event_sig.setdefault(
+                sig,
+                {"writes": set(), "delegates": False, "is_initializer": False},
+            )
+            agg["writes"].update(fn_tags.get("writes") or set())
+            if fn_tags.get("delegates"):
+                agg["delegates"] = True
+            if fn_is_initializer:
+                agg["is_initializer"] = True
+            aggregated_events[sig] = event_ref
         writer_functions.append(
             {
                 "contract": _declaring_contract_name(function, contract.name),
@@ -425,6 +487,27 @@ def _writer_records_from_effects(
                 ],
             }
         )
+
+    # Attach the aggregated tag dict to every event ref carrying that
+    # signature — both in the controller's flat list and within each
+    # writer_function so consumers reading either get the same view.
+    for sig, agg in tags_by_event_sig.items():
+        tags: EffectTags = {}
+        if agg["writes"]:
+            tags["writes"] = sorted(agg["writes"])
+        if agg["delegates"]:
+            tags["delegates"] = True
+        if agg["is_initializer"]:
+            tags["is_initializer"] = True
+        if not tags:
+            continue
+        target_event = aggregated_events.get(sig)
+        if target_event is not None:
+            target_event["effect_tags"] = tags
+        for wf in writer_functions:
+            for ev in wf["associated_events"]:
+                if ev["signature"] == sig and "effect_tags" not in ev:
+                    ev["effect_tags"] = tags
 
     associated_events = sorted(aggregated_events.values(), key=lambda item: item["signature"])
     return writer_functions, associated_events
