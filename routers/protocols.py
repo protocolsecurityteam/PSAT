@@ -44,6 +44,7 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
                 "is_active": c.is_active,
                 "enrollment_source": c.enrollment_source,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             }
             for c in contracts
         ]

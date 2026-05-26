@@ -1,50 +1,55 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
+import { blockExplorerAddressUrl } from "../blockExplorer.js";
+import { proxyDisplayName } from "../displayName.js";
 import { shortenAddress } from "../graph.js";
+import {
+  decodeEvent,
+  eventKind,
+  eventKindLabel,
+  lastEventByContract,
+  relativeTime,
+  scannerHealth,
+  stateRows,
+} from "../monitoring/format.js";
 
-const CONTRACT_TYPE_COLORS = {
-  proxy: "#2563eb",
-  safe: "#7c3aed",
-  timelock: "#d97706",
-  pausable: "#ea580c",
-  role_control: "#0d9488",
-  regular: "#64748b",
-};
+// 30s — enough for the 10-minute server scan loop without burning a
+// request every 10s like the old page did.
+const POLL_INTERVAL_MS = 30_000;
 
-const CONTRACT_TYPE_ORDER = ["proxy", "safe", "timelock", "pausable", "role_control", "regular"];
-
-const ALL_EVENT_TYPES = [
-  "upgraded", "admin_changed", "beacon_upgraded", "ownership_transferred",
-  "paused", "unpaused", "role_granted", "role_revoked",
-  "signer_added", "signer_removed", "threshold_changed",
-  "safe_tx_executed", "safe_tx_failed",
-  "safe_module_executed", "safe_module_failed",
-  "timelock_scheduled", "timelock_executed", "delay_changed",
-  "state_changed_poll",
+// Event types grouped for the right-pane filter bar. Order matters; users
+// scan left-to-right. Critical → less critical.
+const FILTER_GROUPS = [
+  { id: "upgrade", label: "Upgrade", types: ["upgraded", "new_implementation", "target_updated", "upgraded_revision", "changed_master_copy", "beacon_upgraded", "admin_changed", "diamond_cut", "new_pending_implementation"] },
+  { id: "owner", label: "Ownership", types: ["ownership_transferred"] },
+  { id: "pause", label: "Pause", types: ["paused", "unpaused"] },
+  { id: "role", label: "Role", types: ["role_granted", "role_revoked"] },
+  { id: "signer", label: "Signer", types: ["signer_added", "signer_removed", "threshold_changed"] },
+  { id: "timelock", label: "Timelock", types: ["timelock_scheduled", "timelock_executed", "delay_changed"] },
+  { id: "safe", label: "Safe tx", types: ["safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"] },
+  { id: "state", label: "State", types: ["state_changed_poll"] },
 ];
 
-const EVENT_TYPE_COLORS = {
-  ownership_transferred: "#ef4444",
-  paused: "#ef4444",
-  unpaused: "#ef4444",
-  upgraded: "#f59e0b",
-  admin_changed: "#f59e0b",
-  beacon_upgraded: "#f59e0b",
-  timelock_executed: "#f59e0b",
-  timelock_scheduled: "#3b82f6",
-  signer_added: "#3b82f6",
-  signer_removed: "#3b82f6",
-  safe_tx_executed: "#22c55e",
-  safe_tx_failed: "#ef4444",
-  safe_module_executed: "#22c55e",
-  safe_module_failed: "#ef4444",
-  role_granted: "#f59e0b",
-  role_revoked: "#f59e0b",
-  threshold_changed: "#f59e0b",
-  delay_changed: "#f59e0b",
-  state_changed_poll: "#8b5cf6",
+const ALL_EVENT_TYPES = FILTER_GROUPS.flatMap((g) => g.types);
+
+// Sidebar groups the contracts list by contract_type. Order here matches
+// the TYPE_RANK in sortedContracts so the iteration order falls out for free.
+const TYPE_LABELS = {
+  safe: "Safes",
+  timelock: "Timelocks",
+  proxy: "Proxies",
+  pausable: "Pausable",
+  role_control: "Role Control",
+  regular: "Regular",
 };
+
+function explorerTxUrl(txHash, chain = "ethereum") {
+  // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
+  const addrUrl = blockExplorerAddressUrl("0x", chain);
+  if (!addrUrl) return null;
+  return `${addrUrl.replace("/address/0x", "/tx/")}${txHash}`;
+}
 
 export default function ProtocolMonitoringPage({ companyName }) {
   const [protocolId, setProtocolId] = useState(null);
@@ -53,23 +58,54 @@ export default function ProtocolMonitoringPage({ companyName }) {
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
   const [events, setEvents] = useState([]);
+  const [labelMap, setLabelMap] = useState({}); // address-lower → friendly name
+  const [error, setError] = useState(null);
+  const [reEnrolling, setReEnrolling] = useState(false);
+
+  // UI state
+  const [selectedContractId, setSelectedContractId] = useState(null); // null = "All"
+  const [activeKinds, setActiveKinds] = useState(new Set()); // empty = all
+  const [search, setSearch] = useState("");
+  const [showWebhookModal, setShowWebhookModal] = useState(false);
+
+  // Modal form state
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookLabel, setWebhookLabel] = useState("");
   const [webhookEventTypes, setWebhookEventTypes] = useState([]);
   const [showEventPicker, setShowEventPicker] = useState(false);
   const [addingWebhook, setAddingWebhook] = useState(false);
-  const [error, setError] = useState(null);
-  const [reEnrolling, setReEnrolling] = useState(false);
 
-  // Fetch protocol_id from company overview
+  // Tick state used to keep the "X ago" labels fresh without a re-fetch.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setNowTick((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Fetch protocol_id + friendly address labels in one shot.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const data = await api(`/api/company/${encodeURIComponent(companyName)}`);
+        const [overview, addrs] = await Promise.all([
+          api(`/api/company/${encodeURIComponent(companyName)}`),
+          api(`/api/company/${encodeURIComponent(companyName)}/addresses`).catch(() => ({ all_addresses: [] })),
+        ]);
         if (cancelled) return;
-        if (data.protocol_id) {
-          setProtocolId(data.protocol_id);
+        if (overview.protocol_id) {
+          setProtocolId(overview.protocol_id);
+          const map = {};
+          for (const a of addrs?.all_addresses || []) {
+            if (!a?.address) continue;
+            const key = a.address.toLowerCase();
+            map[key] = {
+              name: a.name || null,
+              implName: a.implementation_name || null,
+              isProxy: !!a.is_proxy,
+              chain: a.chain || "ethereum",
+            };
+          }
+          setLabelMap(map);
         } else {
           setNoProtocol(true);
         }
@@ -82,7 +118,6 @@ export default function ProtocolMonitoringPage({ companyName }) {
     return () => { cancelled = true; };
   }, [companyName]);
 
-  // Fetch monitoring data once protocolId is known + auto-refresh
   const refresh = useMemo(() => {
     if (!protocolId) return null;
     return async () => {
@@ -104,12 +139,103 @@ export default function ProtocolMonitoringPage({ companyName }) {
   useEffect(() => {
     if (!refresh) return;
     refresh();
-    const timer = setInterval(refresh, 10000);
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [refresh]);
 
-  async function addWebhook(e) {
-    e.preventDefault();
+  const friendlyName = useCallback(
+    (addr) => {
+      if (!addr) return "Unknown";
+      const entry = labelMap[addr.toLowerCase()];
+      // Same "Impl (via UUPSProxy)" treatment as the addresses page so the
+      // sidebar's proxy rows don't all collapse to the bare template name.
+      const pretty = proxyDisplayName({
+        name: entry?.name,
+        isProxy: entry?.isProxy,
+        implName: entry?.implName,
+      });
+      if (pretty && !/^0x/i.test(pretty)) return pretty;
+      return shortenAddress(addr);
+    },
+    [labelMap],
+  );
+
+  const lastEventTimes = useMemo(() => lastEventByContract(events), [events]);
+
+  const sortedContracts = useMemo(() => {
+    // Group by contract_type priority, then by activity recency, then name.
+    const TYPE_RANK = { safe: 0, timelock: 1, proxy: 2, pausable: 3, role_control: 4, regular: 5 };
+    return [...contracts].sort((a, b) => {
+      const ra = TYPE_RANK[a.contract_type] ?? 9;
+      const rb = TYPE_RANK[b.contract_type] ?? 9;
+      if (ra !== rb) return ra - rb;
+      const la = lastEventTimes[a.id];
+      const lb = lastEventTimes[b.id];
+      if (la && lb) return new Date(lb).getTime() - new Date(la).getTime();
+      if (la) return -1;
+      if (lb) return 1;
+      return friendlyName(a.address).localeCompare(friendlyName(b.address));
+    });
+  }, [contracts, lastEventTimes, friendlyName]);
+
+  const groupedContracts = useMemo(() => {
+    // Map preserves insertion order, and sortedContracts is already TYPE_RANK-ordered,
+    // so groups come out in the right order without a second sort.
+    const buckets = new Map();
+    for (const c of sortedContracts) {
+      const type = c.contract_type || "regular";
+      if (!buckets.has(type)) buckets.set(type, []);
+      buckets.get(type).push(c);
+    }
+    return Array.from(buckets, ([type, items]) => ({
+      type,
+      label: TYPE_LABELS[type] || type.replace(/_/g, " "),
+      contracts: items,
+    }));
+  }, [sortedContracts]);
+
+  const selectedContract = useMemo(
+    () => contracts.find((c) => c.id === selectedContractId) || null,
+    [contracts, selectedContractId],
+  );
+
+  const filteredEvents = useMemo(() => {
+    const kindsActive = activeKinds.size > 0;
+    const needle = search.trim().toLowerCase();
+    return events.filter((e) => {
+      if (selectedContractId && e.monitored_contract_id !== selectedContractId) return false;
+      if (kindsActive && !activeKinds.has(eventKind(e))) return false;
+      if (needle) {
+        const hay = [
+          e.tx_hash,
+          e.data?.contract_address,
+          ...Object.values(e.data || {}).map((v) => (typeof v === "string" ? v : "")),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+  }, [events, selectedContractId, activeKinds, search]);
+
+  const eventsForSelected = useMemo(() => {
+    if (!selectedContractId) return events;
+    return events.filter((e) => e.monitored_contract_id === selectedContractId);
+  }, [events, selectedContractId]);
+
+  const toggleKind = (kind) => {
+    setActiveKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  };
+
+  async function addWebhook(ev) {
+    ev.preventDefault();
     if (!webhookUrl.trim() || !protocolId) return;
     setAddingWebhook(true);
     setError(null);
@@ -152,8 +278,14 @@ export default function ProtocolMonitoringPage({ companyName }) {
     }
   }
 
-  async function toggleContractActive(contractId, currentActive) {
+  async function toggleContractActive(contractId, currentActive, evt) {
+    evt?.stopPropagation();
     try {
+      // Optimistic update so the row reacts immediately. If the API call
+      // fails, refresh() in the catch puts truth back.
+      setContracts((prev) =>
+        prev.map((c) => (c.id === contractId ? { ...c, is_active: !currentActive } : c)),
+      );
       await api(`/api/monitored-contracts/${contractId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -162,6 +294,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
       if (refresh) refresh();
     } catch (err) {
       console.error("Failed to toggle contract:", err);
+      if (refresh) refresh();
     }
   }
 
@@ -176,11 +309,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
 
   if (loading) {
     return (
-      <div className="page">
-        <section className="panel">
-          <p style={{ textAlign: "center", padding: "2rem 0", color: "#64748b" }}>Loading protocol monitoring...</p>
-        </section>
-      </div>
+      <div className="pm-fullpage">Loading protocol monitoring…</div>
     );
   }
 
@@ -200,277 +329,459 @@ export default function ProtocolMonitoringPage({ companyName }) {
     );
   }
 
-  // Sort contracts by type priority
-  const sortedContracts = [...contracts].sort((a, b) => {
-    const ai = CONTRACT_TYPE_ORDER.indexOf(a.contract_type);
-    const bi = CONTRACT_TYPE_ORDER.indexOf(b.contract_type);
-    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-  });
-
-  // Helper: extract monitoring config flags as chips
-  function monitoringChips(config) {
-    if (!config || typeof config !== "object") return null;
-    const flags = [];
-    if (config.watch_upgrades) flags.push("upgrades");
-    if (config.watch_ownership) flags.push("ownership");
-    if (config.watch_pause) flags.push("pause");
-    if (config.watch_roles) flags.push("roles");
-    // Read both the new and legacy keys so auto-enrolled rows (which
-    // only set watch_safe_signers) and old user data (which set the
-    // historical watch_signers) both light up the chip.
-    if (config.watch_safe_signers || config.watch_signers) flags.push("safe activity");
-    if (config.watch_timelock) flags.push("timelock");
-    if (config.watch_state) flags.push("state");
-    if (flags.length === 0) return <span style={{ color: "#475569" }}>none</span>;
-    return flags.map((f) => (
-      <span key={f} className="chip" style={{ fontSize: 11, marginRight: 4, marginBottom: 2 }}>{f}</span>
-    ));
-  }
-
-  // Helper: render event details from data object
-  function renderEventDetails(data) {
-    if (!data || typeof data !== "object") return "-";
-    const entries = Object.entries(data).filter(([k]) => !["contract_address", "contract_type", "chain"].includes(k));
-    if (entries.length === 0) return "-";
-    return entries.map(([k, v]) => (
-      <span key={k} style={{ marginRight: 8, fontSize: 12 }}>
-        <span style={{ color: "#64748b" }}>{k.replace(/_/g, " ")}:</span>{" "}
-        <span className="mono" style={{ color: "#e2e8f0" }}>{typeof v === "string" && v.startsWith("0x") ? shortenAddress(v) : String(v)}</span>
-      </span>
-    ));
-  }
+  const health = scannerHealth(contracts);
+  const headBlock = contracts.reduce((max, c) => Math.max(max, c.last_scanned_block || 0), 0);
+  const activeCount = contracts.filter((c) => c.is_active).length;
 
   return (
-    <div className="page">
-      {/* Section 1: Discord Notifications */}
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Discord Notifications</p>
-            <h2>Webhook Subscriptions ({subscriptions.length})</h2>
-          </div>
+    <>
+      <div className="pm-shell">
+        <StatusBar
+          health={health}
+          headBlock={headBlock}
+          activeCount={activeCount}
+          totalCount={contracts.length}
+          reEnrolling={reEnrolling}
+          onReEnroll={reEnroll}
+        />
+        <div className="pm-console">
+          <ContractsPane
+            groups={groupedContracts}
+            totalCount={contracts.length}
+            selectedId={selectedContractId}
+            lastEventTimes={lastEventTimes}
+            friendlyName={friendlyName}
+            onSelect={(id) => setSelectedContractId(id === selectedContractId ? null : id)}
+            onToggleActive={toggleContractActive}
+          />
+          <EventsPane
+            events={filteredEvents}
+            selectedContract={selectedContract}
+            allEventsForSelected={eventsForSelected}
+            activeKinds={activeKinds}
+            onToggleKind={toggleKind}
+            search={search}
+            onSearch={setSearch}
+            friendlyName={friendlyName}
+            labelMap={labelMap}
+            onClearSelection={() => setSelectedContractId(null)}
+          />
         </div>
+        {error && <p className="pm-err" style={{ position: "fixed", bottom: 70, right: 18 }}>{error}</p>}
+      </div>
 
-        <form onSubmit={addWebhook} style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <input
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              placeholder="Discord webhook URL"
-              required
-              style={{ flex: "1 1 300px", fontFamily: "monospace", fontSize: 13, padding: "8px 12px", borderRadius: 6, border: "1px solid #334155", background: "#0f172a", color: "#e2e8f0" }}
-            />
-            <input
-              value={webhookLabel}
-              onChange={(e) => setWebhookLabel(e.target.value)}
-              placeholder="Label (optional)"
-              style={{ flex: "0 1 200px", fontSize: 13, padding: "8px 12px", borderRadius: 6, border: "1px solid #334155", background: "#0f172a", color: "#e2e8f0" }}
-            />
-            <button type="submit" disabled={addingWebhook} style={{ padding: "8px 16px", borderRadius: 6, background: "#2563eb", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
-              {addingWebhook ? "Adding..." : "Add Webhook"}
-            </button>
+      <NotifMini
+        count={subscriptions.length}
+        onOpen={() => setShowWebhookModal(true)}
+      />
+
+      {showWebhookModal && (
+        <WebhookModal
+          subscriptions={subscriptions}
+          onClose={() => setShowWebhookModal(false)}
+          onRemove={removeSubscription}
+          onSubmit={addWebhook}
+          adding={addingWebhook}
+          url={webhookUrl}
+          label={webhookLabel}
+          eventTypes={webhookEventTypes}
+          showPicker={showEventPicker}
+          onUrl={setWebhookUrl}
+          onLabel={setWebhookLabel}
+          onToggleType={(t) =>
+            setWebhookEventTypes((prev) =>
+              prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]
+            )
+          }
+          onTogglePicker={() => setShowEventPicker((v) => !v)}
+        />
+      )}
+    </>
+  );
+}
+
+// -------------------------------------------------------------------- subviews
+
+function StatusBar({ health, headBlock, activeCount, totalCount, reEnrolling, onReEnroll }) {
+  return (
+    <div className="pm-statusbar" data-testid="pm-statusbar">
+      <span className={`pm-pulse ${health.tone}`}>
+        <span className="pm-dot" /> {health.label}
+      </span>
+      <span className="pm-meta">block {headBlock ? headBlock.toLocaleString() : "—"}</span>
+      <span className="pm-meta">·</span>
+      <span className="pm-meta">{activeCount} of {totalCount} contracts active</span>
+      <span className="pm-spacer" />
+      <button className="pm-btn" disabled={reEnrolling} onClick={onReEnroll} title="Re-run protocol enrollment to discover newly added contracts. Existing per-contract active toggles are preserved.">
+        {reEnrolling ? "Re-enrolling…" : "Re-enroll"}
+      </button>
+    </div>
+  );
+}
+
+function ContractsPane({ groups, totalCount, selectedId, lastEventTimes, friendlyName, onSelect, onToggleActive }) {
+  return (
+    <div className="pm-pane">
+      <div className="pm-pane-head">
+        <h2>Contracts</h2>
+        <span className="pm-count">{totalCount} watched</span>
+      </div>
+      <div className="pm-contracts">
+        {totalCount === 0 ? (
+          <div className="pm-empty">
+            <b>No contracts enrolled</b>
+            Click <em>Re-enroll</em> above to scan this protocol's analyzed contracts and add monitorable ones.
           </div>
-          <div style={{ marginTop: 8 }}>
-            <button
-              type="button"
-              onClick={() => setShowEventPicker(!showEventPicker)}
-              style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: 12, padding: 0 }}
-            >
-              {showEventPicker ? "- Hide event filter" : "+ Filter by event type"}
-              {webhookEventTypes.length > 0 && ` (${webhookEventTypes.length} selected)`}
-            </button>
-            {showEventPicker && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8, padding: 8, borderRadius: 6, border: "1px solid #334155", background: "#0f172a" }}>
-                {ALL_EVENT_TYPES.map((et) => {
-                  const selected = webhookEventTypes.includes(et);
-                  const evtColor = EVENT_TYPE_COLORS[et] || "#94a3b8";
+        ) : (
+          groups.map((g) => (
+            <ContractGroup
+              key={g.type}
+              group={g}
+              selectedId={selectedId}
+              lastEventTimes={lastEventTimes}
+              friendlyName={friendlyName}
+              onSelect={onSelect}
+              onToggleActive={onToggleActive}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContractGroup({ group, selectedId, lastEventTimes, friendlyName, onSelect, onToggleActive }) {
+  const [expanded, setExpanded] = useState(true);
+  // If the user clicks a contract that lives in this group, force-expand so
+  // the selected row is never hidden behind a collapsed header.
+  const containsSelected = group.contracts.some((c) => c.id === selectedId);
+  useEffect(() => {
+    if (containsSelected) setExpanded(true);
+  }, [containsSelected]);
+
+  return (
+    <div className={`pm-group${expanded ? " open" : ""}`} data-group={group.type}>
+      <button
+        type="button"
+        className="pm-group-header"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className={`pm-group-chevron${expanded ? " open" : ""}`} aria-hidden="true">▸</span>
+        <span className={`pm-group-label ${group.type}`}>{group.label}</span>
+        <span className="pm-group-count">{group.contracts.length}</span>
+      </button>
+      {expanded && (
+        <div className="pm-group-body">
+          {group.contracts.map((c) => (
+            <ContractRow
+              key={c.id}
+              contract={c}
+              selected={c.id === selectedId}
+              lastEvent={lastEventTimes[c.id]}
+              friendlyName={friendlyName}
+              onSelect={() => onSelect(c.id)}
+              onToggleActive={(e) => onToggleActive(c.id, c.is_active, e)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, onToggleActive }) {
+  const rows = useMemo(() => stateRows(contract), [contract]);
+  const badge = contract.contract_type || "regular";
+  const name = friendlyName(contract.address);
+  return (
+    <button
+      type="button"
+      className={`pm-contract${selected ? " sel" : ""}${contract.is_active ? "" : " inactive"}`}
+      onClick={onSelect}
+      data-contract-id={contract.id}
+    >
+      <div className="pm-c-top">
+        <span className={`pm-badge ${badge}`}>{badge}</span>
+        <span className="pm-name" title={name}>{name}</span>
+        <span className="pm-c-addr">{shortenAddress(contract.address)}</span>
+      </div>
+      <div className="pm-kv">
+        {rows.map((r) => (
+          <React.Fragment key={r.k}>
+            <div className="pm-k">{r.k}</div>
+            <div className={`pm-v${r.tone ? " " + r.tone : ""}`}>{r.v}</div>
+          </React.Fragment>
+        ))}
+        <div className="pm-k">Last event</div>
+        <div className="pm-v muted">{lastEvent ? relativeTime(lastEvent) : "none recorded"}</div>
+      </div>
+      <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
+        <span
+          role="button"
+          tabIndex={0}
+          className="pm-btn-link"
+          onClick={onToggleActive}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onToggleActive(e); }}
+          style={{ fontSize: 11, color: contract.is_active ? "var(--status-ok)" : "var(--muted)" }}
+        >
+          {contract.is_active ? "● active" : "○ paused"}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function EventsPane({
+  events,
+  selectedContract,
+  allEventsForSelected,
+  activeKinds,
+  onToggleKind,
+  search,
+  onSearch,
+  friendlyName,
+  labelMap,
+  onClearSelection,
+}) {
+  const headerTitle = selectedContract
+    ? friendlyName(selectedContract.address)
+    : "All contracts";
+  const headerAddr = selectedContract ? selectedContract.address : null;
+  const headerChain = selectedContract?.chain || "ethereum";
+
+  return (
+    <div className="pm-pane">
+      <div className="pm-zone-detail">
+        <div className="pm-z-name">{headerTitle}</div>
+        {headerAddr && (
+          <a
+            className="pm-z-addr pm-z-link"
+            href={blockExplorerAddressUrl(headerAddr, headerChain)}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {headerAddr} ↗
+          </a>
+        )}
+        <div className="pm-z-stat">
+          <b>{allEventsForSelected.length}</b> event{allEventsForSelected.length === 1 ? "" : "s"} in window
+          {selectedContract && (
+            <>
+              {" · "}
+              <button className="pm-btn-link" onClick={onClearSelection}>show all</button>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="pm-fbar">
+        <button
+          type="button"
+          className={`pm-fchip${activeKinds.size === 0 ? " on" : ""}`}
+          onClick={() => activeKinds.size > 0 && Array.from(activeKinds).forEach(onToggleKind)}
+        >
+          All
+        </button>
+        {FILTER_GROUPS.map((g) => (
+          <button
+            key={g.id}
+            type="button"
+            className={`pm-fchip${activeKinds.has(g.id) ? " on" : ""}`}
+            onClick={() => onToggleKind(g.id)}
+          >
+            {g.label}
+          </button>
+        ))}
+        <input
+          className="pm-search"
+          placeholder="Search by tx, address, role hash…"
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+        />
+      </div>
+      <div className="pm-stream">
+        {events.length === 0 ? (
+          <div className="pm-empty">
+            <b>No matching events</b>
+            {selectedContract
+              ? "This contract hasn't fired anything in the window — or your filters are too narrow."
+              : "Nothing to show. Filters too narrow, or the scanner hasn't seen anything yet."}
+          </div>
+        ) : (
+          events.map((evt) => (
+            <EventRow
+              key={evt.id}
+              evt={evt}
+              friendlyName={friendlyName}
+              chainOf={(addr) => labelMap[String(addr || "").toLowerCase()]?.chain || "ethereum"}
+              isAllView={!selectedContract}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EventRow({ evt, friendlyName, chainOf, isAllView }) {
+  const decoded = useMemo(() => decodeEvent(evt), [evt]);
+  const kind = eventKind(evt);
+  const label = eventKindLabel(evt);
+  const addr = evt.data?.contract_address;
+  const chain = chainOf(addr);
+  return (
+    <div className="pm-ev">
+      <div className="pm-when" title={evt.detected_at}>{relativeTime(evt.detected_at)}</div>
+      <span className={`pm-type k-${kind}`}>{label}</span>
+      <div className="pm-msg">
+        <b>{decoded.title}</b>
+        {isAllView && addr && (
+          <span className="pm-msg-on">on {friendlyName(addr)}</span>
+        )}
+        {decoded.sub && <span className="pm-msg-sub">{decoded.sub}</span>}
+      </div>
+      <div className="pm-ext">
+        {evt.tx_hash ? (
+          <a href={explorerTxUrl(evt.tx_hash, chain)} target="_blank" rel="noreferrer noopener">
+            {shortenAddress(evt.tx_hash)} ↗
+          </a>
+        ) : (
+          <span className="pm-blk">no tx</span>
+        )}
+        {evt.block_number ? <span className="pm-blk">block {evt.block_number.toLocaleString()}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function NotifMini({ count, onOpen }) {
+  return (
+    <div className="pm-notif" data-testid="pm-notif">
+      <span>
+        {count === 0 ? (
+          <><b>No Discord webhook</b> — get pinged on upgrades, owner changes, pauses</>
+        ) : (
+          <><b>{count}</b> Discord {count === 1 ? "webhook" : "webhooks"} active</>
+        )}
+      </span>
+      <button className="pm-notif-cta" onClick={onOpen}>
+        {count === 0 ? "+ Add →" : "Manage →"}
+      </button>
+    </div>
+  );
+}
+
+function WebhookModal({
+  subscriptions,
+  onClose,
+  onRemove,
+  onSubmit,
+  adding,
+  url,
+  label,
+  eventTypes,
+  showPicker,
+  onUrl,
+  onLabel,
+  onToggleType,
+  onTogglePicker,
+}) {
+  const overlayRef = useRef(null);
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="pm-modal-back"
+      ref={overlayRef}
+      onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
+    >
+      <div className="pm-modal" role="dialog" aria-label="Discord webhooks">
+        <div className="pm-modal-head">
+          <h2>Discord notifications</h2>
+          <span className="pm-modal-sub">Get pinged when governance events fire on this protocol.</span>
+          <button className="pm-modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="pm-modal-body">
+          <section className="pm-modal-section">
+            <h3>Add a webhook</h3>
+            <form onSubmit={onSubmit}>
+              <div className="pm-form-row">
+                <input
+                  className="pm-input mono"
+                  aria-label="Webhook URL"
+                  placeholder="https://discord.com/api/webhooks/…"
+                  value={url}
+                  onChange={(e) => onUrl(e.target.value)}
+                  required
+                />
+                <input
+                  className="pm-input"
+                  aria-label="Label (optional)"
+                  placeholder="Label (optional)"
+                  value={label}
+                  onChange={(e) => onLabel(e.target.value)}
+                />
+              </div>
+              <div>
+                <button type="button" className="pm-btn-link" onClick={onTogglePicker}>
+                  {showPicker ? "− Hide event filter" : "+ Filter by event type"}
+                  {eventTypes.length > 0 && ` (${eventTypes.length} selected)`}
+                </button>
+                {showPicker && (
+                  <div className="pm-evt-picker">
+                    {ALL_EVENT_TYPES.map((et) => (
+                      <button
+                        key={et}
+                        type="button"
+                        className={`pm-fchip${eventTypes.includes(et) ? " on" : ""}`}
+                        onClick={() => onToggleType(et)}
+                      >
+                        {et.replace(/_/g, " ")}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="pm-form-actions">
+                <button type="submit" className="pm-btn-primary" disabled={adding}>
+                  {adding ? "Adding…" : "Add webhook"}
+                </button>
+                <button type="button" className="pm-btn-ghost" onClick={onClose}>Cancel</button>
+              </div>
+            </form>
+          </section>
+
+          <section className="pm-modal-section">
+            <h3>Existing ({subscriptions.length})</h3>
+            {subscriptions.length === 0 ? (
+              <p className="empty">No webhooks yet. Add one above.</p>
+            ) : (
+              <div className="pm-sub-list">
+                {subscriptions.map((s) => {
+                  const filterTypes = Array.isArray(s.event_filter?.event_types) ? s.event_filter.event_types : [];
                   return (
-                    <button
-                      key={et}
-                      type="button"
-                      onClick={() => {
-                        setWebhookEventTypes((prev) =>
-                          selected ? prev.filter((t) => t !== et) : [...prev, et]
-                        );
-                      }}
-                      style={{
-                        padding: "3px 8px",
-                        borderRadius: 4,
-                        fontSize: 11,
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        border: selected ? `1px solid ${evtColor}` : "1px solid #334155",
-                        background: selected ? evtColor + "22" : "transparent",
-                        color: selected ? evtColor : "#64748b",
-                      }}
-                    >
-                      {et.replace(/_/g, " ")}
-                    </button>
+                    <div key={s.id} className="pm-sub-row">
+                      <div>
+                        <div className="pm-sub-label">{s.label || "(no label)"}</div>
+                        <span className="pm-sub-url">{s.discord_webhook_url || "—"}</span>
+                      </div>
+                      <span className="pm-sub-filter">
+                        {filterTypes.length > 0 ? `${filterTypes.length} type${filterTypes.length === 1 ? "" : "s"}` : "all events"}
+                      </span>
+                      <button className="pm-sub-remove" onClick={() => onRemove(s.id)}>remove</button>
+                    </div>
                   );
                 })}
               </div>
             )}
-          </div>
-        </form>
-        {error && <p style={{ color: "#ef4444", fontSize: 13, marginBottom: 12 }}>{error}</p>}
-
-        {subscriptions.length === 0 ? (
-          <p className="empty">No webhook subscriptions. Add one above to receive Discord notifications for governance events.</p>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Label</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Webhook URL</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Event Filter</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Created</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {subscriptions.map((s) => (
-                  <tr key={s.id} style={{ borderBottom: "1px solid #1e293b" }}>
-                    <td style={{ padding: "8px 12px" }}>{s.label || <span style={{ color: "#475569" }}>-</span>}</td>
-                    <td style={{ padding: "8px 12px" }}>
-                      <span className="mono" style={{ fontSize: 12 }}>
-                        {s.discord_webhook_url ? s.discord_webhook_url.slice(0, 60) + (s.discord_webhook_url.length > 60 ? "..." : "") : "-"}
-                      </span>
-                    </td>
-                    <td style={{ padding: "8px 12px" }}>
-                      {s.event_filter && Array.isArray(s.event_filter.event_types) && s.event_filter.event_types.length > 0 ? (
-                        s.event_filter.event_types.map((f) => (
-                          <span key={f} className="chip" style={{ fontSize: 11, marginRight: 4 }}>{f.replace(/_/g, " ")}</span>
-                        ))
-                      ) : <span style={{ color: "#475569" }}>all events</span>}
-                    </td>
-                    <td style={{ padding: "8px 12px", whiteSpace: "nowrap", color: "#94a3b8", fontSize: 12 }}>
-                      {s.created_at ? new Date(s.created_at).toLocaleDateString() : "-"}
-                    </td>
-                    <td style={{ padding: "8px 12px" }}>
-                      <button onClick={() => removeSubscription(s.id)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 12 }}>remove</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* Section 2: Monitored Contracts */}
-      <section className="panel" style={{ marginTop: 16 }}>
-        <div className="panel-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <p className="eyebrow">Monitored Contracts</p>
-            <h2>Contracts ({sortedContracts.length})</h2>
-          </div>
-          <button
-            onClick={reEnroll}
-            disabled={reEnrolling}
-            style={{ padding: "6px 14px", borderRadius: 6, background: "#1e293b", color: "#94a3b8", border: "1px solid #334155", cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}
-          >
-            {reEnrolling ? "Re-enrolling..." : "Re-enroll Contracts"}
-          </button>
+          </section>
         </div>
-        {sortedContracts.length === 0 ? (
-          <p className="empty">No contracts being monitored for this protocol.</p>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Address</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Type</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Watching</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Polling</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Last Block</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Active</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedContracts.map((c) => {
-                  const typeColor = CONTRACT_TYPE_COLORS[c.contract_type] || CONTRACT_TYPE_COLORS.regular;
-                  return (
-                    <tr key={c.id} style={{ borderBottom: "1px solid #1e293b", opacity: c.is_active ? 1 : 0.5 }}>
-                      <td style={{ padding: "8px 12px" }}><span className="mono">{shortenAddress(c.address)}</span></td>
-                      <td style={{ padding: "8px 12px" }}>
-                        <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: typeColor + "22", color: typeColor }}>
-                          {c.contract_type || "regular"}
-                        </span>
-                      </td>
-                      <td style={{ padding: "8px 12px" }}>{monitoringChips(c.monitoring_config)}</td>
-                      <td style={{ padding: "8px 12px" }}>{c.needs_polling ? <span className="chip warn">polling</span> : <span className="chip">events</span>}</td>
-                      <td style={{ padding: "8px 12px" }}>{c.last_scanned_block ? c.last_scanned_block.toLocaleString() : "-"}</td>
-                      <td style={{ padding: "8px 12px" }}>
-                        <button
-                          onClick={() => toggleContractActive(c.id, c.is_active)}
-                          style={{
-                            padding: "2px 10px", borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: "pointer",
-                            border: "1px solid " + (c.is_active ? "#22c55e" : "#475569"),
-                            background: c.is_active ? "#22c55e22" : "transparent",
-                            color: c.is_active ? "#22c55e" : "#475569",
-                          }}
-                        >
-                          {c.is_active ? "on" : "off"}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* Section 3: Detected Events */}
-      <section className="panel" style={{ marginTop: 16 }}>
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Detected Events</p>
-            <h2>Governance Events ({events.length})</h2>
-          </div>
-        </div>
-        {events.length === 0 ? (
-          <p className="empty">No governance events detected yet. Events will appear here as they are detected by the monitoring system.</p>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Time</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Contract</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Event</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Details</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Block</th>
-                  <th style={{ padding: "8px 12px", color: "#94a3b8" }}>Tx</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((evt) => {
-                  const evtColor = EVENT_TYPE_COLORS[evt.event_type] || "#94a3b8";
-                  const contractAddr = evt.data?.contract_address || "";
-                  return (
-                    <tr key={evt.id} style={{ borderBottom: "1px solid #1e293b" }}>
-                      <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>{evt.detected_at ? new Date(evt.detected_at).toLocaleString() : "-"}</td>
-                      <td style={{ padding: "8px 12px" }}><span className="mono">{shortenAddress(contractAddr)}</span></td>
-                      <td style={{ padding: "8px 12px" }}>
-                        <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: evtColor + "22", color: evtColor }}>
-                          {(evt.event_type || "unknown").replace(/_/g, " ")}
-                        </span>
-                      </td>
-                      <td style={{ padding: "8px 12px" }}>{renderEventDetails(evt.data)}</td>
-                      <td style={{ padding: "8px 12px" }}>{evt.block_number || "-"}</td>
-                      <td style={{ padding: "8px 12px" }}><span className="mono">{evt.tx_hash ? shortenAddress(evt.tx_hash) : "-"}</span></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+      </div>
     </div>
   );
 }
+
