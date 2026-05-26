@@ -477,6 +477,33 @@ class TestQueueDiscoveredContracts:
         worker._queue_discovered_contracts(session, cast(Any, _job()), graph, "https://rpc.example")
         assert len(create_calls) == 0
 
+    def test_skips_zero_address_node(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unset controller/dependency resolves to 0x0; queuing it spawns a
+        # discovery job that can only fail "No verified source code for 0x000…".
+        worker = ResolutionWorker()
+        session = MagicMock()
+        session.execute.return_value.scalar_one_or_none.return_value = None
+
+        create_calls: list[dict] = []
+        monkeypatch.setattr(
+            "workers.resolution_worker.create_job",
+            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
+        )
+
+        graph = _resolved_graph(
+            nodes=[
+                {
+                    "address": "0x0000000000000000000000000000000000000000",
+                    "node_type": "contract",
+                    "analyzed": True,
+                    "contract_name": "ZeroAddr",
+                },
+            ]
+        )
+
+        worker._queue_discovered_contracts(session, cast(Any, _job()), graph, "https://rpc.example")
+        assert len(create_calls) == 0
+
     def test_skips_root_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
