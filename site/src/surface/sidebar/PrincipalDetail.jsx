@@ -44,6 +44,13 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
   const threshold = principal.details?.threshold;
   const delay = principal.details?.delay;
 
+  // Verified call rights (server-computed principal.controls_detail): the
+  // concrete functions / capability tags this principal can actually invoke,
+  // per contract. Distinct from the CGN-derived "Governance Path" list below,
+  // which is a reachability path and carries no direct-call-rights guarantee.
+  const callDetail = principal.controls_detail || [];
+  const nameByAddr = new Map(machines.map((m) => [m.address?.toLowerCase(), m.name]));
+
   return (
     <article className="ps-machine" style={{ borderLeft: `2px solid ${type.accent}` }}>
       <header className="ps-machine-header">
@@ -94,6 +101,35 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
               </div>
             );
           })}
+        </section>
+      )}
+
+      {callDetail.length > 0 && (
+        <section className="ps-principal-section">
+          <div className="ps-principal-section-hdr">
+            <span title="Verified from per-function access control (FunctionPrincipal) — the concrete privileged functions this principal can call">
+              Can Call ({callDetail.length})
+            </span>
+          </div>
+          {callDetail.map((d) => (
+            <div
+              key={d.address}
+              className="ps-principal-controlled ps-principal-clickable"
+              onClick={() => onFocusContract && onFocusContract(d.address)}
+              title={d.functions?.join(", ")}
+            >
+              <span className="ps-principal-controlled-name">
+                {nameByAddr.get(d.address?.toLowerCase()) || shortAddr(d.address)}
+              </span>
+              <span className="ps-principal-cancall-caps">
+                {d.capabilities && d.capabilities.length
+                  ? d.capabilities.join(", ")
+                  : (d.functions || []).slice(0, 3).join(", ") +
+                    ((d.functions || []).length > 3 ? ` +${d.functions.length - 3}` : "")}
+              </span>
+              <span className="ps-principal-goto">→</span>
+            </div>
+          ))}
         </section>
       )}
 

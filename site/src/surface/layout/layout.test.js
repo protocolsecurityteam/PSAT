@@ -13,7 +13,7 @@ import { buildMachines } from "./buildMachines.js";
 import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
-import { aggregateEdges, assignGroups, buildGraphLayout } from "./elkLayout.js";
+import { aggregateEdges, assignGroups, buildGraphLayout, estimateDetailHeight, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
 
 const functionData = Object.fromEntries(
   ETHERFI_COMPANY_RICH.contracts.map((c) => [c.address, c.functions || []]),
@@ -93,6 +93,7 @@ describe("buildSearchResults", () => {
     label: p.display_name,
     details: p.details,
     controls: machines.map((m) => m.address),
+    primary_for: machines.map((m) => m.address),
   }));
 
   it("filters to safes when mode=safe", () => {
@@ -123,16 +124,17 @@ describe("buildGraphLayout", () => {
   const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
 
   it("emits a group per principal that uniquely controls at least one contract", () => {
-    // Each principal points at machines[0]. The Safe wins priority and
-    // becomes a 1-child group; the Timelock loses every candidate
-    // child and drops off the canvas entirely (still visible in search
-    // and sidebar via companyData.principals).
+    // Server marks only the Safe as primary for machines[0]; the
+    // Timelock has no primary_for entries and drops off the canvas
+    // entirely (still visible in search and sidebar via
+    // companyData.principals).
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: [machines[0].address],
+      primary_for: p.resolved_type === "safe" ? [machines[0].address] : [],
     }));
     const { nodes, edges } = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
     const contractNodes = nodes.filter((n) => n.type === "contract");
@@ -150,15 +152,16 @@ describe("buildGraphLayout", () => {
   });
 
   it("collapses every principal→child edge into containment", () => {
-    // Same fixture, but the Safe now controls both contracts — exactly
-    // the fanout the grouping is meant to collapse. The Timelock still
-    // only controls one but loses priority to the Safe.
+    // Same fixture, but the Safe is now the server-marked primary for
+    // both contracts — exactly the fanout the grouping is meant to
+    // collapse. The Timelock has no primary_for entries.
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: p.resolved_type === "safe" ? machines.map((m) => m.address) : [machines[0].address],
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
     }));
     const { nodes, edges, groupChildren, contractToGroup } = buildGraphLayout(
       machines,
@@ -188,16 +191,18 @@ describe("buildGraphLayout", () => {
     expect(principalEdges).toHaveLength(0);
   });
 
-  it("picks the highest-priority principal when several control the same contracts", () => {
-    // Safe + Timelock both control both contracts. Safe wins per
-    // PRINCIPAL_PRIORITY; the Timelock's group dissolves because it has
-    // no remaining children.
+  it("respects the server's primary_for assignment for group membership", () => {
+    // Same fixture: server has already picked the Safe as primary for
+    // both contracts. The Timelock is in the principal list (so it
+    // remains searchable) but has an empty primary_for, so it doesn't
+    // get a group.
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
       label: p.display_name,
       details: p.details,
       controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
     }));
     const { groupChildren, contractToGroup } = assignGroups(machines, principals);
     expect(groupChildren.size).toBe(1);
@@ -207,6 +212,125 @@ describe("buildGraphLayout", () => {
         RICH_ADDRESSES.SAFE.toLowerCase(),
       );
     }
+  });
+
+  it("attaches a Controllers list to each group: primary first, then co-controllers scoped to the group", () => {
+    // The Safe primary-owns both contracts (→ one group container). The
+    // Timelock and an operator EOA each co-control machines[0] (VAULT) without
+    // being primary. Co-controllers no longer render as standalone guardian
+    // nodes — they live in the owning group's Controllers accordion
+    // (group.data.controllers), with the functions/caps they can call scoped
+    // to that group's contracts. EOAs are included on Surface even though
+    // monitoring drops them.
+    const eoaAddr = "0x" + "ee".repeat(20);
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
+      co_controls: p.resolved_type === "timelock" ? [machines[0].address] : [],
+      controls_detail:
+        p.resolved_type === "safe"
+          ? [
+              { address: machines[0].address, functions: ["upgradeTo", "transferOwnership"], capabilities: ["ownership", "upgrade"] },
+              { address: machines[1].address, functions: ["upgradeTo"], capabilities: ["upgrade"] },
+            ]
+          : p.resolved_type === "timelock"
+          ? [{ address: machines[0].address, functions: ["pauseContract"], capabilities: ["pause"] }]
+          : [],
+    }));
+    principals.push({
+      address: eoaAddr,
+      type: "eoa",
+      label: "ops-bot",
+      details: {},
+      controls: [machines[0].address],
+      primary_for: [],
+      co_controls: [machines[0].address],
+      controls_detail: [{ address: machines[0].address, functions: ["sweepFunds"], capabilities: ["fund-out"] }],
+    });
+
+    const { nodes } = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
+    const safe = principals.find((p) => p.type === "safe");
+
+    // No standalone principal/guardian nodes anymore.
+    expect(nodes.filter((n) => n.type === "principal")).toHaveLength(0);
+
+    const group = nodes.find((n) => n.type === "group" && n.id === safe.address);
+    expect(group).toBeTruthy();
+    const controllers = group.data.controllers;
+
+    // Primary first.
+    expect(controllers[0].isPrimary).toBe(true);
+    expect(controllers[0].address).toBe(safe.address);
+    // Capability summary is the verbatim union of the real tags, sorted.
+    expect(controllers[0].capabilities).toEqual(["ownership", "upgrade"]);
+    // Primary governs both contracts in the group.
+    expect(controllers[0].governs).toHaveLength(2);
+
+    // Both co-controllers appear, tagged non-primary, scoped to VAULT only.
+    const cos = controllers.filter((c) => !c.isPrimary);
+    expect(cos).toHaveLength(2);
+    const tl = cos.find((c) => c.address.toLowerCase() === RICH_ADDRESSES.TIMELOCK.toLowerCase());
+    const eoa = cos.find((c) => c.address.toLowerCase() === eoaAddr);
+    expect(tl.capabilities).toEqual(["pause"]);
+    expect(tl.governs).toHaveLength(1);
+    expect(tl.governs[0].functions).toEqual(["pauseContract"]);
+    expect(eoa.capabilities).toEqual(["fund-out"]);
+    // The header height grows with the number of controller rows.
+    expect(group.data.headerHeight).toBe(groupHeaderHeight(controllers.length));
+  });
+
+  it("grows a group's reserved header height when one of its controller rows is expanded", () => {
+    const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
+      address: p.address,
+      type: p.resolved_type,
+      label: p.display_name,
+      details: p.details,
+      controls: machines.map((m) => m.address),
+      primary_for: p.resolved_type === "safe" ? machines.map((m) => m.address) : [],
+      co_controls: [],
+      controls_detail:
+        p.resolved_type === "safe"
+          ? machines.map((m) => ({ address: m.address, functions: ["upgradeTo"], capabilities: ["upgrade"] }))
+          : [],
+    }));
+    const safe = principals.find((p) => p.type === "safe");
+    const nControllers = 1; // primary only (no co-controllers here)
+    const collapsed = groupHeaderHeight(nControllers);
+
+    // No expansion → collapsed reservation.
+    const base = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
+    expect(base.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(collapsed);
+
+    // Expanded with no measured height yet → collapsed + estimate.
+    const expanded = { groupId: safe.address, idx: 0 };
+    const estimated = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {});
+    const openRow = estimated.nodes.find((n) => n.id === safe.address).data.controllers[0];
+    expect(estimated.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(
+      collapsed + estimateDetailHeight(openRow.governs.length),
+    );
+
+    // Once GroupNode reports the measured band height for this open-row state,
+    // it's reserved verbatim, and layoutGroupInterior starts the first card
+    // below the grown band.
+    const grownHeader = 540;
+    const measured = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {
+      [`${safe.address}:0`]: grownHeader,
+    });
+    expect(measured.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(grownHeader);
+    const kids = measured.groupChildren.get(safe.address.toLowerCase());
+    const interior = layoutGroupInterior(
+      kids.map((id) => ({ id })),
+      machines,
+      grownHeader,
+    );
+    // Cards start at or below the reserved band (a small gap clears the
+    // group's border so the first card never tucks under the accordion).
+    const firstCardY = Math.min(...[...interior.positions.values()].map((pt) => pt.y));
+    expect(firstCardY).toBeGreaterThanOrEqual(grownHeader);
   });
 });
 

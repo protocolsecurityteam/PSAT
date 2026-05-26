@@ -38,6 +38,40 @@ export function ChanneledStepEdge(props) {
   // sourceX/Y / targetX/Y, so the same routing pass handles them.
   const obstacles = data?.obstacles || [];
 
+  // Inbound stub: a contract called into from another aggregation. The bundle
+  // arrives at the box top "as normal"; here we draw ONLY the part below the
+  // header — a straight drop from the header's bottom edge (directly above the
+  // contract) down to its top handle. Everything that would sit over the header
+  // is omitted, so the header reads as hiding the line (it appears to continue
+  // invisibly up to the bundle). data.headerHeight marks where the header ends.
+  if (data?.stub && data?.inbound) {
+    // sy is the group's outer-top (the handle sits on the 2px border); the
+    // header band starts inside that border, so its bottom is +2 below the
+    // reserved headerHeight. Start the drop there so it never paints over the
+    // header. Clamp to the contract top so degenerate cases don't draw upward.
+    const GROUP_BORDER = 2;
+    const headerBottom = sy + GROUP_BORDER + (data.headerHeight || 0);
+    const startY = Math.min(headerBottom, ty);
+    return (
+      <BaseEdge
+        id={id}
+        path={`M ${tx} ${startY} L ${tx} ${ty}`}
+        style={style}
+        markerEnd={markerEnd}
+        markerStart={markerStart}
+        interactionWidth={interactionWidth}
+      />
+    );
+  }
+
+  // The outbound stub lands on the group's bottom-edge handle (the same spot
+  // the shared bundle leaves from), but it arrives from INSIDE the box —
+  // descending from the contract above. Position.Bottom would make the router
+  // approach from below, overshooting past the handle and doubling back. Treat
+  // the target as top-facing so it drops straight in and meets the bundle's
+  // start cleanly, reading as one continuous line.
+  const targetPos = data?.stub ? "top" : targetPosition;
+
   // Two render paths, in order of preference:
   //   1. Multi-bend orthogonal router (`routeOrthogonal`). Prefers the
   //      5-segment bus-stub shape so every edge from the same handle
@@ -54,7 +88,7 @@ export function ChanneledStepEdge(props) {
   const polyline = routeOrthogonal({
     sx, sy, tx, ty,
     sourcePos: sourcePosition,
-    targetPos: targetPosition,
+    targetPos,
     obstacles,
     sourceId: source,
     targetId: target,
@@ -67,7 +101,7 @@ export function ChanneledStepEdge(props) {
         targetX: tx,
         targetY: ty,
         sourcePosition,
-        targetPosition,
+        targetPosition: targetPos,
         borderRadius: 0,
       })[0];
 
