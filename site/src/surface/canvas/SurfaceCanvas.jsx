@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Background,
   Controls,
@@ -13,10 +13,12 @@ import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
 import { FocusOnNode } from "./FocusOnNode.jsx";
 import { GroupNode } from "./GroupNode.jsx";
-import { PrincipalNode } from "./PrincipalNode.jsx";
 import { PrincipalTourNav } from "./PrincipalTourNav.jsx";
 
-const nodeTypes = { contract: ContractNode, principal: PrincipalNode, group: GroupNode };
+// Co-controllers live inside the owning group's Controllers accordion now, so
+// the canvas only renders contract cards and their owning group boxes — there
+// is no standalone "principal"/guardian-rail node type any more.
+const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
 // Selection-time legend. Renders only while a contract is selected so
@@ -45,17 +47,51 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
+  // Which controller row (if any) is expanded, and the measured header-band
+  // height per (group, open-row) state (keyed "groupId:idx" / "groupId:c").
+  // Both feed elkLayout so the open row's group grows its header band and ELK
+  // re-packs the canvas to make room — the group extends rather than
+  // overlapping cards/neighbours. GroupNode reports the real band height via
+  // onMeasureBand; we only re-store (and thus re-layout) when it actually
+  // changes, so it converges.
+  const [expanded, setExpanded] = useState(null);
+  const [bandHeights, setBandHeights] = useState({});
+
   // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
-    elkLayout(machines, fundFlows, principals).then(({ nodes: n, edges: e }) => {
+    elkLayout(machines, fundFlows, principals, expanded, bandHeights).then(({ nodes: n, edges: e }) => {
       if (!cancelled) {
         setInitNodes(n);
         setInitEdges(e);
       }
     });
     return () => { cancelled = true; };
-  }, [machines, fundFlows, principals]);
+  }, [machines, fundFlows, principals, expanded, bandHeights]);
+
+  const toggleController = useCallback((groupId, idx) => {
+    setExpanded((cur) => (cur && cur.groupId === groupId && cur.idx === idx ? null : { groupId, idx }));
+  }, []);
+
+  const measureBand = useCallback((groupId, idx, height) => {
+    setBandHeights((cur) => {
+      const key = `${groupId}:${idx ?? "c"}`;
+      if (Math.abs((cur[key] || 0) - height) <= 1) return cur;
+      return { ...cur, [key]: height };
+    });
+  }, []);
+
+  // Clicking a controller row selects that principal so the existing logic
+  // highlights the contracts it governs (dims everything else + chips them) and
+  // opens its sidebar. Looks the full principal up from the list so the sidebar
+  // gets every field. focus:false keeps the camera put — selecting the primary
+  // would otherwise pan/zoom to its (large) group node, which the user reads as
+  // an unwanted zoom-in; we only want the highlight.
+  const selectController = useCallback((addr) => {
+    const lc = addr?.toLowerCase();
+    const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
+    if (p && onSelectPrincipal) onSelectPrincipal(p, { focus: false });
+  }, [principals, onSelectPrincipal]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -80,6 +116,19 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     // edges existed between the same pair.
     const connectedNodes = new Set();
     const selectionChips = new Map();
+    // Cross-group contract selection state (populated in the block below).
+    // The contract→group-bottom stubs themselves are permanent layout edges
+    // now (see elkLayout) and highlight through the normal edge logic; this
+    // pair just makes the shared bundle the stub feeds light up with it:
+    //   relatedEdgeIds — the SPECIFIC group→group bundles the contract feeds,
+    //                    force-highlighted by id (not via group membership in
+    //                    connectedNodes, which would also light unrelated
+    //                    bundles between two groups the contract happens to
+    //                    touch separately)
+    //   brightGroups  — target group boxes to un-dim, kept out of connectedNodes
+    //                    so it doesn't leak into the edge-relatedness check
+    const relatedEdgeIds = new Set();
+    const brightGroups = new Set();
     if (sel) {
       connectedNodes.add(sel);
       const addChip = (addrLc, caps, direction) => {
@@ -148,16 +197,85 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       const selPrincipal = (principals || []).find(
         (p) => p.address?.toLowerCase() === sel,
       );
+      // Per-contract capability detail for the selected principal
+      // (server-computed principal.controls_detail, passthrough-resolved), so a
+      // chip says what the controller can actually DO ("pause, fund-out", or
+      // concrete function names) rather than a generic "<type>-controlled".
+      // Used for both the group children (primary) and the co-controlled set.
+      const detailByContract = new Map();
+      for (const d of selPrincipal?.controls_detail || []) {
+        if (d?.address) detailByContract.set(d.address.toLowerCase(), d);
+      }
+      const capsTextFor = (addrLc) => {
+        const d = detailByContract.get(addrLc);
+        const caps = d?.capabilities || [];
+        const fns = d?.functions || [];
+        return caps.length
+          ? caps.join(", ")
+          : fns.length
+          ? fns.slice(0, 3).join(", ") + (fns.length > 3 ? ` +${fns.length - 3}` : "")
+          : `${selPrincipal?.type || "principal"}-controlled`;
+      };
       for (const n of initNodes) {
         const nid = n.id?.toLowerCase();
         const pid = n.parentId?.toLowerCase();
         if (pid === sel) {
           connectedNodes.add(nid);
           if (selPrincipal) {
-            addChip(nid, `${selPrincipal.type || "principal"}-controlled`, "out");
+            addChip(nid, capsTextFor(nid), "out");
           }
         }
         if (nid === sel && pid) connectedNodes.add(pid);
+      }
+
+      // Co-controller selection: the selected principal may hold authority on
+      // contracts it isn't the primary owner of (principal.co_controls). On
+      // select we light up those contracts — and their containing groups, so a
+      // highlighted child isn't dimmed along with its box — and chip them with
+      // what the controller can do. This is the same dim+chip highlight a
+      // primary gets for its own children. We deliberately draw NO edges: the
+      // cross-group dashed lines read as the fanout spaghetti the owner-
+      // grouping removed, and the highlight alone conveys the reach.
+      const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
+      if (coControls.length) {
+        const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
+        for (const c of coControls) {
+          const t = c?.toLowerCase();
+          const tn = t && nodeByAddr.get(t);
+          if (!tn) continue;
+          connectedNodes.add(t);
+          if (tn.parentId) connectedNodes.add(tn.parentId.toLowerCase());
+          addChip(t, capsTextFor(t), "out");
+        }
+      }
+
+      // Cross-group contract selection: a grouped contract's permanent stub
+      // runs down to its group's bottom edge and the shared group→group bundle
+      // carries on from there. The stub lights via the normal directly-connected
+      // rule (its source IS the selected contract); here we just make the bundle
+      // it feeds light up too, so the whole path reads as one highlighted line.
+      // We match the bundle by id (not by adding the groups to connectedNodes,
+      // which would also light unrelated bundles between them) and separately
+      // un-dim the two group boxes it joins via brightGroups.
+      const selNode = initNodes.find((n) => n.id?.toLowerCase() === sel);
+      if (selNode && selNode.type === "contract" && selNode.parentId) {
+        const groupAddrs = new Set(
+          initNodes.filter((n) => n.type === "group").map((n) => n.id?.toLowerCase()),
+        );
+        for (const e of initEdges) {
+          const eSrc = e.source?.toLowerCase();
+          const eTgt = e.target?.toLowerCase();
+          // cross-group bundles only (both endpoints are group boxes)
+          if (!groupAddrs.has(eSrc) || !groupAddrs.has(eTgt) || eSrc === eTgt) continue;
+          let touchesC = false;
+          for (const s of e.data?.samples || []) {
+            if (s.from?.toLowerCase() === sel || s.to?.toLowerCase() === sel) { touchesC = true; break; }
+          }
+          if (!touchesC) continue;
+          relatedEdgeIds.add(e.id);
+          brightGroups.add(eSrc);
+          brightGroups.add(eTgt);
+        }
       }
     }
 
@@ -172,7 +290,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
         const inAudit = hiActive && highlightedAddresses.has(nid);
-        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid));
+        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
         const focused = foc && nid === foc;
         // Merge — don't replace — n.style. Group containers carry
         // ELK-computed width/height in n.style and we'd otherwise blow
@@ -200,6 +318,20 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
             onSelect: n.data.principal
               ? () => onSelectPrincipal && onSelectPrincipal(n.data.principal)
               : () => onSelectMachine(n.data.machine),
+            // Controllers-accordion wiring for group nodes: which row is open
+            // (so GroupNode renders its detail), which controller is currently
+            // selected (so the row reads as active), plus the toggle / select /
+            // measure callbacks that drive expansion, highlighting, and the
+            // grow-on-expand re-layout.
+            ...(n.type === "group"
+              ? {
+                  expandedIdx: expanded && expanded.groupId === n.id ? expanded.idx : null,
+                  selectedControllerAddr: sel || null,
+                  onToggleController: (idx) => toggleController(n.id, idx),
+                  onSelectController: (addr) => selectController(addr),
+                  onMeasureBand: (idx, h) => measureBand(n.id, idx, h),
+                }
+              : null),
           },
         };
       })
@@ -217,9 +349,18 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       // address directly.
       const edgeInAudit = hiActive && highlightedAddresses.has(src) && highlightedAddresses.has(tgt);
       const directlyConnected = src === sel || tgt === sel;
+      // A cross-group stub belongs to its CONTRACT endpoint (the other end is
+      // just the group box where the bundle joins). Light it whenever that
+      // contract is in the connected set — so selecting either end of a
+      // cross-group link lights the whole path: source's outbound stub → the
+      // shared bundle → the target's inbound stub. (Checking only the contract
+      // end avoids lighting every stub that merely shares the selected
+      // contract's group box.)
+      const stubContractEnd = e.data?.stub ? (e.data.inbound ? tgt : src) : null;
+      const stubRelated = stubContractEnd != null && connectedNodes.has(stubContractEnd);
       const related = hiActive
         ? edgeInAudit
-        : (!sel || directlyConnected || (connectedNodes.has(src) && connectedNodes.has(tgt)));
+        : (!sel || directlyConnected || relatedEdgeIds.has(e.id) || stubRelated || (connectedNodes.has(src) && connectedNodes.has(tgt)));
       return {
         ...e,
         style: {
@@ -232,7 +373,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal]);
+  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, expanded, toggleController, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">

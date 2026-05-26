@@ -878,6 +878,95 @@
   font-weight: 600;
 }
 
+/* Permissionless / lower-privilege callers, aggregated per contract: a
+   "+N callers" affordance so an authorized caller is never silently invisible,
+   without a node or edge per bidder. Muted (vs the amber guardian accent) to
+   read as "many low-privilege callers", and clickable to inspect the list. */
+.ps-node-callers {
+  margin-top: 4px;
+  align-self: flex-start;
+  font-size: 8px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px dashed rgba(148, 163, 184, 0.4);
+  cursor: pointer;
+}
+
+.ps-node-callers:hover {
+  background: rgba(148, 163, 184, 0.25);
+}
+
+/* The "+N callers" list expanded in the contract detail sidebar. */
+.ps-machine-callers {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.ps-machine-callers-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+  margin-bottom: 6px;
+}
+
+.ps-machine-callers-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ps-machine-caller {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.1);
+  color: #c7d2e0;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  cursor: pointer;
+}
+
+.ps-machine-caller:hover {
+  background: rgba(148, 163, 184, 0.22);
+}
+
+.ps-machine-caller-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ps-machine-caller-type {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #8b92a8;
+}
+
+.ps-machine-caller-caps {
+  font-size: 9px;
+  color: #8b9bb0;
+}
+
+/* Verified capabilities on a "Can Call" row in the principal sidebar. */
+.ps-principal-cancall-caps {
+  margin-left: auto;
+  margin-right: 6px;
+  font-size: 10px;
+  color: #d99a4e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ps-node-role {
   margin-top: 2px;
   font-size: 9px;
@@ -2014,64 +2103,13 @@
 }
 
 /* Principal nodes (Safe, EOA, Timelock) */
-.ps-principal-node {
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: #0c0f14;
-  border: 1px dashed var(--principal-color, #64748b);
-  color: #e2e8f0;
-  min-width: 90px;
-  max-width: 160px;
-  font-size: 10px;
-}
-
-.ps-principal-badge {
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 1px 5px;
-  border-radius: 3px;
-  display: inline-block;
-  margin-bottom: 3px;
-}
-
+/* Shared with the sidebar InspectorCard. The canvas principal/guardian-rail
+   node that also used the other .ps-principal-* node styles was removed with
+   the Controllers accordion, so only this one remains. */
 .ps-principal-addr {
   font-size: 9px;
   color: #64748b;
   font-family: "JetBrains Mono", monospace;
-}
-
-.ps-principal-detail {
-  font-size: 9px;
-  color: #94a3b8;
-  margin-top: 2px;
-  font-weight: 600;
-}
-
-.ps-principal-owners {
-  margin-top: 4px;
-  padding-top: 3px;
-  border-top: 1px solid rgba(148, 163, 184, 0.1);
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.ps-principal-owner {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 8px;
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-}
-
-.ps-owner-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #a09870;
-  flex-shrink: 0;
 }
 
 /* Owner-group container — a labeled box that holds every contract a
@@ -2109,16 +2147,45 @@
   border-style: solid;
 }
 
-.ps-group-header {
+/* Header band: an absolutely-positioned strip at the top of the group,
+   pinned by GroupNode to exactly the height the layout reserved
+   (data.headerHeight). Holds the colored primary bar + the Controllers
+   accordion (with the open row's detail rendered in-flow below it). The
+   reserved height grows when a row is open and ELK re-packs to match, so the
+   in-flow content fits; overflow:hidden clips only the brief frame before the
+   measured height converges, never letting the accordion bleed onto a card.
+   pointer-events:none here lets the inert gaps fall through; the interactive
+   children opt back in. */
+.ps-group-head {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Auto-height wrapper holding the colored bar + accordion. GroupNode measures
+   this (not the clipped outer band) to get the true content height, so wrapped
+   capability summaries and open-row detail are reserved exactly. */
+.ps-group-head-inner {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 9px 14px;
+  /* React Flow defaults nodes to text-align:center; the accordion reads as
+     left-aligned text (badges, addresses, the comma-separated cap summary). */
+  text-align: left;
+}
+
+.ps-group-header {
+  flex: 0 0 auto;
+  height: 62px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  overflow: hidden;
   background: linear-gradient(180deg, var(--principal-header-bg-top, rgba(15, 18, 24, 0.92)) 0%, var(--principal-header-bg-bot, rgba(15, 18, 24, 0.55)) 100%);
   border-bottom: 2px solid var(--principal-color, rgba(148, 163, 184, 0.12));
   border-top-left-radius: 8px;
@@ -2164,11 +2231,200 @@
   color: #f8fafc;
   font-weight: 700;
   white-space: nowrap;
+  margin-left: auto;
+  padding-left: 10px;
+}
+
+/* ── Controllers accordion ──────────────────────────────────────────────
+   Lives in the header band below the colored primary bar. Lists every
+   controller with authority inside the box (primary + co-controllers); each
+   row expands to the exact functions it can call per contract. */
+.ps-group-controllers {
+  padding: 0 10px;
+  background: rgba(13, 17, 23, 0.92);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  pointer-events: auto;
+}
+
+.ps-group-controllers-label {
+  height: 26px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.ps-ctrl-row {
+  border-radius: 5px;
+  border-left: 2px solid var(--ctrl-accent, transparent);
+  background: rgba(255, 255, 255, 0.015);
+  margin-bottom: 2px;
+}
+
+.ps-ctrl-row--primary {
+  background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 10%, transparent);
+}
+
+/* Selected controller (its governed contracts are highlighted on the canvas):
+   a soft accent fill + ring so it reads as the active one. */
+.ps-ctrl-row--selected {
+  background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 16%, transparent);
+  box-shadow: inset 0 0 0 1px var(--ctrl-accent, #6a9e94);
+}
+
+/* min-height (not a fixed height) so the row grows when the full capability
+   summary wraps to more than one line — we never truncate the tags. */
+.ps-ctrl-head {
+  min-height: 30px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.ps-ctrl-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ps-ctrl-caret {
+  color: #64748b;
+  font-size: 9px;
+  width: 9px;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-tag {
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-tag--primary {
+  background: #6a9e94;
+  color: #0f1218;
+}
+
+.ps-ctrl-tag--co {
+  background: rgba(217, 154, 78, 0.18);
+  color: #d99a4e;
+}
+
+.ps-ctrl-badge {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-addr {
+  font-size: 9px;
+  color: #64748b;
+  font-family: "JetBrains Mono", monospace;
+  flex-shrink: 0;
+}
+
+/* Full capability summary — every tag, comma-separated, never truncated.
+   Wraps to as many lines as it needs (the row grows; the band is measured).
+   overflow-wrap:break-word is a safety net so a lone long tag breaks rather
+   than overflowing + clipping if a group is unusually tight. */
+.ps-ctrl-caps {
+  font-size: 10px;
+  color: #c9b08a;
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.ps-ctrl-governs {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Expanded detail: rendered in-flow below the row head. It pushes the rows
+   below it down and grows the reserved header band — the layout re-packs the
+   canvas to make room, so the group extends rather than overlapping cards.
+   Its height is measured (GroupNode) and fed back so the reservation is
+   exact. */
+.ps-ctrl-detail {
+  padding: 4px 10px 9px 26px;
+  background: #10141b;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  pointer-events: auto;
+}
+
+.ps-ctrl-detail-line {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  align-items: baseline;
+  border-top: 1px solid rgba(148, 163, 184, 0.06);
+}
+
+.ps-ctrl-detail-line:first-child {
+  border-top: none;
+}
+
+.ps-ctrl-cname {
+  font-size: 11px;
+  font-weight: 600;
+  color: #cbd5e1;
+  min-width: 150px;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-fns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ps-ctrl-fnchip {
+  font-size: 9px;
+  font-family: "JetBrains Mono", monospace;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #aeb9cc;
+}
+
+.ps-ctrl-fnchip--upgrade {
+  background: rgba(138, 106, 158, 0.2);
+  color: #c0a0d4;
+}
+
+.ps-ctrl-fnchip--pause {
+  background: rgba(201, 138, 138, 0.18);
+  color: #d8a3a3;
+}
+
+.ps-ctrl-fnchip--fund {
+  background: rgba(201, 176, 138, 0.16);
+  color: #d6bd8c;
 }
 
 /* React Flow stacks nodes in DOM order. Group containers go behind
    their children so the contract nodes inside read above the dashed
-   border. */
+   border (and a selected group, elevated +1000 by React Flow, can't
+   cover its own cards). The Controllers accordion grows the group's
+   reserved header band in-flow and the canvas re-packs to fit, so the
+   group never needs to be lifted above its cards. */
 .react-flow__node-group {
   z-index: 0 !important;
 }
