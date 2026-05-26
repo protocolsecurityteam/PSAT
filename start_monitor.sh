@@ -1,7 +1,14 @@
 #!/bin/bash
-# `monitor` process group: three chain-scan singletons.
-# DO NOT scale above 1 — running multiple instances races on scan
-# state and duplicates writes.
+# `monitor` process group: the event scanner, state poller, and TVL
+# tracker, plus the enrollment reconciler. The reconciler converges
+# monitored_contracts on a cadence — notably the controller Safes /
+# Timelocks the per-job enrollment hint (enroll_controllers=False)
+# deliberately skips, and anything the one-shot boot reconcile missed
+# because it ran before the protocol existed. Without it controllers
+# never land in monitoring until a manual /re-enroll.
+# DO NOT scale above 1 — the scanner/poller race on scan state and
+# duplicate writes. (The reconciler only does idempotent upserts, so it
+# is safe as a co-process; the scanners are why this stays a singleton.)
 set -e
 
 cd "$(dirname "$0")"
@@ -30,8 +37,10 @@ PIDS+=($!)
 PIDS+=($!)
 "${PY[@]}" -m workers.protocol_monitor --tvl &
 PIDS+=($!)
+"${PY[@]}" -m workers.protocol_monitor --reconcile &
+PIDS+=($!)
 
 echo "Monitors started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine and relaunches all
-# three. A silently-dead scanner is worse than a 30s restart.
+# four. A silently-dead scanner is worse than a 30s restart.
 wait -n
