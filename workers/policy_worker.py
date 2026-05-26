@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -28,6 +29,7 @@ from services.policy.effective_permissions_writer import write_effective_functio
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
+from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_degraded
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
@@ -38,6 +40,29 @@ logger = logging.getLogger("workers.policy_worker")
 DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
+
+
+def _make_principal_type_resolver(
+    classify_cache: dict[str, tuple[str, dict[str, object]]],
+    rpc_url: str | None,
+) -> Callable[[str], tuple[str | None, dict[str, object] | None]]:
+    """Build an ``address -> (resolved_type, details)`` classifier for the FP
+    writer. Reuses the resolution stage's classify cache, falling back to a
+    live (process-cached) ``classify_resolved_address`` probe for misses — the
+    same path ``build_principal_labels`` uses, so FunctionPrincipal rows carry
+    the same Safe/Timelock/EOA typing as principal labels."""
+    cache_lc = {k.lower(): v for k, v in classify_cache.items()}
+
+    def _resolve(address: str) -> tuple[str | None, dict[str, object] | None]:
+        cached = cache_lc.get((address or "").lower())
+        if cached:
+            return cached[0], cached[1]
+        if not rpc_url:
+            return None, None
+        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address)
+        return resolved_type, details
+
+    return _resolve
 
 
 def _rpc_url_for_job(job: Job) -> str:
@@ -367,6 +392,7 @@ class PolicyWorker(BaseWorker):
                 function_records=ep_data.get("functions", []),
                 capability_by_function=capability_resolver_output,
                 safe_address_lookup=safe_lookup or None,
+                resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
             )
             session.commit()
 

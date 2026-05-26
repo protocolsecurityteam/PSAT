@@ -605,3 +605,114 @@ def test_column_values_unsupported() -> None:
     cols = _column_values_for_capability(cap_dict)
     assert cols["status"] == "unsupported"
     assert cols["authority_public"] is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_principal_type — write-time typing of caller principals
+# ---------------------------------------------------------------------------
+
+
+def test_finite_set_rows_typed_via_resolver(db_session) -> None:
+    """Regression: finite_set caller rows are typed via the injected
+    classifier, so ``function_principals.resolved_type`` carries
+    Safe/Timelock/EOA instead of NULL.
+
+    Root cause this pins: the capability surface projects finite_set members
+    with ``resolved_type=None`` and (pre-fix) the writer never classified
+    them, leaving every per-function caller NULL. A governance Safe reachable
+    only through per-function authority (e.g. a Safe that controls a Timelock
+    which owns the protocol's contracts) then never surfaces in
+    ``_fp_governance`` / primary-controller assignment. Typing at the writer
+    fixes every downstream consumer at the source.
+    """
+    safe_addr = "0x" + "a" * 40
+    eoa_addr = "0x" + "b" * 40
+    cap = CapabilityExpr.finite_set([safe_addr, eoa_addr])
+
+    classified = {
+        safe_addr.lower(): ("safe", {"owners": ["0x" + "1" * 40], "threshold": 1}),
+        eoa_addr.lower(): ("eoa", {}),
+    }
+
+    def _resolver(addr: str):
+        return classified.get(addr.lower(), (None, None))
+
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("doThing()")],
+        capability_by_function={"doThing()": cap},
+        resolve_principal_type=_resolver,
+    )
+    db_session.commit()
+
+    rows = {r.address: r for r in _principals(db_session)}
+    assert rows[safe_addr.lower()].resolved_type == "safe"
+    # Classifier details (owners/threshold) are merged alongside the surface trace.
+    assert rows[safe_addr.lower()].details.get("owners") == ["0x" + "1" * 40]
+    assert rows[eoa_addr.lower()].resolved_type == "eoa"
+
+
+def test_finite_set_rows_untyped_without_resolver(db_session) -> None:
+    """Baseline: with no resolver the rows stay untyped. Typing is purely
+    additive and resolver-gated — no behavior change for callers (tests,
+    fixtures) that don't pass one."""
+    member = "0x" + "a" * 40
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("doThing()")],
+        capability_by_function={"doThing()": CapabilityExpr.finite_set([member])},
+    )
+    db_session.commit()
+    rows = _principals(db_session)
+    assert len(rows) == 1
+    assert rows[0].resolved_type is None
+
+
+def test_resolver_not_called_for_signature_witness(db_session) -> None:
+    """Signature-witness rows are signers, not callers, and are excluded from
+    the governance/primary-controller consumers — so the writer must not spend
+    a classify probe on them."""
+    inner = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
+    cap = CapabilityExpr.signature_witness(inner)
+
+    def _resolver(addr: str):
+        raise AssertionError(f"resolver must not be called for a signer ({addr})")
+
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("approveHash(bytes32)")],
+        capability_by_function={"approveHash(bytes32)": cap},
+        resolve_principal_type=_resolver,
+    )
+    db_session.commit()
+    rows = _principals(db_session)
+    assert rows, "signature_witness(finite) should still emit signer rows"
+    for r in rows:
+        assert r.principal_type == "signature_witness"
+        assert r.resolved_type is None
+
+
+def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
+    """threshold_group already resolves to 'safe'; the resolver is only a
+    fallback for untyped rows and must not override an already-typed row."""
+    signers = [f"0x{(0x10 + i):040x}" for i in range(3)]
+    cap = CapabilityExpr.threshold_group(2, signers)
+
+    def _resolver(addr: str):
+        return ("eoa", {})  # wrong on purpose; must not be consulted
+
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("exec()")],
+        capability_by_function={"exec()": cap},
+        safe_address_lookup={"default": "0x" + "5" * 40},
+        resolve_principal_type=_resolver,
+    )
+    db_session.commit()
+    rows = _principals(db_session)
+    assert len(rows) == 1
+    assert rows[0].resolved_type == "safe"

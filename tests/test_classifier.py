@@ -470,6 +470,58 @@ def test_classify_single_with_bytecode_param(monkeypatch):
     assert result["implementation"] == "0x" + impl_hex
 
 
+def test_classify_single_large_impl_getter_is_regular(monkeypatch):
+    """A large logic contract exposing implementation() as a domain getter
+    (not a delegation pointer) classifies as 'regular', not a custom proxy.
+
+    Regression for EtherFi's StakingManager: 16.5 KB UUPS logic that returns the
+    EtherFiNode beacon template from implementation(). Without the size guard it
+    was mis-tagged proxy_type=custom → EtherFiNode, so its own functions were
+    never analyzed and it surfaced no governance controller."""
+    addr = ADDR(0x30)
+    domain_target = ADDR(0x31)
+    big_logic = "0x" + "60" * (cls.GENERIC_IMPL_PROXY_MAX_BYTES + 1000)  # > ceiling, no DELEGATECALL
+
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: big_logic)
+
+    def fake_rpc(_rpc, method, params, retries=1):
+        if method == "eth_getStorageAt":
+            return ZERO_SLOT
+        if method == "eth_call" and params[0].get("data", "")[:10] == cls.IMPLEMENTATION_SELECTOR:
+            return _slot_for(domain_target)  # answered — must be ignored at this bytecode size
+        raise RuntimeError("revert")
+
+    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "regular"
+    assert result.get("proxy_type") is None
+
+
+def test_classify_single_small_impl_getter_still_custom(monkeypatch):
+    """A small custom proxy that exposes implementation() is still detected —
+    the size guard must not break the legitimate non-standard-slot proxy path."""
+    addr = ADDR(0x32)
+    impl = ADDR(0x33)
+    small_proxy = "0x" + "60" * 200  # 200 bytes, well under the ceiling
+
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: small_proxy)
+
+    def fake_rpc(_rpc, method, params, retries=1):
+        if method == "eth_getStorageAt":
+            return ZERO_SLOT
+        if method == "eth_call" and params[0].get("data", "")[:10] == cls.IMPLEMENTATION_SELECTOR:
+            return _slot_for(impl)
+        raise RuntimeError("revert")
+
+    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "proxy"
+    assert result["proxy_type"] == "custom"
+    assert result["implementation"] == impl
+
+
 # ---------------------------------------------------------------------------
 # Slot-batching parity: ``classify_single`` issues one batched
 # eth_getStorageAt instead of five sequential calls.
