@@ -14,7 +14,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -247,6 +247,52 @@ class TestBuildMonitoringConfig:
         config = _build_monitoring_config(summary, [], "regular")
         assert config["watch_roles"] is True
 
+    def test_tracked_topics_persisted_when_supplied(self):
+        """tracked_topics passed in (from extract_governance_topics) must
+        land on monitoring_config so the scanner can union them into the
+        global topic filter and dispatch per-emitter."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        tracked = [
+            {
+                "topic0": "0x" + "a" * 64,
+                "signature": "OwnerUpdated(address,address)",
+                "event_type": "ownership_transferred",
+                "controller_id": "state_variable:owner",
+                "inputs": [],
+            }
+        ]
+        config = _build_monitoring_config(None, [], "regular", tracked)
+        assert config["tracked_topics"] == tracked
+
+    def test_authority_topic_sets_watch_authority_flag(self):
+        """Presence of an authority_updated tracked-topic flips on the
+        watch_authority flag explicitly — the flag-getter defaults to
+        True on missing keys, so this is documentation-on-inspection
+        rather than gating, but it keeps the config self-describing."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        tracked = [
+            {
+                "topic0": "0x" + "b" * 64,
+                "signature": "AuthorityUpdated(address,address)",
+                "event_type": "authority_updated",
+                "controller_id": "external_contract:authority",
+                "inputs": [],
+            }
+        ]
+        config = _build_monitoring_config(None, [], "regular", tracked)
+        assert config.get("watch_authority") is True
+
+    def test_empty_tracked_topics_omitted(self):
+        """No tracked_topics arg → no field on monitoring_config (avoids
+        polluting existing rows with empty lists during a reconcile)."""
+        from services.monitoring.enrollment import _build_monitoring_config
+
+        config = _build_monitoring_config(None, [], "regular")
+        assert "tracked_topics" not in config
+        assert "watch_authority" not in config
+
 
 # ---------------------------------------------------------------------------
 # Tests for _build_initial_state
@@ -269,6 +315,39 @@ class TestBuildInitialState:
         state = _build_initial_state(contract, [cv])
         assert state["owner"] == "0x" + "e" * 40
 
+    def test_ignores_pending_owner_and_other_substring_matches(self):
+        """The old substring match latched ``pendingOwner``/``previousOwner``/
+        ``roleOwner``/``ownerFee`` into ``last_known_state.owner`` and the
+        scanner would false-positive an OwnershipTransferred when the live
+        owner finally diverged. Only the canonical Ownable slot counts.
+        """
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        active = _mock_controller_value(controller_id="state_variable:owner", value="0x" + "a" * 40)
+        pending = _mock_controller_value(controller_id="state_variable:pendingOwner", value="0x" + "b" * 40)
+        previous = _mock_controller_value(controller_id="state_variable:previousOwner", value="0x" + "c" * 40)
+        role_owner = _mock_controller_value(controller_id="state_variable:roleOwner", value="0x" + "d" * 40)
+        # Order: active first, then noise. Last-write-wins under the old
+        # substring match would have latched the last entry.
+        state = _build_initial_state(contract, [active, pending, previous, role_owner])
+        assert state["owner"] == "0x" + "a" * 40
+
+    def test_ignores_state_variable_destination_admin(self):
+        """``state_variable:foo.adminAddress`` is not the canonical
+        Ownable admin slot — same lesson as the owner test, applied to
+        admin matching.
+        """
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        active = _mock_controller_value(controller_id="state_variable:admin", value="0x" + "1" * 40)
+        nested = _mock_controller_value(
+            controller_id="state_variable:rolesAuthority.pendingAdmin", value="0x" + "2" * 40
+        )
+        state = _build_initial_state(contract, [active, nested])
+        assert state["admin"] == "0x" + "1" * 40
+
 
 # ---------------------------------------------------------------------------
 # Tests for maybe_enroll_protocol
@@ -277,38 +356,42 @@ class TestBuildInitialState:
 
 class TestMaybeEnrollProtocol:
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
-    def test_skips_when_in_flight_jobs(self, mock_enroll, db_session):
+    def test_fires_with_in_flight_siblings(self, mock_enroll):
+        """A queued / processing sibling must not block enrollment.
+
+        The trigger used to short-circuit on
+        ``Job.status IN (queued, processing)`` for the protocol; that
+        gate produced silent skips when a sibling crashed before
+        transitioning out of those statuses and had no fallback. The
+        anvil integration counterpart is
+        ``test_in_flight_sibling_job_does_not_block_enrollment``.
+        """
         from services.monitoring.enrollment import maybe_enroll_protocol
 
-        # We need to mock the session queries since Job uses JSONB
+        # The single remaining query is the "≥1 completed job" gate;
+        # returning a row means we proceed to enroll.
         mock_session = MagicMock()
-        # in-flight query returns a result
-        mock_in_flight = MagicMock()
-        mock_in_flight.scalars.return_value.first.return_value = MagicMock()
-        mock_session.execute.return_value = mock_in_flight
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = MagicMock()
+        mock_session.execute.return_value = result
 
-        result = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
-        assert result is False
-        mock_enroll.assert_not_called()
+        fired = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
+        assert fired is True
+        # Fast-path hint skips the expensive primary-controller pass
+        # (enroll_controllers=False); the reconciler converges controllers.
+        mock_enroll.assert_called_once_with(mock_session, 1, "http://rpc", "ethereum", None, enroll_controllers=False)
 
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_skips_when_no_completed_jobs(self, mock_enroll):
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         mock_session = MagicMock()
-        # in-flight returns None, completed returns None
-        call_count = [0]
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        mock_session.execute.return_value = result
 
-        def mock_execute(stmt):
-            call_count[0] += 1
-            result = MagicMock()
-            result.scalars.return_value.first.return_value = None
-            return result
-
-        mock_session.execute.side_effect = mock_execute
-
-        result = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
-        assert result is False
+        fired = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
+        assert fired is False
         mock_enroll.assert_not_called()
 
 
@@ -537,6 +620,76 @@ def _create_completed_job(session, address, protocol_id):
     return job
 
 
+def _grant_primary_authority(
+    session,
+    contract_id,
+    principal_address,
+    function_name="setOwner",
+    resolved_type=None,
+    effect_labels=None,
+    details=None,
+):
+    """Make ``principal_address`` a primary controller of the contract by
+    attaching a ``FunctionPrincipal`` row. ``assign_primary_controllers``
+    uses FP membership as eligibility, so any CGN principal needs at
+    least one matching FP row on the contract to survive the enrollment
+    filter.
+
+    ``resolved_type`` types the FP row (Safe / Timelock / proxy_admin).
+    Enrollment seeds candidates from this when the address has no usable
+    ``control_graph_nodes`` type, mirroring the Surface canvas.
+
+    ``effect_labels`` sets the function's effect labels, which the
+    co-controller rule reads — a privileged label (e.g. ``pause_toggle``)
+    keeps a non-primary caller as a monitored co-controller.
+    """
+    _grant_shared_authority(
+        session,
+        contract_id,
+        [principal_address],
+        function_name=function_name,
+        resolved_type=resolved_type,
+        effect_labels=effect_labels,
+        details=details,
+    )
+
+
+def _grant_shared_authority(
+    session,
+    contract_id,
+    principal_addresses,
+    function_name="setOwner",
+    resolved_type=None,
+    effect_labels=None,
+    details=None,
+):
+    """Attach a single ``EffectiveFunction`` callable by *every* address in
+    *principal_addresses*. The shared caller-set size is what the co-controller
+    rule uses to tell a tightly-gated governance function from a broad
+    permissionless whitelist (e.g. ``createBid`` shared by dozens of bidders),
+    so a faithful bidder model needs one function with many callers — not one
+    function per caller.
+    """
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    ef = EffectiveFunction(
+        contract_id=contract_id, function_name=function_name, authority_public=False, effect_labels=effect_labels
+    )
+    session.add(ef)
+    session.flush()
+    for addr in principal_addresses:
+        session.add(
+            FunctionPrincipal(
+                function_id=ef.id,
+                address=addr,
+                principal_type="controller",
+                resolved_type=resolved_type,
+                details=details,
+            )
+        )
+    session.flush()
+
+
 @requires_postgres
 class TestEnrollmentIntegration:
     """End-to-end enrollment with real Contract, ContractSummary, and
@@ -617,8 +770,10 @@ class TestEnrollmentIntegration:
         assert proxy_mc.monitoring_config["watch_pause"] is True
         assert proxy_mc.last_known_state["implementation"] == "0x" + "a2" * 20
         assert proxy_mc.last_known_state["owner"] == "0x" + "b1" * 20
-        # EIP-1967 proxies emit events — no polling needed
-        assert proxy_mc.needs_polling is False
+        # The polling-plan projection still emits an EIP-1967 vendored
+        # storage-slot entry as a safety net, so needs_polling=True.
+        # Duplicate poll events are suppressed by the scan/poll dedupe.
+        assert proxy_mc.needs_polling is True
         # Proxy should also have a WatchedProxy row linked
         assert proxy_mc.watched_proxy_id is not None
 
@@ -683,8 +838,11 @@ class TestEnrollmentIntegration:
 
         # Must be proxy, not regular
         assert mc.contract_type == "proxy"
-        # EIP-1967 proxies emit events — no polling needed
-        assert mc.needs_polling is False
+        # EIP-1967 still emits Upgraded events the scanner catches, but
+        # the poll path now runs as a belt-and-suspenders safety net
+        # for the same impl slot. The poll/scan dedupe filter swallows
+        # the duplicate so this is no-cost notification-wise.
+        assert mc.needs_polling is True
         assert mc.monitoring_config["watch_upgrades"] is True
         assert mc.monitoring_config["watch_ownership"] is True
 
@@ -748,9 +906,72 @@ class TestEnrollmentIntegration:
         # No WatchedProxy should be created
         assert mc.watched_proxy_id is None
 
-    def test_enroll_discovers_controllers_from_graph(self, pg_session):
-        """ControlGraphNode rows with safe/timelock types get their own
-        MonitoredContract rows automatically."""
+    def test_enroll_enrolls_primary_controllers(self, pg_session):
+        """Principals that primary-control a contract get their own
+        MonitoredContract rows — Safe and Timelock — while EOAs are dropped
+        (nothing event-bearing to monitor). These are the winner-take-all
+        primaries the Surface canvas groups by; enrollment shares that
+        computation via ``controllers_for_protocol``.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        safe_addr = "0x" + "e1" * 20
+        timelock_addr = "0x" + "e2" * 20
+        eoa_addr = "0x" + "e3" * 20
+
+        # Each principal is the sole FP controller of its own contract, so each
+        # wins primary_for for that contract (no winner-take-all contest).
+        for caddr, cname, principal, ptype, fn in [
+            ("0x" + "d1" * 20, "GovernedBySafe", safe_addr, "safe", "setOwner"),
+            ("0x" + "d2" * 20, "GovernedByTimelock", timelock_addr, "timelock", "schedule"),
+            ("0x" + "d3" * 20, "GovernedByEOA", eoa_addr, "eoa", "poke"),
+        ]:
+            contract = Contract(address=caddr, chain="ethereum", protocol_id=proto.id, contract_name=cname)
+            pg_session.add(contract)
+            pg_session.flush()
+            _create_completed_job(pg_session, caddr, proto.id)
+            _grant_primary_authority(pg_session, contract.id, principal, function_name=fn, resolved_type=ptype)
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        # Safe primary controller enrolled.
+        safe_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
+        ).scalar_one()
+        assert safe_mc.contract_type == "safe"
+        assert safe_mc.monitoring_config["watch_safe_signers"] is True
+        assert safe_mc.needs_polling is True
+
+        # Timelock primary controller enrolled.
+        tl_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
+        ).scalar_one()
+        assert tl_mc.contract_type == "timelock"
+        assert tl_mc.monitoring_config["watch_timelock"] is True
+
+        # EOA primary controller is NOT monitored (dropped upstream).
+        eoa_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == eoa_addr)
+        ).scalar_one_or_none()
+        assert eoa_mc is None
+
+    def test_enroll_cgn_unknown_governance_safe_still_enrolls(self, pg_session):
+        """A governance Safe whose ControlGraphNode is typed ``unknown`` (the
+        resolution-stage walk never classified it) must still enroll, because
+        enrollment derives controllers from the shared governance computation,
+        which types principals from ``FunctionPrincipal`` and picks the primary
+        controller per contract. The Safe wins primary_for over a co-controlling
+        EOA, and the EOA is dropped (not monitored). Regression for the etherfi
+        governance Safe that showed on Surface but was missing from monitoring
+        because its CGN type was ``unknown``.
+        """
         from db.models import Contract, ControlGraphNode, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -759,69 +980,174 @@ class TestEnrollmentIntegration:
         pg_session.flush()
 
         contract = Contract(
-            address="0x" + "d1" * 20,
+            address="0x" + "d2" * 20,
             chain="ethereum",
             protocol_id=proto.id,
-            contract_name="TestContract",
+            contract_name="EtherFiTimelock",
         )
         pg_session.add(contract)
         pg_session.flush()
-        _create_completed_job(pg_session, "0x" + "d1" * 20, proto.id)
+        _create_completed_job(pg_session, "0x" + "d2" * 20, proto.id)
 
-        safe_addr = "0x" + "e1" * 20
-        timelock_addr = "0x" + "e2" * 20
-        eoa_addr = "0x" + "e3" * 20
+        gov_safe = "0x" + "e4" * 20
+        gov_eoa = "0x" + "e5" * 20
 
-        pg_session.add_all(
-            [
-                ControlGraphNode(
-                    contract_id=contract.id,
-                    address=safe_addr,
-                    node_type="safe",
-                    resolved_type="safe",
-                    label="Multi-sig",
-                ),
-                ControlGraphNode(
-                    contract_id=contract.id,
-                    address=timelock_addr,
-                    node_type="timelock",
-                    resolved_type="timelock",
-                    label="Timelock",
-                ),
-                ControlGraphNode(
-                    contract_id=contract.id,
-                    address=eoa_addr,
-                    node_type="eoa",
-                    resolved_type="eoa",
-                    label="Deployer",
-                ),
-            ]
+        # CGN sees the Safe but the resolution-stage classifier left it
+        # ``unknown`` — the exact state that hid it from monitoring before.
+        pg_session.add(
+            ControlGraphNode(
+                contract_id=contract.id,
+                address=gov_safe,
+                node_type="unknown",
+                resolved_type="unknown",
+                label="governance",
+            )
+        )
+        # FunctionPrincipal types the Safe ``safe`` (live classify fallback at
+        # write time) and grants both addresses call authority; the Safe wins
+        # the per-contract primary-controller contest over the EOA.
+        _grant_primary_authority(pg_session, contract.id, gov_safe, function_name="cancel", resolved_type="safe")
+        _grant_primary_authority(pg_session, contract.id, gov_eoa, function_name="execute", resolved_type="eoa")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        # Safe enrolls as a primary controller even though CGN typed it ``unknown``.
+        safe_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == gov_safe)
+        ).scalar_one()
+        assert safe_mc.contract_type == "safe"
+        assert safe_mc.is_active is True
+        assert safe_mc.enrollment_source == "auto"
+
+        # EOA stays unenrolled — EOAs are dropped, and it lost the contest anyway.
+        eoa_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == gov_eoa)
+        ).scalar_one_or_none()
+        assert eoa_mc is None
+
+    def test_enroll_excludes_permissionless_bidder_safes(self, pg_session):
+        """Safes whose only authority is a broad, permissionless function are
+        not enrolled — neither as primary (they lose the contest) nor as
+        co-controllers (the function is shared by too many callers to read as a
+        governance gate). Mirrors EtherFi's ``createBid`` on AuctionManager,
+        shared by ~33 whitelisted bidders. The bare FP-authority signal alone
+        over-enrolled every bidder.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        big_safe = "0x" + "e6" * 20  # governs the second contract -> wins, enrolled
+        # Many bidder safes share one createBid function -> permissionless,
+        # so the co-controller rule's caller-set arm drops them.
+        bidder_safes = ["0x" + f"{0xB0 + i:02x}" * 20 for i in range(6)]
+
+        auction = Contract(
+            address="0x" + "d1" * 20, chain="ethereum", protocol_id=proto.id, contract_name="AuctionManager"
+        )
+        governed = Contract(address="0x" + "d2" * 20, chain="ethereum", protocol_id=proto.id, contract_name="Governed")
+        pg_session.add_all([auction, governed])
+        pg_session.flush()
+        _create_completed_job(pg_session, auction.address, proto.id)
+        _create_completed_job(pg_session, governed.address, proto.id)
+
+        # One shared createBid function callable by big_safe + every bidder (7
+        # callers > the gate threshold), labelled only external_contract_call
+        # (no privileged label). big_safe also governs the second contract, so
+        # it wins the auction's primary contest and is the only one enrolled.
+        _grant_shared_authority(
+            pg_session,
+            auction.id,
+            [big_safe, *bidder_safes],
+            function_name="createBid",
+            resolved_type="safe",
+            effect_labels=["external_contract_call"],
+        )
+        _grant_primary_authority(pg_session, governed.id, big_safe, function_name="setOwner", resolved_type="safe")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        # The governing Safe is enrolled.
+        assert (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == big_safe))
+            .scalar_one()
+            .contract_type
+            == "safe"
+        )
+        # No permissionless bidder Safe is enrolled.
+        for bidder in bidder_safes:
+            assert (
+                pg_session.execute(
+                    select(MonitoredContract).where(MonitoredContract.address == bidder)
+                ).scalar_one_or_none()
+                is None
+            ), f"bidder {bidder} should not be enrolled"
+
+    def test_enroll_includes_privileged_co_controller(self, pg_session):
+        """A guardian Safe that holds a privileged power (``pause``) on a
+        contract it LOSES the primary contest for is still enrolled — as a
+        co-controller. Regression for EtherFi 0x2aca, a 4-of-7 pause /
+        fund-recovery multisig hidden from monitoring because the
+        timelock-passthrough governance Safe won all 8 of its contracts.
+        Monitoring must watch it even though the Surface canvas groups the
+        contract under the winner.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        gov_safe = "0x" + "e6" * 20  # governs both contracts -> wins both primaries
+        guardian = "0x" + "e7" * 20  # can pause one contract -> loses primary, co-controls
+
+        pool = Contract(address="0x" + "d1" * 20, chain="ethereum", protocol_id=proto.id, contract_name="LiquidityPool")
+        other = Contract(address="0x" + "d2" * 20, chain="ethereum", protocol_id=proto.id, contract_name="Other")
+        pg_session.add_all([pool, other])
+        pg_session.flush()
+        _create_completed_job(pg_session, pool.address, proto.id)
+        _create_completed_job(pg_session, other.address, proto.id)
+
+        # gov_safe governs both contracts (owns more) so it wins pool's primary
+        # over the guardian. The guardian's only authority is pause on pool — a
+        # privileged label, so it's kept as a co-controller despite losing.
+        _grant_primary_authority(pg_session, pool.id, gov_safe, function_name="setOwner", resolved_type="safe")
+        _grant_primary_authority(pg_session, other.id, gov_safe, function_name="setOwner", resolved_type="safe")
+        _grant_primary_authority(
+            pg_session,
+            pool.id,
+            guardian,
+            function_name="pauseContract",
+            resolved_type="safe",
+            effect_labels=["pause_toggle"],
         )
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
             enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
-        # Safe controller should be enrolled
-        safe_mc = pg_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
+        # The winner is enrolled (primary).
+        assert (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == gov_safe))
+            .scalar_one()
+            .contract_type
+            == "safe"
+        )
+        # The guardian is enrolled too — as a co-controller, not a primary.
+        guardian_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == guardian)
         ).scalar_one()
-        assert safe_mc.contract_type == "safe"
-        assert safe_mc.monitoring_config["watch_safe_signers"] is True
-        assert safe_mc.needs_polling is True
-
-        # Timelock controller should be enrolled
-        tl_mc = pg_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
-        ).scalar_one()
-        assert tl_mc.contract_type == "timelock"
-        assert tl_mc.monitoring_config["watch_timelock"] is True
-
-        # EOA should NOT be enrolled (regular type, skipped)
-        eoa_mc = pg_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == eoa_addr)
-        ).scalar_one_or_none()
-        assert eoa_mc is None
+        assert guardian_mc.contract_type == "safe"
+        assert guardian_mc.is_active is True
+        assert guardian_mc.monitoring_config["watch_safe_signers"] is True
 
     def test_enroll_is_idempotent(self, pg_session):
         """Calling enroll_protocol_contracts twice doesn't duplicate rows."""
@@ -889,6 +1215,7 @@ class TestEnrollmentIntegration:
             resolved_type="safe",
         )
         pg_session.add(node)
+        _grant_primary_authority(pg_session, contract.id, safe_addr)
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(1000)):
@@ -905,3 +1232,426 @@ class TestEnrollmentIntegration:
             "Controller MonitoredContract was deactivated by stale-detection — flush ordering bug"
         )
         assert safe_mc.contract_type == "safe"
+
+    def test_state_variable_destination_safe_is_not_enrolled(self, pg_session):
+        """A Safe that only appears as a state-variable destination
+        (CGN with no FunctionPrincipal authority on any function) must
+        NOT become an active MonitoredContract — that's the etherfi
+        ``accountantState.payoutAddress`` misclassification this whole
+        pipeline change is fixing.
+        """
+        from db.models import Contract, ControlGraphNode, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d2" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d2" * 20, proto.id)
+
+        real_safe = "0x" + "cc" * 20
+        fee_safe = "0x" + "ee" * 20
+        pg_session.add_all(
+            [
+                ControlGraphNode(
+                    contract_id=contract.id,
+                    address=real_safe,
+                    node_type="controller",
+                    resolved_type="safe",
+                    label="owner",
+                    depth=1,
+                ),
+                ControlGraphNode(
+                    contract_id=contract.id,
+                    address=fee_safe,
+                    node_type="controller",
+                    resolved_type="safe",
+                    label="accountantState.payoutAddress",
+                    depth=1,
+                ),
+            ]
+        )
+        # Only the real Safe holds function-level authority.
+        _grant_primary_authority(pg_session, contract.id, real_safe, function_name="transferOwnership")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(2000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        real_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == real_safe)
+        ).scalar_one()
+        assert real_mc.is_active is True
+        assert real_mc.contract_type == "safe"
+
+        fee_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == fee_safe)
+        ).scalar_one_or_none()
+        assert fee_mc is None, (
+            "Non-primary Safe was enrolled — the FP-based eligibility filter "
+            "didn't fire for accountantState.payoutAddress-style destinations"
+        )
+
+    def test_re_enrollment_demotes_safe_that_lost_authority(self, pg_session):
+        """A Safe enrolled in a prior run that has since lost its
+        function-level authority (no remaining FP rows) gets
+        ``is_active=False`` + ``enrollment_source='auto_deprimary'``
+        on the next ``enroll_protocol_contracts`` call. The row is
+        kept (not deleted) so its MonitoredEvent history survives.
+        """
+        from db.models import (
+            Contract,
+            ControlGraphNode,
+            EffectiveFunction,
+            FunctionPrincipal,
+            Protocol,
+        )
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d3" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d3" * 20, proto.id)
+
+        safe_addr = "0x" + "77" * 20
+        pg_session.add(
+            ControlGraphNode(
+                contract_id=contract.id,
+                address=safe_addr,
+                node_type="controller",
+                resolved_type="safe",
+                label="owner",
+                depth=1,
+            )
+        )
+        _grant_primary_authority(pg_session, contract.id, safe_addr, function_name="setOwner")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(3000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        first = pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
+        assert first.is_active is True
+        assert first.enrollment_source == "auto"
+
+        # Simulate the Safe losing its function authority (e.g. the
+        # owner was rotated). Drop the EF/FP rows for this contract
+        # specifically — a global FP wipe would clobber state from any
+        # other test sharing the test DB.
+        ef_ids = [
+            ef_id
+            for (ef_id,) in pg_session.execute(
+                select(EffectiveFunction.id).where(EffectiveFunction.contract_id == contract.id)
+            ).all()
+        ]
+        if ef_ids:
+            pg_session.execute(delete(FunctionPrincipal).where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(delete(EffectiveFunction).where(EffectiveFunction.id.in_(ef_ids)))
+        pg_session.commit()
+        pg_session.expire_all()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(4000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        demoted = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
+        ).scalar_one()
+        assert demoted.is_active is False, (
+            f"Demoted Safe should be deactivated, got is_active={demoted.is_active} source={demoted.enrollment_source}"
+        )
+        assert demoted.enrollment_source == "auto_deprimary"
+
+    def test_zombie_timelock_row_demoted_when_cgn_evidence_disappears(self, pg_session):
+        """A timelock enrolled in a prior run whose CGN node is later
+        rebuilt away — and whose FP authority is also gone — must be
+        deactivated on re-enrollment. Observed on prod-etherfi: 4 of 5
+        monitored timelocks are zombies with no current evidence in
+        CGN, FP, or fund_flows. The deployed code had no path to
+        notice them because the CGN-walk-then-enroll loop only sees
+        addresses still in CGN; orphan rows survived indefinitely.
+        """
+        from db.models import (
+            Contract,
+            ControlGraphNode,
+            EffectiveFunction,
+            FunctionPrincipal,
+            Protocol,
+        )
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "d4" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            is_proxy=False,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, "0x" + "d4" * 20, proto.id)
+
+        timelock_addr = "0x" + "99" * 20
+        cgn_node = ControlGraphNode(
+            contract_id=contract.id,
+            address=timelock_addr,
+            node_type="controller",
+            resolved_type="timelock",
+            label="owner",
+            depth=1,
+        )
+        pg_session.add(cgn_node)
+        _grant_primary_authority(pg_session, contract.id, timelock_addr, function_name="schedule")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(5000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        first = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
+        ).scalar_one()
+        assert first.is_active is True
+        assert first.contract_type == "timelock"
+        assert first.enrollment_source == "auto"
+
+        # Simulate a re-analysis that drops both the CGN node AND the
+        # function authority — the zombie state observed on prod.
+        pg_session.delete(cgn_node)
+        ef_ids = [
+            ef_id
+            for (ef_id,) in pg_session.execute(
+                select(EffectiveFunction.id).where(EffectiveFunction.contract_id == contract.id)
+            ).all()
+        ]
+        if ef_ids:
+            pg_session.execute(delete(FunctionPrincipal).where(FunctionPrincipal.function_id.in_(ef_ids)))
+            pg_session.execute(delete(EffectiveFunction).where(EffectiveFunction.id.in_(ef_ids)))
+        pg_session.commit()
+        pg_session.expire_all()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value=hex(6000)):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+
+        zombie = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
+        ).scalar_one()
+        assert zombie.is_active is False, (
+            f"Zombie timelock should be demoted, got is_active={zombie.is_active} source={zombie.enrollment_source}"
+        )
+        assert zombie.enrollment_source == "auto_deprimary"
+
+
+@requires_postgres
+class TestControlGraphTypeReconciliation:
+    """``reconcile_control_graph_types`` folds authoritative FunctionPrincipal
+    typing back into ``control_graph_nodes`` so every CGN consumer reads one
+    consistent type — the fix for governance principals the resolution stage
+    left ``unknown``."""
+
+    @staticmethod
+    def _proto_contract(session, addr, name="EtherFiTimelock"):
+        from db.models import Contract, Protocol
+
+        proto = Protocol(name=PROTO_NAME)
+        session.add(proto)
+        session.flush()
+        contract = Contract(address=addr, chain="ethereum", protocol_id=proto.id, contract_name=name)
+        session.add(contract)
+        session.flush()
+        return contract
+
+    @staticmethod
+    def _add_cgn(session, contract_id, addr, resolved_type):
+        from db.models import ControlGraphNode
+
+        session.add(
+            ControlGraphNode(
+                contract_id=contract_id, address=addr, node_type=resolved_type, resolved_type=resolved_type
+            )
+        )
+        session.flush()
+
+    @staticmethod
+    def _node_type(session, contract_id, addr):
+        from db.models import ControlGraphNode
+
+        return (
+            session.execute(
+                select(ControlGraphNode.resolved_type).where(
+                    ControlGraphNode.contract_id == contract_id,
+                    ControlGraphNode.address == addr,
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    def test_upgrades_unknown_cgn_from_fp(self, pg_session):
+        """A node the resolution stage left ``unknown`` is upgraded to the
+        type FunctionPrincipal assigned it."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "a3" * 20)
+        gov_safe = "0x" + "e6" * 20
+        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
+        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
+
+    def test_does_not_downgrade_concrete_cgn(self, pg_session):
+        """A graph-walk-determined concrete type is never overwritten, even if
+        FunctionPrincipal disagrees."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "a4" * 20)
+        addr = "0x" + "e7" * 20
+        self._add_cgn(pg_session, c.id, addr, "timelock")
+        _grant_primary_authority(pg_session, c.id, addr, function_name="schedule", resolved_type="safe")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+        assert self._node_type(pg_session, c.id, addr) == "timelock"
+
+    def test_skips_non_governance_fp_types(self, pg_session):
+        """EOA / contract FP types are left alone — only Safe / Timelock /
+        proxy admin (monitored principal kinds) are folded back."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "a5" * 20)
+        eoa_addr = "0x" + "e8" * 20
+        self._add_cgn(pg_session, c.id, eoa_addr, "unknown")
+        _grant_primary_authority(pg_session, c.id, eoa_addr, function_name="poke", resolved_type="eoa")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+        assert self._node_type(pg_session, c.id, eoa_addr) == "unknown"
+
+    def test_idempotent(self, pg_session):
+        """A second run after convergence upgrades nothing."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "a6" * 20)
+        addr = "0x" + "e9" * 20
+        self._add_cgn(pg_session, c.id, addr, "unknown")
+        _grant_primary_authority(pg_session, c.id, addr, function_name="upgradeTo", resolved_type="proxy_admin")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        pg_session.flush()
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+        assert self._node_type(pg_session, c.id, addr) == "proxy_admin"
+
+    @staticmethod
+    def _node_details(session, contract_id, addr):
+        from db.models import ControlGraphNode
+
+        return (
+            session.execute(
+                select(ControlGraphNode.details).where(
+                    ControlGraphNode.contract_id == contract_id,
+                    ControlGraphNode.address == addr,
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    def test_folds_safe_owners_and_threshold_from_fp(self, pg_session):
+        """Upgrading a node to ``safe`` also folds the signer set + threshold
+        the classifier stored on FunctionPrincipal — so the node doesn't end up
+        asserting ``safe`` with no owners (the bug that hid a multisig's signers
+        on the Surface canvas)."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b1" * 20)
+        gov_safe = "0x" + "f1" * 20
+        owners = ["0x" + "11" * 20, "0x" + "22" * 20, "0x" + "33" * 20]
+        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            gov_safe,
+            function_name="cancel",
+            resolved_type="safe",
+            details={"owners": owners, "threshold": 2},
+        )
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
+        details = self._node_details(pg_session, c.id, gov_safe) or {}
+        assert details.get("owners") == owners
+        assert details.get("threshold") == 2
+
+    def test_backfills_config_onto_already_typed_node(self, pg_session):
+        """A node a prior *type-only* reconcile already flipped to ``safe`` (no
+        owners) is repaired on the next run — the selector revisits
+        governance-typed rows so existing data converges, and re-running once
+        backfilled changes nothing."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b2" * 20)
+        gov_safe = "0x" + "f2" * 20
+        owners = ["0x" + "44" * 20, "0x" + "55" * 20]
+        # Node is already 'safe' but carries no owners — the half-reconciled state.
+        self._add_cgn(pg_session, c.id, gov_safe, "safe")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            gov_safe,
+            function_name="cancel",
+            resolved_type="safe",
+            details={"owners": owners, "threshold": 2},
+        )
+        pg_session.commit()
+
+        # No type change, but config is backfilled → counts as one row changed.
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        pg_session.flush()
+        assert (self._node_details(pg_session, c.id, gov_safe) or {}).get("owners") == owners
+        # Converged: a second run touches nothing.
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+
+    def test_does_not_fold_owners_onto_disagreeing_type(self, pg_session):
+        """A safe's owners are never attached to a node the resolution stage
+        concretely typed ``timelock`` — type stays, and no safe-shaped config
+        leaks onto it."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b3" * 20)
+        addr = "0x" + "f3" * 20
+        self._add_cgn(pg_session, c.id, addr, "timelock")
+        _grant_primary_authority(
+            pg_session,
+            c.id,
+            addr,
+            function_name="schedule",
+            resolved_type="safe",
+            details={"owners": ["0x" + "66" * 20], "threshold": 1},
+        )
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+        assert self._node_type(pg_session, c.id, addr) == "timelock"
+        assert not (self._node_details(pg_session, c.id, addr) or {}).get("owners")

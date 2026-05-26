@@ -10,16 +10,19 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.contract_materializations import find_by_address, hydrate_tracking_plan
 from db.models import (
     Contract,
     ContractSummary,
-    ControlGraphNode,
     ControllerValue,
     Job,
     JobStatus,
     MonitoredContract,
     WatchedProxy,
 )
+from services.governance.control_graph_types import reconcile_control_graph_types
+from services.monitoring.event_topics import extract_governance_topics
+from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -32,29 +35,29 @@ def maybe_enroll_protocol(
     chain: str = "ethereum",
     exclude_job_id: Any = None,
 ) -> bool:
-    """Enroll a protocol's contracts if all jobs are complete.
+    """Low-latency enrollment hint — fires from PolicyWorker.process()
+    immediately after a job completes so monitored_contracts catches up
+    in the common case without waiting for the reconciler tick.
 
-    Called at the end of PolicyWorker.process(). Returns True if enrollment
-    was performed, False if skipped (in-flight jobs or no completed jobs).
+    Returns True if enrollment ran, False if there's nothing to enroll
+    (no completed jobs yet for the protocol).
 
-    *exclude_job_id* should be the current job's id — it's still in
-    ``processing`` status when this is called from inside ``process()``,
-    so it must be excluded from the in-flight check.
+    *exclude_job_id* identifies the calling PolicyWorker's job (still
+    ``processing`` because this is invoked from inside ``process()``)
+    so ``enroll_protocol_contracts`` can include its address in the
+    analyzed-addrs set despite the not-yet-flipped status.
+
+    Historical note: this used to gate on
+    ``Job.status IN (queued, processing)`` to avoid running mid-batch.
+    The gate produced silent skips when a sibling job hung in those
+    statuses without ever transitioning (terminal discovery failures
+    were the observed culprit), and there was no fallback trigger.
+    ``enroll_protocol_contracts`` is idempotent — partial enrollment
+    is fine and gets upserted by the next caller — so the gate was a
+    fragile premature optimization. The reconciler in
+    ``services/monitoring/reconciler.py`` is the convergence backstop
+    for anything this fast-path misses.
     """
-    # Check for in-flight jobs for this protocol (excluding the calling job)
-    stmt = select(Job).where(
-        Job.protocol_id == protocol_id,
-        Job.status.in_([JobStatus.queued, JobStatus.processing]),
-    )
-    if exclude_job_id is not None:
-        stmt = stmt.where(Job.id != exclude_job_id)
-    in_flight = session.execute(stmt).scalars().first()
-
-    if in_flight:
-        logger.debug("Protocol %s has in-flight jobs, skipping enrollment", protocol_id)
-        return False
-
-    # Check that at least 1 completed job exists
     completed = (
         session.execute(
             select(Job).where(
@@ -70,7 +73,11 @@ def maybe_enroll_protocol(
         logger.debug("Protocol %s has no completed jobs, skipping enrollment", protocol_id)
         return False
 
-    enroll_protocol_contracts(session, protocol_id, rpc_url, chain, exclude_job_id)
+    # Fast-path hint: enroll contract rows immediately but skip the
+    # primary-controller pass (it runs build_governance_view per call). The
+    # reconciler converges controllers on its cadence; manual re-enroll runs
+    # them on demand.
+    enroll_protocol_contracts(session, protocol_id, rpc_url, chain, exclude_job_id, enroll_controllers=False)
     return True
 
 
@@ -80,15 +87,25 @@ def enroll_protocol_contracts(
     rpc_url: str,
     chain: str = "ethereum",
     calling_job_id: Any = None,
+    enroll_controllers: bool = True,
 ) -> list[MonitoredContract]:
     """Create MonitoredContract rows for all contracts in a protocol.
 
     Performs upsert (ON CONFLICT address+chain DO UPDATE) so this is
     idempotent. Also creates WatchedProxy rows for proxy contracts and
-    discovers controller addresses (safes, timelocks) from the control graph.
+    enrolls the protocol's controllers — primary + privileged co-controllers
+    (safes, timelocks, proxy admins).
 
     *calling_job_id* is the job that triggered enrollment — it's still in
     ``processing`` status, so we include it alongside completed jobs.
+
+    *enroll_controllers* gates the primary-controller pass, which runs the
+    Surface governance computation (``build_governance_view``) and is the
+    expensive part. The per-job fast-path hint (``maybe_enroll_protocol``)
+    passes ``False`` so it stays cheap; the reconciler and the manual
+    re-enroll route leave it ``True``, so controllers converge on the
+    reconcile cadence (or immediately on demand). Contract rows and the CGN
+    type reconciliation run regardless.
 
     Returns list of created/updated MonitoredContract rows.
     """
@@ -120,6 +137,19 @@ def enroll_protocol_contracts(
         logger.info("Protocol %s has no analyzed contracts, nothing to enroll", protocol_id)
         return []
 
+    # Fold authoritative FunctionPrincipal typing back into control_graph_nodes.
+    # The resolution stage leaves a governance Safe/Timelock reachable only
+    # through per-function authority typed ``unknown`` (its graph walk never
+    # classified it). Enrollment itself no longer reads CGN types — it enrolls
+    # the primary controllers computed by ``build_governance_view`` — but the
+    # other CGN consumers (the chat context layer, the analysis-detail graph)
+    # still read these rows, so reconciling keeps the persisted graph
+    # consistent with FP. Idempotent; only upgrades unknown → concrete.
+    reconciled = reconcile_control_graph_types(session, [c.id for c in contracts])
+    if reconciled:
+        session.flush()
+        logger.info("Reconciled %d control-graph node types for protocol %s", reconciled, protocol_id)
+
     # Get current block number for last_scanned_block
     try:
         result = rpc_request(rpc_url, "eth_blockNumber", [])
@@ -146,10 +176,24 @@ def enroll_protocol_contracts(
         # Determine contract type
         contract_type = _determine_contract_type(contract, summary, cv_rows)
 
+        # Discover per-contract governance event topics + raw tracking
+        # plan from the static analysis. Used twice: ``tracked_topics``
+        # feeds the watcher's event dispatcher, and the raw plan feeds
+        # ``build_polling_plan`` which projects pollable getters /
+        # storage slots from the analyzer's tracked_controllers.
+        tracked_topics, tracking_plan = _load_tracking_plan_artifacts(session, contract)
+
+        polling_plan = build_polling_plan(
+            contract_type=contract_type,
+            proxy_type=contract.proxy_type,
+            tracking_plan=tracking_plan,
+            tracked_topics=tracked_topics,
+        )
+
         # Build monitoring config and initial state
-        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type)
-        initial_state = _build_initial_state(contract, cv_rows)
-        needs_poll = _needs_polling(contract_type, contract)
+        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type, tracked_topics, polling_plan)
+        initial_state = _build_initial_state(contract, cv_rows, polling_plan)
+        needs_poll = bool(polling_plan)
 
         # Check for existing MonitoredContract
         existing = session.execute(
@@ -197,25 +241,38 @@ def enroll_protocol_contracts(
 
         enrolled.append(mc)
 
-    # Discover controller addresses from the control graph
-    _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
-
-    # Flush so controller rows are visible to the stale-detection query below.
-    session.flush()
+    # Enroll the protocol's controllers (primary + privileged co-controllers).
+    # This runs build_governance_view (the Surface computation), so it's gated
+    # off the per-job fast-path hint and runs on the reconciler cadence + manual
+    # re-enroll instead — the low-latency-hint / cadence-convergence split the
+    # reconciler module documents. Controllers therefore land in the Monitoring
+    # tab within one reconcile interval of analysis, or immediately via
+    # ``POST /api/protocols/{id}/re-enroll``. The stale-detection below
+    # re-includes existing controller rows from the DB, so skipping this pass
+    # never deactivates controllers a prior reconciler enrolled.
+    if enroll_controllers:
+        _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
+        # Flush so controller rows are visible to the stale-detection query below.
+        session.flush()
 
     # Deactivate stale MonitoredContract rows for this protocol that are no
     # longer in the enrolled set (e.g. inventory addresses that were never
     # analyzed).  We keep them (is_active=False) rather than deleting so
     # historical events are preserved.
     enrolled_addrs = {mc.address for mc in enrolled}
-    # Also include controller-discovered addresses
+    # Also include controller-discovered addresses so the stale-detection
+    # query below doesn't deactivate rows that ``_enroll_controller_addresses``
+    # just enrolled or kept active. Must mirror ``_CONTROLLER_MONITORED_TYPES``
+    # — leaving 'proxy' out caused a ping-pong where Pass 1 re-promoted a
+    # CGN-discovered proxy admin and the stale check then immediately
+    # deactivated it because 'proxy' wasn't in this subset.
     enrolled_addrs |= {
         mc.address
         for mc in session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
-                MonitoredContract.contract_type.in_(("safe", "timelock")),
+                MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
             )
         )
         .scalars()
@@ -280,24 +337,50 @@ def _determine_contract_type(
 _EVENT_BASED_PROXY_TYPES = {"eip1967", "eip1167", "eip1822"}
 
 
-def _needs_polling(contract_type: str, contract: Contract) -> bool:
-    """Decide whether a contract needs the state-polling loop.
+def _load_tracking_plan_artifacts(
+    session: Session,
+    contract: Contract,
+) -> tuple[list[dict], dict | None]:
+    """Hydrate the analysis ``tracking_plan`` for *contract* once and
+    return both projections the enrollment path needs:
 
-    EIP-1967 (and other standard) proxies emit Upgraded / AdminChanged events
-    that the event scanner picks up — no polling required.  Only safes,
-    timelocks, and non-standard (custom) proxies need polling.
+      * ``tracked_topics`` — per-contract event-topic specs the watcher
+        dispatches on. Same shape as ``extract_governance_topics``.
+      * the raw ``tracking_plan`` dict — the polling-plan builder walks
+        ``tracked_controllers`` directly so it can read each entry's
+        ``read_spec`` / ``polling_fallback`` without losing context.
+
+    Returns ``([], None)`` when the materialization row is missing /
+    the status isn't ready / a blob fetch fails. The watcher still has
+    the hand-rolled topic registry as a baseline for events and the
+    vendored proxy/safe/timelock templates as a baseline for polling.
     """
-    if contract_type in ("safe", "timelock"):
-        return True
-    if contract_type == "proxy":
-        return (contract.proxy_type or "").lower() not in _EVENT_BASED_PROXY_TYPES
-    return False
+    try:
+        row = find_by_address(session, chain=contract.chain or "ethereum", address=contract.address)
+        if row is None:
+            return [], None
+        plan = hydrate_tracking_plan(row)
+        topics = extract_governance_topics(plan)
+        return topics, plan
+    except Exception as exc:
+        # A blob-fetch hiccup or schema drift in tracking_plan shouldn't
+        # block enrollment — the hand-rolled registry still catches the
+        # OZ/Safe/Timelock baseline.
+        logger.warning(
+            "Failed to load tracking_plan for %s: %s",
+            contract.address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        return [], None
 
 
 def _build_monitoring_config(
     summary: ContractSummary | None,
     controller_values: Sequence[ControllerValue],  # noqa: ARG001 — reserved for future use
     contract_type: str,
+    tracked_topics: list[dict] | None = None,
+    polling_plan: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Build the monitoring_config JSONB based on detected capabilities."""
     config: dict[str, Any] = {
@@ -315,25 +398,103 @@ def _build_monitoring_config(
         if summary.control_model and "role" in (summary.control_model or "").lower():
             config["watch_roles"] = True
 
+    if tracked_topics:
+        config["tracked_topics"] = tracked_topics
+        # Default-on the authority flag if any tracked event_type drives it.
+        # ``_should_watch`` falls back to True for missing keys, so the
+        # explicit set is more documentation than functional — but it keeps
+        # the config self-describing on inspection.
+        if any(t.get("event_type") == "authority_updated" for t in tracked_topics):
+            config["watch_authority"] = True
+
+    if polling_plan:
+        config["polling_plan"] = polling_plan
+
     return config
+
+
+# Canonical owner/admin controller_id whitelists. Same shape as
+# ``services.aggregations.company_overview._ACTIVE_OWNER_CONTROLLER_IDS``
+# — both pick the canonical Ownable slot. Kept here so the initial-state
+# seed for the two universally-seeded fields (owner, admin) survives
+# whether or not the analyzer surfaced them in the polling plan.
+_INITIAL_STATE_OWNER_IDS = frozenset({"owner", "_owner", "state_variable:owner", "state_variable:_owner"})
+_INITIAL_STATE_ADMIN_IDS = frozenset({"admin", "state_variable:admin"})
+
+
+def _candidate_controller_ids_for_field(field: str) -> tuple[str, ...]:
+    """Controller_id forms the analyzer emits for a given state-var
+    name. Mirrors ``_update_controller_value_rows`` in the watcher so
+    the polling-plan-driven initial-state seed reads from the same key
+    set the runtime sync writes to."""
+    return (
+        field,
+        f"_{field}",
+        f"state_variable:{field}",
+        f"state_variable:_{field}",
+        f"external_contract:{field}",
+    )
 
 
 def _build_initial_state(
     contract: Contract,
     controller_values: Sequence[ControllerValue],
+    polling_plan: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Build the last_known_state dict from existing pipeline data."""
+    """Seed ``last_known_state`` from pre-existing analysis data so the
+    poller has a comparison baseline on its first tick and the API has
+    something to render before the first observation arrives.
+
+    Two stacked sources, in order:
+
+      1. ``contract.implementation`` plus the canonical owner / admin
+         CV slots. These are universally surfaced — the API and
+         reanalysis snapshot both rely on ``last_known_state.owner`` /
+         ``.admin`` being present whenever the resolution stage produced
+         a value, independent of whether the analyzer also surfaced a
+         polling entry for them.
+      2. Per-polling-plan-field CV seeding for custom slots
+         (``protocolAdmin``, ``feeRecipient``, …) so the first poll on
+         those slots doesn't fire a spurious state_changed event.
+
+    The two passes operate on disjoint key sets: pass 1 covers
+    ``implementation`` / ``owner`` / ``admin`` (and never overwrites);
+    pass 2 covers fields named by polling-plan entries that aren't
+    already in state.
+    """
     state: dict[str, Any] = {}
 
     if contract.implementation:
         state["implementation"] = contract.implementation
 
+    cv_by_id: dict[str, str] = {}
     for cv in controller_values:
-        cid = cv.controller_id.lower() if cv.controller_id else ""
-        if "owner" in cid and cv.value:
-            state["owner"] = cv.value
-        elif "admin" in cid and cv.value:
-            state["admin"] = cv.value
+        cid = (cv.controller_id or "").lower()
+        if cid and cv.value:
+            cv_by_id.setdefault(cid, cv.value)
+
+    # Pass 1: canonical owner/admin seeding from CV rows.
+    for cid, value in cv_by_id.items():
+        if cid in _INITIAL_STATE_OWNER_IDS and "owner" not in state:
+            state["owner"] = value
+        elif cid in _INITIAL_STATE_ADMIN_IDS and "admin" not in state:
+            state["admin"] = value
+
+    # Pass 2: polling-plan-driven custom-slot seeding.
+    if polling_plan:
+        for entry in polling_plan:
+            if not isinstance(entry, dict):
+                continue
+            field = entry.get("field")
+            if not isinstance(field, str) or not field:
+                continue
+            if field in state:
+                continue
+            for candidate in _candidate_controller_ids_for_field(field):
+                value = cv_by_id.get(candidate.lower())
+                if value:
+                    state[field] = value
+                    break
 
     return state
 
@@ -377,6 +538,13 @@ def _bridge_to_watched_proxy(
         mc.watched_proxy_id = wp.id
 
 
+# MonitoredContract.contract_type values this module materializes for
+# controller principals. Pass 2 in ``_enroll_controller_addresses`` scans the
+# full set so a controller of any flavor gets demoted once it stops being a
+# controller (primary or co-controller).
+_CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
+
+
 def _enroll_controller_addresses(
     session: Session,
     contracts: Sequence[Contract],
@@ -384,53 +552,109 @@ def _enroll_controller_addresses(
     chain: str,
     current_block: int,
 ) -> None:
-    """Discover and enroll controller addresses from control graph nodes."""
-    # Collect all contract addresses already enrolled
-    enrolled_addrs = {c.address.lower() for c in contracts}
+    """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
+    MonitoredContract rows, and demote any that are no longer controllers.
 
-    for contract in contracts:
-        nodes = (
-            session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract.id)).scalars().all()
-        )
+    The enrolled set is :func:`controllers_for_protocol` — the protocol's
+    **primary controllers union its privileged co-controllers**, computed by the
+    same loaders + ``build_governance_view`` the ``/company`` endpoint uses, so
+    Monitoring and the Surface canvas share one source of truth (deriving the
+    set a second way here is what historically let the two views drift — a
+    fund-destination Safe stored in a state variable landing in Monitoring but
+    not on the canvas; or a real governance Safe typed ``unknown`` in the
+    control graph showing on the canvas but never enrolled).
 
-        for node in nodes:
-            addr = node.address.lower() if node.address else ""
-            if not addr or addr in enrolled_addrs:
-                continue
+    Monitoring watches more than the canvas *groups*: the canvas renders one
+    primary controller per contract (winner-take-all) plus secondary
+    annotations, while enrollment also watches the co-controllers — a contract
+    governed by both a guardian Safe (pause / fund-recovery) and a bigger
+    governance Safe needs both monitored, since each emits its own events.
+    What's still excluded is genuine noise: permissionless callers (whitelisted
+    auction bidders sharing ``createBid``) and fund-destination Safes hold
+    neither a primary win nor privileged/tightly-gated authority, so
+    :func:`assign_co_controllers` drops them. EOAs are dropped upstream
+    (nothing event-bearing to monitor); ``proxy_admin`` is enrolled as the
+    historical ``'proxy'`` contract_type.
 
-            # Determine type from node
-            node_type = "regular"
-            if node.resolved_type in ("safe", "gnosis_safe"):
-                node_type = "safe"
-            elif node.resolved_type == "timelock":
-                node_type = "timelock"
-            elif node.resolved_type in ("proxy", "proxy_admin"):
-                node_type = "proxy"
+    Demotion is symmetric: an auto-enrolled controller row whose address is no
+    longer a controller is deactivated (``is_active=False``,
+    ``enrollment_source="auto_deprimary"``) rather than deleted, so its
+    MonitoredEvent history survives a later re-promotion or an audit.
+    Protocol-contract rows (owned by the main loop in
+    ``enroll_protocol_contracts``) are never touched.
+    """
+    from services.aggregations.company_overview import controllers_for_protocol
 
-            if node_type == "regular":
-                continue
+    enrolled_contract_addrs = {c.address.lower() for c in contracts}
+    controllers = controllers_for_protocol(session, protocol_id)
 
-            existing = session.execute(
-                select(MonitoredContract).where(
-                    MonitoredContract.address == addr,
-                    MonitoredContract.chain == chain,
-                )
-            ).scalar_one_or_none()
-
-            if not existing:
-                config = _build_monitoring_config(None, [], node_type)
-                mc = MonitoredContract(
+    # Pass 1: enroll / re-promote each controller (primary + co-controller).
+    for addr, monitored_type in controllers.items():
+        if not addr or addr in enrolled_contract_addrs:
+            continue
+        existing = session.execute(
+            select(MonitoredContract).where(
+                MonitoredContract.address == addr,
+                MonitoredContract.chain == chain,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.protocol_id = protocol_id
+            existing.contract_type = monitored_type
+            existing.is_active = True
+            existing.enrollment_source = "auto"
+        else:
+            # Primary controllers are principals on *other* contracts, not
+            # analyzed themselves, so the polling plan resolves to vendored
+            # entries only — Safe gets ``getThreshold``, Timelock gets
+            # ``getMinDelay``, proxy_admin gets nothing (needs_polling=False).
+            polling_plan = build_polling_plan(
+                contract_type=monitored_type,
+                proxy_type=None,
+                tracking_plan=None,
+                tracked_topics=None,
+            )
+            config = _build_monitoring_config(None, [], monitored_type, None, polling_plan)
+            session.add(
+                MonitoredContract(
                     id=uuid.uuid4(),
                     address=addr,
                     chain=chain,
                     protocol_id=protocol_id,
-                    contract_type=node_type,
+                    contract_type=monitored_type,
                     monitoring_config=config,
                     last_known_state={},
                     last_scanned_block=current_block,
-                    needs_polling=node_type in ("safe", "timelock"),
+                    needs_polling=bool(polling_plan),
                     is_active=True,
                     enrollment_source="auto",
                 )
-                session.add(mc)
-                enrolled_addrs.add(addr)
+            )
+
+    # Pass 2: demote any active auto-enrolled controller row that is no longer
+    # a controller (neither primary nor co-controller). Symmetric with Pass 1 —
+    # same signal, opposite direction — covering both "lost its authority" and
+    # the zombie case where the controller dropped out of the governance view
+    # entirely between runs. Protocol-contract rows are excluded so this never
+    # touches MC rows owned by the main contract loop in
+    # ``enroll_protocol_contracts``.
+    existing_controllers = (
+        session.execute(
+            select(MonitoredContract).where(
+                MonitoredContract.protocol_id == protocol_id,
+                MonitoredContract.enrollment_source == "auto",
+                MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
+                MonitoredContract.is_active.is_(True),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for mc in existing_controllers:
+        addr = (mc.address or "").lower()
+        if not addr or addr in enrolled_contract_addrs:
+            continue
+        if addr in controllers:
+            continue
+        mc.is_active = False
+        mc.enrollment_source = "auto_deprimary"
