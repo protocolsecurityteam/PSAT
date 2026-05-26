@@ -459,6 +459,25 @@ class BaseWorker:
                 except Exception as exc:
                     from utils.secrets import sanitize_string
 
+                    # A failed flush/commit inside ``process()`` leaves the
+                    # session in a pending-rollback state and can leave ``job``
+                    # with expired attributes. Roll back BEFORE reading any ORM
+                    # attribute (``job.retry_count`` just below): on an
+                    # un-rolled-back session that lazy-load re-raises
+                    # PendingRollbackError, which escapes this handler so the
+                    # job is never marked failed/requeued. It stays 'processing'
+                    # and only the stale-job sweep recovers it — never bumping
+                    # retry_count — i.e. an unbounded poison-retry loop that
+                    # stalls the whole pipeline.
+                    try:
+                        session.rollback()
+                    except Exception:
+                        logger.exception(
+                            "Worker %s: rollback in failure handler failed for job %s",
+                            self.worker_id,
+                            getattr(job, "id", "?"),
+                        )
+
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     error = sanitize_string(traceback.format_exc())
