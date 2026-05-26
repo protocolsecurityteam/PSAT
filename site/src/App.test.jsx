@@ -139,15 +139,16 @@ describe("App router smoke tests", () => {
     navigateTo("/company/etherfi/monitoring");
     const { container } = render(<App />);
     await waitFor(() => {
-      // ProtocolMonitoringPage shows either a "Loading protocol
-      // monitoring..." paragraph, the "Protocol Monitoring" eyebrow, or
-      // its full UI once the company fetch resolves. All three prove
-      // the route reached the right component.
+      // ProtocolMonitoringPage's console layout shows the loading
+      // placeholder first, then either the status pulse text or the
+      // no-protocol fallback once the company fetch resolves. Any of
+      // these proves the route reached the right component.
       const text = container.textContent || "";
       const matched =
         /Loading protocol monitoring/i.test(text) ||
         /Protocol Monitoring/i.test(text) ||
-        /Webhook Subscriptions/i.test(text);
+        /Discord notifications/i.test(text) ||
+        /no contracts/i.test(text);
       expect(matched).toBe(true);
     });
     expectNoCrash();

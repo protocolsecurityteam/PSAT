@@ -7,21 +7,18 @@ import {
   computeCurrentImplAddrs,
   isPureHistorical,
 } from "./addressFilter.js";
+import { proxyDisplayName } from "./displayName.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
-// For is_proxy rows, lead with the implementation's name (what the proxy
-// actually executes) and tuck the proxy template into a "via …" suffix
-// so 19 different proxy rows don't all read as "UUPSProxy". When impl
-// info is missing, fall back to the raw row name.
+// "Impl (via UUPSProxy)" for proxy rows, raw name otherwise — see
+// proxyDisplayName. Thin adapter from the address-inventory row shape.
 function prettyAddressName(row) {
-  const raw = row?.name || "";
-  if (row?.is_proxy && row?.implementation_name) {
-    const impl = row.implementation_name;
-    if (!raw || raw.toLowerCase() === impl.toLowerCase()) return impl;
-    return `${impl} (via ${raw})`;
-  }
-  return raw;
+  return proxyDisplayName({
+    name: row?.name,
+    isProxy: row?.is_proxy,
+    implName: row?.implementation_name,
+  });
 }
 
 // Parse any blob of text (comma, newline, whitespace separated) into a
