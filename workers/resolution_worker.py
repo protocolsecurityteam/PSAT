@@ -504,6 +504,11 @@ class ResolutionWorker(BaseWorker):
             addr = (node.get("address") or "").lower()
             if not addr or not addr.startswith("0x") or len(addr) != 42:
                 continue
+            if addr == "0x0000000000000000000000000000000000000000":
+                # An unset controller/dependency resolves to the zero address;
+                # queuing it spawns a discovery job that can only fail with
+                # "No verified source code for 0x000…000".
+                continue
             if addr == root_address:
                 continue
             # Only queue contracts that were analyzed during resolution

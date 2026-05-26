@@ -74,6 +74,15 @@ def _log_classify_pressure() -> None:
         logger.info("[CACHE_PRESSURE] %s", msg)
 
 
+# ``controller_values.value`` is ``String(66)`` (db/models.py): an address is
+# 42 chars, a single 32-byte word 66. A wider value is not a storable single
+# controller identity — almost always a struct/array getter whose raw multi-word
+# ABI return reaches the fallthrough below with no ``member_path`` to project
+# (e.g. AccountantWithRateProviders.accountantState()), or a projected uint256
+# that stringifies past 66 digits.
+_CONTROLLER_VALUE_MAX_LEN = 66
+
+
 def _decode_controller_value(
     raw_value: Any,
     controller_kind: str,
@@ -81,10 +90,24 @@ def _decode_controller_value(
 ) -> str:
     value = _normalize_hex(raw_value if isinstance(raw_value, str) else "0x")
     if isinstance(read_spec, dict) and read_spec.get("member_path"):
-        return _decode_projected_member_value(value, read_spec)
-    if controller_kind in {"state_variable", "external_contract"} and len(value) == 66:
-        return "0x" + value[-40:]
-    return value
+        decoded = _decode_projected_member_value(value, read_spec)
+    elif controller_kind in {"state_variable", "external_contract"} and len(value) == 66:
+        decoded = "0x" + value[-40:]
+    else:
+        decoded = value
+    # Refuse an unstorable value here rather than letting the resolution
+    # worker's controller_values INSERT raise StringDataRightTruncation
+    # mid-commit (which poisons the worker session). The caller
+    # (build_control_snapshot) turns this into a value=None entry.
+    if len(decoded) > _CONTROLLER_VALUE_MAX_LEN:
+        member_path = read_spec.get("member_path") if isinstance(read_spec, dict) else None
+        raise ValueError(
+            f"controller value ({len(decoded)} chars) exceeds storable width "
+            f"{_CONTROLLER_VALUE_MAX_LEN}: a struct/array getter without a member_path "
+            f"projection has no single storable value "
+            f"(controller_kind={controller_kind!r}, member_path={member_path!r})"
+        )
+    return decoded
 
 
 def _decode_projected_member_value(raw_value: str, read_spec: ControllerReadSpec) -> str:
