@@ -190,6 +190,10 @@ def build_predicate_artifacts_with_pause_info(
         pass_durations_ms["mapping_event_hints"] = int((time.monotonic() - pass_started) * 1000)
 
         pass_started = time.monotonic()
+        apply_solmate_authority_hint_pass(contract, all_trees)
+        pass_durations_ms["solmate_authority_hints"] = int((time.monotonic() - pass_started) * 1000)
+
+        pass_started = time.monotonic()
         pause_info = apply_reentrancy_pause_pass(contract, all_trees)
         pass_durations_ms["reentrancy_pause"] = int((time.monotonic() - pass_started) * 1000)
 
@@ -251,6 +255,59 @@ def apply_mapping_event_hint_pass(contract: Any, trees: dict[str, PredicateTree]
 
     for tree in trees.values():
         _walk_tree_leaves(tree, lambda leaf: _attach_hints_to_leaf(leaf, specs_by_mapping))
+
+
+# Solmate ``Auth``/``RolesAuthority``: ``requiresAuth`` authorizes via
+# ``authority.canCall(msg.sender, address(this), msg.sig)``. The static stage
+# already emits this as an ``external_set`` leaf carrying ``authority_contract``
+# but no events. Attach the RolesAuthority role-event topics so the event-log
+# indexer enrolls them (the event address resolves from ``authority_contract``
+# at index time); the Solmate adapter then reconstructs the caller set. canCall
+# is a two-event join (capability ⋈ user-role), so the generic mapping-event
+# path can't cover it.
+_SOLMATE_CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
+_SOLMATE_ROLE_EVENT_SIGNATURES = (
+    "RoleCapabilityUpdated(uint8,address,bytes4,bool)",
+    "PublicCapabilityUpdated(address,bytes4,bool)",
+    "UserRoleUpdated(address,uint8,bool)",
+)
+
+
+def apply_solmate_authority_hint_pass(contract: Any, trees: dict[str, PredicateTree]) -> None:
+    del contract
+    cancall_selector = "0x" + keccak(text=_SOLMATE_CANCALL_SIGNATURE).hex()[:8]
+    role_topics = ["0x" + keccak(text=signature).hex() for signature in _SOLMATE_ROLE_EVENT_SIGNATURES]
+
+    def attach(leaf: dict[str, Any]) -> None:
+        descriptor = leaf.get("set_descriptor")
+        if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
+            return
+        signature = descriptor.get("callee_signature")
+        selector = descriptor.get("callee_selector")
+        is_cancall = (isinstance(signature, str) and signature.replace(" ", "") == _SOLMATE_CANCALL_SIGNATURE) or (
+            isinstance(selector, str) and selector.lower() == cancall_selector
+        )
+        if not is_cancall:
+            return
+        hints = list(descriptor.get("enumeration_hint") or [])
+        existing = {h.get("topic0") for h in hints if isinstance(h, dict)}
+        for topic0 in role_topics:
+            if topic0 in existing:
+                continue
+            hints.append(
+                {
+                    "event_address": None,
+                    "topic0": topic0,
+                    "topics_to_keys": {},
+                    "data_to_keys": {},
+                    "direction": "set",
+                }
+            )
+        if hints:
+            descriptor["enumeration_hint"] = hints
+
+    for tree in trees.values():
+        _walk_tree_leaves(tree, attach)
 
 
 def _walk_tree_leaves(node: Any, callback: Callable[[dict[str, Any]], None]) -> None:

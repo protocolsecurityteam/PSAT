@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Any, Mapping, Protocol
 
+from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -22,6 +23,33 @@ logger = logging.getLogger("workers.event_log_indexer")
 
 DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
+
+# Solmate RolesAuthority canCall: the role events to index at the authority so
+# SolmateRolesAuthorityAdapter can fold them. Enrolled directly off the canCall
+# descriptor so the fix works even on predicate_trees materialized before the
+# enumeration-hint pass existed (the bytecode-keyed materialization cache won't
+# carry the hints until rebuilt). Topics computed here to avoid a worker→adapter
+# import dependency.
+_SOLMATE_CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
+_SOLMATE_CANCALL_SELECTOR = "0x" + keccak(text=_SOLMATE_CANCALL_SIGNATURE).hex()[:8]
+_SOLMATE_ROLE_TOPICS = [
+    "0x" + keccak(text=sig).hex()
+    for sig in (
+        "RoleCapabilityUpdated(uint8,address,bytes4,bool)",
+        "PublicCapabilityUpdated(address,bytes4,bool)",
+        "UserRoleUpdated(address,uint8,bool)",
+    )
+]
+
+
+def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
+    if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
+        return False
+    signature = descriptor.get("callee_signature")
+    selector = descriptor.get("callee_selector")
+    return (isinstance(signature, str) and signature.replace(" ", "") == _SOLMATE_CANCALL_SIGNATURE) or (
+        isinstance(selector, str) and selector.lower() == _SOLMATE_CANCALL_SELECTOR
+    )
 
 
 class LogFetcher(Protocol):
@@ -193,6 +221,12 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                     continue
                 if enroll_event_cursor(session, chain_id=chain_id, event_address=address, topic0=topic0):
                     inserted += 1
+            if _is_solmate_cancall_descriptor(descriptor):
+                authority = _event_address_for_descriptor(descriptor, {}, job, values)
+                if authority is not None:
+                    for topic0 in _SOLMATE_ROLE_TOPICS:
+                        if enroll_event_cursor(session, chain_id=chain_id, event_address=authority, topic0=topic0):
+                            inserted += 1
     session.commit()
     return inserted
 

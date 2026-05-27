@@ -315,7 +315,20 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     inlined = negate(inlined)
                 return inlined
             if descriptor.get("kind") == "external_set":
-                cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+                # Try a named adapter first (e.g. Solmate RolesAuthority resolves
+                # canCall via its role events); fall back to the generic
+                # external-check materializer only when no adapter produces a
+                # concrete set. Previously external_set skipped the registry
+                # entirely, so standard authority contracts never resolved.
+                cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
+                # Fall back to the materializer unless the adapter produced a
+                # concrete answer. A non-exact empty finite_set is the _NullAdapter
+                # placeholder (or an un-indexed partial) — not a real "nobody";
+                # an *exact* empty set IS a real true-negative and is kept.
+                if cap.kind in {"unsupported", "external_check_only"} or (
+                    cap.kind == "finite_set" and not cap.members and cap.membership_quality != "exact"
+                ):
+                    cap = _external_check_from_descriptor(leaf, descriptor, ctx)
             else:
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
                 if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
@@ -399,6 +412,13 @@ def _nullary_getter_selector(name: str | None) -> str | None:
     if not isinstance(name, str) or not name:
         return None
     return _selector_for_signature(f"{name}()")
+
+
+# owner() — the canonical OZ Ownable accessor. OZ v4 keeps a plain ``_owner``
+# state var; OZ v5 (ERC-7201) keeps it in a namespaced storage struct read via
+# assembly. Both expose ``owner()`` identically, so reading it live recovers the
+# owner for the v5 case where the operand is the slot-pointer constant.
+_OWNER_SELECTOR = "0x8da5cb5b"
 
 
 def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None) -> CapabilityExpr | None:
@@ -502,6 +522,17 @@ def _resolve_equality_principal(
         # the FP-only attribution can't re-introduce fee-destination noise.
         if not op.get("member_path"):
             live = _live_resolve_authority(ctx, _nullary_getter_selector(op.get("state_variable_name")))
+            if live is not None:
+                return live
+        elif op.get("member_path") == ["_owner"]:
+            # OZ v5 (ERC-7201) Ownable keeps the owner in a namespaced storage
+            # struct, so ``msg.sender == OwnableStorageLocation._owner`` arrives
+            # as a struct-member operand. Its canonical accessor is the public
+            # ``owner()`` getter (identical to v4) — read it live instead of
+            # treating the slot-pointer constant as a getter (which reverts, the
+            # OZ-v5 owner recall gap). Other struct members (fund destinations
+            # like ``accountantState.payoutAddress``) stay placeholders above.
+            live = _live_resolve_authority(ctx, _OWNER_SELECTOR)
             if live is not None:
                 return live
         # Fallback: we know there's a guarding state-var but haven't

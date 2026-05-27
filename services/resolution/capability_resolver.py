@@ -53,6 +53,7 @@ from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
+from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
@@ -221,6 +222,9 @@ def resolve_contract_capabilities(
     )
 
     registry = AdapterRegistry()
+    # Named standard adapters first (higher matches() scores win); the generic
+    # event-indexed adapter is the fallback for non-standard authority.
+    registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EventIndexedAdapter)
 
     event_log_repo = PostgresEventLogRepo(session)

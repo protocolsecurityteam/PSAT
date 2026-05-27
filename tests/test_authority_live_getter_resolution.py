@@ -278,3 +278,44 @@ def test_resolved_owner_becomes_primary_controller() -> None:
 
     pre_fix = assign_primary_controllers(principals, {CONTRACT: set()})
     assert pre_fix[OWNER.lower()] == []
+
+
+# --------------------------------------------------------------------------
+# OZ v5 (ERC-7201) namespaced Ownable: the owner lives in a storage struct, so
+# the gate is ``msg.sender == OwnableStorageLocation._owner`` — a struct-member
+# operand. Its canonical accessor is the same ``owner()`` getter, so it must be
+# read live. This is the EtherfiL1SyncPoolETH owner gap (owner = EtherFiTimelock)
+# that the "treat the slot-pointer constant as a getter" heuristic missed.
+# --------------------------------------------------------------------------
+
+
+def test_oz_v5_namespaced_owner_resolves_via_owner_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder: list = []
+    _stub_rpc(monkeypatch, OWNER, recorder=recorder)
+    tree = _eq_tree(
+        {"source": "state_variable", "state_variable_name": "OwnableStorageLocation", "member_path": ["_owner"]}
+    )
+
+    cap = evaluate_tree(tree, _ctx_with_rpc())
+
+    assert cap.kind == "finite_set"
+    assert cap.members == [OWNER]
+    assert cap.membership_quality == "exact"
+    # Resolved by calling owner() (0x8da5cb5b) — NOT OwnableStorageLocation().
+    assert recorder, "expected a live getter call"
+    assert recorder[-1][1][0]["data"] == OWNER_SELECTOR
+
+
+def test_oz_v5_namespaced_owner_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder: list = []
+    _stub_rpc(monkeypatch, OWNER, recorder=recorder)
+    tree = _eq_tree(
+        {"source": "state_variable", "state_variable_name": "OwnableStorageLocation", "member_path": ["_owner"]}
+    )
+
+    cap = evaluate_tree(tree, _ctx_no_rpc())
+
+    assert cap.kind == "finite_set"
+    assert cap.members == []
+    assert cap.membership_quality == "lower_bound"
+    assert recorder == []
