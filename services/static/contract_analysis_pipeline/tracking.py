@@ -41,6 +41,31 @@ def _unit_key(unit) -> str:
     )
 
 
+def _is_storage_layout_constant(name: str) -> bool:
+    """True for ERC-7201 / EIP-1967 storage-layout pointer constants and the
+    ERC1967 ``__self`` immutable — slot locators that are never controllers.
+
+    Emitting them as ``role_identifier`` / ``state_variable`` targets produced
+    dead ``eth_call_error`` rows (calling ``OwnableStorageLocation()`` etc.
+    reverts) and, for OZ-v5 Ownable, shadowed the real owner. Standard-aware
+    resolution reads the canonical getter (``owner()``) or role events instead.
+    Real AccessControl roles (``*_ROLE``, ``DEFAULT_ADMIN_ROLE``) and ordinary
+    address state vars do not match these suffixes.
+    """
+    if not name:
+        return False
+    if name == "__self":
+        return True
+    lowered = name.lower()
+    return (
+        lowered.endswith("storagelocation")
+        or lowered.endswith("storageposition")
+        or lowered.endswith("_slot")
+        or lowered.endswith("_storage")
+        or "initializable_storage" in lowered
+    )
+
+
 def _abi_type(type_obj) -> str:
     if type_obj is None:
         return "unknown"
@@ -696,6 +721,8 @@ def build_controller_tracking(
     for name in sorted(referenced_state_vars):
         if name in role_def_names:
             continue
+        if _is_storage_layout_constant(name):
+            continue
         sv = state_vars_by_name.get(name)
         # Role-identifier classification is structural: a referenced bytes32
         # constant can be read once and passed into semantic authority checks.
@@ -780,6 +807,8 @@ def build_controller_tracking(
 
     for name, member_path in sorted(referenced_member_paths):
         if name in role_def_names:
+            continue
+        if _is_storage_layout_constant(name):
             continue
         label = f"{name}.{'.'.join(member_path)}"
         controller_id = f"state_variable:{label}"
