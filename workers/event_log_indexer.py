@@ -24,6 +24,17 @@ logger = logging.getLogger("workers.event_log_indexer")
 DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
 
+# Backfill in bounded windows. A cold cursor's gap to head is ~25M blocks; the
+# fetcher already pages eth_getLogs, but a full-range step accumulates every
+# match into one list and inserts it in a single statement. On high-volume
+# authorities (the LayerZero endpoint) that one insert dropped the Neon
+# connection ("SSL connection has been closed unexpectedly"), wedging the cursor
+# at block 0 forever. So: cap the span scanned per step, batch the insert, and
+# let one pass advance a cursor across several windows.
+DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "50000"))
+DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "200"))
+DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
+
 # Solmate RolesAuthority canCall: the role events to index at the authority so
 # SolmateRolesAuthorityAdapter can fold them. Enrolled directly off the canCall
 # descriptor so the fix works even on predicate_trees materialized before the
@@ -76,6 +87,7 @@ class IndexStepResult:
     scanned_from: int
     scanned_to: int
     inserted: int
+    caught_up: bool  # True once scanned_to reached the confirmed head (no gap left)
 
 
 def enroll_event_cursor(
@@ -110,6 +122,8 @@ def index_event_log_step(
     head_fetcher: HeadBlockFetcher,
     block_hash_fetcher: BlockHashFetcher,
     confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
+    max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
+    insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> IndexStepResult:
     cursor = session.execute(
         select(IndexedEventCursor)
@@ -119,13 +133,13 @@ def index_event_log_step(
         .with_for_update()
     ).scalar_one_or_none()
     if cursor is None:
-        return IndexStepResult(scanned_from=0, scanned_to=0, inserted=0)
+        return IndexStepResult(scanned_from=0, scanned_to=0, inserted=0, caught_up=True)
 
     head = head_fetcher.head_block()
     target = max(0, head - confirmation_depth)
     last = int(cursor.last_indexed_block or 0)
     if target <= last:
-        return IndexStepResult(scanned_from=last + 1, scanned_to=target, inserted=0)
+        return IndexStepResult(scanned_from=last + 1, scanned_to=target, inserted=0, caught_up=True)
 
     if last > 0 and cursor.last_indexed_block_hash is not None:
         observed_hash = block_hash_fetcher.block_hash(last)
@@ -141,18 +155,22 @@ def index_event_log_step(
             cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(rewind_to) if rewind_to else None
             last = rewind_to
 
+    # One bounded window per step — never the whole [last+1, target] gap at once.
     start = last + 1
+    window_end = min(target, last + max(1, max_block_span))
     logs = fetcher.fetch_logs(
         event_address=event_address.lower(),
         topic0=topic0.lower(),
         from_block=start,
-        to_block=target,
+        to_block=window_end,
     )
-    inserted = _bulk_insert_logs(session, chain_id, event_address.lower(), topic0.lower(), logs)
-    cursor.last_indexed_block = target
-    cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(target)
+    inserted = _bulk_insert_logs(
+        session, chain_id, event_address.lower(), topic0.lower(), logs, batch_size=insert_batch_size
+    )
+    cursor.last_indexed_block = window_end
+    cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(window_end)
     cursor.last_run_at = func.now()
-    return IndexStepResult(scanned_from=start, scanned_to=target, inserted=inserted)
+    return IndexStepResult(scanned_from=start, scanned_to=window_end, inserted=inserted, caught_up=window_end >= target)
 
 
 def scan_enrolled_events(
@@ -162,6 +180,9 @@ def scan_enrolled_events(
     head_fetchers: Mapping[int, HeadBlockFetcher],
     block_hash_fetchers: Mapping[int, BlockHashFetcher],
     confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
+    max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
+    max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
+    insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> int:
     rows = session.execute(
         select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
@@ -173,19 +194,29 @@ def scan_enrolled_events(
         block_hash_fetcher = block_hash_fetchers.get(chain_id)
         if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
             continue
+        # Walk several windows per pass so a cold cursor backfills in a handful
+        # of passes, but cap it so one high-volume address can't starve the
+        # rest. Commit per window: each transaction (and INSERT) stays small,
+        # progress is durable, and a mid-backfill failure on one cursor doesn't
+        # roll back the windows it already landed.
         try:
-            result = index_event_log_step(
-                session,
-                chain_id=chain_id,
-                event_address=event_address,
-                topic0=topic0,
-                fetcher=fetcher,
-                head_fetcher=head_fetcher,
-                block_hash_fetcher=block_hash_fetcher,
-                confirmation_depth=confirmation_depth,
-            )
-            inserted += result.inserted
-            session.commit()
+            for _ in range(max(1, max_windows_per_cursor)):
+                result = index_event_log_step(
+                    session,
+                    chain_id=chain_id,
+                    event_address=event_address,
+                    topic0=topic0,
+                    fetcher=fetcher,
+                    head_fetcher=head_fetcher,
+                    block_hash_fetcher=block_hash_fetcher,
+                    confirmation_depth=confirmation_depth,
+                    max_block_span=max_block_span,
+                    insert_batch_size=insert_batch_size,
+                )
+                session.commit()
+                inserted += result.inserted
+                if result.caught_up:
+                    break
         except Exception:
             session.rollback()
             logger.exception(
@@ -243,31 +274,36 @@ def _bulk_insert_logs(
     event_address: str,
     topic0: str,
     logs: list[FetchedEventLog],
+    *,
+    batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> int:
     if not logs:
         return 0
-    rows = [
-        {
-            "chain_id": chain_id,
-            "event_address": event_address,
-            "topic0": topic0,
-            "tx_hash": log.tx_hash,
-            "log_index": log.log_index,
-            "block_number": log.block_number,
-            "block_hash": log.block_hash,
-            "transaction_index": log.transaction_index,
-            "topics": log.topics,
-            "data_words": log.data_words,
-        }
-        for log in logs
-    ]
-    stmt = (
-        pg_insert(IndexedEventLog)
-        .values(rows)
-        .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
-    )
-    result = session.execute(stmt)
-    return int(getattr(result, "rowcount", 0) or 0)
+    total = 0
+    for offset in range(0, len(logs), max(1, batch_size)):
+        rows = [
+            {
+                "chain_id": chain_id,
+                "event_address": event_address,
+                "topic0": topic0,
+                "tx_hash": log.tx_hash,
+                "log_index": log.log_index,
+                "block_number": log.block_number,
+                "block_hash": log.block_hash,
+                "transaction_index": log.transaction_index,
+                "topics": log.topics,
+                "data_words": log.data_words,
+            }
+            for log in logs[offset : offset + max(1, batch_size)]
+        ]
+        stmt = (
+            pg_insert(IndexedEventLog)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
+        )
+        result = session.execute(stmt)
+        total += int(getattr(result, "rowcount", 0) or 0)
+    return total
 
 
 def _descriptors_from_artifact(artifact: dict[str, Any]) -> list[dict[str, Any]]:
