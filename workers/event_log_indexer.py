@@ -222,7 +222,13 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 if enroll_event_cursor(session, chain_id=chain_id, event_address=address, topic0=topic0):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
-                authority = _event_address_for_descriptor(descriptor, {}, job, values)
+                # Resolve the authority strictly from authority_contract — never
+                # the job.address fallback. The RolesAuthority events are emitted
+                # by the authority, not by the protected contract, so enrolling
+                # them at job.address would scan an address that can't emit them.
+                # If the authority isn't resolved yet, skip; a later pass enrolls
+                # it once its ControllerValue is captured.
+                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if authority is not None:
                     for topic0 in _SOLMATE_ROLE_TOPICS:
                         if enroll_event_cursor(session, chain_id=chain_id, event_address=authority, topic0=topic0):
@@ -306,6 +312,8 @@ def _event_address_for_descriptor(
     hint: dict[str, Any],
     job: Job,
     state_var_values: dict[str, str],
+    *,
+    allow_job_fallback: bool = True,
 ) -> str | None:
     raw = hint.get("event_address")
     if isinstance(raw, str) and raw.startswith("0x") and len(raw) == 42:
@@ -320,6 +328,8 @@ def _event_address_for_descriptor(
         value = state_var_values.get(name) if isinstance(name, str) else None
         if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
             return value.lower()
+    if not allow_job_fallback:
+        return None
     return job.address.lower() if job.address and len(job.address) == 42 else None
 
 

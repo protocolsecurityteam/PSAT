@@ -41,20 +41,56 @@ CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
 CANCALL_SELECTOR = "0x" + keccak(text=CANCALL_SIGNATURE).hex()[:8]
 
 
+def _sel(signature: str) -> str:
+    return "0x" + keccak(text=signature).hex()[:8]
+
+
+# ``canCall(address,address,bytes4)`` is NOT unique to Solmate — OZ AccessManager
+# exposes the same selector (0xb7009613). Disambiguate from the authority's
+# bytecode: a Solmate RolesAuthority declares these getters; an OZ AccessManager
+# declares ``getTargetFunctionRole``. ``matches()`` confirms RolesAuthority before
+# claiming the descriptor at full confidence, and declines a recognized different
+# canCall standard so its own adapter can win the tie.
+_ROLES_AUTHORITY_MARKER_SELECTORS = (
+    _sel("getRolesWithCapability(address,bytes4)"),
+    _sel("doesUserHaveRole(address,uint8)"),
+)
+_OTHER_CANCALL_STANDARD_SELECTORS = (_sel("getTargetFunctionRole(address,bytes4)"),)  # OZ AccessManager
+_CONFIRMED_SCORE = 90
+# Claimed when confirmation isn't possible (no bytecode repo / unresolved
+# authority): Solmate is still the only wired canCall standard, but a *confirmed*
+# adapter (score 90) outranks this, so a second canCall standard drops in cleanly
+# instead of being starved by a registration-order tie.
+_PROVISIONAL_SCORE = 40
+
+
 class SolmateRolesAuthorityAdapter:
     """Resolves a Solmate ``canCall`` external-bool check into the concrete
     caller set authorized for the function under analysis."""
 
     @classmethod
     def matches(cls, descriptor: dict, ctx: EvaluationContext) -> int:
-        del ctx
         signature = descriptor.get("callee_signature")
-        if isinstance(signature, str) and signature.replace(" ", "") == CANCALL_SIGNATURE:
-            return 90
         selector = descriptor.get("callee_selector")
-        if isinstance(selector, str) and selector.lower() == CANCALL_SELECTOR:
-            return 90
-        return 0
+        is_cancall = (isinstance(signature, str) and signature.replace(" ", "") == CANCALL_SIGNATURE) or (
+            isinstance(selector, str) and selector.lower() == CANCALL_SELECTOR
+        )
+        if not is_cancall:
+            return 0
+        # canCall's selector is shared with OZ AccessManager, so the signature
+        # alone can't claim this is Solmate. Confirm from the authority's bytecode:
+        # full confidence only for a real RolesAuthority; decline a recognized
+        # different canCall standard (so its adapter wins); claim provisionally
+        # when we can't probe.
+        authority = _resolve_authority_address(descriptor, ctx)
+        repo = getattr(ctx, "bytecode", None)
+        if authority is None or repo is None:
+            return _PROVISIONAL_SCORE
+        if any(_safe_has_selector(repo, ctx, authority, s) for s in _ROLES_AUTHORITY_MARKER_SELECTORS):
+            return _CONFIRMED_SCORE
+        if any(_safe_has_selector(repo, ctx, authority, s) for s in _OTHER_CANCALL_STANDARD_SELECTORS):
+            return 0
+        return _PROVISIONAL_SCORE
 
     @classmethod
     def supports_external_check_only(cls) -> bool:
@@ -163,6 +199,16 @@ def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> Ca
             extra={"basis": basis, "adapter": "solmate_roles_authority"},
         )
     )
+
+
+def _safe_has_selector(repo: Any, ctx: EvaluationContext, address: str, selector: str) -> bool:
+    fn = getattr(repo, "has_selector", None)
+    if not callable(fn):
+        return False
+    try:
+        return bool(fn(chain_id=getattr(ctx, "chain_id", 1), contract_address=address, selector=selector))
+    except Exception:
+        return False
 
 
 def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str | None:

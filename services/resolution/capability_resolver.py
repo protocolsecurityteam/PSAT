@@ -57,6 +57,7 @@ from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
+from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
@@ -228,6 +229,9 @@ def resolve_contract_capabilities(
     registry.register(EventIndexedAdapter)
 
     event_log_repo = PostgresEventLogRepo(session)
+    # Lets adapters confirm a contract's standard from its bytecode — e.g. tell a
+    # Solmate RolesAuthority from an OZ AccessManager, which share canCall's selector.
+    bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
     state_var_values = _load_state_var_values(
         session,
         analysis_job.address or addr,
@@ -243,6 +247,7 @@ def resolve_contract_capabilities(
             contract_address=runtime_addr,
             block=block,
             event_log_repo=event_log_repo,
+            bytecode=bytecode_repo,
             rpc_url=rpc_url,
             state_var_values=state_var_values,
             session=session,

@@ -28,9 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.resolution.adapters import AdapterRegistry, CallFrame, EvaluationContext  # noqa: E402
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
 from services.resolution.adapters.solmate_roles import (  # noqa: E402
+    _OTHER_CANCALL_STANDARD_SELECTORS,
+    _ROLES_AUTHORITY_MARKER_SELECTORS,
     CANCALL_SIGNATURE,
     SolmateRolesAuthorityAdapter,
 )
+from services.resolution.capabilities import CapabilityExpr  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
@@ -157,13 +160,83 @@ def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
     assert "authority_unconfirmed_no_role_events" in cap.check.extra["basis"]
 
 
-def test_registry_prefers_solmate_over_generic_event_adapter():
+_AUTHORITY = "0x" + "a1" * 20
+
+
+class _FakeBytecode:
+    """BytecodeRepo whose has_selector is True only for the given selectors —
+    simulates a contract that declares exactly those functions."""
+
+    def __init__(self, *, selectors):
+        self._selectors = {s.lower() for s in selectors}
+
+    def has_selector(self, *, chain_id, contract_address, selector):
+        del chain_id, contract_address
+        return selector.lower() in self._selectors
+
+    def declares_event(self, *, chain_id, contract_address, topic0):
+        del chain_id, contract_address, topic0
+        return False
+
+
+def _descriptor_with_authority() -> dict:
+    return {
+        "kind": "external_set",
+        "callee_signature": CANCALL_SIGNATURE,
+        "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "authority"}},
+    }
+
+
+def _ctx_for_matches(bytecode=None) -> EvaluationContext:
+    return EvaluationContext(chain_id=1, state_var_values={"authority": _AUTHORITY}, bytecode=bytecode)
+
+
+def test_matches_scores_high_only_for_a_confirmed_rolesauthority():
+    bc = _FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS)
+    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bc)) == 90
+
+
+def test_matches_declines_a_different_cancall_standard():
+    # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so the
+    # AccessManager adapter can win the tie rather than being starved.
+    bc = _FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS)
+    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bc)) == 0
+
+
+def test_matches_provisional_when_authority_cannot_be_probed():
+    # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90)
+    # but > 0, so Solmate still handles canCall as the only such standard today.
+    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(None)) == 40
+
+
+def test_registry_prefers_confirmed_solmate_over_generic_event_adapter():
     registry = AdapterRegistry()
     registry.register(EventIndexedAdapter)
     registry.register(SolmateRolesAuthorityAdapter)
-    descriptor = {
-        "kind": "external_set",
-        "callee_signature": CANCALL_SIGNATURE,
-        "enumeration_hint": [{"topic0": "0xaa", "direction": "add"}],
-    }
-    assert registry.pick(descriptor, EvaluationContext()) is SolmateRolesAuthorityAdapter
+    bc = _FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS)
+    assert registry.pick(_descriptor_with_authority(), _ctx_for_matches(bc)) is SolmateRolesAuthorityAdapter
+
+
+def test_second_cancall_standard_not_starved_when_solmate_declines():
+    # The generalization fix (F1): although Solmate is registered FIRST, for an
+    # OZ AccessManager authority Solmate declines (0) and a confirmed AccessManager
+    # adapter wins — proving the registry can host two standards sharing canCall.
+    class _ConfirmedAccessManagerAdapter:
+        @classmethod
+        def matches(cls, descriptor, ctx):
+            del ctx
+            return 90 if descriptor.get("callee_signature") == CANCALL_SIGNATURE else 0
+
+        @classmethod
+        def supports_external_check_only(cls):
+            return True
+
+        def enumerate(self, descriptor, ctx):
+            del descriptor, ctx
+            return CapabilityExpr.unsupported("access_manager_stub")
+
+    registry = AdapterRegistry()
+    registry.register(SolmateRolesAuthorityAdapter)  # registered first
+    registry.register(_ConfirmedAccessManagerAdapter)
+    bc = _FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS)  # an AccessManager authority
+    assert registry.pick(_descriptor_with_authority(), _ctx_for_matches(bc)) is _ConfirmedAccessManagerAdapter

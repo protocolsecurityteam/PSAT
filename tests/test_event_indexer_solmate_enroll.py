@@ -11,12 +11,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from types import SimpleNamespace  # noqa: E402
+from typing import Any, cast  # noqa: E402
+
 from eth_utils.crypto import keccak  # noqa: E402
 
 from workers.event_log_indexer import (  # noqa: E402
     _SOLMATE_ROLE_TOPICS,
+    _event_address_for_descriptor,
     _is_solmate_cancall_descriptor,
 )
+
+_CANCALL_DESCRIPTOR = {
+    "kind": "external_set",
+    "callee_signature": "canCall(address,address,bytes4)",
+    "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "authority"}},
+}
+_PROTECTED = "0x" + "11" * 20  # the job's protected contract (NOT the authority)
+_AUTHORITY = "0x" + "a2" * 20
+
+
+def _job():
+    return cast(Any, SimpleNamespace(address=_PROTECTED))
 
 
 def test_recognizes_cancall_by_signature():
@@ -48,3 +64,29 @@ def test_role_topics_are_the_three_solmate_events():
         "0x" + keccak(text="PublicCapabilityUpdated(address,bytes4,bool)").hex(),
         "0x" + keccak(text="UserRoleUpdated(address,uint8,bool)").hex(),
     ]
+
+
+# F2: the Solmate enroll path resolves the authority strictly — it must never
+# enroll the role events at the protected contract (job.address), which can't
+# emit them.
+
+
+def test_solmate_enroll_does_not_fall_back_to_job_address():
+    job = _job()
+    # Authority unresolved (not in ControllerValue feed) + no job fallback → None.
+    assert _event_address_for_descriptor(_CANCALL_DESCRIPTOR, {}, job, {}, allow_job_fallback=False) is None
+
+
+def test_generic_path_still_falls_back_to_job_address():
+    # The generic enroll path (mapping events on the contract itself) keeps the
+    # job.address fallback — only the Solmate authority path opts out.
+    job = _job()
+    assert _event_address_for_descriptor(_CANCALL_DESCRIPTOR, {}, job, {}, allow_job_fallback=True) == _PROTECTED
+
+
+def test_solmate_enroll_uses_resolved_authority_when_available():
+    job = _job()
+    addr = _event_address_for_descriptor(
+        _CANCALL_DESCRIPTOR, {}, job, {"authority": _AUTHORITY}, allow_job_fallback=False
+    )
+    assert addr == _AUTHORITY
