@@ -53,9 +53,11 @@ from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
+from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
+from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
@@ -221,9 +223,15 @@ def resolve_contract_capabilities(
     )
 
     registry = AdapterRegistry()
+    # Named standard adapters first (higher matches() scores win); the generic
+    # event-indexed adapter is the fallback for non-standard authority.
+    registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EventIndexedAdapter)
 
     event_log_repo = PostgresEventLogRepo(session)
+    # Lets adapters confirm a contract's standard from its bytecode — e.g. tell a
+    # Solmate RolesAuthority from an OZ AccessManager, which share canCall's selector.
+    bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
     state_var_values = _load_state_var_values(
         session,
         analysis_job.address or addr,
@@ -239,6 +247,7 @@ def resolve_contract_capabilities(
             contract_address=runtime_addr,
             block=block,
             event_log_repo=event_log_repo,
+            bytecode=bytecode_repo,
             rpc_url=rpc_url,
             state_var_values=state_var_values,
             session=session,
@@ -258,7 +267,14 @@ def _selector_for_signature(signature: str | None) -> str | None:
         return None
     from eth_utils.crypto import keccak
 
-    return "0x" + keccak(text=signature).hex()[:8]
+    from services.policy.effective_permissions import _abi_signature
+
+    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
+    # parameter type names (``addAsset(ERC20)``). The real EVM selector — and
+    # ``effective_functions.selector`` — is keyed on the canonical ABI signature
+    # (``addAsset(address)``). Lower contract/interface types to ``address`` first
+    # so the selector the Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
+    return "0x" + keccak(text=_abi_signature(signature)).hex()[:8]
 
 
 def _analysis_lookup_for_runtime_job(

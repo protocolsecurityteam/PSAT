@@ -147,6 +147,49 @@ class PostgresEventLogRepo:
             last_indexed_block=last_indexed_block,
         )
 
+    def iter_event_rows(
+        self,
+        *,
+        chain_id: int,
+        event_address: str,
+        topic0s: list[str],
+        block: int | None = None,
+    ) -> list[IndexedEventLog]:
+        """Raw indexed logs for ``event_address`` matching any of ``topic0s``,
+        in canonical log order (block, tx_index, log_index).
+
+        Named adapters that need a multi-event join (e.g. Solmate
+        ``RolesAuthority``'s capability ⋈ user-role reconstruction) read
+        rows directly rather than going through the single-event fold.
+        """
+        lowered = [t.lower() for t in topic0s if isinstance(t, str)]
+        if not lowered:
+            return []
+        q = (
+            select(IndexedEventLog)
+            .where(IndexedEventLog.chain_id == chain_id)
+            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
+            .where(func.lower(IndexedEventLog.topic0).in_(lowered))
+            .order_by(
+                IndexedEventLog.block_number.asc(),
+                IndexedEventLog.transaction_index.asc(),
+                IndexedEventLog.log_index.asc(),
+            )
+        )
+        if block is not None:
+            q = q.where(IndexedEventLog.block_number <= block)
+        return list(self.session.execute(q).scalars())
+
+    def min_indexed_block(self, *, chain_id: int, event_address: str, topic0s: list[str]) -> int | None:
+        """Lowest indexed-cursor block across ``topic0s``, or ``None`` when any
+        topic has no positive cursor (i.e. not yet durably indexed). Callers use
+        ``None`` to demote an empty result from exact to a probe."""
+        blocks = [self._cursor_block(chain_id, event_address, t) for t in topic0s if isinstance(t, str)]
+        present = [b for b in blocks if b is not None and b > 0]
+        if not topic0s or len(present) != len([t for t in topic0s if isinstance(t, str)]):
+            return None
+        return min(present)
+
     def _cursor_block(self, chain_id: int, event_address: str, topic0: str) -> int | None:
         row = self.session.execute(
             select(IndexedEventCursor.last_indexed_block)
