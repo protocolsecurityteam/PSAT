@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from eth_utils.crypto import keccak
 
-from services.policy.principal_history import build_role_authority_history
+from services.policy.principal_history import _external_authority_checks, build_role_authority_history
 
 AUTHORITY = "0x" + "aa" * 20
 TARGET = "0x" + "bb" * 20
 USER = "0x" + "cc" * 20
 SELECTOR = "0x12345678"
+_SOLMATE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "solmate"
 
 
 def _topic(signature: str) -> str:
@@ -120,3 +124,23 @@ def test_role_authority_history_uses_event_shapes_not_names():
     assert [item["status"] for item in role_intervals] == ["revoked", "active"]
     assert role_intervals[1]["principal"] == USER
     assert role_intervals[1]["role"] == 5
+
+
+def test_external_authority_checks_uses_canonical_selector_for_contract_type_params():
+    # The predicate-tree key is Slither's full_name ``addAsset(ERC20)``, but the
+    # RolesAuthority ``RoleCapabilityUpdated`` event the timeline replays against
+    # carries the canonical EVM selector ``addAsset(address)`` (0x298410e5), NOT
+    # keccak("addAsset(ERC20)") (0x4fdd72aa). A non-canonical selector here never
+    # matches the on-chain event, so the contract-type-param function would show
+    # no controller in the capability timeline (the canCall selector bug).
+    data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
+    checks = _external_authority_checks(
+        contract_address=data["contract"],
+        predicate_trees={"trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]}},
+        state_var_values={"authority": "0x3994741a5b29c60d0ab318de1024f9256fe959dc"},
+    )
+    assert len(checks) == 1
+    assert checks[0]["function"] == "addAsset(ERC20)"
+    # Canonical keccak("addAsset(address)") — the real msg.sig the event keys on.
+    assert checks[0]["selector"] == "0x298410e5"
+    assert checks[0]["selector"] != "0x4fdd72aa"

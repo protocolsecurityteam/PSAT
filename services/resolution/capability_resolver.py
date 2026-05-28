@@ -267,7 +267,14 @@ def _selector_for_signature(signature: str | None) -> str | None:
         return None
     from eth_utils.crypto import keccak
 
-    return "0x" + keccak(text=signature).hex()[:8]
+    from services.policy.effective_permissions import _abi_signature
+
+    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
+    # parameter type names (``addAsset(ERC20)``). The real EVM selector — and
+    # ``effective_functions.selector`` — is keyed on the canonical ABI signature
+    # (``addAsset(address)``). Lower contract/interface types to ``address`` first
+    # so the selector the Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
+    return "0x" + keccak(text=_abi_signature(signature)).hex()[:8]
 
 
 def _analysis_lookup_for_runtime_job(
