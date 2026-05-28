@@ -1145,16 +1145,15 @@ def _maybe_inline_cross_contract_call(
         )
         if materialized is not None:
             return materialized
-        return CapabilityExpr.external_check_only(
-            ExternalCheck(
-                target_address=registry_addr,
-                target_call_selector=callee_selector,
-                extra={
-                    "callee_signature": callee_signature,
-                    "basis": ["delegated_check_not_materialized"],
-                },
-            )
-        )
+        # Fall through to the caller's adapter dispatch instead of dead-ending.
+        # When the inlined delegated check can't be materialized (e.g. canCall's
+        # role-mapping join the generic materializer can't express), the caller's
+        # external_set path can still try a named adapter — SolmateRolesAuthorityAdapter
+        # folds canCall from indexed role events. The old dead-end (an
+        # external_check_only with basis=["delegated_check_not_materialized"])
+        # returned non-None and pre-empted that adapter for every Solmate-protected
+        # contract analyzed alongside its RolesAuthority, so the adapter never ran.
+        return None
     return resolved
 
 
