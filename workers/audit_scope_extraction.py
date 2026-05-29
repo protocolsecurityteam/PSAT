@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select, Update
 
 from db.models import AuditReport, SessionLocal
+from db.queue import HEARTBEAT_AUDIT_SCOPE
 from services.audits import ScopeExtractionOutcome, process_audit_scope
 from workers.audit_row_worker import AuditRowWorker
 
@@ -84,6 +85,7 @@ class AuditScopeExtractionWorker(AuditRowWorker):
     """Drain rows where text extraction succeeded but scope isn't extracted yet."""
 
     worker_name = "AuditScopeExtraction"
+    heartbeat_process = HEARTBEAT_AUDIT_SCOPE
     batch_size = _BATCH_SIZE
     max_concurrent = _MAX_CONCURRENT
     idle_poll_interval = _IDLE_POLL_INTERVAL

@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from db.models import SessionLocal
+from db.queue import HEARTBEAT_COVERAGE_VERIFY, record_heartbeat
 from utils.logging import configure_logging
 from utils.memory import (
     cgroup_memory_current_bytes,
@@ -433,6 +434,7 @@ class CoverageVerifyWorker:
                 finally:
                     session.close()
 
+                record_heartbeat(HEARTBEAT_COVERAGE_VERIFY, status="running" if claimed_ids else "idle")
                 if not claimed_ids:
                     time.sleep(self.idle_poll_interval)
                     continue

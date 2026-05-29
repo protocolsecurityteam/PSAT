@@ -29,6 +29,7 @@ from sqlalchemy import select, update
 from sqlalchemy.sql import Select, Update
 
 from db.models import AuditReport, SessionLocal
+from db.queue import HEARTBEAT_AUDIT_TEXT
 from services.audits import ExtractionOutcome, process_audit_report
 from workers.audit_row_worker import AuditRowWorker
 
@@ -60,6 +61,7 @@ class AuditTextExtractionWorker(AuditRowWorker):
     """Drain rows where text extraction has not yet been attempted."""
 
     worker_name = "AuditTextExtraction"
+    heartbeat_process = HEARTBEAT_AUDIT_TEXT
     batch_size = _BATCH_SIZE
     max_concurrent = _MAX_CONCURRENT
     idle_poll_interval = _IDLE_POLL_INTERVAL

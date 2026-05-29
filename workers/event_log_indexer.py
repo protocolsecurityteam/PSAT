@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
-from db.queue import get_artifact
+from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
@@ -380,6 +380,8 @@ def run_event_log_indexer_loop(
     logger.info("starting event log indexer loop interval=%ss", interval)
     stop_event = stop_event or Event()
     while not stop_event.is_set():
+        enrolled = inserted = 0
+        status = "running"
         with SessionLocal() as session:
             try:
                 enrolled = enroll_from_completed_jobs(session)
@@ -394,6 +396,12 @@ def run_event_log_indexer_loop(
             except Exception:
                 session.rollback()
                 logger.exception("event log indexer pass failed")
+                status = "error"
+        record_heartbeat(
+            HEARTBEAT_EVENT_INDEXER,
+            status=status,
+            detail={"enrolled_last_pass": enrolled, "inserted_last_pass": inserted},
+        )
         stop_event.wait(interval)
 
 
