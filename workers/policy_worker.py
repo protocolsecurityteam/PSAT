@@ -31,7 +31,7 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 from workers.base import BaseWorker
 
@@ -397,6 +397,7 @@ class PolicyWorker(BaseWorker):
             session.commit()
 
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain_id = CHAIN_IDS.get(str(job_chain or "ethereum").lower(), 1)
@@ -524,6 +525,7 @@ class PolicyWorker(BaseWorker):
             session.commit()
 
         store_artifact(session, job.id, "principal_labels", data=pl_data)
+        record_stage_metric("principals_labeled", len(pl_data.get("principals", [])))
 
         logger.info(
             "Policy stage principal labels complete for job %s address=%s name=%s",
@@ -538,7 +540,12 @@ class PolicyWorker(BaseWorker):
             self._apply_effect_label_updates(ep_data, enriched)
             store_artifact(session, job.id, "effective_permissions", data=ep_data)
 
-        self.update_detail(session, job, "Policy analysis complete")
+        self.update_detail(
+            session,
+            job,
+            f"Policy analysis complete: {len(ep_data.get('functions', []))} functions, "
+            f"{len(pl_data.get('principals', []))} principals",
+        )
         logger.info(
             "Policy stage complete for job %s address=%s name=%s",
             job.id,
@@ -558,6 +565,7 @@ class PolicyWorker(BaseWorker):
                     chain="ethereum",
                     exclude_job_id=job.id,
                 )
+                record_stage_metric("enrolled", bool(enrolled))
                 if enrolled:
                     logger.info(
                         "Auto-enrolled protocol %s contracts into monitoring",
