@@ -999,6 +999,13 @@ class IndexedEventCursor(Base):
     last_run_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # True once the historical backfill has reached the confirmed head at least
+    # once. Cursors are seeded at the event address's *creation block* (not 0),
+    # so ``last_indexed_block > 0`` no longer implies "indexed" — a freshly
+    # enrolled cursor sits at a positive block having scanned nothing. Resolvers
+    # consult this flag (not the block number) before trusting the durable index;
+    # until it flips True they fall back to an inline fetch.
+    backfill_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
 
 class WorkerHeartbeat(Base):

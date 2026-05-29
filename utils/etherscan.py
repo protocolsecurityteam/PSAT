@@ -228,6 +228,52 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
     raise RuntimeError("Etherscan rate limit: max retries exceeded")
 
 
+def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str | None = None) -> int | None:
+    """Block in which *address* was deployed, or ``None`` if it can't be
+    determined.
+
+    Used to seed event-log cursors at the contract's birth instead of block 0,
+    so the indexer never scans the empty pre-deployment range. ``getcontractcreation``
+    is PG-cached (immutable), so this is a one-time cost per address. Prefers the
+    ``blockNumber`` Etherscan v2 returns directly; falls back to resolving the
+    creation ``txHash`` via RPC (through eRPC) when an older response omits it.
+    Best-effort: any failure returns ``None`` and the caller seeds at 0.
+    """
+    if not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
+        return None
+    try:
+        data = get("contract", "getcontractcreation", chain_id=chain_id, contractaddresses=address)
+    except Exception:
+        return None
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, list) or not result or not isinstance(result[0], dict):
+        return None
+    item = result[0]
+
+    raw_block = item.get("blockNumber")
+    if isinstance(raw_block, int):
+        return raw_block if raw_block >= 0 else None
+    if isinstance(raw_block, str) and raw_block.strip():
+        try:
+            return int(raw_block, 16) if raw_block.startswith("0x") else int(raw_block)
+        except ValueError:
+            pass
+
+    tx_hash = item.get("txHash")
+    if isinstance(tx_hash, str) and tx_hash.startswith("0x"):
+        try:
+            from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url, rpc_request
+
+            url = rpc_url or default_rpc_url(chain_id=chain_id) or PUBLIC_ETH_RPC_URL
+            tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash])
+            block = tx.get("blockNumber") if isinstance(tx, dict) else None
+            if isinstance(block, str) and block.startswith("0x"):
+                return int(block, 16)
+        except Exception:
+            return None
+    return None
+
+
 def _canonical_abi_type(inp: dict) -> str:
     """Expand an ABI input type to its canonical form, recursing into tuple components."""
     if inp.get("type") == "tuple":

@@ -177,6 +177,7 @@ def test_capabilities_response_includes_data_freshness(api_client, db_session, m
             topic0="0x" + "ab" * 32,
             last_indexed_block=18_500_000,
             last_indexed_block_hash=b"\xee" * 32,
+            backfill_complete=True,
         )
     )
     db_session.commit()

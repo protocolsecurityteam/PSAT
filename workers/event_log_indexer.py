@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from utils.etherscan import get_contract_creation_block
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -156,6 +157,10 @@ def index_event_log_step(
     target = max(0, head - confirmation_depth)
     last = int(cursor.last_indexed_block or 0)
     if target <= last:
+        # Cursor is already at (or past) the confirmed head — the historical
+        # backfill is done. Record that so resolvers stop treating a cursor
+        # seeded at the deploy block as "still cold" and trust the durable index.
+        cursor.backfill_complete = True
         return IndexStepResult(scanned_from=last + 1, scanned_to=target, inserted=0, caught_up=True)
 
     if last > 0 and cursor.last_indexed_block_hash is not None:
@@ -187,7 +192,10 @@ def index_event_log_step(
     cursor.last_indexed_block = window_end
     cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(window_end)
     cursor.last_run_at = func.now()
-    return IndexStepResult(scanned_from=start, scanned_to=window_end, inserted=inserted, caught_up=window_end >= target)
+    caught_up = window_end >= target
+    if caught_up:
+        cursor.backfill_complete = True
+    return IndexStepResult(scanned_from=start, scanned_to=window_end, inserted=inserted, caught_up=caught_up)
 
 
 def scan_enrolled_events(
@@ -254,6 +262,30 @@ def scan_enrolled_events(
     )
 
 
+def _seed_block(address: str, cache: dict[str, int], *, chain_id: int = 1) -> int:
+    """The ``last_indexed_block`` a new cursor should start at: one below the
+    event address's creation block, so the first scan window begins at the
+    deploy block and the ~20M empty pre-deployment blocks are never fetched.
+
+    Cached per pass (one Etherscan lookup per address, not per topic). Falls
+    back to 0 on any lookup failure — the cursor then backfills from genesis as
+    before, so a missing creation block degrades to the old behavior rather than
+    skipping real history.
+    """
+    key = address.lower()
+    if key in cache:
+        return cache[key]
+    seed = 0
+    try:
+        created = get_contract_creation_block(key, chain_id=chain_id)
+        if isinstance(created, int) and created > 0:
+            seed = created - 1
+    except Exception:
+        seed = 0
+    cache[key] = seed
+    return seed
+
+
 def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: int = 500) -> int:
     jobs = session.execute(
         select(Job)
@@ -263,6 +295,7 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
         .limit(limit)
     ).scalars()
     inserted = 0
+    seed_cache: dict[str, int] = {}
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
@@ -276,7 +309,10 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 address = _event_address_for_descriptor(descriptor, hint, job, values)
                 if address is None:
                     continue
-                if enroll_event_cursor(session, chain_id=chain_id, event_address=address, topic0=topic0):
+                start_block = _seed_block(address, seed_cache, chain_id=chain_id)
+                if enroll_event_cursor(
+                    session, chain_id=chain_id, event_address=address, topic0=topic0, start_block=start_block
+                ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
                 # Resolve the authority strictly from authority_contract — never
@@ -287,8 +323,11 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 # it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if authority is not None:
+                    start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
                     for topic0 in _SOLMATE_ROLE_TOPICS:
-                        if enroll_event_cursor(session, chain_id=chain_id, event_address=authority, topic0=topic0):
+                        if enroll_event_cursor(
+                            session, chain_id=chain_id, event_address=authority, topic0=topic0, start_block=start_block
+                        ):
                             inserted += 1
     session.commit()
     return inserted

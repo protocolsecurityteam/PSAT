@@ -63,8 +63,13 @@ class PostgresEventLogRepo:
                 continue
             state[member] = True
 
-        cursor_block = self._cursor_block(chain_id, event_address, topic0)
-        if cursor_block is None or cursor_block <= 0:
+        cursor_block, complete = self._cursor_state(chain_id, event_address, topic0)
+        # Trust the durable index only once its historical backfill has reached
+        # head. Cursors are seeded at the event address's deploy block, so a
+        # positive ``last_indexed_block`` no longer implies "fully indexed" — gate
+        # on ``backfill_complete`` so a cold/mid-backfill cursor defers to the
+        # adapter's inline fallback instead of folding a partial history.
+        if cursor_block is None or not complete:
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
                 confidence="partial",
@@ -130,10 +135,12 @@ class PostgresEventLogRepo:
                     continue
                 state[member] = hint["direction"] == "add"
 
-        cursor_blocks = {topic0: self._cursor_block(chain_id, event_address, topic0) for topic0 in topic0s}
-        indexed_blocks = [value for value in cursor_blocks.values() if value is not None and value > 0]
-        last_indexed_block = min(indexed_blocks) if indexed_blocks else None
-        if len(indexed_blocks) != len(topic0s):
+        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        # As in fold_event_writes: a topic counts as indexed only when its
+        # backfill is complete, not merely because its cursor advanced past 0.
+        complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
+        last_indexed_block = min(complete_blocks) if complete_blocks else None
+        if len(complete_blocks) != len(topic0s):
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
                 confidence="partial",
@@ -182,22 +189,34 @@ class PostgresEventLogRepo:
 
     def min_indexed_block(self, *, chain_id: int, event_address: str, topic0s: list[str]) -> int | None:
         """Lowest indexed-cursor block across ``topic0s``, or ``None`` when any
-        topic has no positive cursor (i.e. not yet durably indexed). Callers use
-        ``None`` to demote an empty result from exact to a probe."""
-        blocks = [self._cursor_block(chain_id, event_address, t) for t in topic0s if isinstance(t, str)]
-        present = [b for b in blocks if b is not None and b > 0]
-        if not topic0s or len(present) != len([t for t in topic0s if isinstance(t, str)]):
+        topic's backfill isn't complete (i.e. not yet durably indexed to head).
+        Callers use ``None`` to demote an empty result from exact to an inline
+        fetch / probe. A cursor seeded at the deploy block reads a positive
+        block immediately, so completeness — not the block number — is the
+        trust signal."""
+        topics = [t for t in topic0s if isinstance(t, str)]
+        if not topics:
             return None
-        return min(present)
+        states = [self._cursor_state(chain_id, event_address, t) for t in topics]
+        if any(block is None or not complete for block, complete in states):
+            return None
+        return min(block for block, _ in states if block is not None)
 
     def _cursor_block(self, chain_id: int, event_address: str, topic0: str) -> int | None:
+        return self._cursor_state(chain_id, event_address, topic0)[0]
+
+    def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
+        """``(last_indexed_block, backfill_complete)`` for one cursor, or
+        ``(None, False)`` when no cursor exists."""
         row = self.session.execute(
-            select(IndexedEventCursor.last_indexed_block)
+            select(IndexedEventCursor.last_indexed_block, IndexedEventCursor.backfill_complete)
             .where(IndexedEventCursor.chain_id == chain_id)
             .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
             .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
         ).first()
-        return row[0] if row else None
+        if row is None:
+            return None, False
+        return row[0], bool(row[1])
 
 
 def _caller_key_index(key_sources: list[dict[str, Any]]) -> int | None:
