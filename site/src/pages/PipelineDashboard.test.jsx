@@ -188,10 +188,18 @@ describe("PipelineDashboard — fleet strip", () => {
 
   it("renders a pill per daemon with health-derived tone + an unhealthy summary", async () => {
     const { container } = render(<PipelineDashboard />);
-    await waitFor(() => expect(container.querySelector(".sys-strip")).toBeTruthy());
+    // Wait for the pills themselves — .sys-strip renders immediately (just the
+    // "Fleet" label) before /api/fleet resolves, so waiting on it races the
+    // fetch and finds zero pills.
+    const errPill = await waitFor(() => {
+      const p = Array.from(container.querySelectorAll(".sys-strip .sys-pill")).find((x) =>
+        x.textContent.includes("Event indexer"),
+      );
+      expect(p).toBeTruthy();
+      return p;
+    });
     const strip = container.querySelector(".sys-strip");
     // error daemon → .err pill; failed-audit daemon → .warn; watchers stale → .warn.
-    const errPill = Array.from(strip.querySelectorAll(".sys-pill")).find((p) => p.textContent.includes("Event indexer"));
     expect(errPill.className).toContain("err");
     const scopePill = Array.from(strip.querySelectorAll(".sys-pill")).find((p) => p.textContent.includes("Audit scope"));
     expect(scopePill.className).toContain("warn");
