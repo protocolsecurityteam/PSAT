@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from db.models import (
     AuditContractCoverage,
+    AuditReport,
     IndexedEventCursor,
     Job,
     JobStatus,
@@ -110,6 +111,23 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
 
     audit_pipeline = build_audits_pipeline(session)
 
+    # Backlog + oldest-pending age for the two audit row workers. Cheap
+    # index-backed aggregates (the partial ``ix_audit_reports_*_status``
+    # indexes cover the predicates). Computed here rather than reused from the
+    # build_audits_pipeline buckets because those cap each bucket at 50, which
+    # understates a real backlog; ``min(...)`` over the pending slice dates the
+    # oldest waiting row so the frontend can flag a stuck worker (old age with
+    # zero throughput).
+    text_backlog, text_oldest = session.execute(
+        select(func.count(), func.min(AuditReport.discovered_at)).where(AuditReport.text_extraction_status.is_(None))
+    ).one()
+    scope_backlog, scope_oldest = session.execute(
+        select(func.count(), func.min(AuditReport.text_extracted_at)).where(
+            AuditReport.text_extraction_status == "success",
+            AuditReport.scope_extraction_status.is_(None),
+        )
+    ).one()
+
     idx_cursors, idx_oldest_run, idx_max_block, idx_min_block = session.execute(
         select(
             func.count(),
@@ -133,11 +151,28 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
-            return {"by_equivalence_status": cov_work, "total": sum(cov_work.values())}
+            return {
+                "by_equivalence_status": cov_work,
+                "total": sum(cov_work.values()),
+                # Drainable queue depth. Derived from the breakdown above (no
+                # extra query). No clean enqueue timestamp exists —
+                # equivalence_checked_at is stamped at *claim*, not enqueue —
+                # so we lead with backlog and omit oldest-age rather than date
+                # it from the wrong column.
+                "backlog": cov_work.get("pending", 0),
+            }
         if process == HEARTBEAT_AUDIT_TEXT:
-            return _bucket_counts(audit_pipeline.get("text_extraction"))
+            return {
+                **_bucket_counts(audit_pipeline.get("text_extraction")),
+                "backlog": text_backlog or 0,
+                "oldest_pending_age_s": _age_seconds(text_oldest, now),
+            }
         if process == HEARTBEAT_AUDIT_SCOPE:
-            return _bucket_counts(audit_pipeline.get("scope_extraction"))
+            return {
+                **_bucket_counts(audit_pipeline.get("scope_extraction")),
+                "backlog": scope_backlog or 0,
+                "oldest_pending_age_s": _age_seconds(scope_oldest, now),
+            }
         if process == HEARTBEAT_EVENT_INDEXER:
             spread = idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None
             return {
