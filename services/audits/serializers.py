@@ -27,10 +27,12 @@ def _audit_report_to_dict(ar: Any) -> dict[str, Any]:
         "text_extraction_status": ar.text_extraction_status,
         "text_extracted_at": (ar.text_extracted_at.isoformat() if ar.text_extracted_at else None),
         "text_size_bytes": ar.text_size_bytes,
+        "text_extraction_error": ar.text_extraction_error,
         "has_text": ar.text_extraction_status == "success",
         "scope_extraction_status": ar.scope_extraction_status,
         "scope_extracted_at": (ar.scope_extracted_at.isoformat() if ar.scope_extracted_at else None),
         "scope_contract_count": len(scope_contracts),
+        "scope_extraction_error": ar.scope_extraction_error,
         "has_scope": ar.scope_extraction_status == "success",
         # Commit attribution: `reviewed_commits` is the flat list extracted
         # from the PDF via regex; `classified_commits` is the LLM-labeled
