@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Job, JobStage
+from utils.logging import record_stage_metric, stage_metrics_var
 from workers.base import BaseWorker
 
 
@@ -120,6 +121,75 @@ def test_each_stage_writes_its_own_artifact_name(monkeypatch):
     assert payload0 is not None and payload1 is not None
     assert payload0["stage"] == "discovery"
     assert payload1["stage"] == "static"
+
+
+def test_record_folds_stage_metrics_when_bound(monkeypatch):
+    """Metrics recorded via ``record_stage_metric`` during a stage are folded
+    into that stage's timing artifact under a ``metrics`` key — this is what
+    lets the monitoring UI show "12 deps, 3 principals" without log scraping."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "workers.base.store_artifact",
+        lambda *_a, **kw: captured.update({"data": kw.get("data")}),
+    )
+
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        record_stage_metric("dependencies", 12)
+        record_stage_metric("is_proxy", False)
+        _FakeWorker()._record_stage_timing(
+            MagicMock(),
+            _job(),
+            started_at="t0",
+            ended_at="t1",
+            elapsed_s=1.0,
+            status="success",
+        )
+    finally:
+        stage_metrics_var.reset(token)
+
+    assert captured["data"]["metrics"] == {"dependencies": 12, "is_proxy": False}
+    # Stored payload must be a copy — a later contextvar reset / mutation
+    # cannot retroactively change what we persisted.
+    metrics["dependencies"] = 999
+    assert captured["data"]["metrics"]["dependencies"] == 12
+
+
+def test_record_omits_metrics_key_when_none_recorded(monkeypatch):
+    """No metrics bound (or none recorded) → no ``metrics`` key at all, so
+    legacy readers and the v2 schema are untouched."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "workers.base.store_artifact",
+        lambda *_a, **kw: captured.update({"data": kw.get("data")}),
+    )
+
+    # Unbound contextvar (default None).
+    _FakeWorker()._record_stage_timing(
+        MagicMock(),
+        _job(),
+        started_at="t0",
+        ended_at="t1",
+        elapsed_s=1.0,
+        status="success",
+    )
+    assert "metrics" not in captured["data"]
+
+    # Bound but empty dict — still omitted (falsy).
+    token = stage_metrics_var.set({})
+    try:
+        _FakeWorker()._record_stage_timing(
+            MagicMock(),
+            _job(),
+            started_at="t0",
+            ended_at="t1",
+            elapsed_s=1.0,
+            status="success",
+        )
+    finally:
+        stage_metrics_var.reset(token)
+    assert "metrics" not in captured["data"]
 
 
 def test_record_failed_status_persists(monkeypatch):
@@ -250,6 +320,67 @@ def test_record_timing_runs_before_advance_in_run_loop(monkeypatch):
 # ---------------------------------------------------------------------------
 # Codex-iter-2 finding: rollback session on artifact-write failure
 # ---------------------------------------------------------------------------
+
+
+def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
+    """End-to-end: a worker that calls ``record_stage_metric`` inside
+    ``process()`` ends up with those metrics in its ``stage_timing_<stage>``
+    artifact. Exercises the full ``_execute_job`` wiring — the per-job dict is
+    bound before ``process()``, folded by ``_record_stage_timing``, and reset
+    in the ``finally`` — not just the helper in isolation."""
+    from db.models import JobStatus
+    from workers import base
+
+    writes: list[tuple[str | None, dict | None]] = []
+
+    def _fake_store(*args, **kw):
+        name = args[2] if len(args) > 2 else kw.get("name")
+        writes.append((name, kw.get("data")))
+
+    class _MetricWorker(BaseWorker):
+        stage = JobStage.static
+        next_stage = JobStage.resolution
+        poll_interval = 0.0
+
+        def process(self, _session, _job):
+            record_stage_metric("dependencies", 5)
+            record_stage_metric("is_proxy", True)
+
+    # lease_id absent → no heartbeat thread / inflight registration to stub.
+    job = SimpleNamespace(
+        id="job-metrics",
+        address="0xabc",
+        name="t",
+        status=JobStatus.processing,
+        worker_id="w",
+        stage=JobStage.static,
+        request={},
+        trace_id=None,
+    )
+    claims = iter([job, None])
+
+    def _fake_claim(self_, _session):
+        try:
+            j = next(claims)
+        except StopIteration:
+            return None
+        if j is None:
+            self_._running = False
+        return j
+
+    monkeypatch.setattr(base.BaseWorker, "_claim_job", _fake_claim)
+    monkeypatch.setattr(base, "store_artifact", _fake_store)
+    monkeypatch.setattr(base, "advance_job", lambda *_a, **_kw: None)
+    monkeypatch.setattr(base, "SessionLocal", lambda: MagicMock())
+    monkeypatch.setattr(base.time, "sleep", lambda *_: None)
+
+    _MetricWorker().run_loop()
+
+    timing = next((data for name, data in writes if name == "stage_timing_static"), None)
+    assert timing is not None, "stage_timing_static artifact was not written"
+    assert timing["metrics"] == {"dependencies": 5, "is_proxy": True}
+    # Contextvar must be reset after the job — no leak into the next claim.
+    assert stage_metrics_var.get() is None
 
 
 def test_record_rolls_back_session_on_store_failure(monkeypatch):

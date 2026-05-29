@@ -81,6 +81,20 @@ degraded_errors_var: contextvars.ContextVar[list["StageError"] | None] = context
     "psat_degraded_errors", default=None
 )
 
+# Per-job accumulator for stage progress metrics (counts, key intermediate
+# results). ``BaseWorker`` binds a fresh dict at the start of every
+# ``_execute_job`` and folds it into that stage's ``stage_timing_<stage>``
+# artifact when the stage finishes — so the monitoring UI can show what a
+# stage actually did (deps discovered, principals resolved, coverage rows
+# written) without scraping logs or querying the DB. ``record_stage_metric``
+# (below) writes into it. Same threading story as the degraded accumulator:
+# the dispatcher does a ``copy_context().run(...)`` per job, so each pool
+# thread sees its own dict. Default ``None`` so calls outside a worker's job
+# context are no-ops.
+stage_metrics_var: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "psat_stage_metrics", default=None
+)
+
 # Standard ``LogRecord`` attributes we shouldn't echo into the JSON body —
 # the formatter already promotes the ones it cares about (level, logger,
 # message), and the rest are noise (pathname, lineno, processName, …).
@@ -277,12 +291,34 @@ def record_degraded(
     accumulator.append(error)
 
 
+def record_stage_metric(key: str, value: Any) -> None:
+    """Record a single progress metric for the current pipeline stage.
+
+    Folds ``key -> value`` into the per-job metrics dict that ``BaseWorker``
+    drains into the ``stage_timing_<stage>`` artifact on stage completion,
+    surfacing it to the monitoring UI. ``value`` should be a small
+    JSON-serialisable scalar (a count, flag, block number, or type name);
+    later writes for the same key overwrite earlier ones, so a worker can
+    update a running total as it goes.
+
+    A no-op when called outside a worker's job context (no accumulator
+    bound) — helpers and services can call it unconditionally, and tests
+    don't have to install the accumulator just to import a module.
+    """
+    metrics = stage_metrics_var.get()
+    if metrics is None:
+        return
+    metrics[key] = value
+
+
 __all__ = [
     "JsonFormatter",
     "bind_trace_context",
     "configure_logging",
     "degraded_errors_var",
     "record_degraded",
+    "record_stage_metric",
+    "stage_metrics_var",
     "trace_id_var",
     "job_id_var",
     "stage_var",
