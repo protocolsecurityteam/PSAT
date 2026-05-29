@@ -434,7 +434,16 @@ class CoverageVerifyWorker:
                 finally:
                     session.close()
 
-                record_heartbeat(HEARTBEAT_COVERAGE_VERIFY, status="running" if claimed_ids else "idle")
+                # ``verified_last_pass`` is the per-pass throughput count the
+                # fleet view diffs into a rate. The beat fires before the batch
+                # is processed (it must also fire on an idle poll so the daemon
+                # never reads as stale), so this is "rows taken up to verify
+                # this pass" — 0 when idle.
+                record_heartbeat(
+                    HEARTBEAT_COVERAGE_VERIFY,
+                    status="running" if claimed_ids else "idle",
+                    detail={"verified_last_pass": len(claimed_ids)},
+                )
                 if not claimed_ids:
                     time.sleep(self.idle_poll_interval)
                     continue

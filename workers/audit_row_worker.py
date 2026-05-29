@@ -250,7 +250,15 @@ class AuditRowWorker:
                     session.close()
 
                 if self.heartbeat_process:
-                    record_heartbeat(self.heartbeat_process, status="running" if claimed else "idle")
+                    # ``claimed_last_pass`` is the per-pass throughput count the
+                    # fleet view diffs into a rate. The beat fires before the
+                    # batch is processed (and on idle polls, so the daemon never
+                    # reads as stale), so it's "rows claimed this pass" — 0 idle.
+                    record_heartbeat(
+                        self.heartbeat_process,
+                        status="running" if claimed else "idle",
+                        detail={"claimed_last_pass": len(claimed)},
+                    )
                 if not claimed:
                     time.sleep(self.idle_poll_interval)
                     continue

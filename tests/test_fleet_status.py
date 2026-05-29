@@ -20,8 +20,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from db.models import IndexedEventCursor, MonitoredContract, WorkerHeartbeat
+from db.models import (
+    AuditContractCoverage,
+    AuditReport,
+    Contract,
+    IndexedEventCursor,
+    MonitoredContract,
+    Protocol,
+    WorkerHeartbeat,
+)
 from db.queue import (
+    HEARTBEAT_AUDIT_SCOPE,
+    HEARTBEAT_AUDIT_TEXT,
     HEARTBEAT_COVERAGE_VERIFY,
     HEARTBEAT_ENROLLMENT_RECONCILER,
     HEARTBEAT_EVENT_INDEXER,
@@ -110,7 +120,7 @@ def test_build_fleet_status_shape_when_idle(db_session, _clean_heartbeats):
     assert cov["alive"] is False
     assert cov["stale"] is True
     assert cov["last_beat_at"] is None
-    assert cov["work"] == {"by_equivalence_status": {}, "total": 0}
+    assert cov["work"] == {"by_equivalence_status": {}, "total": 0, "backlog": 0}
 
     assert set(out["watchers"]) >= {
         "monitored_contracts",
@@ -188,6 +198,75 @@ def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_hear
 
 
 @requires_postgres
+def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, _clean_heartbeats):
+    # The Option B triad: backlog (drainable depth) + oldest_pending_age_s
+    # (how long the oldest waiter has sat) come from cheap aggregate SQL.
+    now = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+    p = Protocol(name=f"fleet-triad-{_addr(99)[-8:]}")
+    db_session.add(p)
+    db_session.commit()
+
+    def _audit(**kw):
+        ar = AuditReport(protocol_id=p.id, url=f"https://x/{_addr(kw.pop('n'))}.pdf", auditor="A", title="T", **kw)
+        db_session.add(ar)
+        return ar
+
+    # Two rows awaiting text extraction; the oldest discovered 600s ago.
+    _audit(n=1, text_extraction_status=None, discovered_at=now - timedelta(seconds=600))
+    _audit(n=2, text_extraction_status=None, discovered_at=now - timedelta(seconds=120))
+    # One row past text, awaiting scope, text extracted 300s ago.
+    _audit(
+        n=3,
+        text_extraction_status="success",
+        scope_extraction_status=None,
+        text_extracted_at=now - timedelta(seconds=300),
+    )
+    # One fully-extracted row — counts toward neither backlog.
+    _audit(
+        n=4,
+        text_extraction_status="success",
+        scope_extraction_status="success",
+        text_extracted_at=now - timedelta(seconds=900),
+    )
+    db_session.commit()
+
+    # A non-proxy contract + one pending coverage row (the coverage backlog).
+    c = Contract(protocol_id=p.id, address=_addr(5), chain="ethereum", contract_name="Pool")
+    db_session.add(c)
+    db_session.commit()
+    audit_for_cov = _audit(n=6, text_extraction_status="success", scope_extraction_status="success")
+    db_session.commit()
+    db_session.add(
+        AuditContractCoverage(
+            contract_id=c.id,
+            audit_report_id=audit_for_cov.id,
+            protocol_id=p.id,
+            matched_name="Pool",
+            match_type="direct",
+            match_confidence="high",
+            equivalence_status="pending",
+        )
+    )
+    db_session.commit()
+
+    out = build_fleet_status(db_session, now=now)
+    work = {d["process"]: d["work"] for d in out["daemons"]}
+
+    text_work = work[HEARTBEAT_AUDIT_TEXT]
+    assert text_work["backlog"] == 2
+    assert text_work["oldest_pending_age_s"] == 600.0
+
+    scope_work = work[HEARTBEAT_AUDIT_SCOPE]
+    assert scope_work["backlog"] == 1
+    assert scope_work["oldest_pending_age_s"] == 300.0
+
+    cov_work = work[HEARTBEAT_COVERAGE_VERIFY]
+    assert cov_work["backlog"] == 1
+    assert cov_work["by_equivalence_status"].get("pending") == 1
+
+
+@requires_postgres
 def test_fleet_endpoint_returns_all_groups(api_client, db_session, _clean_heartbeats):
     resp = api_client.get("/api/fleet")
     assert resp.status_code == 200
@@ -230,7 +309,7 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
 
     def fake_scan(_session, **_kw):
         stop.set()  # one pass only
-        return 5
+        return idx.ScanSummary(inserted=5, windows_scanned=3, caught_up_cursors=1, total_cursors=2)
 
     monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 2)
@@ -243,7 +322,13 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
     process, kw = beats[0]
     assert process == HEARTBEAT_EVENT_INDEXER
     assert kw["status"] == "running"
-    assert kw["detail"] == {"enrolled_last_pass": 2, "inserted_last_pass": 5}
+    assert kw["detail"] == {
+        "enrolled_last_pass": 2,
+        "inserted_last_pass": 5,
+        "windows_scanned": 3,
+        "caught_up_cursors": 1,
+        "total_cursors": 2,
+    }
 
 
 # ── audit serializer error fields ────────────────────────────────────────────
