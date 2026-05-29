@@ -10,10 +10,11 @@
 //   - buildLogsDeeplink / inferFlyApp helper shapes (unchanged)
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 import PipelineDashboard from "./PipelineDashboard.jsx";
+import { computeFleetRates, daemonTone } from "./FleetStrip.jsx";
 import { buildLogsDeeplink, inferFlyApp } from "./JobDetailPanel.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
 
@@ -238,6 +239,146 @@ describe("PipelineDashboard — fleet strip", () => {
     const dock = container.querySelector(".dock");
     expect(await within(dock).findByText(/1 cursor far behind head/)).toBeInTheDocument();
     expect(within(dock).getByText("blocks behind")).toBeInTheDocument();
+  });
+});
+
+describe("PipelineDashboard — fleet triad (Option B)", () => {
+  const baseWatchers = {
+    monitored_contracts: 0,
+    active: 0,
+    last_update_at: new Date(NOW).toISOString(),
+    last_update_age_s: 5,
+    tvl_last_snapshot_at: null,
+    tvl_last_snapshot_age_s: null,
+  };
+
+  it("renders backlog, oldest-waiting age, and the per-pass throughput count in the daemon detail", async () => {
+    const fleet = {
+      now: new Date(NOW).toISOString(),
+      jobs: { queued: 0, processing: 0, by_stage: {} },
+      daemons: [
+        {
+          process: "audit_text_extraction", kind: "drainer", label: "Audit text extraction", status: "running",
+          last_beat_at: isoAgo(2_000), beat_age_s: 2, alive: true, stale: false,
+          detail: { claimed_last_pass: 7 },
+          work: { processing: 2, pending: 12, failed: 0, backlog: 12, oldest_pending_age_s: 240 },
+        },
+      ],
+      watchers: baseWatchers,
+    };
+    installMocks([RUNNING], { fleet });
+    const { container } = render(<PipelineDashboard />);
+    const pill = await waitFor(() => {
+      const p = Array.from(container.querySelectorAll(".sys-pill")).find((x) => x.textContent.includes("Audit text"));
+      expect(p).toBeTruthy();
+      return p;
+    });
+    fireEvent.click(pill);
+    const dock = container.querySelector(".dock");
+    // Triad rows.
+    expect(await within(dock).findByText("backlog")).toBeInTheDocument();
+    expect(within(dock).getByText("oldest waiting")).toBeInTheDocument();
+    expect(within(dock).getByText("4m")).toBeInTheDocument(); // humanAge(240)
+    // Per-pass throughput surfaces from the heartbeat detail ("Last pass" block).
+    expect(within(dock).getByText(/claimed last pass 7/)).toBeInTheDocument();
+  });
+
+  it("flags a stuck drainer (old age + zero throughput) as warn and counts it unhealthy", async () => {
+    const fleet = {
+      now: new Date(NOW).toISOString(),
+      jobs: { queued: 0, processing: 0, by_stage: {} },
+      daemons: [
+        {
+          process: "audit_scope_extraction", kind: "drainer", label: "Audit scope extraction", status: "idle",
+          last_beat_at: isoAgo(3_000), beat_age_s: 3, alive: true, stale: false,
+          detail: { claimed_last_pass: 0 },
+          work: { processing: 0, pending: 5, failed: 0, backlog: 5, oldest_pending_age_s: 1800 },
+        },
+      ],
+      watchers: baseWatchers,
+    };
+    installMocks([RUNNING], { fleet });
+    const { container } = render(<PipelineDashboard />);
+    const pill = await waitFor(() => {
+      const p = Array.from(container.querySelectorAll(".sys-pill")).find((x) => x.textContent.includes("Audit scope"));
+      expect(p).toBeTruthy();
+      return p;
+    });
+    // Stuck → warn pill, "stuck" sub, and counted in the unhealthy summary.
+    expect(pill.className).toContain("warn");
+    expect(within(pill).getByText("stuck")).toBeInTheDocument();
+    const strip = container.querySelector(".sys-strip");
+    expect(within(strip).getByText(/1 unhealthy/)).toBeInTheDocument();
+    fireEvent.click(pill);
+    const dock = container.querySelector(".dock");
+    expect(await within(dock).findByText(/Stuck — oldest item waiting/)).toBeInTheDocument();
+  });
+
+  it("computeFleetRates diffs two snapshots into per-process progress/backlog rates", () => {
+    const anchors = {};
+    const snap = (now, block, backlog) => ({
+      now,
+      daemons: [
+        { process: "event_log_indexer", work: { max_indexed_block: block } },
+        { process: "audit_text_extraction", work: { backlog } },
+      ],
+      watchers: { max_scanned_block: block },
+    });
+    // First snapshot seeds anchors — no rate yet.
+    const first = computeFleetRates(anchors, snap("2026-05-28T12:00:00.000Z", 19_000_000, 30));
+    expect(first.event_log_indexer.blocksPerMin).toBeNull();
+    expect(first.audit_text_extraction.backlogPerMin).toBeNull();
+    // 60s later: +2400 blocks indexed, backlog drained by 10.
+    const second = computeFleetRates(anchors, snap("2026-05-28T12:01:00.000Z", 19_002_400, 20));
+    expect(second.event_log_indexer.blocksPerMin).toBe(2400);
+    expect(second.audit_text_extraction.backlogPerMin).toBe(-10);
+    expect(second.watchers.blocksPerMin).toBe(2400);
+  });
+
+  it("reads a growing backlog as warn (falling behind) and a draining one as healthy", () => {
+    const d = {
+      process: "audit_text_extraction", status: "running", last_beat_at: new Date(NOW).toISOString(),
+      stale: false, detail: { claimed_last_pass: 3 }, work: { backlog: 50, oldest_pending_age_s: 30, failed: 0 },
+    };
+    expect(daemonTone(d, { backlogPerMin: 5 })).toBe("warn"); // backlog rising → falling behind
+    expect(daemonTone(d, { backlogPerMin: -5 })).toBe("ok"); // backlog draining → healthy
+    expect(daemonTone(d, {})).toBe("ok"); // no rate yet (first poll) → healthy
+  });
+
+  it("shows a frontend-computed progress rate in the dock after two differing polls", async () => {
+    vi.useFakeTimers();
+    try {
+      installMocks([RUNNING]);
+      const idx = (nowMs, block) => ({
+        process: "event_log_indexer", kind: "indexer", label: "Event-log indexer",
+        status: "idle", last_beat_at: new Date(nowMs).toISOString(), beat_age_s: 1, alive: true, stale: false,
+        detail: { enrolled_last_pass: 0, inserted_last_pass: 4, windows_scanned: 5, caught_up_cursors: 2, total_cursors: 2 },
+        work: { cursors: 2, stalest_run_age_s: 5, max_indexed_block: block, min_indexed_block: block, block_spread: 0, lagging_cursors: 0 },
+      });
+      const poll = (nowMs, block) => ({
+        now: new Date(nowMs).toISOString(),
+        jobs: { queued: 0, processing: 0, by_stage: {} },
+        daemons: [idx(nowMs, block)],
+        watchers: { monitored_contracts: 0, active: 0, last_update_at: new Date(nowMs).toISOString(), last_update_age_s: 1 },
+      });
+      let n = 0;
+      setFetchHandler(/^\/api\/fleet$/, () => (n++ === 0 ? poll(NOW, 19_000_000) : poll(NOW + 60_000, 19_002_400)));
+
+      const { container } = render(<PipelineDashboard />);
+      // Poll #1 seeds the anchor; the 2.5s interval fires poll #2 (+2400 blocks
+      // over 60s of server time) which the page diffs into a rate.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2600);
+      });
+
+      const pill = Array.from(container.querySelectorAll(".sys-pill")).find((x) => x.textContent.includes("Event indexer"));
+      fireEvent.click(pill);
+      const dock = container.querySelector(".dock");
+      expect(within(dock).getByText("indexing rate")).toBeInTheDocument();
+      expect(within(dock).getByText(/\+2\.4K blocks\/min/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

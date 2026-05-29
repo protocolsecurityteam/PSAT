@@ -473,6 +473,12 @@
   text-transform: uppercase;
   color: #64748b;
 }
+/* Progress/throughput rate annotation next to a work metric (e.g. "+18/min",
+   "+12.3K blocks/min"). Colored at the call site by direction. */
+.dmn-rate {
+  margin-left: 7px;
+  font: 600 10px "JetBrains Mono", monospace;
+}
 .dmn-alert {
   border-radius: 8px;
   padding: 10px 12px;

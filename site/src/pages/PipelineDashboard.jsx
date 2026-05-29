@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
 import { shortenAddress } from "../graph.js";
 import { JobDetail } from "./JobDetailPanel.jsx";
-import { FleetStrip, DaemonDetail } from "./FleetStrip.jsx";
+import { FleetStrip, DaemonDetail, computeFleetRates } from "./FleetStrip.jsx";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";
 
 // Re-exported for RunsPage.jsx, which still imports PIPELINE_STAGES from here.
@@ -251,6 +251,11 @@ export default function PipelineDashboard() {
   const [allJobs, setAllJobs] = useState([]);
   const [stats, setStats] = useState(null);
   const [fleet, setFleet] = useState(null);
+  // Per-process progress rates, diffed across successive /api/fleet polls.
+  // Anchors (last-changed value + time per counter) persist in a ref so the
+  // rate survives re-renders; the derived map is state so it triggers one.
+  const fleetRatesAnchors = useRef({});
+  const [fleetRates, setFleetRates] = useState({});
   const [now, setNow] = useState(Date.now());
   // One selection drives the dock: null | {type:'job', id} | {type:'process', key}
   const [selected, setSelected] = useState(null);
@@ -274,6 +279,9 @@ export default function PipelineDashboard() {
           setAllJobs(Array.isArray(jobs) ? jobs : []);
           setStats(s);
           setFleet(f);
+          // Only re-derive rates from a real snapshot — a failed fleet poll
+          // (f null) keeps the last rates rather than wiping them to zero.
+          if (f) setFleetRates(computeFleetRates(fleetRatesAnchors.current, f));
           setRefreshTick((n) => n + 1);
         }
       } catch {
@@ -398,7 +406,7 @@ export default function PipelineDashboard() {
         </div>
       </div>
 
-      <FleetStrip fleet={fleet} selected={selected} onSelectProcess={selectProcess} />
+      <FleetStrip fleet={fleet} selected={selected} onSelectProcess={selectProcess} rates={fleetRates} />
 
       <div className="split">
         <div>
@@ -490,7 +498,7 @@ export default function PipelineDashboard() {
               now={now}
             />
           ) : selected?.type === "process" ? (
-            <DaemonDetail daemonKey={selected.key} fleet={fleet} onClose={clearSelection} />
+            <DaemonDetail daemonKey={selected.key} fleet={fleet} onClose={clearSelection} rates={fleetRates} />
           ) : (
             <EmptyDock />
           )}
