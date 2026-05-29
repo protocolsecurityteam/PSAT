@@ -337,11 +337,7 @@ def probe_sibling_chains(
 
     # Limit to chains the resolver can actually reach: eRPC-routable chain_ids,
     # or chains with a legacy Alchemy slug as fallback when eRPC is absent.
-    probe_chains = [
-        ch
-        for ch in CHAIN_IDS
-        if erpc_url_for_chain_id(CHAIN_IDS[ch]) or ch in _ALCHEMY_CHAIN_SLUGS
-    ]
+    probe_chains = [ch for ch in CHAIN_IDS if erpc_url_for_chain_id(CHAIN_IDS[ch]) or ch in _ALCHEMY_CHAIN_SLUGS]
     all_addrs = sorted(known.keys())
 
     _debug_log(
