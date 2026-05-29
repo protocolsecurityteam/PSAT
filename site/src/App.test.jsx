@@ -85,15 +85,14 @@ describe("App router smoke tests", () => {
     expectNoCrash();
   });
 
-  it("renders the pipeline dashboard at /monitor", async () => {
+  it("renders the job monitor at /monitor", async () => {
     navigateTo("/monitor");
     render(<App />);
-    // PipelineDashboard either shows the loading state or the full
-    // dashboard — both prove the route resolved + the component mounted.
+    // The monitor page renders the Active/History zones + the fleet strip
+    // immediately (empty state when there's no data) — the zone eyebrow
+    // proves the route resolved + the component mounted.
     await waitFor(() => {
-      const loading = screen.queryByText(/Loading pipeline status/i);
-      const eyebrow = screen.queryByText(/Pipeline Status/i);
-      expect(loading || eyebrow).toBeInTheDocument();
+      expect(screen.getByText(/Active · queued \+ processing/i)).toBeInTheDocument();
     });
     expectNoCrash();
   });
