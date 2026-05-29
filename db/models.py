@@ -1001,6 +1001,27 @@ class IndexedEventCursor(Base):
     )
 
 
+class WorkerHeartbeat(Base):
+    """Liveness + last-known work summary for a background daemon that drains
+    its own table instead of the ``jobs`` queue (coverage-verify, audit
+    text/scope extraction, event-log indexer, enrollment reconciler).
+
+    One row per logical process; the daemon upserts it each loop tick via
+    ``db.queue.record_heartbeat`` so the fleet view (``/api/fleet``) can tell
+    'idle' from 'dead'. A work-row timestamp can't make that distinction —
+    an idle drainer has no recent rows to point at, so it would read as dead.
+    """
+
+    __tablename__ = "worker_heartbeats"
+
+    process: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="running")
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    beat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class EtherscanCache(Base):
     """Persistent Etherscan response cache. Read/written by ``utils/etherscan.py``
     via raw SQL; the model exists so the schema participates in
