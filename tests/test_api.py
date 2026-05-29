@@ -568,13 +568,14 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls) -> None:
     assert resp.status_code == 404
 
 
-def test_stage_timings_endpoint_is_admin_protected() -> None:
-    """Per-job timings expose internal worker_id / runtime metadata —
-    must be admin-protected so a public-facing analyzer doesn't leak
-    the worker fleet shape. Verified at the route-definition level
-    because conftest's ``_bypass_admin_key`` autouse fixture stubs
-    the auth dependency for every test, so an HTTP 401 assertion
-    can never fire."""
+def test_stage_timings_endpoint_is_public() -> None:
+    """Per-job stage timings are intentionally public. The payload is execution
+    telemetry (durations, status, metric counts) plus worker_id — and worker_id
+    is already exposed by the public ``/api/jobs`` and ``/api/jobs/{id}/errors``
+    endpoints, so nothing here is more sensitive than what the monitor page
+    already serves unauthenticated. Verified at the route-definition level
+    because conftest's ``_bypass_admin_key`` autouse fixture stubs the auth
+    dependency for every test, so an HTTP-status assertion can never fire."""
     import api
     from routers.deps import require_admin_key
 
@@ -583,9 +584,10 @@ def test_stage_timings_endpoint_is_admin_protected() -> None:
     assert matching, f"route {target_path} is not registered"
     route = matching[0]
     route_deps = [dep.call for dep in route.dependant.dependencies]  # type: ignore[attr-defined]
-    assert require_admin_key in route_deps, (
-        "stage_timings endpoint must depend on require_admin_key — without "
-        "it, per-job worker_id / runtime metadata would be public"
+    assert require_admin_key not in route_deps, (
+        "stage_timings is intentionally public (telemetry + worker_id, already "
+        "public via /api/jobs and /errors); re-gating it reintroduces the "
+        "no-admin-key 'flash then disappear' bug on /monitor"
     )
 
 
