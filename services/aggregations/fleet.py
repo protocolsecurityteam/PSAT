@@ -56,6 +56,11 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_ENROLLMENT_RECONCILER: {"kind": "daemon", "interval_s": 660, "label": "Enrollment reconciler"},
 }
 
+# A cursor more than this many blocks behind the leading cursor is "lagging" —
+# the signature of one seeded at block 0 (full-chain backfill) while the rest
+# track head. ~2 weeks of mainnet blocks; far below any genuine backfill gap.
+_CURSOR_LAG_BLOCKS = 100_000
+
 
 def _age_seconds(ts: datetime | None, now: datetime) -> float | None:
     """Seconds between *ts* and *now*, or None. Guards naive timestamps so a
@@ -105,13 +110,26 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
 
     audit_pipeline = build_audits_pipeline(session)
 
-    idx_cursors, idx_oldest_run, idx_max_block = session.execute(
+    idx_cursors, idx_oldest_run, idx_max_block, idx_min_block = session.execute(
         select(
             func.count(),
             func.min(IndexedEventCursor.last_run_at),
             func.max(IndexedEventCursor.last_indexed_block),
+            func.min(IndexedEventCursor.last_indexed_block),
         )
     ).one()
+    # Cursors far behind the leader. max_indexed_block alone hides a block-0
+    # backfill the moment any healthy cursor reaches head; this surfaces it.
+    idx_lagging = 0
+    if idx_max_block:
+        idx_lagging = (
+            session.execute(
+                select(func.count())
+                .select_from(IndexedEventCursor)
+                .where(IndexedEventCursor.last_indexed_block < idx_max_block - _CURSOR_LAG_BLOCKS)
+            ).scalar()
+            or 0
+        )
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
@@ -121,10 +139,14 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         if process == HEARTBEAT_AUDIT_SCOPE:
             return _bucket_counts(audit_pipeline.get("scope_extraction"))
         if process == HEARTBEAT_EVENT_INDEXER:
+            spread = idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None
             return {
                 "cursors": idx_cursors or 0,
                 "stalest_run_age_s": _age_seconds(idx_oldest_run, now),
                 "max_indexed_block": idx_max_block,
+                "min_indexed_block": idx_min_block,
+                "block_spread": spread,
+                "lagging_cursors": idx_lagging,
             }
         return None
 
@@ -158,12 +180,20 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         or 0
     )
     mon_latest = session.execute(select(func.max(MonitoredContract.updated_at))).scalar()
+    mon_min_block, mon_max_block = session.execute(
+        select(func.min(MonitoredContract.last_scanned_block), func.max(MonitoredContract.last_scanned_block))
+    ).one()
     tvl_latest = session.execute(select(func.max(TvlSnapshot.timestamp))).scalar()
     watchers = {
         "monitored_contracts": mon_total,
         "active": mon_active,
         "last_update_at": mon_latest.isoformat() if mon_latest else None,
         "last_update_age_s": _age_seconds(mon_latest, now),
+        "min_scanned_block": mon_min_block,
+        "max_scanned_block": mon_max_block,
+        "scan_block_spread": (
+            mon_max_block - mon_min_block if mon_max_block is not None and mon_min_block is not None else None
+        ),
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
     }

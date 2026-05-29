@@ -161,6 +161,33 @@ def test_build_fleet_status_reports_work_and_watchers(db_session, _clean_heartbe
 
 
 @requires_postgres
+def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_heartbeats):
+    # One cursor at head + one freshly-enrolled cursor stuck at block 0 (a
+    # seeded-from-0 full-chain backfill). max_indexed_block alone reads
+    # "healthy" because the leader is at head — min/spread/lagging expose it.
+    db_session.add(
+        IndexedEventCursor(chain_id=1, event_address=_addr(10), topic0="0x" + "aa" * 32, last_indexed_block=19_000_000)
+    )
+    db_session.add(
+        IndexedEventCursor(chain_id=1, event_address=_addr(11), topic0="0x" + "bb" * 32, last_indexed_block=0)
+    )
+    db_session.add(MonitoredContract(address=_addr(12), chain="ethereum", last_scanned_block=0))
+    db_session.add(MonitoredContract(address=_addr(13), chain="ethereum", last_scanned_block=19_000_000))
+    db_session.commit()
+
+    out = build_fleet_status(db_session)
+    work = next(d for d in out["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)["work"]
+    assert work["min_indexed_block"] == 0
+    assert work["max_indexed_block"] >= 19_000_000
+    assert work["block_spread"] >= 19_000_000
+    assert work["lagging_cursors"] >= 1  # the block-0 cursor
+
+    watchers = out["watchers"]
+    assert watchers["min_scanned_block"] == 0
+    assert watchers["scan_block_spread"] >= 19_000_000
+
+
+@requires_postgres
 def test_fleet_endpoint_returns_all_groups(api_client, db_session, _clean_heartbeats):
     resp = api_client.get("/api/fleet")
     assert resp.status_code == 200
