@@ -48,6 +48,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
+from utils.logging import record_stage_metric
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.coverage_worker")
@@ -205,6 +206,8 @@ class CoverageWorker(BaseWorker):
             verify_source_equivalence=False,
         )
         session.commit()
+        record_stage_metric("coverage_rows", inserted)
+        self.update_detail(session, job, f"Audit coverage refreshed: {inserted} row(s)")
         logger.info(
             "Coverage stage complete for job %s (contract %s): %d coverage row(s) — verification deferred",
             job.id,

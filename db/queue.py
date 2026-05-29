@@ -27,7 +27,9 @@ from .models import (
     JobStage,
     JobStatus,
     Protocol,
+    SessionLocal,
     SourceFile,
+    WorkerHeartbeat,
 )
 from .storage import (
     StorageError,
@@ -54,6 +56,40 @@ DEFAULT_JOB_STALE_TIMEOUT = int(os.getenv("PSAT_JOB_STALE_TIMEOUT", "900"))
 # either a crashed worker or a worker that's gone too long without a
 # heartbeat (e.g. a single nested forge build over the heartbeat cadence).
 DEFAULT_JOB_LEASE_TTL_S = int(os.getenv("PSAT_JOB_LEASE_TTL_S", str(DEFAULT_JOB_STALE_TIMEOUT)))
+
+# Canonical process names for the background daemons that drain their own
+# tables (not the jobs queue). Shared by the daemons (writers) and the
+# ``/api/fleet`` endpoint (reader) so the two can't drift.
+HEARTBEAT_COVERAGE_VERIFY = "coverage_verify"
+HEARTBEAT_EVENT_INDEXER = "event_log_indexer"
+HEARTBEAT_ENROLLMENT_RECONCILER = "enrollment_reconciler"
+HEARTBEAT_AUDIT_TEXT = "audit_text_extraction"
+HEARTBEAT_AUDIT_SCOPE = "audit_scope_extraction"
+
+
+def record_heartbeat(process: str, *, status: str = "running", detail: dict[str, Any] | None = None) -> None:
+    """Upsert a background daemon's liveness row (best-effort).
+
+    Opens its own short-lived session and never raises into the caller's
+    loop — a heartbeat-write failure must not take down a worker. ``detail``
+    carries a small JSON summary the daemon already computes (rows claimed,
+    protocols reconciled, …) for the fleet view; the heavier work-state
+    breakdowns are queried straight from each daemon's table by the endpoint.
+    """
+    try:
+        with SessionLocal() as session:
+            stmt = (
+                pg_insert(WorkerHeartbeat)
+                .values(process=process, status=status, detail=detail, beat_at=func.now())
+                .on_conflict_do_update(
+                    index_elements=["process"],
+                    set_={"status": status, "detail": detail, "beat_at": func.now()},
+                )
+            )
+            session.execute(stmt)
+            session.commit()
+    except Exception:
+        logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
 
 
 class LeaseLost(RuntimeError):

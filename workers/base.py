@@ -12,7 +12,7 @@ import traceback
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,7 +33,7 @@ from db.queue import (
     update_job_detail,
 )
 from schemas.stage_errors import StageError, StageErrors
-from utils.logging import bind_trace_context, configure_logging, degraded_errors_var
+from utils.logging import bind_trace_context, configure_logging, degraded_errors_var, stage_metrics_var
 from utils.memory import (
     cgroup_memory_current_bytes,
     cgroup_memory_max_bytes,
@@ -301,6 +301,12 @@ class BaseWorker:
             # context is a copy from the dispatcher).
             degraded_accumulator: list[StageError] = []
             accumulator_token = degraded_errors_var.set(degraded_accumulator)
+            # Per-job accumulator for ``record_stage_metric`` calls. Bound and
+            # reset alongside the degraded accumulator (same per-thread reasons)
+            # and folded into this stage's ``stage_timing_<stage>`` artifact by
+            # ``_record_stage_timing``.
+            stage_metrics: dict[str, Any] = {}
+            metrics_token = stage_metrics_var.set(stage_metrics)
             # Snapshot the lease at claim time so every mutating queue
             # write threads it through. ``getattr`` keeps test stubs that
             # build a bare SimpleNamespace job from tripping AttributeError.
@@ -656,6 +662,7 @@ class BaseWorker:
                 if heartbeat_thread is not None:
                     heartbeat_thread.join(timeout=1)
                 degraded_errors_var.reset(accumulator_token)
+                stage_metrics_var.reset(metrics_token)
                 if inflight_registered:
                     with self._inflight_lock:
                         self._inflight_jobs.pop(claim_job_id, None)
@@ -1066,6 +1073,14 @@ class BaseWorker:
             "worker_id": self.worker_id,
             "status": status,
         }
+        # Fold in any progress metrics the stage recorded via
+        # ``record_stage_metric`` (deps discovered, principals resolved, …).
+        # Additive within schema v2 — the key is omitted when empty so legacy
+        # readers (bench harness reads ``elapsed_s``) are unaffected. Copied so
+        # a later reset of the contextvar can't mutate the stored payload.
+        metrics = stage_metrics_var.get()
+        if metrics:
+            payload["metrics"] = dict(metrics)
         try:
             store_artifact(session, job.id, artifact_name, data=payload)
         except Exception:

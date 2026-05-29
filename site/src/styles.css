@@ -28,6 +28,7 @@
 @import "./styles/components/surface-preview.css";
 @import "./styles/components/eye-conveyor.css";
 @import "./styles/pages/pipeline-dashboard.css";
+@import "./styles/pages/job-monitor.css";
 @import "./styles/pages/protocol-monitoring.css";
 @import "./styles/pages/company-bands.css";
 @import "./styles/pages/inline-surface.css";

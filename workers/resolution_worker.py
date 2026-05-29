@@ -30,7 +30,7 @@ from services.resolution.capability_resolver import (
 )
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 from workers.base import BaseWorker
 
@@ -133,6 +133,9 @@ class ResolutionWorker(BaseWorker):
         )
         # Keep as artifact — policy stage reads it as JSON
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
+        record_stage_metric("controllers_resolved", len(snapshot.get("controller_values", {})))
+        if snapshot.get("block_number") is not None:
+            record_stage_metric("block_number", snapshot.get("block_number"))
 
         # Write to controller_values table
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
@@ -186,6 +189,10 @@ class ResolutionWorker(BaseWorker):
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "recursive_graph"},
         )
 
+        graph_nodes = len(resolved_graph.get("nodes", [])) if resolved_graph else 0
+        graph_edges = len(resolved_graph.get("edges", [])) if resolved_graph else 0
+        record_stage_metric("graph_nodes", graph_nodes)
+        record_stage_metric("graph_edges", graph_edges)
         if resolved_graph:
             # Persist each nested contract's artifacts so the policy stage can
             # read them back by address (no local filesystem).
@@ -265,7 +272,11 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
-        self.update_detail(session, job, "Resolution complete")
+        self.update_detail(
+            session,
+            job,
+            f"Resolution complete: {graph_nodes} graph nodes, {graph_edges} edges",
+        )
         logger.info(
             "Resolution stage complete for job %s address=%s name=%s",
             job.id,

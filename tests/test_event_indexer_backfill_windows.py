@@ -158,7 +158,7 @@ def test_backfills_full_history_in_bounded_windows(session):
 
     fetcher = _RangeCappedFetcher()
     fetchers, heads, hashes = _maps(fetcher)
-    inserted = scan_enrolled_events(
+    summary = scan_enrolled_events(
         session,
         fetchers=fetchers,
         head_fetchers=heads,
@@ -181,7 +181,7 @@ def test_backfills_full_history_in_bounded_windows(session):
     expected_logs = _TARGET // _DENSITY  # 9_999
     assert _cursor_block(session, _AUTHORITY) == _TARGET
     assert _log_count(session, _AUTHORITY) == expected_logs
-    assert inserted == expected_logs
+    assert summary.inserted == expected_logs
 
 
 @requires_postgres
@@ -195,7 +195,7 @@ def test_unbounded_span_wedges_the_cursor_at_zero(session):
     fetcher = _RangeCappedFetcher()
     fetchers, heads, hashes = _maps(fetcher)
     # max_block_span wider than the whole gap == the old single-shot behaviour.
-    inserted = scan_enrolled_events(
+    summary = scan_enrolled_events(
         session,
         fetchers=fetchers,
         head_fetchers=heads,
@@ -206,6 +206,6 @@ def test_unbounded_span_wedges_the_cursor_at_zero(session):
     )
 
     assert max(fetcher.requested_spans) > _MAX_SAFE_SPAN  # it asked for an oversized range
-    assert inserted == 0
+    assert summary.inserted == 0
     assert _cursor_block(session, _AUTHORITY) == 0  # wedged, never advanced
     assert _log_count(session, _AUTHORITY) == 0

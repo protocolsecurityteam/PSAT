@@ -37,6 +37,7 @@ from services.discovery.ranking import (
     effective_confidence,
     rank_contract_rows,
 )
+from utils.logging import record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.selection_worker")
@@ -359,6 +360,8 @@ class SelectionWorker(BaseWorker):
                 "ranked": summary_ranked,
             },
         )
+        record_stage_metric("ranked_candidates", len(ranked))
+        record_stage_metric("queued", len(child_ids))
         if child_ids:
             detail = f"Selection complete: queued {len(child_ids)} of {len(ranked)} ranked candidates"
         elif ranked:

@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
-from db.queue import get_artifact
+from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
@@ -88,6 +88,23 @@ class IndexStepResult:
     scanned_to: int
     inserted: int
     caught_up: bool  # True once scanned_to reached the confirmed head (no gap left)
+
+
+@dataclass(frozen=True)
+class ScanSummary:
+    """What one ``scan_enrolled_events`` pass did, for the fleet heartbeat.
+
+    ``windows_scanned`` (steps run, summed across all cursors) over
+    ``total_cursors`` reveals the from-0 backfill signature: many windows
+    scanned with 0 inserted and ``caught_up_cursors`` < ``total_cursors``
+    means a cold cursor is grinding through empty eth_getLogs ranges while
+    the rest sit at head.
+    """
+
+    inserted: int = 0
+    windows_scanned: int = 0
+    caught_up_cursors: int = 0
+    total_cursors: int = 0
 
 
 def enroll_event_cursor(
@@ -183,11 +200,13 @@ def scan_enrolled_events(
     max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
-) -> int:
+) -> ScanSummary:
     rows = session.execute(
         select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
     ).all()
     inserted = 0
+    windows_scanned = 0
+    caught_up_cursors = 0
     for chain_id, event_address, topic0 in rows:
         fetcher = fetchers.get(chain_id)
         head_fetcher = head_fetchers.get(chain_id)
@@ -215,7 +234,9 @@ def scan_enrolled_events(
                 )
                 session.commit()
                 inserted += result.inserted
+                windows_scanned += 1
                 if result.caught_up:
+                    caught_up_cursors += 1
                     break
         except Exception:
             session.rollback()
@@ -225,7 +246,12 @@ def scan_enrolled_events(
                 event_address,
                 topic0,
             )
-    return inserted
+    return ScanSummary(
+        inserted=inserted,
+        windows_scanned=windows_scanned,
+        caught_up_cursors=caught_up_cursors,
+        total_cursors=len(rows),
+    )
 
 
 def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: int = 500) -> int:
@@ -380,20 +406,38 @@ def run_event_log_indexer_loop(
     logger.info("starting event log indexer loop interval=%ss", interval)
     stop_event = stop_event or Event()
     while not stop_event.is_set():
+        enrolled = 0
+        summary = ScanSummary()
+        status = "running"
         with SessionLocal() as session:
             try:
                 enrolled = enroll_from_completed_jobs(session)
-                inserted = scan_enrolled_events(
+                summary = scan_enrolled_events(
                     session,
                     fetchers=fetchers,
                     head_fetchers=head_fetchers,
                     block_hash_fetchers=block_hash_fetchers,
                 )
-                if enrolled or inserted:
-                    logger.info("event log indexer pass: enrolled=%d inserted=%d", enrolled, inserted)
+                if enrolled or summary.inserted:
+                    logger.info("event log indexer pass: enrolled=%d inserted=%d", enrolled, summary.inserted)
             except Exception:
                 session.rollback()
                 logger.exception("event log indexer pass failed")
+                status = "error"
+        # windows_scanned + caught_up_cursors/total are the throughput triad
+        # for the indexer: "many windows, 0 inserted, caught_up < total" is the
+        # from-0 backfill grind; "caught_up == total" means the fleet is at head.
+        record_heartbeat(
+            HEARTBEAT_EVENT_INDEXER,
+            status=status,
+            detail={
+                "enrolled_last_pass": enrolled,
+                "inserted_last_pass": summary.inserted,
+                "windows_scanned": summary.windows_scanned,
+                "caught_up_cursors": summary.caught_up_cursors,
+                "total_cursors": summary.total_cursors,
+            },
+        )
         stop_event.wait(interval)
 
 

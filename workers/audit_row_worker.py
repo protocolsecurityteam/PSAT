@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select, Update
 
 from db.models import AuditReport, SessionLocal
+from db.queue import record_heartbeat
 from utils.logging import configure_logging
 from utils.memory import (
     cgroup_memory_current_bytes,
@@ -50,6 +51,11 @@ class AuditRowWorker:
 
     # Prefix for worker_id and the starting log line. Override per-phase.
     worker_name: str = "AuditRow"
+
+    # Canonical fleet process name for the ``/api/fleet`` heartbeat. Subclasses
+    # set this to a ``db.queue.HEARTBEAT_*`` constant; left None for the base
+    # so an un-specialised worker simply doesn't beat.
+    heartbeat_process: str | None = None
 
     # Per-tick rows to claim; thread pool size; idle sleep when no work.
     batch_size: int = 4
@@ -243,6 +249,16 @@ class AuditRowWorker:
                 finally:
                     session.close()
 
+                if self.heartbeat_process:
+                    # ``claimed_last_pass`` is the per-pass throughput count the
+                    # fleet view diffs into a rate. The beat fires before the
+                    # batch is processed (and on idle polls, so the daemon never
+                    # reads as stale), so it's "rows claimed this pass" — 0 idle.
+                    record_heartbeat(
+                        self.heartbeat_process,
+                        status="running" if claimed else "idle",
+                        detail={"claimed_last_pass": len(claimed)},
+                    )
                 if not claimed:
                     time.sleep(self.idle_poll_interval)
                     continue

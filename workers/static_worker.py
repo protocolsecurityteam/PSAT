@@ -31,7 +31,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -917,6 +917,7 @@ class StaticWorker(BaseWorker):
         # Dependency discovery still runs because proxy-address deps are useful.
         session.refresh(contract_row)
         is_proxy = contract_row.is_proxy
+        record_stage_metric("is_proxy", bool(is_proxy))
 
         # Check if the discovery worker flagged this job as using cached static
         # data.  When set, we skip the expensive Slither / contract-analysis /
@@ -1407,12 +1408,14 @@ class StaticWorker(BaseWorker):
             deps_output = static_outcome  # type: ignore[assignment]
             if cached_static_deps is None and isinstance(deps_output, dict):
                 store_artifact(session, job.id, "static_dependencies", data=deps_output)
+            static_dep_count = len(deps_output.get("dependencies", [])) if isinstance(deps_output, dict) else 0
+            record_stage_metric("static_dependencies", static_dep_count)
             logger.info(
                 "Static stage static dependencies %s for job %s address=%s count=%d",
                 "loaded from cache" if cached_static_deps is not None else "complete",
                 job.id,
                 address,
-                len(deps_output.get("dependencies", [])) if isinstance(deps_output, dict) else 0,
+                static_dep_count,
             )
 
         # ---- Dynamic dependencies: merge with prev, persist. ----
@@ -1446,6 +1449,7 @@ class StaticWorker(BaseWorker):
                 dyn_output = _merge_dynamic_deps(prev_dyn, dyn_output)
             if isinstance(dyn_output, dict):
                 store_artifact(session, job.id, "dynamic_dependencies", data=dyn_output)
+                record_stage_metric("dynamic_dependencies", len(dyn_output.get("dependencies", [])))
                 logger.info(
                     "Static stage dynamic dependencies complete for job %s address=%s count=%d",
                     job.id,
@@ -1484,6 +1488,7 @@ class StaticWorker(BaseWorker):
             unique_deps = sorted(
                 set((deps_output or {}).get("dependencies", []) + (dyn_output or {}).get("dependencies", []))
             )
+            record_stage_metric("dependencies", len(unique_deps))
             try:
                 t0 = time.monotonic()
                 from services.discovery.static_dependencies import normalize_address
@@ -1512,6 +1517,7 @@ class StaticWorker(BaseWorker):
                 )
                 # Store classifications artifact for future cache hits
                 store_artifact(session, job.id, "classifications", data=cls_output)
+                record_stage_metric("discovered_addresses", len(cls_output.get("discovered_addresses", [])))
                 logger.info(
                     "static phase complete: classification (%d deps)",
                     len(unique_deps),

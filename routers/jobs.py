@@ -355,7 +355,7 @@ def retry_job(job_id: str) -> dict[str, Any]:
         return job.to_dict()
 
 
-@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)])
+@router.get("/api/jobs/{job_id}/stage_timings")
 def get_job_stage_timings(job_id: str) -> dict[str, Any]:
     """Return all per-stage timing artifacts the worker fleet wrote for
     this job, keyed by stage name. Schema-v2 layout (one
@@ -363,8 +363,11 @@ def get_job_stage_timings(job_id: str) -> dict[str, Any]:
     harness to populate ``worker_elapsed_seconds`` reliably without
     scraping Fly logs.
 
-    Admin-protected because per-job timings expose internal worker_id /
-    runtime metadata.
+    Public: the payload is execution telemetry (per-stage durations, status,
+    metric counts) plus worker_id — and worker_id is already exposed by the
+    public ``/api/jobs`` and ``/api/jobs/{id}/errors`` endpoints, so nothing
+    here is more sensitive than what the monitor page already serves
+    unauthenticated.
     """
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)

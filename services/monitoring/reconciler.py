@@ -53,6 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Protocol, SessionLocal
+from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
 from services.monitoring.enrollment import enroll_protocol_contracts
 
 logger = logging.getLogger(__name__)
@@ -123,11 +124,19 @@ def run_enrollment_reconciler_loop(
     stop_event = stop_event or Event()
     logger.info("starting enrollment reconciler interval=%ss", interval)
     while not stop_event.is_set():
+        reconciled = 0
+        status = "running"
         try:
             with SessionLocal() as session:
-                reconcile_enrollments(session, rpc_url, chain)
+                reconciled = reconcile_enrollments(session, rpc_url, chain)
         except Exception:
             logger.exception("reconciler outer loop failed")
+            status = "error"
+        record_heartbeat(
+            HEARTBEAT_ENROLLMENT_RECONCILER,
+            status=status,
+            detail={"protocols_reconciled_last_pass": reconciled},
+        )
         stop_event.wait(interval)
 
 

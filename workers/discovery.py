@@ -34,7 +34,7 @@ from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, p
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
@@ -237,6 +237,7 @@ class DiscoveryWorker(BaseWorker):
             store_artifact(session, job.id, "audit_reports", data=audit_result)
             _sync_audit_reports_to_db(session, protocol_row.id, audit_result.get("reports", []))
             audit_count = len(audit_result.get("reports", []))
+            record_stage_metric("audit_reports", audit_count)
             if audit_count:
                 logger.info("Job %s: found %d audit report(s) for %s", job.id, audit_count, company)
         except Exception as exc:
@@ -250,6 +251,7 @@ class DiscoveryWorker(BaseWorker):
             logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
 
         discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
+        record_stage_metric("contracts_discovered", len(discovered))
 
         # Write ALL discovered addresses to contracts table. Ranking and
         # job creation happen later in the selection stage, once DApp
@@ -590,7 +592,8 @@ class DiscoveryWorker(BaseWorker):
             job.name = f"{contract_name}_{address[2:10]}"
             session.commit()
 
-        self.update_detail(session, job, f"Discovery complete: {contract_name}")
+        record_stage_metric("source_files", len(sources))
+        self.update_detail(session, job, f"Discovery complete: {contract_name} ({len(sources)} source files)")
         logger.info("Discovery complete for %s (%s)", address, contract_name)
 
 
