@@ -9,7 +9,7 @@ adapter consumes those records directly with no per-standard adapter.
 
 from __future__ import annotations
 
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EnumerationResult, EvaluationContext
@@ -148,17 +148,25 @@ class EventIndexedAdapter:
         ctx: EvaluationContext,
         basis: list[str],
     ) -> CapabilityExpr:
+        extra: dict[str, Any] = {
+            "basis": basis,
+            "topic0": hint.get("topic0"),
+            "direction": hint.get("direction"),
+            "callee_function": descriptor.get("callee_function"),
+            "callee_signature": descriptor.get("callee_signature"),
+        }
+        # See solmate_roles._check_only: tag only the index-cold ``no_index_cursor``
+        # deferral so the deferred-resolution reconciler retries it once the event
+        # address's logs finish indexing. Structural/transient bases
+        # (event_address_unresolved, unresolved_event_key, event_log_backend_error)
+        # are not waiting on the index and are left unmarked.
+        if "no_index_cursor" in basis:
+            extra["deferred_pending_index"] = True
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=_resolve_event_address(descriptor, hint, ctx),
                 target_call_selector=descriptor.get("callee_selector"),
-                extra={
-                    "basis": basis,
-                    "topic0": hint.get("topic0"),
-                    "direction": hint.get("direction"),
-                    "callee_function": descriptor.get("callee_function"),
-                    "callee_signature": descriptor.get("callee_signature"),
-                },
+                extra=extra,
             )
         )
 

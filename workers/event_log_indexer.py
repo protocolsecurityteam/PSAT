@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
@@ -447,6 +448,7 @@ def run_event_log_indexer_loop(
     while not stop_event.is_set():
         enrolled = 0
         summary = ScanSummary()
+        reenqueued = 0
         status = "running"
         with SessionLocal() as session:
             try:
@@ -463,6 +465,17 @@ def run_event_log_indexer_loop(
                 session.rollback()
                 logger.exception("event log indexer pass failed")
                 status = "error"
+            # Self-heal index-cold capability deferrals whose authority just
+            # finished backfilling (this is the pass that flips backfill_complete,
+            # so it's the timely place to re-resolve). Isolated try: a reconcile
+            # failure must not mark the indexing pass itself as errored.
+            try:
+                reenqueued = reconcile_deferred_resolutions(session)
+                if reenqueued:
+                    logger.info("deferred-resolution reconciler re-enqueued %d job(s)", reenqueued)
+            except Exception:
+                session.rollback()
+                logger.exception("deferred-resolution reconcile pass failed")
         # windows_scanned + caught_up_cursors/total are the throughput triad
         # for the indexer: "many windows, 0 inserted, caught_up < total" is the
         # from-0 backfill grind; "caught_up == total" means the fleet is at head.
@@ -475,6 +488,7 @@ def run_event_log_indexer_loop(
                 "windows_scanned": summary.windows_scanned,
                 "caught_up_cursors": summary.caught_up_cursors,
                 "total_cursors": summary.total_cursors,
+                "deferred_reenqueued_last_pass": reenqueued,
             },
         )
         stop_event.wait(interval)

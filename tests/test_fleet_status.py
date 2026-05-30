@@ -314,6 +314,9 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
     monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 2)
     monkeypatch.setattr(idx, "scan_enrolled_events", fake_scan)
+    # The same pass runs the deferred-resolution self-heal; its re-enqueue count
+    # rides along in the heartbeat for the fleet view.
+    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session: 4)
     monkeypatch.setattr(idx, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
 
     idx.run_event_log_indexer_loop(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0, stop_event=stop)
@@ -328,6 +331,7 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
         "windows_scanned": 3,
         "caught_up_cursors": 1,
         "total_cursors": 2,
+        "deferred_reenqueued_last_pass": 4,
     }
 
 
