@@ -87,6 +87,30 @@ _EMPTY_PAUSE_INFO: PauseInfo = {
 }
 
 
+def _canonical_signature(fn: Any) -> str | None:
+    """Slither's EVM-canonical ABI signature for ``fn`` — contract/interface
+    params lowered to ``address``, enums to ``uint8``, structs to their tuple
+    form — or ``None`` when Slither can't lower it.
+
+    The trees here are keyed on Slither ``full_name``, which keeps user-defined
+    parameter type names (``addAsset(ERC20)``,
+    ``executeTasks(IEtherFiOracle.OracleReport)``). The real EVM selector can't
+    be recovered from that string downstream: a struct's field layout and an
+    enum's ``uint8`` width are already gone, and the name alone can't tell a
+    struct/enum apart from a contract. ``solidity_signature`` still has the type
+    objects and lowers them correctly, so we capture it here while Slither is
+    live. It raises for the occasional non-lowerable (e.g. recursive) struct
+    param; those drop out and consumers fall back to the string-level
+    normalization (the prior, contract-only-correct behavior)."""
+    try:
+        signature = fn.solidity_signature
+    except (ValueError, AttributeError, KeyError, TypeError):
+        return None
+    if isinstance(signature, str) and "(" in signature and signature.endswith(")"):
+        return signature
+    return None
+
+
 def build_predicate_artifacts(contract: Any) -> dict[str, Any]:
     """Return a JSON-serializable dict of predicate trees for every
     external/public function on ``contract``.
@@ -127,6 +151,11 @@ def build_predicate_artifacts_with_pause_info(
     try:
         trees: dict[str, PredicateTree] = {}
         check_trees: dict[str, PredicateTree] = {}
+        # full_name -> EVM-canonical ABI signature, for every entry point whose
+        # canonical form differs from full_name (i.e. it has a contract/enum/
+        # struct param). Lets the selector consumers key on the true ``msg.sig``
+        # instead of re-deriving it from the lossy full_name string.
+        canonical_signatures: dict[str, str] = {}
         # ``functions_entry_points`` is the deduped surface: for an
         # overridden virtual function (every OZ AccessControl method on a
         # contract that inherits it), Slither's ``functions`` returns
@@ -141,6 +170,9 @@ def build_predicate_artifacts_with_pause_info(
         for fn in getattr(contract, "functions_entry_points", []) or []:
             if not _is_externally_callable(fn):
                 continue
+            canonical = _canonical_signature(fn)
+            if canonical is not None and canonical != fn.full_name:
+                canonical_signatures[fn.full_name] = canonical
             fn_started = time.monotonic()
             tree = build_predicate_tree(fn)
             if tree is not None:
@@ -205,6 +237,8 @@ def build_predicate_artifacts_with_pause_info(
         "contract_name": contract_name,
         "trees": trees,
     }
+    if canonical_signatures:
+        artifact["canonical_signatures"] = canonical_signatures
     if check_trees:
         artifact["check_trees"] = check_trees
 

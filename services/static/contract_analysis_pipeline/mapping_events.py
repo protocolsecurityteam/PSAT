@@ -233,6 +233,12 @@ def _extract_event_emissions(
             if _ir_name(ir) != "EventCall":
                 continue
             name = getattr(ir, "name", "") or ""
+            # Slither types ``EventCall.name`` as ``str | Constant``; a Constant
+            # slips through for events emitted via an aliased reference (seen on
+            # Morpho). Coerce so the downstream signature handling never calls
+            # ``.split('(')`` on a non-str.
+            if not isinstance(name, str):
+                name = str(name)
             arguments = list(getattr(ir, "arguments", []) or [])
             if not name:
                 continue

@@ -157,7 +157,7 @@ def _external_authority_checks(
     for function, tree in trees.items():
         if not isinstance(function, str):
             continue
-        selector = _selector_for_signature(function)
+        selector = _selector_for_signature(function, predicate_trees.get("canonical_signatures"))
         if selector is None:
             continue
         for leaf in _walk_leaves(tree):

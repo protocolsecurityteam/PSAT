@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -240,6 +240,7 @@ def resolve_contract_capabilities(
     )
     if not state_var_values and runtime_job.id != analysis_job.id:
         state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
+    canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
     out: dict[str, dict[str, Any]] = {}
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
@@ -254,7 +255,9 @@ def resolve_contract_capabilities(
             call_frame=CallFrame.root(
                 contract_address=runtime_addr,
                 function_signature=fn_signature if isinstance(fn_signature, str) else None,
-                function_selector=_selector_for_signature(fn_signature if isinstance(fn_signature, str) else None),
+                function_selector=_selector_for_signature(
+                    fn_signature if isinstance(fn_signature, str) else None, canonical_signatures
+                ),
             ),
         )
         cap = evaluate_tree_with_registry(tree, registry, ctx)
@@ -262,18 +265,29 @@ def resolve_contract_capabilities(
     return out
 
 
-def _selector_for_signature(signature: str | None) -> str | None:
+def _selector_for_signature(
+    signature: str | None,
+    canonical_signatures: Mapping[str, str] | None = None,
+) -> str | None:
     if not signature or "(" not in signature or not signature.endswith(")"):
         return None
     from eth_utils.crypto import keccak
 
+    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
+    # parameter type names (``addAsset(ERC20)``, ``executeTasks(IFoo.Report)``).
+    # The real EVM selector — and ``effective_functions.selector`` — is keyed on
+    # the canonical ABI signature. The static stage precomputes that per function
+    # (contract→address, enum→uint8, struct→tuple); prefer it so the selector the
+    # Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
+    canonical = (canonical_signatures or {}).get(signature)
+    if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
+        return "0x" + keccak(text=canonical).hex()[:8]
+
     from services.policy.effective_permissions import _abi_signature
 
-    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
-    # parameter type names (``addAsset(ERC20)``). The real EVM selector — and
-    # ``effective_functions.selector`` — is keyed on the canonical ABI signature
-    # (``addAsset(address)``). Lower contract/interface types to ``address`` first
-    # so the selector the Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
+    # Fallback: string normalization of full_name. Correct for contract/interface
+    # params (→ ``address``); enum/struct params can't be recovered from the name
+    # alone (no tuple layout, no uint width), which is why the map above exists.
     return "0x" + keccak(text=_abi_signature(signature)).hex()[:8]
 
 

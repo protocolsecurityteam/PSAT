@@ -109,8 +109,31 @@ def _abi_signature(function_signature: str) -> str:
     return f"{name}({normalized_args})"
 
 
-def _selector(function_signature: str) -> str:
-    return "0x" + keccak(text=_abi_signature(function_signature)).hex()[:8]
+def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[str, str]:
+    """``full_name -> EVM-canonical ABI signature`` from the predicate artifact.
+
+    The static stage precomputes this from Slither's ``solidity_signature`` (see
+    ``predicate_artifacts._canonical_signature``) so the selector here keys on
+    the true ``msg.sig`` for contract/enum/struct params. ``_abi_signature``'s
+    string-level normalization can only recover contract params (→ ``address``);
+    enums (→ ``uint8``) and structs (→ tuple) need the type info this map carries."""
+    if not isinstance(predicate_trees, dict):
+        return {}
+    canonical = predicate_trees.get("canonical_signatures")
+    if not isinstance(canonical, dict):
+        return {}
+    return {
+        str(name): str(sig)
+        for name, sig in canonical.items()
+        if isinstance(sig, str) and "(" in sig and sig.endswith(")")
+    }
+
+
+def _abi_signature_and_selector(function_signature: str, canonical_signatures: Mapping[str, str]) -> tuple[str, str]:
+    """``(abi_signature, selector)`` preferring the precomputed canonical ABI
+    signature; falls back to the full_name string normalization when absent."""
+    abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
+    return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]
 
 
 def _resolved_principal(
@@ -451,6 +474,7 @@ def build_effective_permissions(
 
     known = _known_principals(target_snapshot, authority_snapshot)
     controller_lookup = _controller_lookup(target_snapshot)
+    canonical_signatures = _canonical_signature_map(predicate_trees)
     capability_dicts = _normalize_capability_output(capability_resolver_output)
     effects_by_function = _effects_by_function(effects)
     predicate_tree_functions = _predicate_trees_by_function(predicate_trees)
@@ -463,7 +487,7 @@ def build_effective_permissions(
 
     functions: list[EffectiveFunctionPermission] = []
     for function_record in function_records:
-        selector = _selector(function_record["function"])
+        abi_signature, selector = _abi_signature_and_selector(function_record["function"], canonical_signatures)
         controller_refs = sorted(set(function_record.get("controller_refs", [])))
         direct_owner = None
 
@@ -500,7 +524,7 @@ def build_effective_permissions(
 
         function_permission: EffectiveFunctionPermission = {
             "function": fn_signature,
-            "abi_signature": _abi_signature(fn_signature),
+            "abi_signature": abi_signature,
             "selector": selector,
             "direct_owner": direct_owner,
             "authority_public": False,
