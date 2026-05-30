@@ -172,9 +172,10 @@ def test_build_fleet_status_reports_work_and_watchers(db_session, _clean_heartbe
 
 @requires_postgres
 def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_heartbeats):
-    # One cursor at head + one freshly-enrolled cursor stuck at block 0 (a
-    # seeded-from-0 full-chain backfill). max_indexed_block alone reads
-    # "healthy" because the leader is at head — min/spread/lagging expose it.
+    # One cursor at head + one cursor still at block 0 (the creation-block seed
+    # fell back to 0 on a lookup miss, so it backfills the whole chain).
+    # max_indexed_block alone reads "healthy" because the leader is at head —
+    # min/spread/lagging expose it.
     db_session.add(
         IndexedEventCursor(chain_id=1, event_address=_addr(10), topic0="0x" + "aa" * 32, last_indexed_block=19_000_000)
     )

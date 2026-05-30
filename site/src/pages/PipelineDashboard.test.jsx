@@ -222,14 +222,15 @@ describe("PipelineDashboard — fleet strip", () => {
     expect(within(dock).getByText("coverage_verify")).toBeInTheDocument();
   });
 
-  it("flags a backfill-lagging indexer (block-0 cursor behind head) as warn with a blocks-behind alert", async () => {
+  it("flags a backfill-lagging indexer (cursor still backfilling from creation) as warn with a blocks-behind alert", async () => {
     // A beating, non-error indexer whose leading cursor is at head but one
-    // cursor is stuck near block 0 — invisible in max_indexed_block alone.
+    // cursor is still backfilling from its contract's creation block —
+    // invisible in max_indexed_block alone.
     const laggingFleet = {
       now: new Date(NOW).toISOString(),
       jobs: { queued: 0, processing: 0, by_stage: {} },
       daemons: [
-        { process: "event_log_indexer", kind: "indexer", label: "Event-log indexer", status: "idle", last_beat_at: isoAgo(2_000), beat_age_s: 2, alive: true, stale: false, detail: null, work: { cursors: 2, stalest_run_age_s: 5, max_indexed_block: 19_000_000, min_indexed_block: 0, block_spread: 19_000_000, lagging_cursors: 1 } },
+        { process: "event_log_indexer", kind: "indexer", label: "Event-log indexer", status: "idle", last_beat_at: isoAgo(2_000), beat_age_s: 2, alive: true, stale: false, detail: null, work: { cursors: 2, stalest_run_age_s: 5, max_indexed_block: 19_000_000, min_indexed_block: 12_700_000, block_spread: 6_300_000, lagging_cursors: 1 } },
       ],
       watchers: { monitored_contracts: 0, active: 0, last_update_at: new Date(NOW).toISOString(), last_update_age_s: 5, tvl_last_snapshot_at: null, tvl_last_snapshot_age_s: null },
     };
