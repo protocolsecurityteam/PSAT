@@ -65,10 +65,11 @@ function auditHasFailures(d) {
   );
 }
 
-// Indexer cursors far behind the leader (≈ head). The signature of one seeded
-// at block 0 backfilling the whole chain while the rest track head — invisible
-// in max_indexed_block alone, so we treat it as a degraded (warn) state even
-// while the daemon beats normally.
+// Indexer cursors far behind the leader (≈ head). A freshly-enrolled cursor
+// seeds at its contract's creation block and backfills forward; until it
+// catches up, resolution against that authority fails closed (deferred, then
+// re-enqueued automatically). max_indexed_block alone hides this, so we treat
+// it as a degraded (warn) state even while the daemon beats normally.
 function indexerLagging(d) {
   return d.process === "event_log_indexer" && (d.work?.lagging_cursors || 0) > 0;
 }
@@ -355,7 +356,7 @@ function alertContent(d, rate) {
     const w = d.work || {};
     return {
       head: `${w.lagging_cursors} cursor${w.lagging_cursors === 1 ? "" : "s"} far behind head`,
-      body: `Earliest cursor at block ${formatBlockNumber(w.min_indexed_block)} vs ${formatBlockNumber(w.max_indexed_block)} (~${formatBlockNumber(w.block_spread)} behind). New cursors backfill from block 0, so a contract's first resolution can run before its authority events are indexed.`,
+      body: `Earliest cursor at block ${formatBlockNumber(w.min_indexed_block)} vs ${formatBlockNumber(w.max_indexed_block)} (~${formatBlockNumber(w.block_spread)} behind). These cursors are still backfilling from their contract's creation block; resolution against them fails closed and is deferred until backfill completes, then re-enqueued automatically.`,
     };
   }
   if (daemonStuck(d)) {

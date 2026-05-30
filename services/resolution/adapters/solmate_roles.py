@@ -192,11 +192,21 @@ class SolmateRolesAuthorityAdapter:
 
 
 def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> CapabilityExpr:
+    extra: dict[str, Any] = {"basis": basis, "adapter": "solmate_roles_authority"}
+    # Tag index-cold deferrals so the deferred-resolution reconciler re-resolves
+    # this function once the authority's role events finish indexing.
+    # ``no_index_cursor`` is the only basis here that is *waiting on the durable
+    # index*; the others are settled answers (``*_unresolved`` = missing context,
+    # ``authority_unconfirmed_no_role_events`` = a warm authority that emitted no
+    # role events), so they are deliberately NOT marked — marking them would make
+    # the reconciler re-resolve forever.
+    if "no_index_cursor" in basis:
+        extra["deferred_pending_index"] = True
     return CapabilityExpr.external_check_only(
         ExternalCheck(
             target_address=authority,
             target_call_selector=descriptor.get("callee_selector") or CANCALL_SELECTOR,
-            extra={"basis": basis, "adapter": "solmate_roles_authority"},
+            extra=extra,
         )
     )
 

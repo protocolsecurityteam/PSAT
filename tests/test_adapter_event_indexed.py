@@ -231,7 +231,8 @@ def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
         SimpleNamespace(topic0="0xaa", topics=["0xaa", _address_topic(ADDR_B)], data_words=[]),
     ]
     repo = PostgresEventLogRepo(cast(Any, FakeSession(rows)))
-    repo._cursor_block = lambda chain_id, event_address, topic0: 100  # type: ignore[method-assign]
+    # The fold gates trust on backfill_complete now, not the raw cursor block.
+    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)  # type: ignore[method-assign]
 
     result = repo.fold_event_history(
         chain_id=1,

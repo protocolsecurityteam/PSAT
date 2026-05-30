@@ -58,8 +58,9 @@ PROCESS_META: dict[str, dict[str, Any]] = {
 }
 
 # A cursor more than this many blocks behind the leading cursor is "lagging" —
-# the signature of one seeded at block 0 (full-chain backfill) while the rest
-# track head. ~2 weeks of mainnet blocks; far below any genuine backfill gap.
+# the signature of one still backfilling from its contract's creation block
+# while the rest track head. ~2 weeks of mainnet blocks; far below any genuine
+# backfill gap.
 _CURSOR_LAG_BLOCKS = 100_000
 
 
@@ -136,8 +137,9 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
             func.min(IndexedEventCursor.last_indexed_block),
         )
     ).one()
-    # Cursors far behind the leader. max_indexed_block alone hides a block-0
-    # backfill the moment any healthy cursor reaches head; this surfaces it.
+    # Cursors far behind the leader. A cursor still backfilling from its
+    # contract's creation block is invisible in max_indexed_block alone once a
+    # healthy cursor reaches head; this surfaces it.
     idx_lagging = 0
     if idx_max_block:
         idx_lagging = (

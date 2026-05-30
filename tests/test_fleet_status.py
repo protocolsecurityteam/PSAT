@@ -172,9 +172,10 @@ def test_build_fleet_status_reports_work_and_watchers(db_session, _clean_heartbe
 
 @requires_postgres
 def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_heartbeats):
-    # One cursor at head + one freshly-enrolled cursor stuck at block 0 (a
-    # seeded-from-0 full-chain backfill). max_indexed_block alone reads
-    # "healthy" because the leader is at head — min/spread/lagging expose it.
+    # One cursor at head + one cursor still at block 0 (the creation-block seed
+    # fell back to 0 on a lookup miss, so it backfills the whole chain).
+    # max_indexed_block alone reads "healthy" because the leader is at head —
+    # min/spread/lagging expose it.
     db_session.add(
         IndexedEventCursor(chain_id=1, event_address=_addr(10), topic0="0x" + "aa" * 32, last_indexed_block=19_000_000)
     )
@@ -314,6 +315,9 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
     monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 2)
     monkeypatch.setattr(idx, "scan_enrolled_events", fake_scan)
+    # The same pass runs the deferred-resolution self-heal; its re-enqueue count
+    # rides along in the heartbeat for the fleet view.
+    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session: 4)
     monkeypatch.setattr(idx, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
 
     idx.run_event_log_indexer_loop(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0, stop_event=stop)
@@ -328,6 +332,7 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
         "windows_scanned": 3,
         "caught_up_cursors": 1,
         "total_cursors": 2,
+        "deferred_reenqueued_last_pass": 4,
     }
 
 
