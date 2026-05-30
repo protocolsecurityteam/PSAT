@@ -115,6 +115,43 @@ def test_makerdao_rely_adds_to_wards():
     assert s["key_position"] == 0
 
 
+def test_event_call_name_as_constant_does_not_crash():
+    """Slither types ``EventCall.name`` as ``str | Constant``; a Constant name
+    (observed on Morpho) must not crash ``discover_mapping_writer_events`` —
+    it's coerced to str and the spec is still produced. Regression for
+    ``AttributeError: 'Constant' object has no attribute 'split'``."""
+
+    class _ConstantName:  # like Slither's Constant: str(...) yields the event sig
+        def __init__(self, s: str) -> None:
+            self._s = s
+
+        def __str__(self) -> str:
+            return self._s
+
+    wards = _mapping("wards")
+    guy = _local("guy")
+    index_lv = _tmp("TMP_0")
+    rely_fn = _function(
+        "rely",
+        nodes=[
+            _node(
+                [
+                    _index(wards, guy, index_lv),
+                    _assignment(index_lv, _constant(1)),
+                    # deliberately non-str: Slither types EventCall.name as ``str | Constant``
+                    _event_call(_ConstantName("Rely(address)"), [guy]),  # type: ignore[arg-type]
+                ]
+            )
+        ],
+        written=[wards],
+    )
+    specs = discover_mapping_writer_events(_contract([rely_fn]))
+    assert len(specs) == 1
+    assert isinstance(specs[0]["event_signature"], str)
+    assert specs[0]["event_signature"] == "Rely(address)"
+    assert specs[0]["event_name"] == "Rely"
+
+
 def test_makerdao_deny_removes_via_zero_write():
     wards = _mapping("wards")
     guy = _local("guy")
