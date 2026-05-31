@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.activity import enrich_with_activity
-from services.discovery.chain_resolver import resolve_unknown_chains, validate_claimed_chains
+from services.discovery.chain_resolver import resolve_chains, resolve_unknown_chains, validate_claimed_chains
 from services.discovery.deployer import expand_from_deployers
 from services.discovery.inventory import (
     _build_contracts,
@@ -695,6 +695,24 @@ class TestResolveUnknownChains:
         result = validate_claimed_chains(contracts)
         assert result[0]["chains"] == ["unknown"]
         assert result[0]["chain_sanity"]["status"] == "unresolved_no_code_on_claimed_or_supported_chains"
+
+    def test_resolve_chains_composes_unknown_and_validate(self, monkeypatch):
+        """resolve_chains() resolves unknowns AND verifies speculative claims in one pass."""
+        unk = "0x" + "1" * 40
+        exa = "0x" + "2" * 40
+        contracts = [
+            {"name": "Unk", "address": unk, "chains": ["unknown"]},
+            {"name": "Exa", "address": exa, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]},
+        ]
+        # Unk's code lives on base; Exa's ethereum claim is wrong — code is on optimism.
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_batch",
+            self._fake_probe({"base": {unk}, "optimism": {exa}}),
+        )
+        result = resolve_chains(contracts)
+        by_name = {row["name"]: row for row in result}
+        assert by_name["Unk"]["chains"] == ["base"]
+        assert by_name["Exa"]["chains"] == ["optimism"]
 
 
 # ---------------------------------------------------------------------------

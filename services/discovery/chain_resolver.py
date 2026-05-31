@@ -255,3 +255,33 @@ def validate_claimed_chains(
             _debug_log(debug, f"  {address}: no code on claimed chain(s) {claimed}; marked unknown")
 
     return contracts
+
+
+def resolve_chains(
+    contracts: list[dict[str, Any]],
+    debug: bool = False,
+) -> list[dict[str, Any]]:
+    """Single terminal chain-resolution pass over the candidate set.
+
+    One entry point composing the probes so callers don't sequence them by hand:
+
+    1. :func:`resolve_unknown_chains` -- fill chains for ``chains=["unknown"]``
+       entries by probing ``eth_getCode`` across chains.
+    2. :func:`validate_claimed_chains` -- verify speculative (LLM-inferred)
+       chain claims; correct to the detected chain or mark unknown when the
+       claim has no code anywhere reachable.
+
+    Structurally-reliable chains (deployer lineage, DeFiLlama per-chain lists)
+    are treated as priors and left untouched. Provider-agnostic and best-effort
+    — degrades cleanly (claims kept as-is) when no RPC endpoint is configured.
+
+    This is the convergence point a future "fair resolve" will grow from:
+    confidence-tiered verification of *every* source (not just LLM ones), with
+    a bytecode-aware sibling-vs-collision footprint. Today it keeps the existing
+    scope while giving the pipeline one place to call.
+    """
+    if not contracts:
+        return contracts
+    contracts = resolve_unknown_chains(contracts, debug=debug)
+    contracts = validate_claimed_chains(contracts, debug=debug)
+    return contracts

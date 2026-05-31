@@ -14,7 +14,7 @@ from typing import Any
 
 from utils.chains import canonical_chain, canonical_chain_list
 
-from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
+from .chain_resolver import resolve_chains
 from .deployer import expand_from_deployers
 from .inventory_domain import (
     CHAIN_SORT_ORDER,
@@ -384,23 +384,17 @@ def search_protocol_inventory(
         chains = c.get("chains", [])
         return (canonical_chain(chains[0]) if chains else None) or "unknown"
 
-    unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
-    if unknown_count:
-        _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
-        try:
-            contracts = resolve_unknown_chains(contracts, debug=debug)
-            resolved = unknown_count - sum(1 for c in contracts if _primary_chain(c) == "unknown")
-            notes.append(f"Chain resolution: resolved {resolved}/{unknown_count} unknown chain(s)")
-        except Exception as exc:
-            _debug_log(debug, f"Chain resolution failed: {exc!r}")
-            notes.append(f"Chain resolution failed: {exc}")
-
-    if any("exa_deep_research" in (c.get("source") or []) for c in contracts):
-        try:
-            contracts = validate_claimed_chains(contracts, source_names=("exa_deep_research",), debug=debug)
-        except Exception as exc:
-            _debug_log(debug, f"Claimed-chain sanity check failed: {exc!r}")
-            notes.append(f"Claimed-chain sanity check failed: {exc}")
+    unknown_before = sum(1 for c in contracts if _primary_chain(c) == "unknown")
+    try:
+        # Single terminal resolve: fill unknown chains + verify speculative
+        # (LLM-inferred) claims, in one provider-agnostic pass.
+        contracts = resolve_chains(contracts, debug=debug)
+        if unknown_before:
+            resolved = unknown_before - sum(1 for c in contracts if _primary_chain(c) == "unknown")
+            notes.append(f"Chain resolution: resolved {resolved}/{unknown_before} unknown chain(s)")
+    except Exception as exc:
+        _debug_log(debug, f"Chain resolution failed: {exc!r}")
+        notes.append(f"Chain resolution failed: {exc}")
 
     # Activity ranking intentionally does NOT run here. The worker
     # pipeline runs the single authoritative ranking in the selection
