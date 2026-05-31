@@ -995,6 +995,9 @@ class BaseWorker:
         ``getattr`` over direct attribute access so test doubles
         (SimpleNamespace fakes that omit ``request``) don't trigger
         AttributeError on the dependency hooks."""
+        chain = getattr(job, "chain", None)
+        if isinstance(chain, str) and chain:
+            return chain
         request = getattr(job, "request", None)
         if not isinstance(request, dict):
             return None

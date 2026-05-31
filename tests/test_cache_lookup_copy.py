@@ -147,7 +147,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
 
     from sqlalchemy import update
 
-    from db.models import Contract, ContractSummary, Job, JobStage, JobStatus
+    from db.models import Job, JobStage, JobStatus
     from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
 
     _create_completed_job_with_static_data(db_session, address=ADDR_A)
@@ -157,11 +157,9 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     new_job.stage = JobStage.done
     db_session.commit()
 
-    contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")
-    db_session.add(contract)
-    db_session.flush()
-    db_session.add(ContractSummary(contract_id=contract.id))
-    db_session.commit()
+    # One Contract per (address, chain) — the helper already created it. The
+    # newer job reuses it (find keys the contract lookup on address+chain, not
+    # job_id); inserting a second row would violate uq_contract_address_chain.
     store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
     store_artifact(db_session, new_job.id, "contract_analysis", data={"summary": {}})
 

@@ -41,6 +41,25 @@ COMMON_CHAIN_IDS = {
     "berachain": 80094,
 }
 
+# Reverse of COMMON_CHAIN_IDS to a single canonical name, for back-filling a
+# chain string when only a numeric chain id is supplied. Canonical names only
+# (no aliases) so the round-trip chain -> id -> chain is stable.
+CHAIN_ID_TO_NAME = {
+    1: "ethereum",
+    42161: "arbitrum",
+    10: "optimism",
+    137: "polygon",
+    8453: "base",
+    43114: "avalanche",
+    56: "bsc",
+    59144: "linea",
+    534352: "scroll",
+    324: "zksync",
+    81457: "blast",
+    34443: "mode",
+    80094: "berachain",
+}
+
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
 _GETCODE_CACHE: dict[tuple[str, str], tuple[str, str, float]] = {}
 _GETCODE_CACHE_LOCK = threading.Lock()
@@ -274,6 +293,16 @@ def chain_id_for_chain_name(chain: str | None) -> int | None:
     if not isinstance(chain, str) or not chain.strip():
         return None
     return COMMON_CHAIN_IDS.get(chain.lower().strip())
+
+
+def chain_name_for_chain_id(chain_id: int | str | None) -> str | None:
+    """Canonical chain name for an EIP-155 chain id, or None if unknown."""
+    if chain_id is None:
+        return None
+    try:
+        return CHAIN_ID_TO_NAME.get(int(chain_id))
+    except (TypeError, ValueError):
+        return None
 
 
 def default_rpc_url(

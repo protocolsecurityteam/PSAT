@@ -20,8 +20,11 @@ class BytecodeSelectorRepo:
     """``BytecodeRepo`` backed by ``eth_getCode`` (cached). ``has_selector``
     checks whether a function selector appears in the runtime dispatcher."""
 
-    def __init__(self, rpc_url: str | None, chain_id: int = 1) -> None:
+    def __init__(self, rpc_url: str | None, chain_id: int | None = None) -> None:
         self._rpc_url = rpc_url
+        # No mainnet default: when the caller doesn't pin a chain_id, get_code
+        # derives it from the rpc_url (eth_chainId) so the bytecode cache key is
+        # never silently forced to chain 1 for a non-mainnet contract.
         self._chain_id = chain_id
 
     def has_selector(self, *, chain_id: int, contract_address: str, selector: str) -> bool:

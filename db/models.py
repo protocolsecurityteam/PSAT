@@ -67,6 +67,12 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # Denormalized from request['chain'] by create_job's normalize_chain_fields
+    # chokepoint so every job — root or child — has a non-null chain by
+    # construction (default 'ethereum'). Lets queue dedupe filter on
+    # (chain, address) in SQL instead of post-filtering the request JSONB.
+    # Nullable so pre-migration rows stay valid until the backfill stamps them.
+    chain: Mapped[str | None] = mapped_column(String(100), nullable=True)
     company: Mapped[str | None] = mapped_column(String, nullable=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), nullable=False, default=JobStatus.queued)
@@ -135,6 +141,7 @@ class Job(Base):
         return {
             "job_id": str(self.id),
             "address": self.address,
+            "chain": self.chain,
             "company": self.company,
             "name": self.name,
             "status": self.status.value,
@@ -776,6 +783,10 @@ class AddressLabel(Base):
     __tablename__ = "address_labels"
 
     address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    # Per-(address, chain) curation: the same address can be a different entity
+    # on different networks, so chain participates in the PK. Existing rows are
+    # backfilled to 'ethereum'.
+    chain: Mapped[str] = mapped_column(String(100), primary_key=True, nullable=False, server_default="ethereum")
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

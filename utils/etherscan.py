@@ -168,8 +168,35 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
-    """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire."""
+def _ambient_chain_id() -> int:
+    """EIP-155 chain id for the job currently being processed.
+
+    Read from the ``chain_var`` contextvar the worker binds per job (and which
+    ``contextvars.copy_context`` propagates into RpcExecutor/parallel_map worker
+    threads), so every Etherscan call inherits the right chain without callers
+    threading a chain_id through. Falls back to mainnet when no job context is
+    active (CLI, tests) or the chain isn't in ``COMMON_CHAIN_IDS``.
+    """
+    try:
+        from utils.logging import chain_var
+        from utils.rpc import chain_id_for_chain_name
+
+        cid = chain_id_for_chain_name(chain_var.get())
+        if cid is not None:
+            return cid
+    except Exception:
+        pass
+    return 1
+
+
+def get(module: str, action: str, chain_id: int | None = None, **params) -> dict:
+    """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
+
+    ``chain_id`` defaults to the ambient job chain (``chain_var``) so callers
+    that don't pass one hit the contract's actual network rather than mainnet.
+    """
+    if chain_id is None:
+        chain_id = _ambient_chain_id()
     if _CACHE_ENABLED:
         key = _cache_key(module, action, chain_id, params)
         with _cache_lock:
@@ -228,7 +255,7 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
     raise RuntimeError("Etherscan rate limit: max retries exceeded")
 
 
-def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str | None = None) -> int | None:
+def get_contract_creation_block(address: str, *, chain_id: int | None = None, rpc_url: str | None = None) -> int | None:
     """Block in which *address* was deployed, or ``None`` if it can't be
     determined.
 
@@ -241,6 +268,8 @@ def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str
     """
     if not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
         return None
+    if chain_id is None:
+        chain_id = _ambient_chain_id()
     try:
         data = get("contract", "getcontractcreation", chain_id=chain_id, contractaddresses=address)
     except Exception:
@@ -345,13 +374,14 @@ def parallel_get(
     return results
 
 
-def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
+def get_contract_info(address: str, chain_id: int | None = None) -> tuple[str | None, dict[str, str]]:
     """Fetch contract name and selector map in a single Etherscan call.
 
-    Returns (name_or_None, {selector: function_name}).
+    Returns (name_or_None, {selector: function_name}). ``chain_id`` defaults to
+    the ambient job chain.
     """
     try:
-        data = get("contract", "getsourcecode", address=address)
+        data = get("contract", "getsourcecode", chain_id=chain_id, address=address)
         result = data["result"][0]
     except Exception:
         return None, {}
@@ -360,15 +390,15 @@ def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
     return name, selector_map
 
 
-def get_contract_name(address: str) -> str | None:
+def get_contract_name(address: str, chain_id: int | None = None) -> str | None:
     """Return the verified contract name for *address*, or None if unavailable."""
-    name, _ = get_contract_info(address)
+    name, _ = get_contract_info(address, chain_id=chain_id)
     return name
 
 
-def get_source(address: str) -> dict:
+def get_source(address: str, chain_id: int | None = None) -> dict:
     """Fetch verified source code for a contract address. Returns the first result."""
-    data = get("contract", "getsourcecode", address=address)
+    data = get("contract", "getsourcecode", chain_id=chain_id, address=address)
     result = data["result"][0]
 
     if not result.get("SourceCode"):
@@ -382,13 +412,13 @@ def get_source(address: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def get_eth_balance(address: str, chain_id: int = 1) -> int:
-    """Return the ETH balance of *address* in wei."""
+def get_eth_balance(address: str, chain_id: int | None = None) -> int:
+    """Return the ETH balance of *address* in wei (ambient job chain by default)."""
     data = get("account", "balance", chain_id=chain_id, address=address, tag="latest")
     return int(data["result"])
 
 
-def get_eth_price(chain_id: int = 1) -> float:
+def get_eth_price(chain_id: int | None = None) -> float:
     """Return the current ETH price in USD via Etherscan's ethprice endpoint."""
     data = get("stats", "ethprice", chain_id=chain_id)
     return float(data["result"]["ethusd"])
@@ -398,7 +428,7 @@ _token_balance_lock = threading.Lock()
 _token_balance_last_call = 0.0
 
 
-def get_token_balances(address: str, chain_id: int = 1) -> list[dict]:
+def get_token_balances(address: str, chain_id: int | None = None) -> list[dict]:
     """Return all ERC-20 token balances for *address* in a single call.
 
     Uses Etherscan's ``addresstokenbalance`` endpoint. Hardcoded to 1 req/s

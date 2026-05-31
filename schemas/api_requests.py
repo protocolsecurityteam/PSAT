@@ -37,6 +37,18 @@ class AnalyzeRequest(BaseModel):
             raise ValueError("Provide exactly one of: address, company, dapp_urls, defillama_protocol")
         return self
 
+    @model_validator(mode="after")
+    def _normalize_chain(self) -> "AnalyzeRequest":
+        # Canonicalize chain (default 'ethereum') and derive chain_id at the
+        # API boundary so dedupe lookups and downstream routing see a stable
+        # key before the job is even created. Same chokepoint create_job uses.
+        from utils.chains import normalize_chain_fields
+
+        normalized = normalize_chain_fields({"chain": self.chain, "chain_id": self.chain_id})
+        self.chain = normalized["chain"]
+        self.chain_id = normalized["chain_id"]
+        return self
+
 
 class ProtocolSubscribeRequest(BaseModel):
     discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")

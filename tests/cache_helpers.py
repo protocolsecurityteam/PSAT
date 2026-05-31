@@ -318,6 +318,7 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     contract = Contract(
         job_id=job.id,
         address=address,
+        chain=job.chain,
         contract_name="TestContract",
         compiler_version="v0.8.24",
         language="solidity",
@@ -397,6 +398,7 @@ def _create_source_job_with_proxy(
     contract = Contract(
         job_id=job.id,
         address=address,
+        chain=job.chain,
         contract_name="ProxyContract",
         compiler_version="v0.8.24",
         language="solidity",
@@ -460,6 +462,7 @@ def _make_dep_phase_job(session, address=ADDR_A, extra_request=None):
     contract = Contract(
         job_id=job.id,
         address=address,
+        chain=job.chain,
         contract_name="TestContract",
         compiler_version="v0.8.24",
         language="solidity",

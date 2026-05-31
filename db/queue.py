@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.discovery.source_confidence import asserts_ownership
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import canonical_chain, canonical_chain_list, normalize_chain_fields
 
 from .models import (
     Artifact,
@@ -163,6 +163,18 @@ def reclaim_stuck_jobs(session: Session, stale_timeout_seconds: int = DEFAULT_JO
     return rescued
 
 
+def _job_chain_filter(chain: str):
+    """SQL predicate matching jobs on *chain*.
+
+    Prefers the denormalized ``jobs.chain`` column (set by ``create_job`` and
+    the backfill) but falls back to ``request['chain']`` for rows built
+    without the chokepoint (e.g. directly-constructed fixtures or any
+    pre-backfill row), so a chain filter never silently drops a legitimately
+    chained job that merely lacks the column.
+    """
+    return func.coalesce(Job.chain, Job.request["chain"].astext) == chain
+
+
 def create_job(
     session: Session,
     request_dict: dict[str, Any],
@@ -177,9 +189,15 @@ def create_job(
     """
     from utils.logging import trace_id_var
 
+    # Single chain-identity chokepoint: stamp canonical chain (default
+    # 'ethereum') + derived chain_id onto the request in place so every job —
+    # root or child — carries a non-null chain by construction. Mirrored onto
+    # the dedicated jobs.chain column for SQL-side (chain, address) dedupe.
+    normalize_chain_fields(request_dict)
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
     job = Job(
         address=request_dict.get("address"),
+        chain=request_dict.get("chain"),
         company=request_dict.get("company"),
         name=request_dict.get("name"),
         status=JobStatus.queued,
@@ -1225,15 +1243,13 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
         )
         .order_by(Job.updated_at.desc())
     )
+    # chain=None stays backward-compatible (match any chain); a given chain
+    # filters on the denormalized jobs.chain column in SQL.
+    if chain is not None:
+        stmt = stmt.where(_job_chain_filter(chain))
     candidates = session.execute(stmt).scalars().all()
 
     for candidate in candidates:
-        # Filter by chain stored in the job's request dict
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-
         src_count = session.execute(
             select(SourceFile).where(SourceFile.job_id == candidate.id).limit(1)
         ).scalar_one_or_none()
@@ -1286,8 +1302,8 @@ def find_previous_company_inventory(
 ) -> Job | None:
     """Find the most recent completed company job with a contract_inventory artifact.
 
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    considered, preventing cross-chain inventory contamination.
+    When *chain* is given, only jobs whose ``chain`` matches are considered,
+    preventing cross-chain inventory contamination.
     """
     stmt = (
         select(Job)
@@ -1298,14 +1314,12 @@ def find_previous_company_inventory(
         )
         .order_by(Job.updated_at.desc())
     )
+    if chain is not None:
+        stmt = stmt.where(_job_chain_filter(chain))
     candidates = session.execute(stmt).scalars().all()
     for candidate in candidates:
         if exclude_job_id and candidate.id == exclude_job_id:
             continue
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
         art = session.execute(
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_inventory").limit(1)
         ).scalar_one_or_none()
@@ -1317,26 +1331,16 @@ def find_previous_company_inventory(
 def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
     """Find a non-failed job for *address* (and *chain*), case-insensitive.
 
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    returned, so an Ethereum job won't suppress a Base job at the same address.
+    When *chain* is given, only jobs whose ``chain`` matches are returned, so
+    an Ethereum job won't suppress a Base job at the same address.
     """
-    candidates = (
-        session.execute(
-            select(Job).where(
-                func.lower(Job.address) == address.lower(),
-                Job.status != JobStatus.failed,
-            )
-        )
-        .scalars()
-        .all()
+    stmt = select(Job).where(
+        func.lower(Job.address) == address.lower(),
+        Job.status != JobStatus.failed,
     )
-    for c in candidates:
-        if chain is not None:
-            req = c.request if isinstance(c.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-        return c
-    return None
+    if chain is not None:
+        stmt = stmt.where(_job_chain_filter(chain))
+    return session.execute(stmt).scalars().first()
 
 
 def is_known_proxy(session: Session, address: str, chain: str | None = None) -> bool:
@@ -1382,7 +1386,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         return None
 
     src_req = src_job.request if isinstance(src_job.request, dict) else {}
-    src_chain = src_req.get("chain")
+    # Prefer the denormalized column; fall back to the request blob for
+    # directly-constructed rows that never went through create_job.
+    src_chain = getattr(src_job, "chain", None) or src_req.get("chain")
 
     # Join ContractSummary so we copy a summaried row, not a stub (mirrors find_completed_static_cache).
     src_contract_stmt = (

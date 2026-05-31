@@ -240,6 +240,15 @@ def resolve_contract_capabilities(
     ``job_id`` is None.
     """
     addr = address.lower()
+    # The chain string is the authoritative identity; derive chain_id from it
+    # so callers that pass only `chain` route bytecode/event-log queries to the
+    # right network instead of falling back to the mainnet default.
+    if chain:
+        from utils.rpc import chain_id_for_chain_name
+
+        derived_chain_id = chain_id_for_chain_name(chain)
+        if derived_chain_id is not None:
+            chain_id = derived_chain_id
     runtime_addr = addr
     if job_id is not None:
         job = session.get(Job, job_id)
