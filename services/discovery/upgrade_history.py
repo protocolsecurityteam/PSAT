@@ -643,11 +643,19 @@ def backfill_historical_impl_contracts(
     from sqlalchemy import func, select
 
     from db.models import Contract
+    from services.discovery.ranking import CURRENT_IMPLEMENTATION_SOURCE
     from services.discovery.source_confidence import asserts_ownership
     from utils.etherscan import get_contract_info, parallel_get
 
     if not impl_addrs:
         return
+
+    # The proxy's CURRENT impl appears in its own last ``Upgraded`` event, so it
+    # lands in ``impl_addrs`` alongside genuinely-superseded impls. Tag it as the
+    # live implementation rather than a superseded anchor so it stays analyzable
+    # (see ranking.is_superseded_impl) — the live impl is where the proxy's real
+    # functions + principals live.
+    current_impl_lc = (parent_proxy_current_impl_address or "").lower()
 
     # Historical impls are structural same-protocol components of the
     # parent proxy. Route through the unified gate so this path uses
@@ -716,18 +724,27 @@ def backfill_historical_impl_contracts(
     refresh_ids: list[int] = []
     for addr in impl_addrs:
         existing = existing_rows.get(addr)
+        is_current = bool(current_impl_lc) and addr == current_impl_lc
         if existing is not None:
             if existing.protocol_id is None or existing.protocol_id == protocol_id:
                 was_orphan = existing.protocol_id is None
-                had_no_tag = "upgrade_history" not in (existing.discovery_sources or [])
+                existing_sources = list(existing.discovery_sources or [])
                 # Without ownership assertion from the parent, don't
                 # adopt orphans into this protocol — that's exactly the
                 # leak we're closing. The tag append still happens so
                 # the source trail is preserved for later corroboration.
                 if was_orphan and owns:
                     existing.protocol_id = protocol_id
-                if had_no_tag:
-                    existing.discovery_sources = list(existing.discovery_sources or []) + ["upgrade_history"]
+                if is_current:
+                    # Live impl: mark current (keeps it analyzable) instead of
+                    # stamping the superseded-anchor ``upgrade_history`` tag.
+                    had_no_tag = CURRENT_IMPLEMENTATION_SOURCE not in existing_sources
+                    if had_no_tag:
+                        existing.discovery_sources = existing_sources + [CURRENT_IMPLEMENTATION_SOURCE]
+                else:
+                    had_no_tag = "upgrade_history" not in existing_sources
+                    if had_no_tag:
+                        existing.discovery_sources = existing_sources + ["upgrade_history"]
                 adopted += 1
                 # Only schedule coverage refresh when the row is actually
                 # in our protocol — refresh on an orphan is wasted work
@@ -753,7 +770,8 @@ def backfill_historical_impl_contracts(
             contract_name=name or "UnknownImpl",
             is_proxy=False,
             job_id=None,
-            discovery_sources=["upgrade_history"],
+            # Current impl → live marker (stays analyzable); superseded → anchor.
+            discovery_sources=[CURRENT_IMPLEMENTATION_SOURCE] if is_current else ["upgrade_history"],
             source_verified=bool(name),
         )
         session.add(new_row)

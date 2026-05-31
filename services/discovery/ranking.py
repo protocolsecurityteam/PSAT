@@ -53,6 +53,45 @@ MIN_CONFIDENCE_THRESHOLD = 0.3
 # pipeline cycles on bytecode nobody's using anymore.
 EXCLUDED_DISCOVERY_SOURCES: tuple[str, ...] = ("upgrade_history",)
 
+# Tag stamped on the CURRENT implementation of a live proxy when the upgrade-
+# history backfill encounters it. The current impl appears in the proxy's own
+# last ``Upgraded`` event, so the backfill would otherwise tag it
+# ``upgrade_history`` and the anchor predicate would wrongly exclude the live
+# impl — where the proxy's real functions + principals live — from analysis,
+# requeue, and coverage metrics. See services/discovery/upgrade_history.py.
+CURRENT_IMPLEMENTATION_SOURCE = "current_implementation"
+
+
+def is_superseded_impl(discovery_sources: Iterable[str] | None) -> bool:
+    """True for a row that exists ONLY to anchor audit coverage against a
+    *superseded* implementation — the rows that should be excluded from
+    analysis, requeue, and resolution-coverage metrics.
+
+    A proxy's current live impl carries :data:`CURRENT_IMPLEMENTATION_SOURCE`
+    (stamped by the backfill) so it is never mistaken for a superseded anchor.
+    This is the single source of truth for the anchor predicate; the SQL form
+    is :func:`not_superseded_impl_clause`.
+    """
+    srcs = set(discovery_sources or [])
+    return "upgrade_history" in srcs and CURRENT_IMPLEMENTATION_SOURCE not in srcs
+
+
+def not_superseded_impl_clause(discovery_sources_column: Any) -> Any:
+    """SQLAlchemy *keep* predicate mirroring :func:`is_superseded_impl`.
+
+    Keep a row unless it is a superseded-only anchor: ``upgrade_history`` is
+    present AND it is not flagged as a live current implementation. NULL
+    discovery_sources (legacy rows) are always kept.
+    """
+    from sqlalchemy import not_
+
+    return (
+        discovery_sources_column.is_(None)
+        | not_(discovery_sources_column.contains(["upgrade_history"]))
+        | discovery_sources_column.contains([CURRENT_IMPLEMENTATION_SOURCE])
+    )
+
+
 # Default confidence applied when a ``contracts`` row has ``confidence=NULL``.
 # DApp-crawl and DefiLlama discoveries represent confirmed on-chain usage
 # (the protocol's frontend actually calls them, the adapter actually
@@ -261,12 +300,15 @@ def _resolve_chains(row: Contract) -> list[str]:
 
 __all__ = [
     "CORROBORATION_BOOST_PER_SOURCE",
+    "CURRENT_IMPLEMENTATION_SOURCE",
     "DEFAULT_CONFIDENCE_BY_SOURCE",
     "DEFAULT_CONFIDENCE_FALLBACK",
     "EXCLUDED_DISCOVERY_SOURCES",
     "MIN_CONFIDENCE_THRESHOLD",
     "default_confidence_for_source",
     "effective_confidence",
+    "is_superseded_impl",
+    "not_superseded_impl_clause",
     "rank_contract_rows",
     "score_inventory_evidence",
 ]
