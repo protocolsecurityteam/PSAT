@@ -46,6 +46,7 @@ class Subject(TypedDict):
     name: str
     compiler_version: str
     source_verified: bool
+    chain: NotRequired[str | None]
 
 
 class AnalysisStatus(TypedDict):

@@ -15,6 +15,7 @@ from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
+from utils.chains import canonical_chain
 
 from . import deps
 
@@ -133,16 +134,18 @@ def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
     "/api/company/{company_name}/addresses/{address}",
     dependencies=[Depends(deps.require_admin_key)],
 )
-def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
+def delete_company_address(company_name: str, address: str, chain: str = "ethereum") -> dict[str, Any]:
     """Remove a Contract row from a protocol.
 
-    Scoped to the protocol so unrelated contracts sharing an address (very
-    rare — addresses are chain-global but we key by address only) aren't
-    affected. FK cascades on ``contracts.id`` clean up the audit coverage
-    rows and any upgrade-event attribution.
+    Scoped to the protocol and ``chain`` so a same-address deployment on
+    another network isn't deleted alongside the target (addresses are
+    chain-global; the same address frequently hosts unrelated contracts on
+    different chains). FK cascades on ``contracts.id`` clean up the audit
+    coverage rows and any upgrade-event attribution.
     """
     if not deps._ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid address")
+    chain = canonical_chain(chain) or "ethereum"
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
@@ -151,13 +154,14 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
             select(Contract).where(
                 Contract.protocol_id == protocol_row.id,
                 Contract.address == address,
+                Contract.chain == chain,
             )
         ).scalar_one_or_none()
         if contract is None:
             raise HTTPException(status_code=404, detail="Address not found for this protocol")
         session.delete(contract)
         session.commit()
-    return {"company": company_name, "address": address, "deleted": True}
+    return {"company": company_name, "address": address, "chain": chain, "deleted": True}
 
 
 @router.get("/api/jobs/{job_id}")

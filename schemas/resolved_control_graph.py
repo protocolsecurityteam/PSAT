@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from .control_tracking import ResolvedControllerType
 
 ResolvedNodeType = Literal["contract", "principal"]
@@ -28,6 +30,7 @@ class ResolvedGraphNode(TypedDict):
     analyzed: bool
     details: dict[str, object]
     artifacts: dict[str, str]
+    chain: NotRequired[str | None]
 
 
 class ResolvedGraphEdge(TypedDict):
@@ -45,3 +48,4 @@ class ResolvedControlGraph(TypedDict):
     max_depth: int
     nodes: list[ResolvedGraphNode]
     edges: list[ResolvedGraphEdge]
+    chain: NotRequired[str | None]

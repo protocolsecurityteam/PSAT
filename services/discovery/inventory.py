@@ -465,33 +465,42 @@ def merge_inventory(prev: dict, new: dict) -> dict:
     (multiplied by :data:`CONFIDENCE_DECAY` each time they are not rediscovered).
     Contracts that decay below :data:`CONFIDENCE_FLOOR` are dropped.
     """
-    prev_contracts = {c["address"].lower(): c for c in prev.get("contracts", []) if c.get("address")}
-    new_contracts = {c["address"].lower(): c for c in new.get("contracts", []) if c.get("address")}
 
-    merged: dict[str, dict] = {}
+    # Key by (address, chain): the same address can be a different contract on
+    # two chains, so collapsing by address alone would let one deployment
+    # overwrite the other across re-runs. Chain-less inventories all key on
+    # (address, None), so single-chain behavior is unchanged.
+    def _merge_key(contract: dict) -> tuple[str, str | None]:
+        chains = canonical_chain_list(contract.get("chains")) or []
+        return (contract["address"].lower(), chains[0] if chains else None)
 
-    # Addresses in new (possibly also in prev)
-    for addr, entry in new_contracts.items():
-        if addr not in prev_contracts:
-            merged[addr] = entry
+    prev_contracts = {_merge_key(c): c for c in prev.get("contracts", []) if c.get("address")}
+    new_contracts = {_merge_key(c): c for c in new.get("contracts", []) if c.get("address")}
+
+    merged: dict[tuple[str, str | None], dict] = {}
+
+    # Deployments in new (possibly also in prev)
+    for key, entry in new_contracts.items():
+        if key not in prev_contracts:
+            merged[key] = entry
         else:
             # In both — use new entry, keep higher confidence
-            prev_conf = prev_contracts[addr].get("confidence", 0) or 0
+            prev_conf = prev_contracts[key].get("confidence", 0) or 0
             new_conf = entry.get("confidence", 0) or 0
             merged_entry = dict(entry)
             merged_entry["confidence"] = max(prev_conf, new_conf)
-            merged[addr] = merged_entry
+            merged[key] = merged_entry
 
-    # Addresses only in prev — decay confidence
-    for addr, entry in prev_contracts.items():
-        if addr not in new_contracts:
+    # Deployments only in prev — decay confidence
+    for key, entry in prev_contracts.items():
+        if key not in new_contracts:
             decayed_entry = dict(entry)
             prev_conf = entry.get("confidence", 0) or 0
             decayed_conf = prev_conf * CONFIDENCE_DECAY
             if decayed_conf < CONFIDENCE_FLOOR:
                 continue
             decayed_entry["confidence"] = decayed_conf
-            merged[addr] = decayed_entry
+            merged[key] = decayed_entry
 
     sorted_contracts = sorted(merged.values(), key=lambda c: c.get("confidence", 0) or 0, reverse=True)
 

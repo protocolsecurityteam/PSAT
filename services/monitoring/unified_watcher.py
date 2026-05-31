@@ -35,6 +35,8 @@ from services.monitoring.event_topics import (
 from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from utils.rpc import (
+    chain_id_for_chain_name,
+    default_rpc_url,
     normalize_hex,
     rpc_batch_request,
     rpc_request,
@@ -62,12 +64,33 @@ def get_latest_block(rpc_url: str) -> int:
     return int(result, 16)
 
 
-def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
-    """Scan new blocks for all governance and proxy events.
+def _rpc_url_for_chain(chain: str, default_rpc: str) -> str:
+    """Route the watcher's rpc_url by *chain*.
 
-    Uses a single eth_getLogs call per block chunk with all monitored
-    addresses and all event topic0s. Returns list of new MonitoredEvent
-    records created.
+    The loop's *default_rpc* is the operator-supplied / ethereum endpoint: it
+    wins outright for the default ethereum chain so an explicit ``--rpc-url``
+    override is honored exactly as before (single-chain no-op). Other chains
+    route to their eRPC endpoint, falling back to *default_rpc* only when no
+    chain-specific endpoint exists."""
+    if (chain or "ethereum") == "ethereum":
+        return default_rpc
+    return (
+        default_rpc_url(
+            chain=chain,
+            chain_id=chain_id_for_chain_name(chain),
+            fallback_url=default_rpc,
+        )
+        or default_rpc
+    )
+
+
+def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
+    """Scan new blocks for all governance and proxy events, per chain.
+
+    Active monitored contracts are grouped by chain; each group scans against a
+    chain-correct rpc_url. *rpc_url* is the fallback/default (ethereum) endpoint.
+    A per-chain scan failure is logged and skipped, not fatal. Returns the union
+    of new MonitoredEvent records created across all chains.
     """
     contracts = (
         session.execute(
@@ -79,6 +102,40 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     if not contracts:
         return []
 
+    by_chain: dict[str, list[MonitoredContract]] = {}
+    for c in contracts:
+        by_chain.setdefault(c.chain or "ethereum", []).append(c)
+
+    new_events: list[MonitoredEvent] = []
+    for chain, chain_contracts in by_chain.items():
+        chain_rpc_url = _rpc_url_for_chain(chain, rpc_url)
+        try:
+            chain_events = _scan_chain_for_events(session, chain_rpc_url, chain_contracts)
+            session.commit()
+            new_events.extend(chain_events)
+        except Exception as exc:
+            session.rollback()
+            logger.warning(
+                "Scan failed for chain %s (%d contracts): %s",
+                chain,
+                len(chain_contracts),
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+    return new_events
+
+
+def _scan_chain_for_events(
+    session: Session,
+    rpc_url: str,
+    contracts: list[MonitoredContract],
+) -> list[MonitoredEvent]:
+    """Scan one chain's monitored contracts.
+
+    Uses a single eth_getLogs call per block chunk with all monitored
+    addresses and all event topic0s. Returns list of new MonitoredEvent
+    records created. Callers commit; this stages rows only.
+    """
     contract_by_address: dict[str, MonitoredContract] = {c.address.lower(): c for c in contracts}
 
     # Per-emitter map of topic0 → tracked-topic spec (from the static
@@ -303,7 +360,6 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
         if last_successful_block > mc.last_scanned_block:
             mc.last_scanned_block = last_successful_block
 
-    session.commit()
     return new_events
 
 
@@ -859,6 +915,10 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     skipped — the reconciler (``services/monitoring/reconciler.py``)
     backfills the plan within its interval (default 600s) so this is a
     bounded transient on freshly-migrated rows.
+
+    Pollable contracts are grouped by chain and each group polls against a
+    chain-correct rpc_url. *rpc_url* is the fallback/default (ethereum)
+    endpoint. A per-chain poll failure is logged and skipped, not fatal.
     """
     contracts = (
         session.execute(
@@ -873,6 +933,38 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     if not contracts:
         return []
 
+    by_chain: dict[str, list[MonitoredContract]] = {}
+    for c in contracts:
+        by_chain.setdefault(c.chain or "ethereum", []).append(c)
+
+    new_events: list[MonitoredEvent] = []
+    for chain, chain_contracts in by_chain.items():
+        chain_rpc_url = _rpc_url_for_chain(chain, rpc_url)
+        try:
+            chain_events = _poll_chain_for_state_changes(session, chain_rpc_url, chain_contracts)
+            session.commit()
+            new_events.extend(chain_events)
+        except Exception as exc:
+            session.rollback()
+            logger.warning(
+                "Poll failed for chain %s (%d contracts): %s",
+                chain,
+                len(chain_contracts),
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+    return new_events
+
+
+def _poll_chain_for_state_changes(
+    session: Session,
+    rpc_url: str,
+    contracts: list[MonitoredContract],
+) -> list[MonitoredEvent]:
+    """Poll one chain's monitored contracts for state changes.
+
+    Callers commit; this stages rows only.
+    """
     batch_calls: list[tuple[str, list]] = []
     # (contract, batch_index, entry_dict)
     poll_dispatch: list[tuple[MonitoredContract, int, dict]] = []
@@ -1024,7 +1116,6 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                 extra={"exc_type": type(exc).__name__},
             )
 
-    session.commit()
     return new_events
 
 

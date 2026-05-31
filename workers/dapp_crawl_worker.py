@@ -25,7 +25,9 @@ from db.queue import (
 )
 from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
+from utils.chains import canonical_chain
 from utils.logging import log_timed_phase, record_stage_metric
+from utils.rpc import chain_name_for_chain_id
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.dapp_crawl")
@@ -42,16 +44,6 @@ class DAppCrawlWorker(BaseWorker):
             raise ValueError("dapp_crawl job missing dapp_urls in request")
 
         chain_id = request.get("chain_id") or 1
-        chain_id_to_name = {
-            1: "ethereum",
-            10: "optimism",
-            56: "bsc",
-            137: "polygon",
-            8453: "base",
-            42161: "arbitrum",
-            43114: "avalanche",
-            534352: "scroll",
-        }
         wait = request.get("wait") or 10
 
         # Derive / create Protocol row from URL hostname if no company context exists
@@ -134,19 +126,32 @@ class DAppCrawlWorker(BaseWorker):
 
         # Write ALL discovered addresses to contracts table
         protocol_id = protocol_row.id
-        default_chain = request.get("chain") or chain_id_to_name.get(chain_id)
-        # Build per-address context from address_details
-        detail_by_addr: dict[str, dict] = {}
+        default_chain = canonical_chain(request.get("chain")) or chain_name_for_chain_id(chain_id) or "ethereum"
+        # A single crawl can surface the same address on different chains
+        # (different contracts). Key the per-address detail map by
+        # (address, chain) so two chains' deployments survive to the
+        # (address, chain)-keyed DB upsert instead of collapsing here.
+        # Addresses with at least one explorer-pinned chain keep only those
+        # chains; addresses with no chain context fall back to the job chain.
+        detail_by_key: dict[tuple[str, str], dict] = {}
+        chains_by_addr: dict[str, set[str]] = {}
         for detail in result.get("address_details", []):
             addr = detail.get("address", "").lower()
-            if addr:
-                detail_by_addr[addr] = detail
+            if not addr:
+                continue
+            addr_chain = canonical_chain(detail.get("chain")) or default_chain
+            detail_by_key[(addr, addr_chain)] = detail
+            chains_by_addr.setdefault(addr, set()).add(addr_chain)
 
         bulk_entries: list[dict] = []
+        seen_keys: set[tuple[str, str]] = set(detail_by_key.keys())
+        # Discovered addresses with no detail row fall back to the job chain.
         for addr in addresses:
             normalized = addr.lower()
-            info = detail_by_addr.get(normalized, {})
-            addr_chain = info.get("chain") or default_chain
+            if normalized not in chains_by_addr:
+                seen_keys.add((normalized, default_chain))
+        for normalized, addr_chain in sorted(seen_keys):
+            info = detail_by_key.get((normalized, addr_chain), {})
             source_urls = info.get("source_urls", [])
             bulk_entries.append(
                 {

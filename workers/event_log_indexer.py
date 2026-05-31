@@ -20,7 +20,7 @@ from services.resolution.deferred_reconciler import reconcile_deferred_resolutio
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
 from utils.logging import log_timed_phase
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import PUBLIC_ETH_RPC_URL, chain_id_for_chain_name, default_rpc_url, rpc_url_for_chain_id
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -303,10 +303,15 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
     ).scalars()
     inserted = 0
     seed_cache: dict[str, int] = {}
+    # The *chain_id* arg is the fallback default for jobs whose chain is unknown
+    # / outside COMMON_CHAIN_IDS; each job's own chain wins when resolvable so a
+    # non-ethereum job's events index against the right chain.
+    default_chain_id = chain_id
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
+        chain_id = chain_id_for_chain_name(job.chain) or default_chain_id
         values = _state_var_values_for_job(session, job)
         for descriptor in _descriptors_from_artifact(artifact):
             for hint in descriptor.get("enumeration_hint") or []:
@@ -441,11 +446,69 @@ def _event_address_for_descriptor(
     return job.address.lower() if job.address and len(job.address) == 42 else None
 
 
+def _active_chain_ids(session: Session) -> list[int]:
+    """Distinct chain_ids the indexer must drive this pass: the chains already
+    on ``IndexedEventCursor`` rows plus the chains of recently-completed jobs
+    enrollment will seed cursors for. Ethereum (1) is included whenever any
+    cursor/job carries it, so a single-chain deployment yields ``[1]``."""
+    cursor_ids = session.execute(select(IndexedEventCursor.chain_id).distinct()).scalars().all()
+    job_chains = (
+        session.execute(
+            select(Job.chain)
+            .where(Job.status == JobStatus.completed)
+            .where(Job.address.isnot(None))
+            .where(Job.chain.isnot(None))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    ids: set[int] = {int(cid) for cid in cursor_ids if cid is not None}
+    for chain in job_chains:
+        cid = chain_id_for_chain_name(chain)
+        if cid is not None:
+            ids.add(cid)
+    return sorted(ids)
+
+
+def _build_rpc_fetchers_for_chains(
+    chain_ids: list[int],
+) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
+    """Build per-chain RPC fetcher maps, routing each chain_id to its eRPC
+    endpoint. Chains with no resolvable endpoint are logged and skipped — their
+    cursors then degrade cleanly (``scan_enrolled_events`` skips a chain_id with
+    no fetcher) rather than scanning the wrong chain."""
+    from services.resolution.repos.event_logs_rpc import (
+        RpcBlockHashFetcher,
+        RpcEventLogFetcher,
+        RpcHeadBlockFetcher,
+    )
+
+    fetchers: dict[int, LogFetcher] = {}
+    head_fetchers: dict[int, HeadBlockFetcher] = {}
+    block_hash_fetchers: dict[int, BlockHashFetcher] = {}
+    for chain_id in chain_ids:
+        if chain_id == 1:
+            # Preserve the ethereum endpoint override + ETH_RPC/public fallback
+            # chain exactly (matches the prior single-chain main()).
+            rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
+        else:
+            rpc_url = rpc_url_for_chain_id(chain_id)
+        if not rpc_url:
+            logger.warning("event log indexer: no RPC endpoint for chain_id=%s — skipping its cursors", chain_id)
+            continue
+        fetchers[chain_id] = RpcEventLogFetcher(rpc_url)
+        head_fetchers[chain_id] = RpcHeadBlockFetcher(rpc_url)
+        block_hash_fetchers[chain_id] = RpcBlockHashFetcher(rpc_url)
+    return fetchers, head_fetchers, block_hash_fetchers
+
+
 def run_event_log_indexer_loop(
     *,
-    fetchers: Mapping[int, LogFetcher],
-    head_fetchers: Mapping[int, HeadBlockFetcher],
-    block_hash_fetchers: Mapping[int, BlockHashFetcher],
+    fetchers: Mapping[int, LogFetcher] | None = None,
+    head_fetchers: Mapping[int, HeadBlockFetcher] | None = None,
+    block_hash_fetchers: Mapping[int, BlockHashFetcher] | None = None,
+    build_fetchers_per_pass: bool = False,
     interval: float = DEFAULT_INTERVAL_S,
     stop_event: Event | None = None,
 ) -> None:
@@ -461,12 +524,21 @@ def run_event_log_indexer_loop(
                 with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
                     enrolled = enroll_from_completed_jobs(session)
                     ph["enrolled"] = enrolled
+                # Rebuild per-chain fetchers each pass when driven by ``main``,
+                # so cursors enrolled on a new chain mid-run get an endpoint
+                # without a restart. Tests pass explicit static maps instead.
+                if build_fetchers_per_pass:
+                    pass_fetchers, pass_heads, pass_hashes = _build_rpc_fetchers_for_chains(_active_chain_ids(session))
+                else:
+                    pass_fetchers = fetchers or {}
+                    pass_heads = head_fetchers or {}
+                    pass_hashes = block_hash_fetchers or {}
                 with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                     summary = scan_enrolled_events(
                         session,
-                        fetchers=fetchers,
-                        head_fetchers=head_fetchers,
-                        block_hash_fetchers=block_hash_fetchers,
+                        fetchers=pass_fetchers,
+                        head_fetchers=pass_heads,
+                        block_hash_fetchers=pass_hashes,
                     )
                     ph["windows_scanned"] = summary.windows_scanned
                     ph["inserted"] = summary.inserted
@@ -508,8 +580,6 @@ def run_event_log_indexer_loop(
 
 
 def main() -> None:
-    from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -524,14 +594,11 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
-    fetchers = {1: RpcEventLogFetcher(rpc_url)}
-    head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
-    block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}
+    # Per-pass fetcher construction routes each active chain_id to its own
+    # endpoint (ethereum keeps the PSAT_INDEXER_RPC_URL override + public
+    # fallback). A single-chain deployment still drives only chain_id=1.
     run_event_log_indexer_loop(
-        fetchers=fetchers,
-        head_fetchers=head_fetchers,
-        block_hash_fetchers=block_hash_fetchers,
+        build_fetchers_per_pass=True,
         stop_event=stop_event,
     )
 

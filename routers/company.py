@@ -283,6 +283,7 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
                         AuditContractCoverage.proof_kind != "cited_only",
                     ),
                     CoveredContract.address.in_({addr for _chain, addr in target_contract_ids_by_key}),
+                    CoveredContract.chain.in_({chain for chain, _addr in target_contract_ids_by_key}),
                 )
             ).all()
             inherited_rows = _inherit_verified_dependency_coverage(

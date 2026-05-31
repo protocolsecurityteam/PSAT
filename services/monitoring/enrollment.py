@@ -110,27 +110,31 @@ def enroll_protocol_contracts(
     Returns list of created/updated MonitoredContract rows.
     """
     # Only enroll contracts that have a completed job — not the entire
-    # inventory which may include hundreds of unanalyzed addresses.
-    analyzed_addrs = set(
-        addr
-        for (addr,) in session.execute(
-            select(Job.address).where(
+    # inventory which may include hundreds of unanalyzed addresses. Keyed by
+    # (address, chain) so a completed job on one chain doesn't pull in a
+    # same-address contract analyzed on another. For a single-chain protocol
+    # every key shares the same chain, so the filter is unchanged.
+    analyzed_keys: set[tuple[str, str]] = {
+        (addr.lower(), job_chain or chain)
+        for (addr, job_chain) in session.execute(
+            select(Job.address, Job.chain).where(
                 Job.protocol_id == protocol_id,
                 Job.status == JobStatus.completed,
                 Job.address.isnot(None),
             )
         ).all()
-    )
+        if addr
+    }
     # The calling job is still processing — include its address too.
     if calling_job_id is not None:
         calling_job = session.get(Job, calling_job_id)
         if calling_job and calling_job.address:
-            analyzed_addrs.add(calling_job.address)
+            analyzed_keys.add((calling_job.address.lower(), calling_job.chain or chain))
 
     contracts = [
         c
         for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
-        if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
+        if (c.address.lower(), c.chain or chain) in analyzed_keys
     ]
 
     if not contracts:
@@ -259,15 +263,19 @@ def enroll_protocol_contracts(
     # longer in the enrolled set (e.g. inventory addresses that were never
     # analyzed).  We keep them (is_active=False) rather than deleting so
     # historical events are preserved.
-    enrolled_addrs = {mc.address for mc in enrolled}
+    # Keyed by (address, chain) so a same-address contract on a different chain
+    # in this protocol isn't treated as the enrolled one (and thus never
+    # spuriously kept/deactivated across chains). For a single-chain protocol
+    # the chain dimension is constant, so this is a no-op.
+    enrolled_keys = {(mc.address, mc.chain) for mc in enrolled}
     # Also include controller-discovered addresses so the stale-detection
     # query below doesn't deactivate rows that ``_enroll_controller_addresses``
     # just enrolled or kept active. Must mirror ``_CONTROLLER_MONITORED_TYPES``
     # — leaving 'proxy' out caused a ping-pong where Pass 1 re-promoted a
     # CGN-discovered proxy admin and the stale check then immediately
     # deactivated it because 'proxy' wasn't in this subset.
-    enrolled_addrs |= {
-        mc.address
+    enrolled_keys |= {
+        (mc.address, mc.chain)
         for mc in session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
@@ -278,17 +286,17 @@ def enroll_protocol_contracts(
         .scalars()
         .all()
     }
-    stale = (
+    candidates = (
         session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
-                MonitoredContract.address.notin_(enrolled_addrs),
             )
         )
         .scalars()
         .all()
     )
+    stale = [mc for mc in candidates if (mc.address, mc.chain) not in enrolled_keys]
     for mc in stale:
         mc.is_active = False
 
@@ -585,7 +593,11 @@ def _enroll_controller_addresses(
     """
     from services.aggregations.company_overview import controllers_for_protocol
 
-    enrolled_contract_addrs = {c.address.lower() for c in contracts}
+    # Controllers are enrolled on the single ``chain`` passed in, so the
+    # protocol-contract skip-set only excludes contracts on that same chain —
+    # a same-address contract on another chain must not suppress controller
+    # enrollment here. For a single-chain protocol this equals the full set.
+    enrolled_contract_addrs = {c.address.lower() for c in contracts if (c.chain or chain) == chain}
     controllers = controllers_for_protocol(session, protocol_id)
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).

@@ -96,11 +96,15 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         if contract.implementation:
             impl_addrs.add(contract.implementation.lower())
         if impl_addrs:
+            # Scope impls to the proxy's own chain so a same-address impl on
+            # another chain in the same protocol can't pull in foreign
+            # coverage rows. No-op for a single-chain protocol.
             impl_contract_ids = (
                 session.execute(
                     select(Contract.id).where(
                         Contract.protocol_id == contract.protocol_id,
                         Contract.address.in_(impl_addrs),
+                        Contract.chain == contract.chain,
                     )
                 )
                 .scalars()
@@ -159,6 +163,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         brief = _audit_brief(audit, r)
         impl_addr = addr_by_cid.get(r.contract_id)
         brief["impl_address"] = impl_addr
+        brief["chain"] = contract.chain
         brief["bytecode_keccak_at_match"] = r.bytecode_keccak_at_match
         now_keccak = live_keccaks.get(impl_addr.lower()) if impl_addr else None
         brief["bytecode_keccak_now"] = now_keccak
@@ -216,6 +221,7 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
         select(Contract).where(
             Contract.address == current_impl.lower(),
             Contract.protocol_id == contract.protocol_id,
+            Contract.chain == contract.chain,
         )
     ).scalar_one_or_none()
     if impl_contract is None:

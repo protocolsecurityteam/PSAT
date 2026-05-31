@@ -17,6 +17,8 @@ from db.models import (
     TvlSnapshot,
 )
 from schemas.api_requests import ProtocolSubscribeRequest
+from utils.chains import canonical_chain, canonical_chain_list
+from utils.rpc import default_rpc_url
 
 from . import deps
 
@@ -51,37 +53,58 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
 
 
 @router.post("/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)])
-def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, Any]:
+def re_enroll_protocol(protocol_id: int, chain: str | None = None) -> dict[str, Any]:
     """Manually trigger monitoring enrollment for a protocol.
 
     Calls enroll_protocol_contracts directly, bypassing the automatic
     in-flight job checks. Useful when enrollment produced wrong results
     or after manual DB changes.
+
+    When ``chain`` is omitted, re-enroll every network the protocol lives on
+    (``Protocol.chains``, canonicalized), falling back to ethereum if that set
+    is empty. An explicit ``chain`` scopes the run to just that network.
     """
-    rpc_url = deps.DEFAULT_RPC_URL
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
         if protocol is None:
             raise HTTPException(status_code=404, detail="Protocol not found")
 
+        if chain is not None:
+            target_chains = [canonical_chain(chain) or "ethereum"]
+        else:
+            target_chains = canonical_chain_list(protocol.chains) or ["ethereum"]
+
         from services.monitoring.enrollment import enroll_protocol_contracts
 
-        enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain)
-        return {
-            "status": "enrolled",
-            "protocol_id": protocol_id,
-            "contracts_enrolled": len(enrolled),
-            "contracts": [
+        contracts: list[dict[str, Any]] = []
+        for target_chain in target_chains:
+            # ethereum keeps the legacy DEFAULT_RPC_URL verbatim; other chains
+            # route through eRPC via default_rpc_url so enrollment hits the
+            # right network.
+            rpc_url = (
+                deps.DEFAULT_RPC_URL
+                if target_chain == "ethereum"
+                else default_rpc_url(chain=target_chain, fallback_url=deps.DEFAULT_RPC_URL) or deps.DEFAULT_RPC_URL
+            )
+            enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, target_chain)
+            contracts.extend(
                 {
                     "id": str(mc.id),
                     "address": mc.address,
+                    "chain": mc.chain,
                     "contract_type": mc.contract_type,
                     "monitoring_config": mc.monitoring_config,
                     "needs_polling": mc.needs_polling,
                     "is_active": mc.is_active,
                 }
                 for mc in enrolled
-            ],
+            )
+        return {
+            "status": "enrolled",
+            "protocol_id": protocol_id,
+            "chains": target_chains,
+            "contracts_enrolled": len(contracts),
+            "contracts": contracts,
         }
 
 

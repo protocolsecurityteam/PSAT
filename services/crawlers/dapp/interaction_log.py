@@ -62,6 +62,12 @@ class InteractionLog:
         Each entry includes the page URLs where the address was found,
         the discovery method (page-text, js-runtime, explorer link, etc.),
         and inferred chain from block explorer links.
+
+        The same address can appear on different chains (different
+        contracts). Keying by ``(address, chain)`` keeps each chain's
+        deployment as its own detail row instead of collapsing them.
+        Interactions where no explorer chain can be inferred land under a
+        ``None`` chain so the worker's job-chain fallback applies.
         """
         EXPLORER_CHAINS = {
             "etherscan": "ethereum",
@@ -74,37 +80,41 @@ class InteractionLog:
             "snowtrace": "avalanche",
         }
 
-        by_addr: dict[str, dict] = {}
+        by_key: dict[tuple[str, str | None], dict] = {}
         for i in self.interactions:
             if not i.to:
                 continue
             addr = i.to.lower()
-            if addr not in by_addr:
-                by_addr[addr] = {"source_urls": set(), "sources": set(), "chains": set()}
-            entry = by_addr[addr]
-            if i.url:
-                entry["source_urls"].add(i.url)
             source = i.data or ""
-            if source:
-                entry["sources"].add(source)
             # Infer chain from any URL-like field — i.url is always a URL, and
             # for scraped page addresses i.data sometimes holds the full explorer
             # href. Calldata (hex) can't contain explorer domain names anyway.
+            inferred: set[str] = set()
             for candidate in (i.url, source):
                 if not candidate or not candidate.startswith(("http://", "https://")):
                     continue
                 for explorer, chain in EXPLORER_CHAINS.items():
                     if explorer in candidate:
-                        entry["chains"].add(chain)
+                        inferred.add(chain)
+            # One detail row per distinct (address, inferred chain). When no
+            # chain is inferrable the interaction lands under None so it isn't
+            # silently folded into a chain-tagged sibling.
+            chains = sorted(inferred) if inferred else [None]
+            for chain in chains:
+                entry = by_key.setdefault((addr, chain), {"source_urls": set(), "sources": set()})
+                if i.url:
+                    entry["source_urls"].add(i.url)
+                if source:
+                    entry["sources"].add(source)
 
         return [
             {
                 "address": addr,
                 "source_urls": sorted(info["source_urls"]),
                 "sources": sorted(info["sources"]),
-                "chain": sorted(info["chains"])[0] if info["chains"] else None,
+                "chain": chain,
             }
-            for addr, info in sorted(by_addr.items())
+            for (addr, chain), info in sorted(by_key.items(), key=lambda kv: (kv[0][0], kv[0][1] or ""))
         ]
 
     def get_permits(self) -> list[CapturedInteraction]:

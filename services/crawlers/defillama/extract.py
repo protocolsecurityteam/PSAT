@@ -120,7 +120,12 @@ def extract_protocol(project_dir: Path) -> dict:
     """
     protocol_name = project_dir.name
     addresses = []
-    seen = set()
+    # Key the dedupe set by (address, chain): a protocol adapter can deploy the
+    # same address on two chains (different contracts), often in separate files.
+    # Keying by address alone would keep only the first file's chain and drop
+    # the other deployment. Chain is inferred from the enclosing file's context,
+    # so it stays scoped to each adapter.
+    seen: set[tuple[str, str | None]] = set()
 
     # Scan all JS/TS files in the protocol directory
     patterns = ["*.js", "*.ts", "*.mjs"]
@@ -140,11 +145,13 @@ def extract_protocol(project_dir: Path) -> dict:
 
         for addr in raw_addrs:
             lower = addr.lower()
-            if lower in seen or lower in IGNORE_ADDRS:
+            if lower in IGNORE_ADDRS:
                 continue
-            seen.add(lower)
 
             chain = infer_chain_from_context(filepath, text, addr)
+            if (lower, chain) in seen:
+                continue
+            seen.add((lower, chain))
 
             # Find line number
             line_num = None

@@ -52,9 +52,10 @@ from threading import Event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import Protocol, SessionLocal
+from db.models import Contract, Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
 from services.monitoring.enrollment import enroll_protocol_contracts
+from utils.rpc import chain_id_for_chain_name, default_rpc_url
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,16 @@ def reconcile_enrollments(
     reconciled = 0
     for pid in protocol_ids:
         try:
-            enroll_protocol_contracts(session, pid, rpc_url, chain)
+            protocol_chain = _protocol_chain(session, pid, default=chain)
+            protocol_rpc_url = (
+                default_rpc_url(
+                    chain=protocol_chain,
+                    chain_id=chain_id_for_chain_name(protocol_chain),
+                    fallback_url=rpc_url,
+                )
+                or rpc_url
+            )
+            enroll_protocol_contracts(session, pid, protocol_rpc_url, protocol_chain)
             reconciled += 1
         except Exception:
             logger.exception("reconciler enrollment failed for protocol %s", pid)
@@ -107,6 +117,33 @@ def reconcile_enrollments(
             len(protocol_ids),
         )
     return reconciled
+
+
+def _protocol_chain(session: Session, protocol_id: int, *, default: str = "ethereum") -> str:
+    """Pick the chain to route this protocol's reconcile rpc_url against.
+
+    ``enroll_protocol_contracts`` stamps each ``MonitoredContract.chain`` from
+    its own ``Contract.chain`` per-row, so this only governs which endpoint the
+    block-height seed + controller loaders hit. We take the most common chain
+    among the protocol's contracts (ties → first seen), falling back to
+    *default* for a protocol whose contracts carry no chain. For a single-chain
+    (ethereum) protocol this returns ``"ethereum"`` — a no-op.
+    """
+    chains = (
+        session.execute(select(Contract.chain).where(Contract.protocol_id == protocol_id, Contract.chain.isnot(None)))
+        .scalars()
+        .all()
+    )
+    if not chains:
+        return default
+    counts: dict[str, int] = {}
+    for c in chains:
+        if c is None:
+            continue
+        counts[c] = counts.get(c, 0) + 1
+    if not counts:
+        return default
+    return max(counts, key=lambda c: counts[c])
 
 
 def run_enrollment_reconciler_loop(

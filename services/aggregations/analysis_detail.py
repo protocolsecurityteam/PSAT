@@ -78,6 +78,12 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             current = session.get(Job, parent_id)
         return None
 
+    # The owning chain for every serialized subject/node/principal: prefer
+    # the Contract row, fall back to the job's request, default ethereum.
+    req_chain_for_payload = job.request.get("chain") if isinstance(job.request, dict) else None
+    row_chain_for_payload = contract_row.chain if contract_row and contract_row.chain else None
+    detail_chain = row_chain_for_payload or req_chain_for_payload or "ethereum"
+
     payload: dict[str, Any] = {
         "run_name": job.name or str(job.id),
         "job_id": str(job.id),
@@ -85,6 +91,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         "contract_id": contract_row.id if contract_row else None,
         "company": _company_for(job),
         "deployer": contract_row.deployer if contract_row else None,
+        "chain": detail_chain,
         "available_artifacts": sorted(all_artifacts.keys()),
     }
 
@@ -137,7 +144,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             )
 
     if contract_row:
-        _populate_from_contract(session, payload, contract_row)
+        _populate_from_contract(session, payload, contract_row, detail_chain)
 
     # For impl jobs, inherit proxy-specific artifacts from the proxy job
     request = job.request if isinstance(job.request, dict) else {}
@@ -162,13 +169,15 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         impl_stmt = select(Job).where(Job.address == impl_addr).order_by(Job.updated_at.desc()).limit(1)
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
-            _inherit_from_impl(session, payload, job, impl_job, impl_addr)
+            _inherit_from_impl(session, payload, job, impl_job, impl_addr, detail_chain)
 
     # Add subject info from contract_analysis if available
     if isinstance(all_artifacts.get("contract_analysis"), dict):
         subject = all_artifacts["contract_analysis"].get("subject", {})
         payload["contract_name"] = subject.get("name", payload["run_name"])
         payload["summary"] = all_artifacts["contract_analysis"].get("summary")
+        if isinstance(subject, dict) and subject.get("chain") is None:
+            subject["chain"] = detail_chain
 
     # Synthesis fallback for upgrade_history. Mirrors the per-artifact
     # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
@@ -186,7 +195,10 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     return payload
 
 
-def _populate_from_contract(session: Session, payload: dict[str, Any], contract_row: Contract) -> None:
+def _populate_from_contract(
+    session: Session, payload: dict[str, Any], contract_row: Contract, chain: str | None = None
+) -> None:
+    row_chain = (contract_row.chain if contract_row.chain else None) or chain
     ef_rows = list(
         session.execute(
             select(EffectiveFunction)
@@ -195,12 +207,13 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
         ).scalars()
     )
 
-    ef_list = _serialize_effective_functions(ef_rows)
+    ef_list = _serialize_effective_functions(ef_rows, row_chain)
     if ef_list:
         payload["effective_permissions"] = {
             "functions": ef_list,
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
+            "chain": row_chain,
         }
         if "effective_permissions" not in payload.get("available_artifacts", []):
             payload["available_artifacts"] = sorted(
@@ -223,11 +236,13 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
                     "confidence": p.confidence,
                     "details": p.details or {},
                     "graph_context": list(p.graph_context or []),
+                    "chain": row_chain,
                 }
                 for p in pl_rows
             ],
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
+            "chain": row_chain,
         }
 
     if "control_snapshot" not in payload:
@@ -237,7 +252,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
             .all()
         )
         if cv_rows:
-            payload["control_snapshot"] = _build_control_snapshot(contract_row, cv_rows)
+            payload["control_snapshot"] = _build_control_snapshot(contract_row, cv_rows, row_chain)
 
     if "resolved_control_graph" not in payload:
         from db.models import ControlGraphEdge, ControlGraphNode
@@ -253,10 +268,12 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
             .all()
         )
         if cgn_rows:
-            payload["resolved_control_graph"] = _build_control_graph(contract_row.address, cgn_rows, cge_rows)
+            payload["resolved_control_graph"] = _build_control_graph(
+                contract_row.address, cgn_rows, cge_rows, row_chain
+            )
 
 
-def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dict[str, Any]]:
+def _serialize_effective_functions(ef_rows: list[EffectiveFunction], chain: str | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for ef in ef_rows:
         direct_owner = None
@@ -269,6 +286,7 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
                 "source_controller_id": fp.origin,
                 "principal_type": fp.principal_type,
                 "details": fp.details or {},
+                "chain": chain,
             }
             if fp.principal_type == "direct_owner" and direct_owner is None:
                 direct_owner = principal_dict
@@ -301,10 +319,14 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
     return out
 
 
-def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[ControllerValue]) -> dict[str, Any]:
+def _build_control_snapshot(
+    contract_row: Contract, cv_rows: Sequence[ControllerValue], chain: str | None = None
+) -> dict[str, Any]:
+    row_chain = (contract_row.chain if contract_row.chain else None) or chain
     return {
         "contract_name": contract_row.contract_name,
         "contract_address": contract_row.address,
+        "chain": row_chain,
         "controller_values": {
             cv.controller_id: {
                 "value": cv.value,
@@ -313,15 +335,17 @@ def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[Controller
                 "block_number": cv.block_number,
                 "observed_via": cv.observed_via,
                 "details": cv.details or {},
+                "chain": row_chain,
             }
             for cv in cv_rows
         },
     }
 
 
-def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any]:
+def _build_control_graph(root_address: str, cgn_rows, cge_rows, chain: str | None = None) -> dict[str, Any]:
     return {
         "root_contract_address": root_address,
+        "chain": chain,
         "nodes": [
             {
                 "id": f"address:{n.address}",
@@ -333,6 +357,7 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "depth": n.depth,
                 "analyzed": n.analyzed,
                 "details": n.details or {},
+                "chain": chain,
             }
             for n in cgn_rows
         ],
@@ -350,7 +375,9 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
     }
 
 
-def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl_job: Job, impl_addr: str) -> None:
+def _inherit_from_impl(
+    session: Session, payload: dict[str, Any], job: Job, impl_job: Job, impl_addr: str, chain: str | None = None
+) -> None:
     impl_artifacts = deps.get_all_artifacts(session, impl_job.id)
     for fallback_name in (
         "contract_analysis",
@@ -367,6 +394,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
 
     impl_c = session.execute(select(Contract).where(Contract.job_id == impl_job.id).limit(1)).scalar_one_or_none()
     if impl_c:
+        impl_chain = (impl_c.chain if impl_c.chain else None) or chain
         if "effective_permissions" not in payload:
             impl_efs = list(
                 session.execute(
@@ -377,9 +405,10 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             )
             if impl_efs:
                 payload["effective_permissions"] = {
-                    "functions": _serialize_effective_functions(impl_efs),
+                    "functions": _serialize_effective_functions(impl_efs, impl_chain),
                     "contract_name": impl_c.contract_name,
                     "contract_address": impl_c.address,
+                    "chain": impl_chain,
                 }
 
         if "control_snapshot" not in payload:
@@ -387,7 +416,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
                 session.execute(select(ControllerValue).where(ControllerValue.contract_id == impl_c.id)).scalars().all()
             )
             if impl_cvs:
-                payload["control_snapshot"] = _build_control_snapshot(impl_c, impl_cvs)
+                payload["control_snapshot"] = _build_control_snapshot(impl_c, impl_cvs, impl_chain)
 
         if "resolved_control_graph" not in payload:
             from db.models import ControlGraphEdge, ControlGraphNode
@@ -403,7 +432,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
                 .all()
             )
             if impl_cgn:
-                payload["resolved_control_graph"] = _build_control_graph(impl_c.address, impl_cgn, impl_cge)
+                payload["resolved_control_graph"] = _build_control_graph(impl_c.address, impl_cgn, impl_cge, impl_chain)
 
         if "principal_labels" not in payload:
             impl_pls = (
@@ -412,8 +441,15 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             if impl_pls:
                 payload["principal_labels"] = {
                     "principals": [
-                        {"address": p.address, "label": p.label, "resolved_type": p.resolved_type} for p in impl_pls
+                        {
+                            "address": p.address,
+                            "label": p.label,
+                            "resolved_type": p.resolved_type,
+                            "chain": impl_chain,
+                        }
+                        for p in impl_pls
                     ],
+                    "chain": impl_chain,
                 }
 
         if "contract_name" not in payload and impl_c.contract_name:

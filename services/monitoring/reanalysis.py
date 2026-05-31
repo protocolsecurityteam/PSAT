@@ -20,6 +20,7 @@ from db.models import (
 )
 from db.queue import create_job
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
+from utils.rpc import chain_id_for_chain_name, default_rpc_url
 
 # Must match _OWNER_CONTROLLER_IDS in unified_watcher.py.
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
@@ -156,7 +157,14 @@ def maybe_queue_reanalysis(
     else:
         trigger = event_type
 
-    rpc_url = os.environ.get("ETH_RPC", "https://ethereum-rpc.publicnode.com")
+    # Route the child request's rpc_url by the monitored contract's chain so a
+    # non-ethereum reanalysis doesn't get pinned to mainnet. Falls back to the
+    # legacy ETH_RPC/public default when the chain has no eRPC endpoint.
+    rpc_url = default_rpc_url(
+        chain=mc.chain,
+        chain_id=chain_id_for_chain_name(mc.chain),
+        fallback_url=os.environ.get("ETH_RPC", "https://ethereum-rpc.publicnode.com"),
+    )
 
     request_dict: dict = {
         "address": mc.address,

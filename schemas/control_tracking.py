@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from .contract_analysis import AssociatedEvent, ControllerKind, ControllerReadSpec, ControllerTrackingMode
 
 TrackingStrategy = Literal["event_first_with_polling_fallback"]
@@ -60,6 +62,7 @@ class ControlTrackingPlan(TypedDict):
     contract_name: str
     tracking_strategy: TrackingStrategy
     tracked_controllers: list[TrackedController]
+    chain: NotRequired[str | None]
 
 
 class ControlSnapshotValue(TypedDict):
@@ -69,6 +72,7 @@ class ControlSnapshotValue(TypedDict):
     observed_via: str
     resolved_type: ResolvedControllerType
     details: dict[str, object]
+    chain: NotRequired[str | None]
 
 
 class ControlSnapshot(TypedDict):
@@ -77,6 +81,7 @@ class ControlSnapshot(TypedDict):
     contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]
+    chain: NotRequired[str | None]
 
 
 class ControlChangeEvent(TypedDict):
@@ -92,3 +97,4 @@ class ControlChangeEvent(TypedDict):
     observed_via: str
     notes: list[str]
     event_signature: str | None
+    chain: NotRequired[str | None]

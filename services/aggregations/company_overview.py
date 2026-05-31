@@ -1173,6 +1173,7 @@ def build_governance_view(
 
         graph_contract = lookup_contract or contract_row
         if graph_contract:
+            graph_chain = graph_contract.chain or "ethereum"
             cg_nodes = cgn_by_cid.get(graph_contract.id, [])
             cg_edges = cge_by_cid.get(graph_contract.id, [])
             node_meta = {n.address: _principal_lookup_meta(principal_lookup, n.address, n.details) for n in cg_nodes}
@@ -1182,6 +1183,7 @@ def build_governance_view(
                     "type": node_meta[n.address].get("resolved_type") or n.resolved_type,
                     "label": node_meta[n.address].get("label") or n.contract_name or n.label,
                     "details": node_meta[n.address]["details"],
+                    "chain": graph_chain,
                 }
                 for n in cg_nodes
             ]
@@ -1448,6 +1450,11 @@ def _build_flows_and_principals(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
     contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
+    # Owning chain per contract address (default ethereum). Principals inherit
+    # the chain of the contract they control so principal_map can be keyed by
+    # (chain, address) — preventing a same-address principal on two chains from
+    # silently merging its controls/details into one entry.
+    chain_by_contract_addr = {c["address"].lower(): (c.get("chain") or "ethereum") for c in contracts if c["address"]}
     flow_seen: set[tuple[str, str]] = set()
     fund_flows: list[dict[str, Any]] = []
 
@@ -1534,8 +1541,11 @@ def _build_flows_and_principals(
 
     # Collect non-contract principals from control graph + function principals.
     # First pass: find safe_owner edges so we can nest Safe owners later.
-    principal_map: dict[str, dict[str, Any]] = {}
-    safe_owners_map: dict[str, list[str]] = {}
+    # Both maps are keyed by (chain, address) so two networks' principals with
+    # the same address don't collide; ``owner_of_safe`` stays address-only
+    # because it gates a node-skip that is chain-agnostic within a protocol.
+    principal_map: dict[tuple[str, str], dict[str, Any]] = {}
+    safe_owners_map: dict[tuple[str, str], list[str]] = {}
     owner_of_safe: set[str] = set()
 
     for c in contracts:
@@ -1544,14 +1554,15 @@ def _build_flows_and_principals(
         lookup_c = lookup_contract_by_entry.get(c["address"].lower())
         if not lookup_c:
             continue
+        chain = chain_by_contract_addr.get(c["address"].lower(), "ethereum")
         for edge in cge_by_cid.get(lookup_c.id, []):
             if edge.relation != "safe_owner":
                 continue
             safe_addr = edge.from_node_id.replace("address:", "").lower()
             owner_addr = edge.to_node_id.replace("address:", "").lower()
-            safe_owners_map.setdefault(safe_addr, [])
-            if owner_addr not in safe_owners_map[safe_addr]:
-                safe_owners_map[safe_addr].append(owner_addr)
+            safe_owners_map.setdefault((chain, safe_addr), [])
+            if owner_addr not in safe_owners_map[(chain, safe_addr)]:
+                safe_owners_map[(chain, safe_addr)].append(owner_addr)
             owner_of_safe.add(owner_addr)
 
     # Second pass: collect direct controllers (skip Safe owners — they're nested)
@@ -1562,6 +1573,7 @@ def _build_flows_and_principals(
         lookup_c = lookup_contract_by_entry.get(target)
         if not lookup_c:
             continue
+        chain = chain_by_contract_addr.get(target, "ethereum")
 
         for cgn in cgn_by_cid.get(lookup_c.id, []):
             node_addr = (cgn.address or "").lower()
@@ -1576,7 +1588,8 @@ def _build_flows_and_principals(
             if node_addr == "0x0000000000000000000000000000000000000000":
                 continue
 
-            if node_addr not in principal_map:
+            pkey = (chain, node_addr)
+            if pkey not in principal_map:
                 # Seed details with the CGN's own introspection result
                 # (getOwners/getThreshold for safes, getMinDelay for
                 # timelocks). This is the authoritative source for the
@@ -1597,19 +1610,20 @@ def _build_flows_and_principals(
 
                 if resolved_type == "safe":
                     if not details.get("owners"):
-                        details["owners"] = safe_owners_map.get(node_addr, [])
+                        details["owners"] = safe_owners_map.get((chain, node_addr), [])
                     if "threshold" not in details and details.get("owners"):
                         details["threshold"] = len(details["owners"])
 
-                principal_map[node_addr] = {
+                principal_map[pkey] = {
                     "address": node_addr,
+                    "chain": chain,
                     "type": resolved_type,
                     "label": lookup_meta.get("label") or cgn.contract_name or cgn.label or resolved_type,
                     "details": details,
                     "controls": [],
                 }
 
-            principal_map[node_addr]["controls"].append(target)
+            principal_map[pkey]["controls"].append(target)
             add_flow(node_addr, target, "principal")
 
     # Third pass: pull principals out of FunctionPrincipal rows. Some
@@ -1627,6 +1641,7 @@ def _build_flows_and_principals(
         lookup_c = lookup_contract_by_entry.get(target)
         if not lookup_c:
             continue
+        chain = chain_by_contract_addr.get(target, "ethereum")
         for fp in fp_governance_by_cid.get(lookup_c.id, []):
             pa = (fp.get("address") or "").lower()
             if not pa or pa == target:
@@ -1643,25 +1658,27 @@ def _build_flows_and_principals(
                 continue
             if pa in contract_addrs:
                 continue
-            if pa not in principal_map:
+            pkey = (chain, pa)
+            if pkey not in principal_map:
                 fp_details = dict(lookup_meta.get("details") or {})
                 fp_raw_details = fp.get("details")
                 if isinstance(fp_raw_details, dict):
                     fp_details.update(fp_raw_details)
                 if resolved_type == "safe":
                     if not fp_details.get("owners"):
-                        fp_details["owners"] = safe_owners_map.get(pa, [])
+                        fp_details["owners"] = safe_owners_map.get((chain, pa), [])
                     if "threshold" not in fp_details and fp_details.get("owners"):
                         fp_details["threshold"] = len(fp_details["owners"])
-                principal_map[pa] = {
+                principal_map[pkey] = {
                     "address": pa,
+                    "chain": chain,
                     "type": resolved_type,
                     "label": lookup_meta.get("label") or resolved_type,
                     "details": fp_details,
                     "controls": [],
                 }
-            if target not in principal_map[pa]["controls"]:
-                principal_map[pa]["controls"].append(target)
+            if target not in principal_map[pkey]["controls"]:
+                principal_map[pkey]["controls"].append(target)
             add_flow(pa, target, "principal")
 
     return fund_flows, list(principal_map.values())

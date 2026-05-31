@@ -27,6 +27,7 @@ class ResolvedPrincipal(TypedDict):
     source_contract: NotRequired[str]
     source_controller_id: NotRequired[str]
     principal_type: NotRequired[str]
+    chain: NotRequired[str | None]
 
 
 class AuthorityRoleGrant(TypedDict):
@@ -69,3 +70,4 @@ class EffectivePermissions(TypedDict):
     principal_resolution: PrincipalResolution
     artifacts: dict[str, str]
     functions: list[EffectiveFunctionPermission]
+    chain: NotRequired[str | None]

@@ -29,6 +29,7 @@ class PrincipalProfile(TypedDict):
     graph_context: list[str]
     controller_context: list[str]
     permissions: list[PrincipalPermission]
+    chain: NotRequired[str | None]
 
 
 class PrincipalLabels(TypedDict):
@@ -36,3 +37,4 @@ class PrincipalLabels(TypedDict):
     contract_address: str
     contract_name: str
     principals: list[PrincipalProfile]
+    chain: NotRequired[str | None]

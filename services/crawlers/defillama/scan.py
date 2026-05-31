@@ -17,6 +17,7 @@ from typing import Callable
 
 from services.crawlers.defillama.core_assets import build_address_to_chain_map, load_core_assets
 from services.crawlers.defillama.extract import extract_addresses_from_file, extract_protocol
+from utils.chains import canonical_chain
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,12 @@ def scan_protocol(
             entry["chain"] = addr_to_chain[entry["address"]]
 
     elapsed = time.time() - start
-    unique_addrs = sorted({e["address"] for e in result["addresses"]})
+    # Dedupe by (address, chain): the same address can be a different
+    # contract on two chains, so collapsing by address alone would drop one
+    # deployment. ``address_details`` keeps the per-(address, chain) rows; the
+    # flat ``addresses`` list stays address-unique for back-compatible counts.
+    unique_pairs = {(e["address"], canonical_chain(e["chain"])) for e in result["addresses"]}
+    unique_addrs = sorted({addr for addr, _chain in unique_pairs})
 
     return {
         "protocol": protocol_name,
@@ -193,7 +199,9 @@ def scan_all_protocols(
 
     start = time.time()
     all_protocols = []
-    all_unique: set[str] = set()
+    # Track distinct (address, chain) deployments — the same address on two
+    # chains is two contracts, so an address-only set would undercount.
+    all_unique: set[tuple[str, str | None]] = set()
 
     for i, proto_path in enumerate(protocol_dirs):
         if proto_path.is_file():
@@ -209,7 +217,7 @@ def scan_all_protocols(
         for entry in result["addresses"]:
             if not entry["chain"] and entry["address"] in addr_to_chain:
                 entry["chain"] = addr_to_chain[entry["address"]]
-            all_unique.add(entry["address"])
+            all_unique.add((entry["address"], canonical_chain(entry["chain"])))
 
         if result["addresses"]:
             all_protocols.append(result)
