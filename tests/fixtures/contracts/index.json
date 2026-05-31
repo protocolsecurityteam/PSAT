@@ -146,6 +146,27 @@
       "contract_name": "OwnerNoEvent",
       "description": "Controller state changes through a writer function without an associated event, requiring polling fallback.",
       "detection_patterns": ["controller_tracking", "state_only_tracking", "owner_guard"]
+    },
+    {
+      "path": "authority/Governable.sol",
+      "category": "authority",
+      "contract_name": "Governable",
+      "description": "Verbatim ether.fi LRTSquared Governable: onlyGovernor reads the governor from an explicit storage slot via the internal accessor _governor(), so the gate lowers to a view_call on _governor() (no external selector). Resolution must fall back to the canonical public governor() getter (bug #4).",
+      "detection_patterns": ["governor_guard", "internal_accessor_authority", "assembly_slot_authority", "canonical_getter_resolution"]
+    },
+    {
+      "path": "authority/solady/Ownable.sol",
+      "category": "authority",
+      "contract_name": "Ownable",
+      "description": "Verbatim Solady Ownable (as vendored by ether.fi TopUp/TopUpV2): owner lives in the bytes32 constant slot _OWNER_SLOT read via inline assembly, with canonical public getter owner(). A caller-equality gate naming _OWNER_SLOT must not become a dead role_identifier:_OWNER_SLOT target (bug #6).",
+      "detection_patterns": ["owner_guard", "solady_ownable", "assembly_slot_authority", "storage_slot_constant"]
+    },
+    {
+      "path": "authority/TopUpSolady.sol",
+      "category": "authority",
+      "contract_name": "TopUpSolady",
+      "description": "ether.fi TopUp.processTopUp gate (verbatim) over the real Solady Ownable: address _owner = owner(); require(_owner == msg.sender). Reproduces the production state_variable:_OWNER_SLOT caller operand that resolution must read via owner() rather than _OWNER_SLOT() (bug #6).",
+      "detection_patterns": ["owner_guard", "solady_ownable", "storage_slot_constant", "canonical_getter_resolution"]
     }
   ]
 }
