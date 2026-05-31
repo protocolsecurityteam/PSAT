@@ -49,24 +49,42 @@ def _address_from_storage_word(word: str | None, offset: int = 0) -> str | None:
     return addr
 
 
+def _has_code(rpc_request: Any, rpc_url: str, addr: str, block: str) -> bool:
+    """Whether ``addr`` is a deployed contract (non-empty bytecode). Filters
+    candidate slots that decode to a non-logic / garbage address — the safety
+    net that makes over-inclusive detection (e.g. a constant read for an
+    unrelated reason) harmless."""
+    try:
+        code = rpc_request(rpc_url, "eth_getCode", [addr, block])
+    except Exception as exc:
+        logger.warning("secondary-impl getCode failed (addr=%s): %s", addr, exc)
+        return False
+    return isinstance(code, str) and len(code.replace("0x", "")) > 0
+
+
 def resolve_secondary_impl_addresses(
     rpc_url: str,
     proxy_address: str,
     pointers: list[dict[str, Any]],
     *,
     block: str = "latest",
+    implementation: str | None = None,
+    require_code: bool = True,
 ) -> list[str]:
     """Read each pointer's slot against the proxy → deduped secondary impl addrs.
 
     The pointer's auto-getter is typically non-public (it reverts), so the value
-    is read directly from the proxy's storage slot. Zero/self/duplicate values
-    are dropped.
+    is read directly from the proxy's storage slot. Dropped: the zero address,
+    the proxy itself, the proxy's EIP-1967 ``implementation`` (a secondary that
+    resolves to the primary impl would only double-list its functions), and —
+    when ``require_code`` is set — any address with no deployed bytecode.
     """
     from utils.rpc import rpc_request
 
     if not rpc_url or not proxy_address or not pointers:
         return []
     proxy_lc = proxy_address.lower()
+    impl_lc = (implementation or "").lower()
     out: list[str] = []
     seen: set[str] = set()
     for ptr in pointers:
@@ -83,9 +101,12 @@ def resolve_secondary_impl_addresses(
             logger.warning("secondary-impl slot read failed (proxy=%s slot=%s): %s", proxy_address, slot_hex, exc)
             continue
         addr = _address_from_storage_word(word, int(ptr.get("offset") or 0))
-        if addr and addr != proxy_lc and addr not in seen:
-            seen.add(addr)
-            out.append(addr)
+        if not addr or addr in (proxy_lc, impl_lc) or addr in seen:
+            continue
+        if require_code and not _has_code(rpc_request, rpc_url, addr, block):
+            continue
+        seen.add(addr)
+        out.append(addr)
     return out
 
 

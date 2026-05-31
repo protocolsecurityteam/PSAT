@@ -1719,7 +1719,11 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
         cids = [primary_cid] if primary_cid is not None else []
-        cids += [sc.id for sc in _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)]
+        cids += [
+            sc.id
+            for sc in _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+            if sc.id != primary_cid
+        ]
         if cids:
             job_addr_to_ef_cids[job.address] = cids
 

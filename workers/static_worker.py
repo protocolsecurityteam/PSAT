@@ -12,7 +12,7 @@ import tempfile
 import textwrap
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 
@@ -934,6 +934,7 @@ class StaticWorker(BaseWorker):
             # Phase 0: Dependency artifacts (always runs — proxy deps are useful)
             self._run_dependency_phase(session, job, project_dir, contract_name, address, target_classification)
 
+            secondary_analysis: Any = None
             if is_proxy:
                 self.update_detail(session, job, "Proxy detected — impl job handles analysis")
                 logger.info(
@@ -954,6 +955,11 @@ class StaticWorker(BaseWorker):
                     contract_name,
                 )
                 self.update_detail(session, job, "Static analysis complete (cached)")
+                # The cached contract_analysis still carries secondary_impl_pointers
+                # (copy_static_cache copies it), so secondaries get resolved on the
+                # cache path too — not only on a fresh (Slither) analysis.
+                cached_analysis = get_artifact(session, job.id, "contract_analysis")
+                secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
             else:
                 # Phase 1: Contract analysis (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;
@@ -969,12 +975,6 @@ class StaticWorker(BaseWorker):
                 if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
-                # 1A: queue split-proxy secondary implementations (best-effort).
-                # When this impl is analysed in proxy context and its fallback
-                # delegatecalls a state-var address, that secondary logic
-                # contract is resolved against the proxy + analysed the same way.
-                self._resolve_secondary_impls(session, job, address, analysis_data)
-
                 # Phase 2: Control tracking plan
                 t0 = time.monotonic()
                 self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
@@ -982,6 +982,14 @@ class StaticWorker(BaseWorker):
                     "static phase complete: tracking plan",
                     extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "tracking_plan"},
                 )
+                secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
+
+            # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
+            # call site reached by BOTH the fresh-analysis and cache-hit paths, so
+            # an impl re-seen in proxy context never silently skips secondary-impl
+            # linkage just because its static artifacts were cached.
+            if secondary_analysis is not None:
+                self._resolve_secondary_impls(session, job, address, secondary_analysis)
 
             self.update_detail(session, job, "Static analysis complete")
             logger.info("Static analysis complete for job %s (%s)", job_id_str, contract_name)
@@ -1290,9 +1298,6 @@ class StaticWorker(BaseWorker):
                 resolve_secondary_impl_addresses,
             )
 
-            secondary_addrs = resolve_secondary_impl_addresses(rpc_url, proxy_address, pointers)
-            if not secondary_addrs:
-                return
             chain = request.get("chain")
             proxy_stmt = sa_select(Contract).where(Contract.address == proxy_address.lower())
             if chain is not None:
@@ -1300,6 +1305,14 @@ class StaticWorker(BaseWorker):
             proxy_contract = session.execute(proxy_stmt.limit(1)).scalar_one_or_none()
             if proxy_contract is None:
                 logger.warning("Job %s: secondary-impl proxy row %s not found; skipping", job.id, proxy_address)
+                return
+            secondary_addrs = resolve_secondary_impl_addresses(
+                rpc_url,
+                proxy_address,
+                pointers,
+                implementation=proxy_contract.implementation,
+            )
+            if not secondary_addrs:
                 return
             created = queue_secondary_impl_jobs(
                 session,
