@@ -249,10 +249,12 @@ class ControllerTrackingTarget(TypedDict):
 
 
 class SecondaryImplPointer(TypedDict):
-    """A state variable the primary impl's fallback/receive delegatecalls to —
-    the split-proxy / admin-impl pattern (e.g. LRTSquared's ``adminImpl``).
+    """A storage slot the primary impl's fallback/receive delegatecalls the value
+    of — the split-proxy / admin-impl pattern (e.g. LRTSquared's ``adminImpl``).
     ``slot``/``offset`` locate it in the proxy's storage so the value (the
-    secondary impl address) can be read from there. See
+    secondary impl address) can be read from there. ``slot`` is an ``int``: a
+    small sequential layout slot for a named ``address`` var, or the full 256-bit
+    constant for an unstructured (EIP-1967-style) slot. See
     services/static/contract_analysis_pipeline/secondary_impl.py."""
 
     name: str
