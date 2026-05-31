@@ -527,6 +527,14 @@ class Contract(Base):
     implementation: Mapped[str | None] = mapped_column(String(42), nullable=True)
     beacon: Mapped[str | None] = mapped_column(String(42), nullable=True)
     admin: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # Additional logic contracts this proxy delegates to beyond the EIP-1967
+    # slot ``implementation`` — the split-proxy / admin-impl pattern where the
+    # primary impl's ``fallback`` delegatecalls an address held in an ordinary
+    # state variable (e.g. ether.fi LRTSquared's ``adminImpl``). Resolved
+    # against the PROXY's storage and analyzed as proxy-child jobs so their
+    # authority resolves to the proxy's controller. See
+    # services/discovery/secondary_impl.py.
+    secondary_implementations: Mapped[list[str] | None] = mapped_column(ARRAY(String(42)), nullable=True)
     deployer: Mapped[str | None] = mapped_column(String(42), nullable=True)
     remappings: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     rank_score: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)

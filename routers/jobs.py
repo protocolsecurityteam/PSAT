@@ -8,13 +8,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import not_ as sa_not_
 from sqlalchemy import select, text
 
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
+from services.discovery.ranking import not_superseded_impl_clause
 
 from . import deps
 
@@ -60,18 +60,17 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # Exclude backfilled historical impls — these rows exist only to
-        # anchor audit-coverage matching, not to be re-analyzed. Analyzing
-        # them would waste pipeline cycles on bytecode nobody's using.
-        # ``discovery_sources.contains(['upgrade_history'])`` emits
-        # Postgres ``@>``; NULL guard covers pre-array legacy rows.
+        # Exclude backfilled *superseded* historical impls — those rows exist
+        # only to anchor audit-coverage matching, not to be re-analyzed. The
+        # proxy's CURRENT impl is kept (it carries the live marker), since that
+        # is where the real functions live. Single source of truth for the
+        # anchor predicate: services/discovery/ranking.not_superseded_impl_clause.
         unanalyzed = (
             session.execute(
                 select(Contract).where(
                     Contract.protocol_id == protocol_row.id,
                     Contract.job_id.is_(None),
-                    Contract.discovery_sources.is_(None)
-                    | sa_not_(Contract.discovery_sources.contains(["upgrade_history"])),
+                    not_superseded_impl_clause(Contract.discovery_sources),
                 )
             )
             .scalars()

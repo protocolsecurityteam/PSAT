@@ -12,7 +12,7 @@ import tempfile
 import textwrap
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 
@@ -934,6 +934,7 @@ class StaticWorker(BaseWorker):
             # Phase 0: Dependency artifacts (always runs — proxy deps are useful)
             self._run_dependency_phase(session, job, project_dir, contract_name, address, target_classification)
 
+            secondary_analysis: Any = None
             if is_proxy:
                 self.update_detail(session, job, "Proxy detected — impl job handles analysis")
                 logger.info(
@@ -954,6 +955,11 @@ class StaticWorker(BaseWorker):
                     contract_name,
                 )
                 self.update_detail(session, job, "Static analysis complete (cached)")
+                # The cached contract_analysis still carries secondary_impl_pointers
+                # (copy_static_cache copies it), so secondaries get resolved on the
+                # cache path too — not only on a fresh (Slither) analysis.
+                cached_analysis = get_artifact(session, job.id, "contract_analysis")
+                secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
             else:
                 # Phase 1: Contract analysis (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;
@@ -976,6 +982,14 @@ class StaticWorker(BaseWorker):
                     "static phase complete: tracking plan",
                     extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "tracking_plan"},
                 )
+                secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
+
+            # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
+            # call site reached by BOTH the fresh-analysis and cache-hit paths, so
+            # an impl re-seen in proxy context never silently skips secondary-impl
+            # linkage just because its static artifacts were cached.
+            if secondary_analysis is not None:
+                self._resolve_secondary_impls(session, job, address, secondary_analysis)
 
             self.update_detail(session, job, "Static analysis complete")
             logger.info("Static analysis complete for job %s (%s)", job_id_str, contract_name)
@@ -1252,6 +1266,79 @@ class StaticWorker(BaseWorker):
             )
 
         return classification
+
+    def _resolve_secondary_impls(self, session, job, address: str, analysis_data) -> None:
+        """1A: detect + queue split-proxy secondary implementations.
+
+        When an impl analysed in proxy context (``request.proxy_address`` set)
+        has a fallback/receive that delegatecalls a state-var address, resolve
+        that secondary logic contract against the PROXY's storage and analyse it
+        the same way (a proxy-child job) so its admin functions resolve to the
+        proxy's controller instead of stranding on an ownerless orphan node.
+        Best-effort — never fails the parent analysis.
+        """
+        request = job.request if isinstance(job.request, dict) else {}
+        proxy_address = request.get("proxy_address")
+        if not (isinstance(proxy_address, str) and proxy_address.startswith("0x") and len(proxy_address) == 42):
+            return
+        # One level only: a secondary impl doesn't itself spawn secondaries.
+        if request.get("discovery_relationship") == "secondary_implementation":
+            return
+        pointers = (analysis_data or {}).get("secondary_impl_pointers") or []
+        if not pointers:
+            return
+        rpc_url = _request_rpc_url(request)
+        if not rpc_url:
+            return
+        try:
+            from sqlalchemy import select as sa_select
+
+            from services.discovery.secondary_impl import (
+                queue_secondary_impl_jobs,
+                resolve_secondary_impl_addresses,
+            )
+
+            chain = request.get("chain")
+            proxy_stmt = sa_select(Contract).where(Contract.address == proxy_address.lower())
+            if chain is not None:
+                proxy_stmt = proxy_stmt.where(Contract.chain == chain)
+            proxy_contract = session.execute(proxy_stmt.limit(1)).scalar_one_or_none()
+            if proxy_contract is None:
+                logger.warning("Job %s: secondary-impl proxy row %s not found; skipping", job.id, proxy_address)
+                return
+            secondary_addrs = resolve_secondary_impl_addresses(
+                rpc_url,
+                proxy_address,
+                pointers,
+                implementation=proxy_contract.implementation,
+            )
+            if not secondary_addrs:
+                return
+            created = queue_secondary_impl_jobs(
+                session,
+                proxy_contract=proxy_contract,
+                secondary_addrs=secondary_addrs,
+                parent_job=job,
+                rpc_url=rpc_url,
+                proxy_type=request.get("proxy_type") or proxy_contract.proxy_type,
+                root_job_id=request.get("root_job_id") or str(job.id),
+                chain=chain,
+                protocol_id=getattr(job, "protocol_id", None),
+                force=bool(request.get("force")),
+                base_name=job.name or proxy_contract.contract_name or "Contract",
+            )
+            logger.info(
+                "Job %s: split-proxy secondary impls for proxy %s -> %s (%d job(s) queued)",
+                job.id,
+                proxy_address,
+                secondary_addrs,
+                len(created),
+            )
+        except Exception as exc:
+            from utils.secrets import sanitize_string
+
+            record_degraded(phase="secondary_impl_resolution", exc=exc, context={"address": address})
+            logger.warning("Job %s: secondary-impl resolution failed: %s", job.id, sanitize_string(str(exc)))
 
     def _scaffold_project(
         self,

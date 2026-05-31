@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 
-from sqlalchemy import and_, not_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
@@ -32,9 +32,9 @@ from db.queue import (
     store_artifact,
 )
 from services.discovery.ranking import (
-    EXCLUDED_DISCOVERY_SOURCES,
     MIN_CONFIDENCE_THRESHOLD,
     effective_confidence,
+    not_superseded_impl_clause,
     rank_contract_rows,
 )
 from utils.logging import record_stage_metric
@@ -156,16 +156,15 @@ class SelectionWorker(BaseWorker):
             analyze_limit,
         )
 
-        # Row passes when none of the excluded sources is present (NULL guard keeps pre-array legacy rows).
-        no_excluded_tag = and_(
-            *[not_(Contract.discovery_sources.contains([src])) for src in EXCLUDED_DISCOVERY_SOURCES]
-        )
+        # Skip superseded historical impls (audit-coverage anchors only); the
+        # current live impl of a proxy is kept (it carries the live marker).
+        # Single source of truth for the anchor predicate: services/discovery/ranking.
         candidates = (
             session.execute(
                 select(Contract).where(
                     Contract.protocol_id == job.protocol_id,
                     Contract.job_id.is_(None),
-                    Contract.discovery_sources.is_(None) | no_excluded_tag,
+                    not_superseded_impl_clause(Contract.discovery_sources),
                 )
             )
             .scalars()
