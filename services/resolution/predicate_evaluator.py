@@ -414,11 +414,46 @@ def _nullary_getter_selector(name: str | None) -> str | None:
     return _selector_for_signature(f"{name}()")
 
 
-# owner() — the canonical OZ Ownable accessor. OZ v4 keeps a plain ``_owner``
-# state var; OZ v5 (ERC-7201) keeps it in a namespaced storage struct read via
-# assembly. Both expose ``owner()`` identically, so reading it live recovers the
-# owner for the v5 case where the operand is the slot-pointer constant.
-_OWNER_SELECTOR = "0x8da5cb5b"
+# Canonical public authority view-getters. A caller-equality gate may read the
+# authority through a non-canonical accessor — an internal helper (``_governor()``),
+# an explicit storage-slot constant (Solady ``_OWNER_SLOT``, OZ-v5
+# ``OwnableStorageLocation``), or an ERC-7201 namespaced struct member — none of
+# which is itself a readable public getter (reading ``_governor()`` /
+# ``_OWNER_SLOT()`` reverts). Every such standard still exposes the SAME canonical
+# public view getter, which reads the same storage, so we read that live instead.
+# OZ v4 keeps a plain ``_owner`` state var and OZ v5 keeps it in a namespaced
+# storage struct, but both expose ``owner()`` identically.
+_OWNER_SELECTOR = "0x8da5cb5b"  # owner()
+_GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
+_AUTHORITY_SELECTOR = "0xbf7e214f"  # authority()
+
+# Burn sentinel: ownership renounced to a dead address (e.g. Solady TopUp, whose
+# owner is 0x…dEaD). A gate against it has no live controller — treat it like the
+# zero address rather than minting 0x…dEaD as a phantom principal everywhere.
+_BURN_ADDRESS = "0x" + "00" * 18 + "dead"
+
+# Keyword → canonical getter, for slot-constant authority operands. Matched as a
+# substring of the (lowercased) slot-constant name, which must itself be a
+# storage-layout locator (``_is_storage_layout_constant`` — a ``*_slot`` /
+# ``*StorageLocation`` suffix): ``_OWNER_SLOT`` → owner(); OZ-v5
+# ``OwnableStorageLocation`` → owner() (note "ownable", not "owner");
+# ``_GOVERNOR_SLOT`` / ``GovernorStorageLocation`` → governor();
+# ``_AUTHORITY_SLOT`` / ``AuthorityStorageLocation`` → authority(). governor /
+# authority are checked before owner so a name carrying both resolves to the
+# more specific one.
+_SLOT_KEYWORD_TO_GETTER = (
+    ("governor", _GOVERNOR_SELECTOR),
+    ("authority", _AUTHORITY_SELECTOR),
+    ("ownable", _OWNER_SELECTOR),
+    ("owner", _OWNER_SELECTOR),
+)
+
+# Public authority view-getter base names (optionally ``pending``-prefixed). The
+# internal-accessor fallback de-underscores ``_x()`` → ``x()`` only when ``x`` is
+# one of these; an arbitrary ``_x()`` is left fail-closed, because resolving it to
+# whatever public ``x()`` returns would risk a *wrong* controller — worse than a
+# missing one for this tool.
+_AUTHORITY_GETTER_BASENAMES = frozenset({"owner", "governor", "authority"})
 
 
 def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None) -> CapabilityExpr | None:
@@ -463,7 +498,7 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return None
     addr = "0x" + raw[-40:].lower()
-    if _is_zero_address(addr):
+    if _is_zero_address(addr) or addr == _BURN_ADDRESS:
         return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
     return CapabilityExpr.finite_set(
         [addr],
@@ -471,6 +506,59 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         confidence="enumerable",
         trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
     )
+
+
+def _public_getter_selector_for_internal_accessor(signature: str | None) -> str | None:
+    """Selector for the public getter behind a nullary *internal* authority
+    accessor, or ``None`` (fail-closed) for anything else.
+
+    A custom authority gate often reads its principal through an internal helper
+    rather than the public getter: Governable's ``onlyGovernor`` lowers to
+    ``msg.sender == _governor()``, where ``_governor()`` is ``internal`` and has
+    no external selector (calling it reverts). The leading-underscore ⇄ public
+    convention (``_governor()``→``governor()``, ``_owner()``→``owner()``) is
+    shared across OZ / Solady / Solmate / Governable, so the de-underscored
+    getter reads the same value.
+
+    Scoped to the canonical authority getters (``owner`` / ``governor`` /
+    ``authority``, optionally ``pending``-prefixed): an arbitrary ``_x()`` is left
+    fail-closed, since resolving it to whatever public ``x()`` returns would risk
+    a *wrong* controller — worse than a missing one for this tool."""
+    if not isinstance(signature, str) or not signature.endswith("()"):
+        return None
+    name = signature[:-2]
+    if not name.startswith("_") or "(" in name:
+        return None
+    public_name = name.lstrip("_")
+    if not public_name:
+        return None
+    base = public_name[len("pending") :] if public_name.lower().startswith("pending") else public_name
+    if base.lower() not in _AUTHORITY_GETTER_BASENAMES:
+        return None
+    return _selector_for_signature(f"{public_name}()")
+
+
+def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
+    """Canonical public authority-getter selector for a storage-slot-constant
+    operand, or ``None`` when the name doesn't denote one (fail-closed).
+
+    Solady ``_OWNER_SLOT`` / OZ-v5 ``OwnableStorageLocation`` /
+    ``_GOVERNOR_SLOT`` name a *slot locator*, not a getter — reading
+    ``<slot>()`` reverts. The contract's canonical public getter
+    (``owner()``/``governor()``/``authority()``) reads that same slot. Gated on
+    :func:`_is_storage_layout_constant` so ordinary address state vars — which
+    resolve through their own auto-getter — are never rerouted here."""
+    if not isinstance(name, str) or not name:
+        return None
+    from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
+
+    if not _is_storage_layout_constant(name):
+        return None
+    lowered = name.lower()
+    for keyword, selector in _SLOT_KEYWORD_TO_GETTER:
+        if keyword in lowered:
+            return selector
+    return None
 
 
 def _resolve_equality_principal(
@@ -521,9 +609,20 @@ def _resolve_equality_principal(
         # describe fund destinations, not callers — left as the placeholder so
         # the FP-only attribution can't re-introduce fee-destination noise.
         if not op.get("member_path"):
-            live = _live_resolve_authority(ctx, _nullary_getter_selector(op.get("state_variable_name")))
+            name = op.get("state_variable_name")
+            live = _live_resolve_authority(ctx, _nullary_getter_selector(name))
             if live is not None:
                 return live
+            # Storage-slot authority constants (Solady ``_OWNER_SLOT``, OZ-v5
+            # ``OwnableStorageLocation``, ``_GOVERNOR_SLOT``) arrive as a bare
+            # state-var operand naming the slot *locator* — its ``<slot>()``
+            # getter reverts. Fall back to the canonical public getter reading the
+            # same slot (owner()/governor()/authority()); fail-closed otherwise.
+            canonical = _canonical_authority_selector_for_slot(name)
+            if canonical is not None:
+                live = _live_resolve_authority(ctx, canonical)
+                if live is not None:
+                    return live
         elif op.get("member_path") == ["_owner"]:
             # OZ v5 (ERC-7201) Ownable keeps the owner in a namespaced storage
             # struct, so ``msg.sender == OwnableStorageLocation._owner`` arrives
@@ -562,18 +661,30 @@ def _resolve_equality_principal(
         # taking args (e.g. roleAdmin(role)) can't be called with empty
         # calldata, so leave it to the placeholder.
         selector = None
+        canonical_selector = None
         if not op.get("callee_args"):
+            signature = op.get("callee_signature")
             selector = op.get("callee_selector")
             if not (isinstance(selector, str) and selector.startswith("0x") and len(selector) == 10):
-                signature = op.get("callee_signature")
                 selector = (
                     _selector_for_signature(signature)
                     if isinstance(signature, str) and signature.endswith("()")
                     else None
                 )
-        live = _live_resolve_authority(ctx, selector)
-        if live is not None:
-            return live
+            # Internal authority accessors (``_governor()``/``_owner()``) have no
+            # external selector, so reading them reverts (the etherfi LRTSquared
+            # ``onlyGovernor`` gap: the gate is ``msg.sender == _governor()``). The
+            # authority is the value the public getter returns, so prefer the
+            # de-underscored canonical getter (``governor()``/``owner()``).
+            canonical_selector = _public_getter_selector_for_internal_accessor(signature)
+        # Canonical public getter first (when the operand is an internal authority
+        # accessor its own selector is dead); otherwise the literal selector.
+        for candidate in dict.fromkeys((canonical_selector, selector)):
+            if candidate is None:
+                continue
+            live = _live_resolve_authority(ctx, candidate)
+            if live is not None:
+                return live
         return CapabilityExpr.finite_set(
             [],
             quality="lower_bound",
