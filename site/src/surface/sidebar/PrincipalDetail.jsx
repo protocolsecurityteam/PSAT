@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import AddressLabelInline from "../../AddressLabelInline.jsx";
+import { lookupLabel } from "../../api/addressLabels.js";
 import { api } from "../../api/client.js";
 import { formatDelay, formatEventAgo, formatUsd, shortAddr } from "../format.js";
 import { EVENT_ACCENTS, EVENT_LABELS, TYPE_META } from "../meta.js";
@@ -36,6 +37,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
 
   if (!principal) return null;
   const type = TYPE_META[principal.type] || TYPE_META.unknown;
+  const principalChain = principal.chain || "ethereum";
   const controlled = (principal.controls || []);
   const controlledMachines = machines.filter((m) =>
     controlled.some((a) => a.toLowerCase() === m.address?.toLowerCase())
@@ -55,7 +57,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
     <article className="ps-machine" style={{ borderLeft: `2px solid ${type.accent}` }}>
       <header className="ps-machine-header">
         <div className="ps-machine-name">
-          {addressLabels?.get(principal.address?.toLowerCase()) || principal.label || shortAddr(principal.address)}
+          {lookupLabel(addressLabels, principal.address, principalChain) || principal.label || shortAddr(principal.address)}
         </div>
         <div className="ps-machine-address">{principal.address}</div>
         {/* Only EOAs and Safes are "just an address" — add the inline label
@@ -65,6 +67,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
           <div style={{ marginTop: 6 }}>
             <AddressLabelInline
               address={principal.address}
+              chain={principalChain}
               labels={addressLabels}
               refreshAll={refreshAddressLabels}
             />
@@ -85,7 +88,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
         <section className="ps-principal-section">
           <div className="ps-principal-section-hdr">Signers ({owners.length})</div>
           {owners.map((addr) => {
-            const labeled = addressLabels?.get((addr || "").toLowerCase());
+            const labeled = lookupLabel(addressLabels, addr, principalChain);
             return (
               <div key={addr} className="ps-principal-signer">
                 <span className="ps-principal-signer-row">
@@ -94,6 +97,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
                 </span>
                 <AddressLabelInline
                   address={addr}
+                  chain={principalChain}
                   labels={addressLabels}
                   refreshAll={refreshAddressLabels}
                   size="xs"

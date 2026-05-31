@@ -2,6 +2,7 @@ import React from "react";
 import {
   upsertAddressLabel,
   deleteAddressLabel,
+  lookupLabel,
 } from "./api/addressLabels.js";
 
 // Inline "label this address" affordance. Shows the current admin-set name
@@ -11,13 +12,15 @@ import {
 //
 // Props:
 // - address: string — the address to label
-// - labels: Map<lowercase-address, name> — the current label cache
+// - chain: string — the address's network (default "ethereum"); labels are
+//   per-(address, chain) so edits target the right network's label
+// - labels: Map<`${chain}:${lowercase-address}`, name> — the current label cache
 // - refreshAll: () => void — called after a successful save/delete so the
 //   caller can refresh its labels map
 // - size: "sm" (default) | "xs"
-export default function AddressLabelInline({ address, labels, refreshAll, size = "sm" }) {
+export default function AddressLabelInline({ address, chain = "ethereum", labels, refreshAll, size = "sm" }) {
   const addrLower = String(address || "").toLowerCase();
-  const current = labels?.get ? labels.get(addrLower) : null;
+  const current = lookupLabel(labels, addrLower, chain);
 
   const onEdit = async () => {
     const next = window.prompt(
@@ -29,9 +32,9 @@ export default function AddressLabelInline({ address, labels, refreshAll, size =
     try {
       if (!trimmed) {
         if (!current) return;
-        await deleteAddressLabel(addrLower);
+        await deleteAddressLabel(addrLower, chain);
       } else {
-        await upsertAddressLabel(addrLower, trimmed);
+        await upsertAddressLabel(addrLower, trimmed, null, chain);
       }
       refreshAll && refreshAll();
     } catch (err) {

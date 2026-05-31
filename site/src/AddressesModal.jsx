@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api/client.js";
-import { listAddressLabels } from "./api/addressLabels.js";
+import { listAddressLabels, buildLabelMap, lookupLabel } from "./api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import {
   bulkAnalyzeCandidates,
@@ -57,11 +57,9 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     listAddressLabels()
-      .then((rows) => {
+      .then((resp) => {
         if (cancelled) return;
-        const m = new Map();
-        for (const r of rows || []) m.set(String(r.address || "").toLowerCase(), r.name);
-        setLabels(m);
+        setLabels(buildLabelMap(resp));
       })
       .catch(() => { /* labels are optional; missing key just leaves the map empty */ });
     return () => { cancelled = true; };
@@ -134,7 +132,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
           const addr = (r.address || "").toLowerCase();
           const name = (r.name || "").toLowerCase();
           const impl = (r.implementation_name || "").toLowerCase();
-          const label = (labels.get(addr) || "").toLowerCase();
+          const label = (lookupLabel(labels, addr, r.chain) || "").toLowerCase();
           return (
             addr.includes(q) ||
             name.includes(q) ||
@@ -201,13 +199,13 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
   // Queue analysis for a single missing address without leaving compare
   // mode. The row stays in the "missing" group until refresh picks it up
   // (the job has to write a Contract row first).
-  const onAnalyzeMissing = async (address) => {
+  const onAnalyzeMissing = async (address, chain = "ethereum") => {
     setBusyAddr(address);
     try {
       await api("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, company: companyName }),
+        body: JSON.stringify({ address, company: companyName, chain: chain || "ethereum" }),
       });
       setTimeout(refresh, 2000);
     } catch (err) {
@@ -246,6 +244,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
               address: r.address,
               company: companyName,
               name: r.name || null,
+              chain: r.chain || "ethereum",
             }),
           });
         } catch (err) {
@@ -513,6 +512,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                           >
                             <AddressLabelInline
                               address={r.address}
+                              chain={r.chain || "ethereum"}
                               labels={labels}
                               refreshAll={refresh}
                               size="xs"
@@ -540,7 +540,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                             type="button"
                             className="ps-audit-modal-btn"
                             disabled={busyAddr === r.address}
-                            onClick={() => onAnalyzeMissing(r.address)}
+                            onClick={() => onAnalyzeMissing(r.address, r.chain)}
                           >
                             {busyAddr === r.address ? "…" : "Analyze"}
                           </button>

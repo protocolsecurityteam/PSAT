@@ -4,7 +4,7 @@ import "@xyflow/react/dist/style.css";
 
 import { isBytecodeVerifiedAudit } from "./auditCoverage.js";
 import { api } from "./api/client.js";
-import { listAddressLabels } from "./api/addressLabels.js";
+import { listAddressLabels, buildLabelMap } from "./api/addressLabels.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
 import { formatUsd, isRoleIdAddress } from "./surface/format.js";
@@ -141,11 +141,7 @@ export default function ProtocolSurface({
   const refreshAddressLabels = useCallback(() => {
     listAddressLabels()
       .then((d) => {
-        const m = new Map();
-        for (const [addr, info] of Object.entries(d?.labels || {})) {
-          m.set(String(addr).toLowerCase(), info.name);
-        }
-        setAddressLabels(m);
+        setAddressLabels(buildLabelMap(d));
       })
       .catch(() => { /* labels are best-effort — keep whatever we had */ });
   }, []);

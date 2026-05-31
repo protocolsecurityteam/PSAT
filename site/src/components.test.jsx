@@ -229,7 +229,7 @@ describe("AddressLabelInline", () => {
   });
 
   it("renders a labeled address", () => {
-    const labels = new Map([["0x1111111111111111111111111111111111111111", "Treasury"]]);
+    const labels = new Map([["ethereum:0x1111111111111111111111111111111111111111", "Treasury"]]);
     render(
       <AddressLabelInline
         address="0x1111111111111111111111111111111111111111"
@@ -238,6 +238,22 @@ describe("AddressLabelInline", () => {
       />,
     );
     expect(screen.getByText("Treasury")).toBeInTheDocument();
+  });
+
+  it("renders the per-chain label for the address's chain", () => {
+    const labels = new Map([
+      ["ethereum:0x1111111111111111111111111111111111111111", "Eth Treasury"],
+      ["base:0x1111111111111111111111111111111111111111", "Base Treasury"],
+    ]);
+    render(
+      <AddressLabelInline
+        address="0x1111111111111111111111111111111111111111"
+        chain="base"
+        labels={labels}
+        refreshAll={() => {}}
+      />,
+    );
+    expect(screen.getByText("Base Treasury")).toBeInTheDocument();
   });
 });
 
