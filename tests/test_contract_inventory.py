@@ -622,32 +622,33 @@ class TestGroupMultiDeployments:
 
 
 class TestResolveUnknownChains:
+    @staticmethod
+    def _fake_probe(code_by_chain):
+        """Build a _probe_chain_batch stub: code_by_chain maps chain_name -> set(addresses with code)."""
+
+        def _probe(addresses, chain_name, debug=False):
+            have = code_by_chain.get(chain_name, set())
+            return {a for a in addresses if a in have}
+
+        return _probe
+
     def test_resolves_unknown_to_correct_chain(self, monkeypatch):
-        """Contracts with chains=["unknown"] get resolved via batch RPC probing."""
+        """Contracts with chains=["unknown"] get resolved via cross-chain getCode probing."""
+        b = "0x" + "b" * 40
+        c = "0x" + "c" * 40
         contracts = [
             {"name": "Known", "address": "0x" + "a" * 40, "chains": ["ethereum"]},
-            {"name": "Unknown1", "address": "0x" + "b" * 40, "chains": ["unknown"]},
-            {"name": "Unknown2", "address": "0x" + "c" * 40, "chains": ["unknown"]},
+            {"name": "Unknown1", "address": b, "chains": ["unknown"]},
+            {"name": "Unknown2", "address": c, "chains": ["unknown"]},
         ]
+        # Unknown1 found on ethereum; Unknown2 found on arbitrum + base.
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._get_alchemy_key",
-            lambda: "fake-key",
+            "services.discovery.chain_resolver._probe_chain_batch",
+            self._fake_probe({"ethereum": {b}, "arbitrum": {c}, "base": {c}}),
         )
 
-        # Simulate: Unknown1 found on ethereum, Unknown2 found on arbitrum + base
-        def fake_batch_get_code(rpc_url, addresses):
-            if "eth-mainnet" in rpc_url:
-                return {addr: ("0x6001" if addr == "0x" + "b" * 40 else "0x") for addr in addresses}
-            if "arb-mainnet" in rpc_url:
-                return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
-            if "base-mainnet" in rpc_url:
-                return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
-            return {addr: "0x" for addr in addresses}
-
-        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
-
         result = resolve_unknown_chains(contracts, debug=False)
-        by_name = {c["name"]: c for c in result}
+        by_name = {row["name"]: row for row in result}
 
         assert by_name["Known"]["chains"] == ["ethereum"]
         assert by_name["Unknown1"]["chains"] == ["ethereum"]
@@ -656,21 +657,20 @@ class TestResolveUnknownChains:
     def test_no_unknowns_is_noop(self, monkeypatch):
         """When all contracts have known chains, nothing is probed."""
         contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
-        # _get_alchemy_key would fail if called — proves no probing happens.
-        monkeypatch.setattr(
-            "services.discovery.chain_resolver._get_alchemy_key",
-            lambda: (_ for _ in ()).throw(RuntimeError("should not be called")),
-        )
+
+        def _boom(*a, **k):
+            raise AssertionError("should not probe when there are no unknowns")
+
+        monkeypatch.setattr("services.discovery.chain_resolver._probe_chain_batch", _boom)
         result = resolve_unknown_chains(contracts)
         assert result[0]["chains"] == ["ethereum"]
 
     def test_unresolved_stays_unknown(self, monkeypatch):
         """Address not found on any chain keeps chains=["unknown"]."""
         contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._batch_get_code",
-            lambda rpc_url, addrs: {a: "0x" for a in addrs},
+            "services.discovery.chain_resolver._probe_chain_batch",
+            lambda addresses, chain_name, debug=False: set(),
         )
         result = resolve_unknown_chains(contracts)
         assert result[0]["chains"] == ["unknown"]
@@ -678,27 +678,20 @@ class TestResolveUnknownChains:
     def test_exa_claimed_chain_corrected_when_code_lives_elsewhere(self, monkeypatch):
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
-
-        def fake_batch_get_code(rpc_url, addresses):
-            if "base-mainnet" in rpc_url:
-                return {a: "0x6001" for a in addresses}
-            return {a: "0x" for a in addresses}
-
-        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
-
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_batch",
+            self._fake_probe({"base": {addr}}),
+        )
         result = validate_claimed_chains(contracts)
         assert result[0]["chains"] == ["base"]
 
     def test_exa_claimed_chain_marked_unknown_when_no_code_found(self, monkeypatch):
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Base"], "source": ["exa_deep_research"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._batch_get_code",
-            lambda rpc_url, addresses: {a: "0x" for a in addresses},
+            "services.discovery.chain_resolver._probe_chain_batch",
+            lambda addresses, chain_name, debug=False: set(),
         )
-
         result = validate_claimed_chains(contracts)
         assert result[0]["chains"] == ["unknown"]
         assert result[0]["chain_sanity"]["status"] == "unresolved_no_code_on_claimed_or_supported_chains"
@@ -815,15 +808,11 @@ class TestOrchestratorIntegration:
         )
         monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
 
-        # Chain resolver: Bridge found on arbitrum
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
+        # Chain resolver: Bridge found on arbitrum.
+        def fake_probe(addresses, chain_name, debug=False):
+            return {a for a in addresses if a == addr_unknown and chain_name == "arbitrum"}
 
-        def fake_batch(rpc_url, addrs):
-            if "arb-mainnet" in rpc_url:
-                return {a: ("0x6001" if a == addr_unknown else "0x") for a in addrs}
-            return {a: "0x" for a in addrs}
-
-        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch)
+        monkeypatch.setattr("services.discovery.chain_resolver._probe_chain_batch", fake_probe)
 
         result = search_protocol_inventory("docs.example.com", limit=10)
 
