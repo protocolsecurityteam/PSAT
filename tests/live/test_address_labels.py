@@ -34,10 +34,11 @@ def test_label_put_returns_normalized_row(created_label):
 def test_label_visible_in_list(created_label, live_client: LiveClient):
     listing = live_client.list_address_labels()
     labels = listing.get("labels") or {}
-    # Handler normalizes on read + write, so either case should resolve.
-    row = labels.get(TEST_LABEL_ADDRESS.lower()) or labels.get(TEST_LABEL_ADDRESS)
+    # Labels are keyed by "<chain>:<address>"; a chain-less PUT defaults to ethereum.
+    row = labels.get(f"ethereum:{TEST_LABEL_ADDRESS.lower()}")
     assert row is not None, f"created label not present in /api/address_labels list (got {len(labels)} rows)"
     assert row["name"] == TEST_LABEL_NAME
+    assert row["chain"] == "ethereum"
 
 
 def test_label_update_is_idempotent(created_label, live_client: LiveClient):
@@ -45,7 +46,7 @@ def test_label_update_is_idempotent(created_label, live_client: LiveClient):
     updated = live_client.put_address_label(TEST_LABEL_ADDRESS, {"name": "psat-live-test-renamed"})
     assert updated["name"] == "psat-live-test-renamed"
     listing = live_client.list_address_labels()
-    row = (listing.get("labels") or {}).get(TEST_LABEL_ADDRESS.lower())
+    row = (listing.get("labels") or {}).get(f"ethereum:{TEST_LABEL_ADDRESS.lower()}")
     assert row is not None and row["name"] == "psat-live-test-renamed"
 
 
