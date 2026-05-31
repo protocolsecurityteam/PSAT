@@ -217,22 +217,42 @@ def resolve_implementation_contracts(
     contracts directly.
     """
     impl_addrs_needed: set[str] = set()
+    proxy_addrs: set[str] = set()
     for j in jobs:
         cr = contracts_by_job_id.get(j.id)
-        if cr and cr.is_proxy and cr.implementation:
-            impl_addrs_needed.add(cr.implementation.lower())
+        if not (cr and cr.is_proxy):
+            continue
+        if cr.address:
+            proxy_addrs.add(cr.address.lower())
+        # Primary EIP-1967 impl + any secondary logic contracts (the split-proxy
+        # admin-impl pattern, Contract.secondary_implementations). Both are
+        # resolved + attached so the proxy node absorbs every logic contract.
+        for impl in [cr.implementation, *(cr.secondary_implementations or [])]:
+            if impl:
+                impl_addrs_needed.add(impl.lower())
 
     impl_job_by_addr: dict[str, Job] = {}
     if impl_addrs_needed:
+        # Deterministic pick: newest completed job per impl address, preferring
+        # the one linked to a proxy we're rendering (request.proxy_address points
+        # back at a proxy in this set). Without the ORDER BY a re-analysis that
+        # left >1 completed impl job for an address attached arbitrarily (1C).
+        candidates: dict[str, list[Job]] = {}
         for ij in session.execute(
-            select(Job).where(
-                Job.address.in_(list(impl_addrs_needed)),
-                Job.status == JobStatus.completed,
-            )
+            select(Job)
+            .where(Job.address.in_(list(impl_addrs_needed)), Job.status == JobStatus.completed)
+            .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
         ).scalars():
             key = (ij.address or "").lower()
-            if key and key not in impl_job_by_addr:
-                impl_job_by_addr[key] = ij
+            if key:
+                candidates.setdefault(key, []).append(ij)
+        for key, addr_jobs in candidates.items():
+            linked = [
+                ij
+                for ij in addr_jobs
+                if isinstance(ij.request, dict) and str(ij.request.get("proxy_address") or "").lower() in proxy_addrs
+            ]
+            impl_job_by_addr[key] = (linked or addr_jobs)[0]
 
     impl_job_ids_needed = [ij.id for ij in impl_job_by_addr.values()]
     if impl_job_ids_needed:
@@ -242,6 +262,31 @@ def resolve_implementation_contracts(
             contracts_by_job_id[c.job_id] = c
 
     return impl_job_by_addr, contracts_by_job_id
+
+
+def _secondary_impl_contracts(
+    contract_row: Contract | None,
+    impl_job_by_addr: dict[str, Job],
+    contracts_by_job_id: dict[Any, Contract],
+) -> list[Contract]:
+    """Resolved Contract rows for a proxy's secondary implementations (the
+    split-proxy admin-impl set, ``Contract.secondary_implementations``), in
+    declared order. Empty unless the row is a proxy carrying secondaries.
+
+    These logic contracts' EffectiveFunction / FunctionPrincipal rows attribute
+    to the proxy node alongside the EIP-1967 impl's, so the proxy surfaces every
+    function it routes — and the secondary never renders as a standalone
+    ownerless contract.
+    """
+    if not (contract_row and contract_row.is_proxy and contract_row.secondary_implementations):
+        return []
+    out: list[Contract] = []
+    for saddr in contract_row.secondary_implementations:
+        impl_job = impl_job_by_addr.get((saddr or "").lower())
+        sc = contracts_by_job_id.get(impl_job.id) if impl_job else None
+        if sc is not None:
+            out.append(sc)
+    return out
 
 
 # Read the pool sizing from the same env vars db.models reads, rather than
@@ -938,6 +983,37 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
+
+    # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
+    # contract_id buckets. The flow/principal passes key on the primary impl
+    # (the proxy's lookup contract), so a governor/admin Safe that holds
+    # authority only on the secondary (admin) impl's functions still surfaces as
+    # a controller of the proxy node.
+    for job in jobs:
+        cr = contracts_by_job_id.get(job.id)
+        secondaries = _secondary_impl_contracts(cr, impl_job_by_addr, contracts_by_job_id)
+        if not secondaries:
+            continue
+        impl_job = impl_job_by_addr.get((cr.implementation or "").lower()) if cr and cr.implementation else None
+        primary_impl = contracts_by_job_id.get(impl_job.id) if impl_job else None
+        primary_cid = primary_impl.id if primary_impl else (cr.id if cr else None)
+        if primary_cid is None:
+            continue
+        for sc in secondaries:
+            if sc.id == primary_cid:
+                continue
+            cv_extra = controller_values_by_cid.get(sc.id)
+            if cv_extra:
+                controller_values_by_cid[primary_cid] = list(controller_values_by_cid.get(primary_cid) or []) + cv_extra
+            fpg_extra = fp_governance_by_cid.get(sc.id)
+            if fpg_extra:
+                fp_governance_by_cid[primary_cid] = list(fp_governance_by_cid.get(primary_cid) or []) + fpg_extra
+            extra_addrs = fp_in_contract_by_cid.get(sc.id)
+            if extra_addrs:
+                fp_in_contract_by_cid[primary_cid] = set(fp_in_contract_by_cid.get(primary_cid) or set()) | set(
+                    extra_addrs
+                )
+
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 
     contracts: list[dict[str, Any]] = []
@@ -957,14 +1033,22 @@ def build_governance_view(
         impl_job_id = str(impl_job.id) if impl_job else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
+        # Split-proxy secondary logic contracts (admin-impl set). Their
+        # functions + principals attribute to this proxy node too.
+        secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+
         summary_row = impl_contract.summary if impl_contract else None
         if not summary_row and contract_row:
             summary_row = contract_row.summary
 
-        # Prefer the impl's controller snapshot for proxies if it has any.
+        # Prefer a logic contract's controller snapshot for proxies — the impl
+        # (or a secondary impl) read against proxy storage, whichever has rows.
         lookup_contract = contract_row
-        if is_proxy and impl_contract and controller_values_by_cid.get(impl_contract.id):
-            lookup_contract = impl_contract
+        if is_proxy:
+            for candidate in [impl_contract, *secondary_impl_contracts]:
+                if candidate and controller_values_by_cid.get(candidate.id):
+                    lookup_contract = candidate
+                    break
 
         owner = None
         controllers: dict[str, Any] = {}
@@ -980,16 +1064,19 @@ def build_governance_view(
         last_ts = last_upgrade_entry.get("timestamp")
         last_upgrade_timestamp = last_ts.isoformat() if last_ts is not None else None
 
-        ef_contract_id = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
+        # Effects from every logic contract of this node: the impl (or the row
+        # itself for non-proxies) plus any secondary impls.
+        primary_ef_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
+        ef_contract_ids = [primary_ef_cid] if primary_ef_cid else []
+        ef_contract_ids += [sc.id for sc in secondary_impl_contracts]
 
         value_effects: list[str] = []
         all_effects: set[str] = set()
-        ef_effects_for_contract = ef_effects_by_cid.get(ef_contract_id, []) if ef_contract_id else []
-        for label_list in ef_effects_for_contract:
-            for label in label_list:
-                all_effects.add(label)
-                if label in ("asset_pull", "asset_send", "mint", "burn"):
-                    if label not in value_effects:
+        for cid in ef_contract_ids:
+            for label_list in ef_effects_by_cid.get(cid, []):
+                for label in label_list:
+                    all_effects.add(label)
+                    if label in ("asset_pull", "asset_send", "mint", "burn") and label not in value_effects:
                         value_effects.append(label)
 
         # Contract capability tags, from the shared vocabulary (_EFFECT_CAPABILITY)
@@ -1061,6 +1148,9 @@ def build_governance_view(
             "is_proxy": is_proxy,
             "proxy_type": proxy_type,
             "implementation": impl_addr,
+            "secondary_implementations": (
+                [s.lower() for s in (contract_row.secondary_implementations or [])] if contract_row else []
+            ),
             "deployer": contract_row.deployer if contract_row else None,
             "owner": owner,
             "controllers": controllers,
@@ -1109,8 +1199,13 @@ def build_governance_view(
         if owner:
             owner_groups.setdefault(owner, []).append(entry)
 
-    # Deduplicate: remove standalone impl contracts already represented via a proxy
+    # Deduplicate: remove standalone impl contracts already represented via a
+    # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
+    # latter were analysed standalone in older runs, so drop them by address).
     impl_addresses = {c["implementation"].lower() for c in contracts if c.get("implementation")}
+    for c in contracts:
+        for saddr in c.get("secondary_implementations") or []:
+            impl_addresses.add(saddr.lower())
     contracts = [
         c for c in contracts if not c["address"] or c["address"].lower() not in impl_addresses or c["is_proxy"]
     ]
@@ -1156,11 +1251,17 @@ def build_governance_view(
     contract_addr_by_cid: dict[int, str] = {
         c.id: c.address.lower() for c in contracts_by_job_id.values() if c is not None and c.address
     }
-    impl_to_proxy: dict[str, str] = {
-        c["implementation"].lower(): c["address"].lower()
-        for c in contracts
-        if c.get("is_proxy") and c.get("implementation") and c.get("address")
-    }
+    impl_to_proxy: dict[str, str] = {}
+    for c in contracts:
+        if not (c.get("is_proxy") and c.get("address")):
+            continue
+        proxy_addr_lc = c["address"].lower()
+        if c.get("implementation"):
+            impl_to_proxy[c["implementation"].lower()] = proxy_addr_lc
+        # Secondary impls render under the proxy too, so their FunctionPrincipal
+        # authority (e.g. a governor over admin functions) attributes here.
+        for saddr in c.get("secondary_implementations") or []:
+            impl_to_proxy[saddr.lower()] = proxy_addr_lc
     fp_addrs_by_contract_addr: dict[str, set[str]] = {}
     for cid, addrs in fp_all_addrs_by_cid.items():
         own_addr = contract_addr_by_cid.get(cid)
@@ -1590,24 +1691,39 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
         impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
 
-    # Map each job's address to the contract_id whose EF rows it should
-    # show — the impl's row for proxies, the job's own row otherwise.
-    job_addr_to_ef_cid: dict[str, int] = {}
+    # Addresses that are a secondary impl of some proxy are absorbed into that
+    # proxy node (their functions surface there), so they get no standalone
+    # entry — mirrors the canvas dedup for split-proxy admin impls.
+    secondary_impl_addrs = {
+        s.lower()
+        for cr in contracts_by_job_id.values()
+        if cr is not None and cr.is_proxy
+        for s in (cr.secondary_implementations or [])
+    }
+
+    # Map each job's address to the contract_ids whose EF rows it should show —
+    # for a proxy: its EIP-1967 impl plus any split-proxy secondary impls; for a
+    # plain contract: its own row.
+    job_addr_to_ef_cids: dict[str, list[int]] = {}
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
         if request.get("proxy_address"):
             continue
         if not job.address:
             continue
+        if job.address.lower() in secondary_impl_addrs:
+            continue
         contract_row = contracts_by_job_id.get(job.id)
         impl_addr = contract_row.implementation if (contract_row and contract_row.is_proxy) else None
         impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
-        ef_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
-        if ef_cid is not None:
-            job_addr_to_ef_cid[job.address] = ef_cid
+        primary_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
+        cids = [primary_cid] if primary_cid is not None else []
+        cids += [sc.id for sc in _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)]
+        if cids:
+            job_addr_to_ef_cids[job.address] = cids
 
-    relevant_cids = set(job_addr_to_ef_cid.values())
+    relevant_cids = {cid for cids in job_addr_to_ef_cids.values() for cid in cids}
     ef_rows_by_cid: dict[int, list[EffectiveFunction]] = {}
     if relevant_cids:
         with _time_phase(timings_ms, "effective_functions"):
@@ -1640,8 +1756,8 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
 
     out: dict[str, list[dict[str, Any]]] = {}
     with _time_phase(timings_ms, "serialize"):
-        for addr, ef_cid in job_addr_to_ef_cid.items():
-            ef_rows = ef_rows_by_cid.get(ef_cid, [])
+        for addr, ef_cids in job_addr_to_ef_cids.items():
+            ef_rows = [ef for cid in ef_cids for ef in ef_rows_by_cid.get(cid, [])]
             out[addr] = [
                 _build_company_function_entry(ef, ef.principals or [], principal_lookup=principal_lookup)
                 for ef in ef_rows

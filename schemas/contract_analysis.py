@@ -248,6 +248,18 @@ class ControllerTrackingTarget(TypedDict):
     notes: list[str]
 
 
+class SecondaryImplPointer(TypedDict):
+    """A state variable the primary impl's fallback/receive delegatecalls to —
+    the split-proxy / admin-impl pattern (e.g. LRTSquared's ``adminImpl``).
+    ``slot``/``offset`` locate it in the proxy's storage so the value (the
+    secondary impl address) can be read from there. See
+    services/static/contract_analysis_pipeline/secondary_impl.py."""
+
+    name: str
+    slot: int
+    offset: int
+
+
 class ContractAnalysis(TypedDict):
     schema_version: str
     subject: Subject
@@ -262,3 +274,8 @@ class ContractAnalysis(TypedDict):
     slither: SlitherSummary
     tracking_hints: list[TrackingHint]
     controller_tracking: list[ControllerTrackingTarget]
+    # Split-proxy secondary-impl pointers detected on the primary impl. Optional
+    # (present only for the rare fallback-delegatecall-to-state-var shape);
+    # consumed by the static worker to analyse those logic contracts against
+    # proxy storage.
+    secondary_impl_pointers: NotRequired[list[SecondaryImplPointer]]

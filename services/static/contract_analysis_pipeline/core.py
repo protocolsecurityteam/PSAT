@@ -21,6 +21,7 @@ from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
 from .reentrancy_pause import PauseInfo
+from .secondary_impl import detect_secondary_impl_pointers
 from .shared import _load_json, _select_subject_contract
 from .summaries import (
     _build_semantic_control_summary,
@@ -253,6 +254,12 @@ def collect_contract_analysis_with_artifacts(
         pausability = _detect_pausability(subject_contract, project_dir, pause_info)
     with _phase("timelock", durations_ms):
         timelock = _detect_timelock(subject_contract, project_dir, semantic_control["role_definitions"])
+    with _phase("secondary_impl_pointers", durations_ms):
+        try:
+            secondary_impl_pointers = detect_secondary_impl_pointers(subject_contract)
+        except Exception:
+            logger.exception("secondary-impl pointer detection failed for %s", project_dir)
+            secondary_impl_pointers = []
     slither_summary = _summarize_slither(slither_output)
     audit_alignment: AuditAlignment = {
         "status": "not_checked",
@@ -294,6 +301,7 @@ def collect_contract_analysis_with_artifacts(
         "slither": slither_summary,
         "tracking_hints": _build_tracking_hints(semantic_control, upgradeability, pausability, timelock),
         "controller_tracking": controller_tracking,
+        "secondary_impl_pointers": secondary_impl_pointers,
     }
 
     total_ms = int((time.monotonic() - pipeline_started) * 1000)
