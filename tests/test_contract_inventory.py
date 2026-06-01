@@ -55,7 +55,6 @@ def _entry(
         "kind": kind,
         "url": url,
         "explorer_url": explorer_url,
-        "chain_from_hint": False,
     }
 
 

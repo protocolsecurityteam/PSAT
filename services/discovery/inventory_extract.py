@@ -209,20 +209,20 @@ def _resolve_candidate_chains(
     chain_value: str | None,
     line_chain: str,
     requested_chain: str | None,
-) -> list[tuple[str, bool]]:
+) -> list[str]:
     explicit = _parse_chain_values(chain_value or "")
     candidates = explicit or ([line_chain] if line_chain != "unknown" else [])
     if not candidates:
         candidates = ["unknown"]
 
-    resolved: list[tuple[str, bool]] = []
+    resolved: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
-        final_chain, hinted = _resolve_chain(candidate, requested_chain)
+        final_chain, _hinted = _resolve_chain(candidate, requested_chain)
         if final_chain is None or final_chain in seen:
             continue
         seen.add(final_chain)
-        resolved.append((final_chain, hinted))
+        resolved.append(final_chain)
     return resolved
 
 
@@ -253,7 +253,7 @@ def _build_entries_from_table_row(
     entries: list[dict[str, Any]] = []
     for address in addresses:
         explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-        for resolved, chain_from_hint in resolved_chains:
+        for resolved in resolved_chains:
             entries.append(
                 {
                     "name": name,
@@ -262,7 +262,6 @@ def _build_entries_from_table_row(
                     "kind": "official_inventory_table",
                     "url": url,
                     "explorer_url": explorer_url,
-                    "chain_from_hint": chain_from_hint,
                 }
             )
     return entries
@@ -455,7 +454,7 @@ def extract_inventory_entries_from_page_text(
 
         for address in addresses:
             explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-            for resolved, chain_from_hint in _resolve_candidate_chains(None, line_chain, requested_chain):
+            for resolved in _resolve_candidate_chains(None, line_chain, requested_chain):
                 signature = (resolved, address, name, kind, url)
                 if signature in seen:
                     continue
@@ -468,7 +467,6 @@ def extract_inventory_entries_from_page_text(
                         "kind": kind,
                         "url": url,
                         "explorer_url": explorer_url,
-                        "chain_from_hint": chain_from_hint,
                     }
                 )
 

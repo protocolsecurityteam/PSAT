@@ -173,8 +173,8 @@ def score_inventory_evidence(
     ``evidence`` is the list of page-level observations the inventory
     extractor gathered for a single address. Each observation carries a
     ``kind`` label (``official_inventory_table``, ``deployer_expansion``,
-    etc.) and optional metadata (``name``, ``url``, ``explorer_url``,
-    ``chain_from_hint``). Confidence rises with:
+    etc.) and optional metadata (``name``, ``url``, ``explorer_url``).
+    Confidence rises with:
 
         - distinct pages the address appears on
         - the presence of a human-readable name
@@ -222,8 +222,6 @@ def score_inventory_evidence(
         evidence_counts["deployer"] = deployer_count
     if explorer_count:
         evidence_counts["explorer"] = explorer_count
-    if any(item.get("chain_from_hint") for item in evidence):
-        evidence_counts["chain_hinted"] = True
 
     return round(confidence, 4), evidence_counts
 

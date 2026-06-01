@@ -246,7 +246,6 @@ def expand_from_deployers(
                 "kind": "deployer_expansion",
                 "url": f"https://etherscan.io/address/{deployer}",
                 "explorer_url": f"https://etherscan.io/address/{address}",
-                "chain_from_hint": False,
             }
         )
 
