@@ -99,11 +99,11 @@ def _project_node(
                 function_signature=function_signature,
             )
             surface = _or_surface(surface, child_surface)
-        if node_conditions:
-            surface = _and_surface(CapabilitySurface(public_paths=[node_conditions]), surface)
-        return surface
+        return _with_node_conditions(surface, node_conditions)
     if kind == "AND":
-        surface = CapabilitySurface(public_paths=[node_conditions])
+        # Fold from an empty identity, never a seeded public path: an `anyone` surface must
+        # be earned by a conditional_universal child, not minted by AND-ing pure checks.
+        surface = CapabilitySurface()
         for child in _child_dicts(cap_dict):
             child_surface = _project_node(
                 child,
@@ -111,8 +111,22 @@ def _project_node(
                 function_signature=function_signature,
             )
             surface = _and_surface(surface, child_surface)
-        return surface
+        return _with_node_conditions(surface, node_conditions)
     return CapabilitySurface(residual=[dict(cap_dict)])
+
+
+def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:
+    """Qualify the caller rows / public paths an AND or OR resolved to with the node's own
+    side conditions. A public path exists only where a child contributed one (a
+    ``conditional_universal``, which always carries its condition); node-level conditions
+    narrow a real authorization, they never constitute one."""
+    if not conditions:
+        return surface
+    return CapabilitySurface(
+        principal_rows=[_row_with_conditions(row, conditions) for row in surface.principal_rows],
+        public_paths=[_unique_conditions(path + conditions) for path in surface.public_paths],
+        residual=list(surface.residual),
+    )
 
 
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:

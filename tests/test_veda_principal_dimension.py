@@ -23,6 +23,14 @@ Each behavioral pin FAILS on current main:
   * #4: a public ``deposit`` is dropped instead of resolving to ``public``.
 The guardrail pin passes on both main and fix: it asserts the fix does NOT resurrect a
 genuine true-negative (a role-less own gate, owner renounced, stays ``resolved_empty``).
+
+A second regression in the same fix: the writer seeded every AND/OR with its own
+conditions as a public path, so a function whose caller gate is unresolvable (degraded
+coverage → ``external_check_only``) or provably empty (``finite_set([], exact)``)
+surfaced as ``public`` / ``anyone``, masking the real controller. ``test_pin5_*``
+reproduces it end-to-end (RolesAuthority left uncrawled); the ``test_seed_public_*`` pins
+drive the exact prod tree shapes through the writer and assert ``public`` is earned only
+by a ``conditional_universal`` child, never by the fold seed or a node-level condition.
 """
 
 from __future__ import annotations
@@ -37,6 +45,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck  # noqa: E402
 
 _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "veda_teller_stack.json"
@@ -240,11 +250,20 @@ def _inner_exit_grant_events(vault: str) -> list[dict]:
     ]
 
 
-def _resolve(session, fixture: dict, *, seed_vault: bool, extra_events: list[dict] | None = None) -> dict:
+def _resolve(
+    session,
+    fixture: dict,
+    *,
+    seed_vault: bool,
+    extra_events: list[dict] | None = None,
+    seed_role_events: bool = True,
+) -> dict:
     """Seed the stack and run the production resolver against the Teller. ``seed_vault``
     toggles whether the inner ``exit``/``enter`` call inlines (→ #2 bound finite_set) or
     stays an ``external_check_only`` (→ #3). ``extra_events`` appends role events (used to
-    make the inner downstream auth non-empty)."""
+    make the inner downstream auth non-empty). ``seed_role_events=False`` leaves the
+    RolesAuthority uncrawled (no events, no cursor) so the own ``canCall`` gate falls to
+    ``external_check_only`` — the production degraded path (#5)."""
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     teller = fixture["teller_address"]
@@ -270,7 +289,8 @@ def _resolve(session, fixture: dict, *, seed_vault: bool, extra_events: list[dic
             job_id=vault_job.id,
             controllers={"external_contract:authority": authority, "state_variable:owner": _ZERO},
         )
-    _seed_role_events(session, authority=authority, events=fixture["role_events"] + list(extra_events or []))
+    if seed_role_events:
+        _seed_role_events(session, authority=authority, events=fixture["role_events"] + list(extra_events or []))
 
     out = resolve_contract_capabilities(session, address=teller, chain_id=1, job_id=teller_job.id)
     assert out is not None, "resolver returned None — predicate_trees artifact not found"
@@ -391,6 +411,28 @@ def test_pin4_public_capability_resolves_public_without_phantoms(session, fixtur
 
 
 # ---------------------------------------------------------------------------
+# #5 — degraded coverage: the RolesAuthority was never indexed, so the own ``canCall``
+# gate is unresolvable. A restricted, role-gated function must NOT surface as `public`.
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+@pytest.mark.parametrize("seed_vault", [True, False])
+def test_pin5_uncrawled_authority_does_not_surface_public(session, fixture, seed_vault):
+    # The production preview indexed only the LayerZero endpoint, never the shared
+    # RolesAuthority — so the Solmate adapter returns external_check_only for the own
+    # canCall and the function's only "public path" is the projector's own AND fold seed.
+    # bulkWithdraw is role-gated (restricted on-chain); reporting it `public`/`anyone`
+    # masks the real controller, the worst error direction for this tool.
+    out = _resolve(session, fixture, seed_vault=seed_vault, seed_role_events=False)
+    surface, status = _surface(out[_BULKWITHDRAW])
+
+    assert surface.authority_public is False, f"an unresolved caller gate must not surface as `anyone`; status={status}"
+    assert status != "public"
+    assert _row_addresses(surface) == set(), "no principals may be minted for an unresolved gate"
+
+
+# ---------------------------------------------------------------------------
 # Candidate hygiene (defense-in-depth): the materializer must reject small-integer
 # event words coerced to phantom addresses (0x..01 .. 0x..ff) while keeping real ones.
 # ---------------------------------------------------------------------------
@@ -474,3 +516,130 @@ def test_residual_as_conditions_variants():
     generic = _residual_as_conditions({"kind": "external_check_only"})
     assert generic and "external authorization check" in generic[0]["description"]
     assert _residual_as_conditions("not-a-dict") == []  # type: ignore[arg-type]  # defensive non-dict guard
+
+
+# ---------------------------------------------------------------------------
+# Seed-public pins — a `public` surface must be justified by a `conditional_universal`
+# child, never by the projector's own AND/OR fold seed or by node-level side
+# conditions. These feed the exact tree shapes the resolver emits for the Veda Teller
+# (own Solmate gate AND-ed with an inner vault call) through the production serializer
+# (``capability_to_dict``) and writer, covering both the degraded-coverage and the
+# fully-indexed prod runs.
+# ---------------------------------------------------------------------------
+
+_VAULT_ADDR = "0x86b5780b606940eb59a062aa85a07959518c0161"
+_AUTHORITY_ADDR = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
+
+
+def _inner_call_check() -> CapabilityExpr:
+    """The teller's inlined ``BoringVault.exit`` requiresAuth — keyed on the teller as
+    caller, unenumerable from here, so a pure ``external_check_only`` side condition."""
+    return CapabilityExpr.external_check_only(
+        ExternalCheck(target_address=_VAULT_ADDR, target_call_selector="0x61a3bcc8"),
+        conditions=[Condition(kind="business", description="assetsOut < minimumAssets")],
+    )
+
+
+def _unresolved_own_gate() -> CapabilityExpr:
+    """The teller's own ``requiresAuth`` → ``authority.canCall(msg.sender, ...)`` when the
+    RolesAuthority events are not indexed: an unresolvable external check OR-ed with the
+    empty fallback set, exactly as the degraded resolver emits it."""
+    return CapabilityExpr.structural_or(
+        [
+            CapabilityExpr.external_check_only(
+                ExternalCheck(target_address=_AUTHORITY_ADDR, target_call_selector="0xb7009613"),
+                conditions=[
+                    Condition(
+                        kind="business",
+                        description="require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+                    )
+                ],
+            ),
+            CapabilityExpr.finite_set([], quality="exact"),
+        ]
+    )
+
+
+def _surface_for(cap: CapabilityExpr):
+    from services.policy.capability_surface import capability_surface_status, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+
+    cap_dict = capability_to_dict(cap)
+    surface = project_capability_surface(cap_dict)
+    return surface, capability_surface_status(cap_dict, surface)
+
+
+def test_seed_public_unresolved_own_gate_is_not_public():
+    # bulkWithdraw/deposit on the degraded preview: the own canCall is unresolvable, so
+    # the only "public path" is the AND fold seed. Must resolve to unknown, not public.
+    cap = CapabilityExpr.structural_and([_inner_call_check(), _unresolved_own_gate()])
+    surface, status = _surface_for(cap)
+    assert surface.authority_public is False, "an unresolved caller gate must not surface as `anyone`"
+    assert status != "public"
+    assert _row_addresses(surface) == set()
+
+
+def test_seed_public_resolved_empty_own_gate_stays_resolved_empty():
+    # bulkWithdraw/deposit on the fully-indexed prod run: the own gate is a provably-empty
+    # role set (exact). AND-ing an inner external check must not flip resolved_empty → public.
+    own_gate = CapabilityExpr.finite_set(
+        [],
+        quality="exact",
+        conditions=[
+            Condition(
+                kind="business",
+                description="require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+            )
+        ],
+    )
+    cap = CapabilityExpr.structural_and([_inner_call_check(), own_gate])
+    surface, status = _surface_for(cap)
+    assert surface.authority_public is False
+    assert status == "resolved_empty", f"a provably-empty own gate must stay resolved_empty; got {status}"
+    assert _row_addresses(surface) == set()
+
+
+def test_seed_public_or_node_condition_is_not_public():
+    # setShareLockPeriod et al: an OR over (unresolved canCall, empty set) carrying a
+    # node-level business condition. The condition seeds a NON-empty public path, so an
+    # "empty-path" heuristic would miss it — it must still not surface as public.
+    own_gate = CapabilityExpr(
+        kind="OR",
+        children=list(_unresolved_own_gate().children),
+        conditions=[Condition(kind="business", description="_shareLockPeriod > MAX_SHARE_LOCK_PERIOD")],
+    )
+    surface, status = _surface_for(own_gate)
+    assert surface.authority_public is False, "node-level side conditions must not create a public path"
+    assert status != "public"
+    assert _row_addresses(surface) == set()
+
+
+def test_seed_public_genuine_public_survives():
+    # Guardrail (#4): a real PublicCapabilityUpdated → conditional_universal child AND-ed
+    # with an inner external check must STILL surface as public.
+    cap = CapabilityExpr.structural_and(
+        [
+            CapabilityExpr.conditional_universal(
+                Condition(kind="business", description="public RolesAuthority capability")
+            ),
+            _inner_call_check(),
+        ]
+    )
+    surface, status = _surface_for(cap)
+    assert surface.authority_public is True, "a conditional_universal-driven public must survive"
+    assert status == "public"
+    assert _row_addresses(surface) == set(), "a public capability mints no principal rows"
+
+
+def test_seed_public_caller_rows_survive_inner_check():
+    # Guardrail (#3): real role holders AND-ed with an inner external check keep their rows
+    # (with the check attached as a condition) — not dropped, not surfaced as public.
+    holders = ["0x" + "a" * 40, "0x" + "b" * 40]
+    cap = CapabilityExpr.structural_and([CapabilityExpr.finite_set(holders, quality="exact"), _inner_call_check()])
+    surface, status = _surface_for(cap)
+    assert _row_addresses(surface) == {h.lower() for h in holders}, "role holders must survive an inner check"
+    assert surface.authority_public is False and status != "public"
+    assert status != "resolved_empty"
+    assert all(r.get("details", {}).get("conditions") for r in surface.principal_rows), (
+        "the inner check must attach as a condition on the surviving rows"
+    )
