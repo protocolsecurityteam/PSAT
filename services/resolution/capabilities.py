@@ -46,6 +46,17 @@ CapKind = Literal[
 MembershipQuality = Literal["exact", "lower_bound", "upper_bound"]
 Confidence = Literal["enumerable", "partial", "check_only"]
 
+# Which caller dimension a capability constrains. ``root`` = the function's
+# end-user caller (msg.sender / tx.origin at the protected entrypoint). ``bound``
+# = an already-resolved intermediate subject — the caller of an *inlined*
+# downstream cross-contract call (e.g. a Teller calling ``vault.exit``, where the
+# inner ``requiresAuth`` is keyed on the Teller's address, not the end user).
+# A bound-subject guard is a runtime side-condition, never a narrowing of the
+# end-user principal set: combining it via set-intersection (``{users} ∩ {teller}``)
+# wrongly zeroes the real callers. Default ``root`` — everything is an end-user
+# gate unless the leaf evaluator proves the subject was already bound.
+Subject = Literal["root", "bound"]
+
 
 # ---------------------------------------------------------------------------
 # Helper records
@@ -110,6 +121,9 @@ class CapabilityExpr:
     confidence: Confidence = "enumerable"
     last_indexed_block: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
+    # Caller dimension this capability constrains; see ``Subject``. Set at leaf
+    # resolution and propagated by the combinators below.
+    subject: Subject = "root"
 
     # ------------------------------------------------------------------
     # Factories
@@ -125,6 +139,7 @@ class CapabilityExpr:
         conditions: list[Condition] | None = None,
         last_indexed_block: int | None = None,
         trace: list[dict[str, Any]] | None = None,
+        subject: Subject = "root",
     ) -> "CapabilityExpr":
         return cls(
             kind="finite_set",
@@ -134,6 +149,7 @@ class CapabilityExpr:
             conditions=list(conditions or []),
             last_indexed_block=last_indexed_block,
             trace=list(trace or []),
+            subject=subject,
         )
 
     @classmethod
@@ -159,12 +175,14 @@ class CapabilityExpr:
         *,
         confidence: Confidence = "enumerable",
         conditions: list[Condition] | None = None,
+        subject: Subject = "root",
     ) -> "CapabilityExpr":
         return cls(
             kind="cofinite_blacklist",
             blacklist=_canon_addresses(blacklist),
             confidence=confidence,
             conditions=list(conditions or []),
+            subject=subject,
         )
 
     @classmethod
@@ -236,6 +254,25 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if b.kind == "unsupported":
         return CapabilityExpr.unsupported(f"intersect_with_unsupported_{b.unsupported_reason}")
 
+    # X ∩ conditional_universal(c) — preserve X with c appended. conditional_universal
+    # is pure side-conditions (anyone, given C); it never constrains the caller set,
+    # so this holds for either subject. Handled BEFORE the cross-subject divert so a
+    # bound check AND-ed with a root side-condition stays the bound check rather than
+    # collapsing to a public path. (Preserves test_intersect_finite_with_conditional_universal_keeps_set.)
+    if a.kind == "conditional_universal":
+        return _attach_conditions(b, a.conditions)
+    if b.kind == "conditional_universal":
+        return _attach_conditions(a, b.conditions)
+
+    # Cross-dimension AND (root caller ∩ bound intermediate). The bound side is a
+    # runtime side-condition on a downstream call, NOT a narrowing of the end-user
+    # caller set — attaching it as a condition preserves the real callers, whereas
+    # set-intersection would compute {users} ∩ {intermediate} = ∅. Covers every
+    # remaining shape (finite_set, external_check_only, cofinite_blacklist, …);
+    # same-subject pairs fall through to the set algebra unchanged. See ``Subject``.
+    if a.subject != b.subject:
+        return _intersect_cross_subject(a, b)
+
     # finite_set ∩ finite_set
     if a.kind == "finite_set" and b.kind == "finite_set":
         return _intersect_finite(a, b)
@@ -251,12 +288,6 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         # Anyone not in (a.blacklist ∪ b.blacklist).
         return CapabilityExpr.cofinite_blacklist(_canon_addresses((a.blacklist or []) + (b.blacklist or [])))
 
-    # X ∩ conditional_universal(c) — preserve X with c appended.
-    if a.kind == "conditional_universal":
-        return _attach_conditions(b, a.conditions)
-    if b.kind == "conditional_universal":
-        return _attach_conditions(a, b.conditions)
-
     # threshold_group ∩ X — defer to structural AND.
     if a.kind == "threshold_group" or b.kind == "threshold_group":
         return CapabilityExpr.structural_and([a, b])
@@ -270,6 +301,14 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if a.kind == "unsupported":
         return CapabilityExpr.structural_or([a, b])
     if b.kind == "unsupported":
+        return CapabilityExpr.structural_or([a, b])
+
+    # Cross-dimension OR: a bound-subject alternative (e.g. an inlined downstream
+    # call's authorization) is a distinct route, not an additional end-user caller.
+    # Keep both as a structural OR rather than merging an intermediate address into
+    # the root member list (which would mint a phantom end-user principal). See
+    # ``Subject``.
+    if a.subject != b.subject:
         return CapabilityExpr.structural_or([a, b])
 
     if a.kind == "finite_set" and b.kind == "finite_set":
@@ -306,6 +345,7 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             list(a.members or []),
             confidence=a.confidence,
             conditions=a.conditions,
+            subject=a.subject,
         )
     if a.kind == "cofinite_blacklist":
         return CapabilityExpr.finite_set(
@@ -313,6 +353,7 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             quality="exact",
             confidence=a.confidence,
             conditions=a.conditions,
+            subject=a.subject,
         )
     if a.kind == "conditional_universal":
         # Negation of "anyone if C" is "no one if C" — empty set with
@@ -350,11 +391,14 @@ def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         return CapabilityExpr.structural_and([a, b])
     confidence = _meet_confidence(a.confidence, b.confidence)
     conditions = list(a.conditions) + list(b.conditions)
+    # Reached only for same-subject pairs (cross-subject diverts before the kind
+    # dispatch), so a.subject == b.subject — carry it onto the result.
     cap = CapabilityExpr.finite_set(
         common,
         quality=quality,
         confidence=confidence,
         conditions=conditions,
+        subject=a.subject,
     )
     cap.trace = list(a.trace) + list(b.trace)
     return cap
@@ -374,6 +418,7 @@ def _union_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         quality=quality,
         confidence=confidence,
         conditions=conditions,
+        subject=a.subject,
     )
     cap.trace = list(a.trace) + list(b.trace)
     return cap
@@ -469,4 +514,43 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
         confidence=cap.confidence,
         last_indexed_block=cap.last_indexed_block,
         trace=list(cap.trace),
+        subject=cap.subject,
     )
+
+
+def _intersect_cross_subject(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
+    """AND of two capabilities on different caller dimensions (one ``root``, one
+    ``bound``).
+
+    The bound side constrains an intermediate-contract caller (an inlined
+    downstream call's ``requiresAuth``), not the function's end-user caller — it is
+    a runtime side-condition. Fold it onto the root side as condition(s) so the
+    real caller set survives, rather than set-intersecting (``{users} ∩ {teller}``
+    = ∅). The root side keeps its kind: an empty root set stays exact-empty (→
+    ``resolved_empty``), a populated one keeps its members. Because the bound side
+    becomes a condition (not a finite_set child), an empty bound set can never make
+    the AND look ``resolved_empty``.
+    """
+    root, bound = (a, b) if b.subject == "bound" else (b, a)
+    return _attach_conditions(root, _bound_as_conditions(bound))
+
+
+def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
+    """Render a bound-subject capability as side-condition(s): carry forward any
+    conditions it already accumulated, plus one describing the delegated check."""
+    return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+def _bound_condition_description(bound: CapabilityExpr) -> str:
+    target = bound.check.target_address if bound.check is not None else None
+    selector = bound.check.target_call_selector if bound.check is not None else None
+    if target is None:
+        for step in bound.trace or []:
+            if isinstance(step, dict) and step.get("target"):
+                target = step.get("target")
+                selector = selector or step.get("selector")
+                break
+    if target is not None:
+        sel = f".{selector}" if selector else ""
+        return f"delegated authorization: intermediate contract must be authorized for {target}{sel}"
+    return "delegated cross-contract authorization (intermediate-contract caller)"
