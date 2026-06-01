@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.activity import enrich_with_activity
-from services.discovery.chain_resolver import resolve_chains, resolve_unknown_chains, validate_claimed_chains
+from services.discovery.chain_resolver import resolve_chains
 from services.discovery.deployer import expand_from_deployers
 from services.discovery.inventory import (
     _build_contracts,
@@ -647,54 +647,55 @@ class TestResolveUnknownChains:
             self._fake_probe({"ethereum": {b}, "arbitrum": {c}, "base": {c}}),
         )
 
-        result = resolve_unknown_chains(contracts, debug=False)
+        result = resolve_chains(contracts, debug=False)
         by_name = {row["name"]: row for row in result}
 
         assert by_name["Known"]["chains"] == ["ethereum"]
         assert by_name["Unknown1"]["chains"] == ["ethereum"]
         assert set(by_name["Unknown2"]["chains"]) == {"arbitrum", "base"}
 
-    def test_no_unknowns_is_noop(self, monkeypatch):
-        """When all contracts have known chains, nothing is probed."""
-        contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
-
-        def _boom(*a, **k):
-            raise AssertionError("should not probe when there are no unknowns")
-
-        monkeypatch.setattr("services.discovery.chain_resolver._probe_chain_batch", _boom)
-        result = resolve_unknown_chains(contracts)
-        assert result[0]["chains"] == ["ethereum"]
+    def test_confirmed_prior_kept_first(self, monkeypatch):
+        """A confirmed prior chain stays first; newly found sibling chains append after."""
+        a = "0x" + "a" * 40
+        contracts = [{"name": "A", "address": a, "chains": ["ethereum"]}]
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_batch",
+            self._fake_probe({"ethereum": {a}, "base": {a}}),
+        )
+        result = resolve_chains(contracts)
+        assert result[0]["chains"] == ["ethereum", "base"]
 
     def test_unresolved_stays_unknown(self, monkeypatch):
-        """Address not found on any chain keeps chains=["unknown"]."""
+        """Address found on no chain keeps its prior (here ["unknown"])."""
         contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chain_batch",
             lambda addresses, chain_name, debug=False: set(),
         )
-        result = resolve_unknown_chains(contracts)
+        result = resolve_chains(contracts)
         assert result[0]["chains"] == ["unknown"]
 
-    def test_exa_claimed_chain_corrected_when_code_lives_elsewhere(self, monkeypatch):
+    def test_wrong_claim_overwritten_by_probe(self, monkeypatch):
+        """A wrong (LLM) claim is just overwritten by where the code actually is — no verify/correct path."""
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]}]
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chain_batch",
             self._fake_probe({"base": {addr}}),
         )
-        result = validate_claimed_chains(contracts)
+        result = resolve_chains(contracts)
         assert result[0]["chains"] == ["base"]
 
-    def test_exa_claimed_chain_marked_unknown_when_no_code_found(self, monkeypatch):
+    def test_unprobeable_keeps_prior_claim(self, monkeypatch):
+        """When the probe reaches nothing (eRPC down / unreachable), the prior is kept, not downgraded."""
         addr = "0x" + "e" * 40
-        contracts = [{"name": "AI", "address": addr, "chains": ["Base"], "source": ["exa_deep_research"]}]
+        contracts = [{"name": "AI", "address": addr, "chains": ["base"], "source": ["exa_deep_research"]}]
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chain_batch",
             lambda addresses, chain_name, debug=False: set(),
         )
-        result = validate_claimed_chains(contracts)
-        assert result[0]["chains"] == ["unknown"]
-        assert result[0]["chain_sanity"]["status"] == "unresolved_no_code_on_claimed_or_supported_chains"
+        result = resolve_chains(contracts)
+        assert result[0]["chains"] == ["base"]
 
     def test_resolve_chains_composes_unknown_and_validate(self, monkeypatch):
         """resolve_chains() resolves unknowns AND verifies speculative claims in one pass."""

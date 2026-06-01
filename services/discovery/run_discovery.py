@@ -27,7 +27,7 @@ from services.discovery import inventory as inventory_mod
 from services.discovery import inventory_domain as inventory_domain_mod
 from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
-from services.discovery.chain_resolver import validate_claimed_chains
+from services.discovery.chain_resolver import resolve_chains
 from utils import exa, llm
 from utils.chains import canonical_chain
 
@@ -547,9 +547,8 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
         logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
 
     try:
-        inventory_result["contracts"] = validate_claimed_chains(
+        inventory_result["contracts"] = resolve_chains(
             inventory_result.get("contracts", []),
-            source_names=("exa_deep_research",),
             debug=False,
         )
     except Exception as exc:

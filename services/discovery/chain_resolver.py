@@ -1,23 +1,19 @@
-"""Multi-chain resolution for discovered contracts.
+"""Terminal multi-chain resolution for discovered contracts.
 
-After the inventory pipeline builds contracts, some entries have an unknown or
-merely *claimed* chain. This module probes ``eth_getCode`` across the supported
-chains to determine where each contract is actually deployed.
+Discovery sources emit addresses; this is the single place that decides which
+chains they actually live on. It probes ``eth_getCode`` for every address
+across the supported chains and sets ``chains`` to where code really exists — a
+source's prior chain claim is only an ordering hint / unprobeable fallback,
+never ground truth, so a wrong LLM-claimed chain is just overwritten by the
+probe (no separate "verify and correct" path).
 
 Probing routes through the shared chain-aware RPC layer (``utils.rpc``): eRPC
 serves any chain at ``…/evm/<chain_id>``, and calls go through the cache-aware
 batched ``eth_getCode`` so repeated probes hit the ``(chain_id, address)``
 bytecode cache instead of the wire — re-probing is effectively free.
 
-Strategy
---------
-1. **Phase 1** -- probe every target address on the protocol's known chains in
-   parallel.
-2. **Phase 2** -- for addresses that matched nothing, probe the remaining
-   supported chains (also in parallel).
-
-When no RPC endpoint can be derived for a chain it is skipped, and resolution
-degrades cleanly (unknowns stay unknown) rather than raising.
+When no endpoint can be derived for a chain it's skipped; an address that can't
+be confirmed anywhere keeps whatever prior it had rather than being downgraded.
 """
 
 from __future__ import annotations
@@ -26,26 +22,23 @@ import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import canonical_chain_list
 
 from .inventory_domain import CHAIN_IDS, _debug_log
 from .static_dependencies import has_deployed_code
 
 
 def _chain_probe_rpc_url(chain_name: str) -> str | None:
-    """Per-chain eRPC URL for probing; ``None`` means "skip this chain".
+    """eRPC URL for probing *chain_name*, or ``None`` when eRPC isn't configured.
 
-    eRPC serves any chain at ``…/evm/<chain_id>``; ethereum also has the public
-    fallback. Chains with no derivable endpoint are skipped.
+    Probing is eRPC-only: without a multi-chain provider we can't confirm
+    non-mainnet chains, so we return ``None`` (the caller keeps the prior)
+    rather than fall back to a mainnet-only endpoint — which also keeps CLI and
+    offline test runs off the wire.
     """
-    from utils.rpc import chain_id_for_chain_name, default_rpc_url, erpc_url_for_chain_id
+    from utils.rpc import chain_id_for_chain_name, erpc_url_for_chain_id
 
-    erpc = erpc_url_for_chain_id(chain_id_for_chain_name(chain_name))
-    if erpc:
-        return erpc
-    if chain_name == "ethereum":
-        return default_rpc_url(chain="ethereum", chain_id=1)
-    return None
+    return erpc_url_for_chain_id(chain_id_for_chain_name(chain_name))
 
 
 def _probe_chain_batch(addresses: list[str], chain_name: str, debug: bool = False) -> set[str]:
@@ -97,148 +90,38 @@ def _probe_chains(
                 _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
 
 
-def _primary_chain(contract: dict[str, Any]) -> str:
-    """Return the first chain from a contract's chains list, or 'unknown'."""
-    chains = contract.get("chains", [])
-    return (canonical_chain(chains[0]) if chains else None) or "unknown"
-
-
-def resolve_unknown_chains(
-    contracts: list[dict[str, Any]],
-    debug: bool = False,
-) -> list[dict[str, Any]]:
-    """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode`` across chains.
-
-    Mutates the contract dicts in-place (updates ``chains``) and returns the
-    same list. Degrades cleanly (unknowns stay unknown) when no RPC endpoint is
-    configured for a chain.
-    """
-    if not contracts:
-        return contracts
-
-    unknowns = [c for c in contracts if _primary_chain(c) == "unknown"]
-    if not unknowns:
-        _debug_log(debug, "Chain resolution: no unknown-chain contracts to resolve")
-        return contracts
-
-    # Probe the protocol's already-known chains first, then the rest.
-    known_chains: list[str] = []
-    seen: set[str] = set()
-    for c in contracts:
-        for ch in canonical_chain_list(c.get("chains", [])) or []:
-            if ch not in seen and ch != "unknown" and ch in CHAIN_IDS:
-                known_chains.append(ch)
-                seen.add(ch)
-    if not known_chains:
-        known_chains = list(CHAIN_IDS.keys())
-    remaining_chains = [ch for ch in CHAIN_IDS if ch not in seen]
-
-    _debug_log(
-        debug,
-        f"Chain resolution: {len(unknowns)} unknown contract(s), "
-        f"probing {len(known_chains)} known chain(s): {known_chains}",
-    )
-
-    # address -> list of chains where it has code
-    matched: dict[str, list[str]] = {c["address"]: [] for c in unknowns}
-    all_addrs = list(matched.keys())
-
-    # Phase 1: probe ALL unknowns on the known chains in parallel.
-    _probe_chains(all_addrs, known_chains, matched, debug)
-
-    # Phase 2: for addresses that matched nothing, probe the remaining chains.
-    unresolved = [addr for addr, chains in matched.items() if not chains]
-    if unresolved and remaining_chains:
-        _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
-        _probe_chains(unresolved, remaining_chains, matched, debug)
-
-    resolved_count = 0
-    for contract in unknowns:
-        chains = matched.get(contract["address"], [])
-        if chains:
-            contract["chains"] = canonical_chain_list(chains)
-            resolved_count += 1
-            _debug_log(debug, f"  {contract['address']}: resolved to {chains}")
-
-    _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
-    return contracts
-
-
-def validate_claimed_chains(
-    contracts: list[dict[str, Any]],
-    *,
-    source_names: tuple[str, ...] = ("exa_deep_research",),
-    debug: bool = False,
-) -> list[dict[str, Any]]:
-    """Verify AI-supplied chain claims with ``eth_getCode``.
-
-    If a claimed chain has no code, probe the remaining supported chains and
-    either correct to the detected chain(s) or mark the entry unknown.
-    """
-    targets: list[tuple[dict[str, Any], str, list[str]]] = []
-    for contract in contracts:
-        sources = set(contract.get("source") or [])
-        if sources.isdisjoint(source_names):
-            continue
-        address = str(contract.get("address") or "").lower()
-        chains = canonical_chain_list(contract.get("chains")) or []
-        claimed = [chain for chain in chains if chain and chain != "unknown" and chain in CHAIN_IDS]
-        if address and claimed:
-            targets.append((contract, address, claimed))
-
-    if not targets:
-        return contracts
-
-    for contract, address, claimed in targets:
-        matched: dict[str, list[str]] = {address: []}
-        _probe_chains([address], claimed, matched, debug)
-        if matched[address]:
-            contract["chains"] = canonical_chain_list(matched[address])
-            continue
-
-        remaining = [chain for chain in CHAIN_IDS if chain not in set(claimed)]
-        if remaining:
-            _probe_chains([address], remaining, matched, debug)
-        if matched[address]:
-            corrected = canonical_chain_list(matched[address]) or ["unknown"]
-            contract["chains"] = corrected
-            _debug_log(debug, f"  {address}: corrected claimed chain {claimed} -> {corrected}")
-        else:
-            contract["chains"] = ["unknown"]
-            contract["chain_sanity"] = {
-                "status": "unresolved_no_code_on_claimed_or_supported_chains",
-                "claimed_chains": claimed,
-            }
-            _debug_log(debug, f"  {address}: no code on claimed chain(s) {claimed}; marked unknown")
-
-    return contracts
-
-
 def resolve_chains(
     contracts: list[dict[str, Any]],
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Single terminal chain-resolution pass over the candidate set.
+    """Probe every contract across all chains and set ``chains`` from the result.
 
-    One entry point composing the probes so callers don't sequence them by hand:
-
-    1. :func:`resolve_unknown_chains` -- fill chains for ``chains=["unknown"]``
-       entries by probing ``eth_getCode`` across chains.
-    2. :func:`validate_claimed_chains` -- verify speculative (LLM-inferred)
-       chain claims; correct to the detected chain or mark unknown when the
-       claim has no code anywhere reachable.
-
-    Structurally-reliable chains (deployer lineage, DeFiLlama per-chain lists)
-    are treated as priors and left untouched. Provider-agnostic and best-effort
-    — degrades cleanly (claims kept as-is) when no RPC endpoint is configured.
-
-    This is the convergence point a future "fair resolve" will grow from:
-    confidence-tiered verification of *every* source (not just LLM ones), with
-    a bytecode-aware sibling-vs-collision footprint. Today it keeps the existing
-    scope while giving the pipeline one place to call.
+    The probe is the authority: ``chains`` becomes the chains where the address
+    actually has code, ordered with any confirmed prior first. A prior claim is
+    kept only when the address can't be confirmed anywhere (unprobeable), so the
+    pipeline never downgrades on a failed probe and a wrong claim is simply
+    overwritten. Mutates the contract dicts in place and returns the same list.
     """
     if not contracts:
         return contracts
-    contracts = resolve_unknown_chains(contracts, debug=debug)
-    contracts = validate_claimed_chains(contracts, debug=debug)
+
+    addrs = sorted({c["address"] for c in contracts if c.get("address")})
+    if not addrs:
+        return contracts
+
+    matched: dict[str, list[str]] = {a: [] for a in addrs}
+    _probe_chains(addrs, list(CHAIN_IDS.keys()), matched, debug)
+
+    resolved = 0
+    for contract in contracts:
+        found = canonical_chain_list(matched.get(contract.get("address", ""), [])) or []
+        if not found:
+            # Unprobeable (no endpoint / no code reachable): keep the prior.
+            continue
+        prior = canonical_chain_list(contract.get("chains")) or []
+        confirmed = [ch for ch in prior if ch in found]
+        contract["chains"] = confirmed + [ch for ch in found if ch not in confirmed]
+        resolved += 1
+
+    _debug_log(debug, f"Chain resolution: probed {len(addrs)} address(es), set chains for {resolved}")
     return contracts
