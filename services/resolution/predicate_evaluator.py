@@ -49,6 +49,35 @@ from .capabilities import (
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 
+def _frame_is_inlined(ctx: "EvaluationContext") -> bool:
+    """True when we're resolving inside an inlined cross-contract call — the frame's
+    ``msg.sender`` has been bound to a concrete intermediate contract (the caller of
+    the downstream call), so a caller-authorization leaf evaluated here constrains
+    that intermediate, NOT the function's end-user caller. ``CallFrame.root`` leaves
+    ``current_msg_sender`` None (symbolic root caller)."""
+    frame = getattr(ctx, "call_frame", None)
+    return frame is not None and getattr(frame, "current_msg_sender", None) is not None
+
+
+def _tag_caller_subject(cap: "CapabilityExpr", ctx: "EvaluationContext") -> "CapabilityExpr":
+    """Mark a freshly-resolved caller-authorization capability with the dimension it
+    constrains: ``bound`` inside an inlined downstream call (subject = the frame-bound
+    intermediate contract), else ``root`` (the end-user caller). The combinators in
+    ``capabilities.py`` use this to keep a bound check as a side-condition rather than
+    set-intersecting it into the end-user principal set (which would zero it)."""
+    cap.subject = "bound" if _frame_is_inlined(ctx) else "root"
+    return cap
+
+
+def _adapter_declined_external_set(cap: "CapabilityExpr") -> bool:
+    """True when an ``external_set`` adapter produced no concrete answer — unsupported,
+    a query-only external check, or the empty non-exact placeholder of the null adapter.
+    An *exact* empty set is a real ``nobody`` and is NOT a decline."""
+    return cap.kind in {"unsupported", "external_check_only"} or (
+        cap.kind == "finite_set" and not cap.members and cap.membership_quality != "exact"
+    )
+
+
 def _state_var_lookup_key(operand: dict[str, Any]) -> str | None:
     name = operand.get("state_variable_name")
     if not isinstance(name, str) or not name:
@@ -287,52 +316,67 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         cap = _resolve_view_key_membership(descriptor, ctx)
         if cap is None:
             cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
+        cap = _tag_caller_subject(cap, ctx)
         if operator == "falsy":
             cap = negate(cap)
         return cap
 
     if kind == "equality":
         if operator in ("eq", "ne"):
+            # Tag equality the same way membership/external_bool are, so the subject
+            # propagates through an inlined callee's predicate tree. A Solmate function
+            # is OR[canCall(...), msg.sender == owner]; inside an inlined frame the
+            # owner-equality goes through _resolve_contextual_equality (msg.sender is
+            # frame-rewritten, so it has no caller operand). Without a bound tag here,
+            # the OR can't collapse to a single bound capability — the OR container
+            # defaults to root, the cross-subject intersect never fires, and the inner
+            # (intermediate-dimension) members leak to the surface as a competing
+            # principal shape, re-dropping the real callers via and_multiple_principal_shapes.
             if not _leaf_has_caller_operand(leaf):
-                return _resolve_contextual_equality(leaf, ctx, operator)
-            base = _resolve_equality_principal(leaf, ctx)
+                return _tag_caller_subject(_resolve_contextual_equality(leaf, ctx, operator), ctx)
+            base = _tag_caller_subject(_resolve_equality_principal(leaf, ctx), ctx)
             return base if operator == "eq" else negate(base)
         return CapabilityExpr.unsupported(f"equality_op_{operator}_unsupported")
 
     if kind == "external_bool":
         descriptor = leaf.get("set_descriptor")
         if descriptor is not None:
-            # Cross-contract inlining: when the leaf records an exact
-            # callee signature/selector, try evaluating the registry's
-            # predicate_trees for that function under the original
-            # caller's msg.sender. If it
-            # produces a useful capability we use it; otherwise fall
-            # through to the adapter-registry path which handles
-            # generic event-indexed descriptors.
-            inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
-            if inlined is not None:
-                if operator == "falsy":
-                    inlined = negate(inlined)
-                return inlined
             if descriptor.get("kind") == "external_set":
-                # Try a named adapter first (e.g. Solmate RolesAuthority resolves
-                # canCall via its role events); fall back to the generic
-                # external-check materializer only when no adapter produces a
-                # concrete set. Previously external_set skipped the registry
-                # entirely, so standard authority contracts never resolved.
+                # Prefer a confirmed standard-aware adapter (e.g. the Solmate
+                # RolesAuthority adapter resolves canCall from indexed role events:
+                # a *public* capability => anyone, else the exact role-holder set)
+                # over the generic cross-contract inline + probe-materializer. The
+                # materializer mis-renders a public capability as an enumerated list
+                # and can admit phantom event-word candidates as principals — so
+                # consulting it before the standard-aware adapter produced false
+                # callers for every Veda Teller. Only when the adapter declines do we
+                # inline the cross-contract call, then fall back to a bare external
+                # check. The adapter's own confidence gating means a decline
+                # (external_check_only / unsupported / non-exact-empty) is exactly
+                # "no standard-aware answer", so this never special-cases by name.
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
-                # Fall back to the materializer unless the adapter produced a
-                # concrete answer. A non-exact empty finite_set is the _NullAdapter
-                # placeholder (or an un-indexed partial) — not a real "nobody";
-                # an *exact* empty set IS a real true-negative and is kept.
-                if cap.kind in {"unsupported", "external_check_only"} or (
-                    cap.kind == "finite_set" and not cap.members and cap.membership_quality != "exact"
-                ):
-                    cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+                if _adapter_declined_external_set(cap):
+                    inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
+                    if inlined is not None:
+                        # The inline result carries its own subject — ``bound`` when the
+                        # inlined downstream call's auth keyed on the frame-bound
+                        # intermediate caller (so it stays a side-condition, not a caller
+                        # set). Do NOT re-tag against the (root) outer frame.
+                        cap = inlined
+                    else:
+                        cap = _tag_caller_subject(_external_check_from_descriptor(leaf, descriptor, ctx), ctx)
+                else:
+                    cap = _tag_caller_subject(cap, ctx)
             else:
-                cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
-                if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
-                    cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+                # Non-external_set: no standard adapter to prefer, keep inline-first.
+                inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
+                if inlined is not None:
+                    cap = inlined
+                else:
+                    cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
+                    if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
+                        cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+                    cap = _tag_caller_subject(cap, ctx)
             if operator == "falsy":
                 cap = negate(cap)
             return cap
