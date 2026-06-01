@@ -682,6 +682,16 @@ def build_controller_tracking(
             continue
         if role_name in authority_state_vars:
             continue
+        # Storage-layout slot constants (Solady ``_OWNER_SLOT``, OZ-v5
+        # ``OwnableStorageLocation``, ``*StorageLocation``) reach role_definitions
+        # because they surface as bytes32-constant caller_authority operands, but
+        # they are slot locators, not roles — ``role_identifier:<slot>`` produced
+        # a dead ``getter_call <slot>()`` row that always reverts. Pass 2 already
+        # filters these; mirror that guard here so the same suppression applies no
+        # matter which pass first sees the name. The owner/governor they locate is
+        # resolved from the canonical getter in predicate_evaluator instead.
+        if _is_storage_layout_constant(role_name):
+            continue
         controller_id = f"role_identifier:{role_name}"
         if controller_id in seen_ids:
             continue
