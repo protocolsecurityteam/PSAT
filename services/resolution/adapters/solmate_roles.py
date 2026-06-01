@@ -166,12 +166,14 @@ class SolmateRolesAuthorityAdapter:
             }
         ]
         if last_block is None:
-            # Events aren't durably indexed yet — a bare empty set here would be a
-            # false "nobody can call"; defer to a probe instead.
-            if members:
-                return CapabilityExpr.finite_set(
-                    sorted(members), quality="lower_bound", confidence="partial", trace=trace
-                )
+            # The authority's role events aren't durably indexed to head yet (no
+            # backfill_complete cursor). Any fold now is at best a lower bound — more grants
+            # may sit in the un-indexed tail — and a bare finite_set here carries nothing the
+            # reconciler can converge on: a partial set would freeze a never-self-healing
+            # answer, an empty one would assert a false "nobody can call". Defer
+            # unconditionally; ``no_index_cursor`` is marked ``deferred_pending_index`` so
+            # ``deferred_reconciler`` re-resolves this to the exact set once backfill
+            # completes (rather than emitting a sticky ``lower_bound`` the self-heal misses).
             return _check_only(authority, descriptor, ["no_index_cursor"])
         if not rows:
             # Indexed, but the authority emitted NONE of the three RolesAuthority
