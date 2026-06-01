@@ -25,6 +25,22 @@ _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
 _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
 
+# Event words are 32 bytes; ``_word_to_address`` takes the low 20. A non-address
+# field carrying a small integer (a uint8 role, a bool, an array length, a small
+# uint) coerces to a phantom address like 0x00..01–0x00..ff. A real account/contract
+# address — being a 20-byte value — is astronomically unlikely to fit in the low 32
+# bits, so reject candidates below this floor. This stops phantom principals being
+# probed/minted: on a *public* capability ``canCall(0x..01)`` returns true, so the
+# phantom would otherwise survive as a controller.
+_ADDRESS_PLAUSIBILITY_FLOOR = 2**32
+
+
+def _is_plausible_candidate_address(addr: str) -> bool:
+    try:
+        return int(addr, 16) >= _ADDRESS_PLAUSIBILITY_FLOOR
+    except (TypeError, ValueError):
+        return False
+
 
 def materialize_external_check_from_events(
     *,
@@ -159,7 +175,7 @@ def _candidate_addresses_from_events(
     for topics, data_words in session.execute(stmt):
         for word in list(topics or [])[1:] + list(data_words or []):
             addr = _word_to_address(word)
-            if addr is None or addr == "0x" + "0" * 40:
+            if addr is None or not _is_plausible_candidate_address(addr):
                 continue
             if addr in seen:
                 continue
@@ -208,7 +224,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
         for log in _logs_from_hypersync_response(response):
             for word in _topics_from_hypersync_log(log)[1:] + _data_words_from_hypersync_log(log):
                 addr = _word_to_address(word)
-                if addr is None or addr == "0x" + "0" * 40 or addr in seen:
+                if addr is None or not _is_plausible_candidate_address(addr) or addr in seen:
                     continue
                 seen.add(addr)
                 out.append(addr)
