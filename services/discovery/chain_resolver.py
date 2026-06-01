@@ -4,12 +4,10 @@ After the inventory pipeline builds contracts, some entries have an unknown or
 merely *claimed* chain. This module probes ``eth_getCode`` across the supported
 chains to determine where each contract is actually deployed.
 
-Probing is **provider-agnostic**: it routes through the shared chain-aware RPC
-layer (``utils.rpc``), which prefers the configured eRPC endpoint
-(``…/evm/<chain_id>``, valid for any chain) and falls back to a legacy Alchemy
-``ETH_RPC`` or the public mainnet endpoint. Calls go through the cache-aware
+Probing routes through the shared chain-aware RPC layer (``utils.rpc``): eRPC
+serves any chain at ``…/evm/<chain_id>``, and calls go through the cache-aware
 batched ``eth_getCode`` so repeated probes hit the ``(chain_id, address)``
-bytecode cache instead of the wire.
+bytecode cache instead of the wire — re-probing is effectively free.
 
 Strategy
 --------
@@ -25,67 +23,26 @@ degrades cleanly (unknowns stay unknown) rather than raising.
 from __future__ import annotations
 
 import contextvars
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Any
-
-from dotenv import load_dotenv
 
 from utils.chains import canonical_chain, canonical_chain_list
 
 from .inventory_domain import CHAIN_IDS, _debug_log
 from .static_dependencies import has_deployed_code
 
-# Legacy Alchemy network slugs — used only when ETH_RPC is an Alchemy URL and
-# no eRPC endpoint is configured for the chain.
-_ALCHEMY_CHAIN_SLUGS: dict[str, str] = {
-    "ethereum": "eth-mainnet",
-    "arbitrum": "arb-mainnet",
-    "optimism": "opt-mainnet",
-    "polygon": "polygon-mainnet",
-    "base": "base-mainnet",
-    "avalanche": "avax-mainnet",
-    "bsc": "bnb-mainnet",
-    "linea": "linea-mainnet",
-    "scroll": "scroll-mainnet",
-    "zksync": "zksync-mainnet",
-    "blast": "blast-mainnet",
-}
-
-
-def _alchemy_key_or_none() -> str | None:
-    """Return the Alchemy API key embedded in ETH_RPC, or None when it isn't an Alchemy URL."""
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    rpc = os.getenv("ETH_RPC", "")
-    return rpc.rstrip("/").rsplit("/", 1)[-1] if "/v2/" in rpc else None
-
-
-def _alchemy_rpc(chain_name: str, api_key: str) -> str | None:
-    """Build a legacy Alchemy RPC URL for a chain, or None if unsupported."""
-    slug = _ALCHEMY_CHAIN_SLUGS.get(chain_name)
-    if not slug:
-        return None
-    return f"https://{slug}.g.alchemy.com/v2/{api_key}"
-
 
 def _chain_probe_rpc_url(chain_name: str) -> str | None:
-    """Per-chain RPC URL for probing, provider-agnostic.
+    """Per-chain eRPC URL for probing; ``None`` means "skip this chain".
 
-    eRPC first (serves any chain via ``…/evm/<chain_id>``), then a legacy
-    Alchemy ``ETH_RPC``, then the public mainnet fallback for ethereum. ``None``
-    means "no endpoint for this chain" and the caller skips it cleanly.
+    eRPC serves any chain at ``…/evm/<chain_id>``; ethereum also has the public
+    fallback. Chains with no derivable endpoint are skipped.
     """
     from utils.rpc import chain_id_for_chain_name, default_rpc_url, erpc_url_for_chain_id
 
     erpc = erpc_url_for_chain_id(chain_id_for_chain_name(chain_name))
     if erpc:
         return erpc
-    key = _alchemy_key_or_none()
-    if key:
-        alchemy = _alchemy_rpc(chain_name, key)
-        if alchemy:
-            return alchemy
     if chain_name == "ethereum":
         return default_rpc_url(chain="ethereum", chain_id=1)
     return None
