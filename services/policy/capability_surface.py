@@ -37,7 +37,13 @@ class CapabilitySurface:
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
     if surface.authority_public:
         return "public"
-    if _is_resolved_empty_capability(cap_dict):
+    # ``resolved_empty`` means "provably nobody". Only when the surface yields NO
+    # caller rows: an AND that carries a real caller set alongside an exact-empty
+    # *bound* side-condition (a downstream call whose own auth resolved empty) still
+    # has those callers — flagging it resolved_empty would drop them via the status,
+    # re-opening the Veda caller-drop one layer up. A genuine no-role own gate has no
+    # rows, so this still resolves_empty correctly.
+    if not surface.principal_rows and _is_resolved_empty_capability(cap_dict):
         return "resolved_empty"
     if cap_dict.get("kind") == "unsupported" and not surface.principal_rows:
         return "unsupported"
@@ -93,11 +99,11 @@ def _project_node(
                 function_signature=function_signature,
             )
             surface = _or_surface(surface, child_surface)
-        if node_conditions:
-            surface = _and_surface(CapabilitySurface(public_paths=[node_conditions]), surface)
-        return surface
+        return _with_node_conditions(surface, node_conditions)
     if kind == "AND":
-        surface = CapabilitySurface(public_paths=[node_conditions])
+        # Fold from an empty identity, never a seeded public path: an `anyone` surface must
+        # be earned by a conditional_universal child, not minted by AND-ing pure checks.
+        surface = CapabilitySurface()
         for child in _child_dicts(cap_dict):
             child_surface = _project_node(
                 child,
@@ -105,8 +111,22 @@ def _project_node(
                 function_signature=function_signature,
             )
             surface = _and_surface(surface, child_surface)
-        return surface
+        return _with_node_conditions(surface, node_conditions)
     return CapabilitySurface(residual=[dict(cap_dict)])
+
+
+def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:
+    """Qualify the caller rows / public paths an AND or OR resolved to with the node's own
+    side conditions. A public path exists only where a child contributed one (a
+    ``conditional_universal``, which always carries its condition); node-level conditions
+    narrow a real authorization, they never constitute one."""
+    if not conditions:
+        return surface
+    return CapabilitySurface(
+        principal_rows=[_row_with_conditions(row, conditions) for row in surface.principal_rows],
+        public_paths=[_unique_conditions(path + conditions) for path in surface.public_paths],
+        residual=list(surface.residual),
+    )
 
 
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
@@ -130,8 +150,24 @@ def _or_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capability
 
 
 def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
-    if not _has_valid_path(left) or not _has_valid_path(right):
+    left_valid = _has_valid_path(left)
+    right_valid = _has_valid_path(right)
+
+    # Neither side carries a caller path — both are pure checks; keep them residual.
+    if not left_valid and not right_valid:
         return CapabilitySurface(residual=left.residual + right.residual)
+
+    # Exactly one side carries the caller path (principal rows / public paths); the
+    # other is a pure check with no path — a downstream/bound-subject authorization or
+    # an unenumerable external check. That check is a runtime SIDE-CONDITION on the
+    # call, NOT grounds to drop the real callers. Preserve the valid side and attach
+    # the check as a condition, per this module's contract ("AND with caller path +
+    # side conditions → caller rows with conditions"). Collapsing to residual-only
+    # here is what silently dropped the Veda Teller withdraw/deposit caller sets.
+    if not right_valid:
+        return _surface_with_side_checks(left, right.residual)
+    if not left_valid:
+        return _surface_with_side_checks(right, left.residual)
 
     public_paths: list[list[dict[str, Any]]] = []
     for left_path in left.public_paths:
@@ -151,6 +187,46 @@ def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capabilit
         residual.append({"kind": "unsupported", "unsupported_reason": "and_multiple_principal_shapes"})
 
     return CapabilitySurface(principal_rows=rows, public_paths=public_paths, residual=residual)
+
+
+def _surface_with_side_checks(valid: CapabilitySurface, side_residual: list[dict[str, Any]]) -> CapabilitySurface:
+    """Keep ``valid``'s caller rows / public paths, folding the pure-check residual on
+    the other AND branch in as side-condition(s) (and retaining it in ``residual`` so
+    the API can still surface the probe)."""
+    conditions = [cond for residual in side_residual for cond in _residual_as_conditions(residual)]
+    if not conditions:
+        return CapabilitySurface(
+            principal_rows=list(valid.principal_rows),
+            public_paths=list(valid.public_paths),
+            residual=list(valid.residual) + list(side_residual),
+        )
+    rows = [_row_with_conditions(row, conditions) for row in valid.principal_rows]
+    public_paths = [_unique_conditions(path + conditions) for path in valid.public_paths]
+    return CapabilitySurface(
+        principal_rows=rows,
+        public_paths=public_paths,
+        residual=list(valid.residual) + list(side_residual),
+    )
+
+
+def _residual_as_conditions(residual: dict[str, Any]) -> list[dict[str, Any]]:
+    """Render a residual check (an ``external_check_only`` / ``unsupported`` cap dict)
+    as side-condition dict(s): any conditions it already carries, plus one summarizing
+    the check itself."""
+    if not isinstance(residual, dict):
+        return []
+    out = _condition_dicts(residual.get("conditions"))
+    check = residual.get("check")
+    if isinstance(check, dict) and check.get("target_address"):
+        selector = check.get("target_call_selector")
+        suffix = f".{selector}" if selector else ""
+        target = check["target_address"]
+        out.append({"kind": "business", "description": f"external authorization check: {target}{suffix}"})
+    elif residual.get("unsupported_reason"):
+        out.append({"kind": "business", "description": f"unresolved check: {residual['unsupported_reason']}"})
+    else:
+        out.append({"kind": "business", "description": "external authorization check"})
+    return out
 
 
 def _has_valid_path(surface: CapabilitySurface) -> bool:

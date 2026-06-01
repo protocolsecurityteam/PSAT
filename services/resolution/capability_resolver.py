@@ -529,4 +529,8 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
         out["last_indexed_block"] = cap.last_indexed_block
     if cap.trace:
         out["trace"] = list(cap.trace)
+    # Only emit when non-default so root-caller capabilities (the vast majority) keep
+    # their existing wire shape; ``bound`` marks an inlined downstream-call subject.
+    if cap.subject != "root":
+        out["subject"] = cap.subject
     return out

@@ -372,3 +372,102 @@ def test_negate_total_over_all_kinds():
         out = negate(a)
         # Only constraint: never raises, returns a CapabilityExpr.
         assert isinstance(out, CapabilityExpr)
+
+
+# ---------------------------------------------------------------------------
+# Subject dimension (root caller vs bound intermediate)
+# ---------------------------------------------------------------------------
+
+
+def test_finite_set_defaults_to_root_subject():
+    assert CapabilityExpr.finite_set([ADDR_A]).subject == "root"
+    assert CapabilityExpr.finite_set([ADDR_A], subject="bound").subject == "bound"
+
+
+def test_intersect_cross_subject_preserves_root_set_as_condition():
+    # The bug: a bound intermediate ({}) set-intersected with the real root caller set
+    # zeroes it. Cross-subject intersect must instead keep the root set and attach the
+    # bound side as a side-condition.
+    root = CapabilityExpr.finite_set([ADDR_A, ADDR_B])  # real end-user callers
+    bound_empty = CapabilityExpr.finite_set([], subject="bound")  # inlined downstream auth, empty
+    out = intersect(root, bound_empty)
+    assert out.kind == "finite_set"
+    assert set(out.members or []) == {ADDR_A, ADDR_B}  # NOT zeroed
+    assert out.subject == "root"
+    assert out.conditions, "the bound check must be attached as a side-condition"
+
+
+def test_intersect_cross_subject_is_commutative():
+    root = CapabilityExpr.finite_set([ADDR_A])
+    bound = CapabilityExpr.finite_set([ADDR_C], subject="bound")
+    left = intersect(root, bound)
+    right = intersect(bound, root)
+    assert set(left.members or []) == set(right.members or []) == {ADDR_A}
+    assert left.subject == right.subject == "root"
+
+
+def test_intersect_cross_subject_empty_root_stays_resolved_empty():
+    # Guardrail: a genuinely-empty ROOT gate AND a bound side-condition must stay
+    # exact-empty (the bound side never resurrects callers).
+    root_empty = CapabilityExpr.finite_set([], quality="exact")
+    bound = CapabilityExpr.finite_set([ADDR_C], subject="bound")
+    out = intersect(root_empty, bound)
+    assert out.kind == "finite_set" and out.members == [] and out.membership_quality == "exact"
+
+
+def test_intersect_same_subject_bound_uses_set_algebra():
+    # Two bound sides share a dimension → ordinary set algebra (not attach).
+    a = CapabilityExpr.finite_set([ADDR_A, ADDR_B], subject="bound")
+    b = CapabilityExpr.finite_set([ADDR_B], subject="bound")
+    out = intersect(a, b)
+    assert set(out.members or []) == {ADDR_B}
+    assert out.subject == "bound"
+
+
+def test_intersect_conditional_universal_runs_before_cross_subject():
+    # conditional_universal is pure side-conditions; X ∩ cond_universal keeps X even
+    # across subjects (the bound check stays the bound check, not a public path).
+    bound = CapabilityExpr.finite_set([], subject="bound")
+    cu = CapabilityExpr.conditional_universal(Condition(kind="business", description="c"))
+    out = intersect(cu, bound)
+    assert out.kind == "finite_set" and out.subject == "bound"
+    assert any(c.description == "c" for c in out.conditions)
+
+
+def test_union_cross_subject_yields_structural_or():
+    root = CapabilityExpr.finite_set([ADDR_A])
+    bound = CapabilityExpr.finite_set([ADDR_C], subject="bound")
+    out = union(root, bound)
+    assert out.kind == "OR"  # not merged — an intermediate address never joins the root set
+    assert {c.subject for c in out.children} == {"root", "bound"}
+
+
+def test_negate_preserves_subject():
+    bound = CapabilityExpr.finite_set([ADDR_A], quality="exact", subject="bound")
+    out = negate(bound)
+    assert out.kind == "cofinite_blacklist" and out.subject == "bound"
+    # round-trip back to finite keeps it bound too
+    assert negate(out).subject == "bound"
+
+
+def test_attach_conditions_preserves_subject():
+    bound = CapabilityExpr.finite_set([ADDR_A], subject="bound")
+    cu = CapabilityExpr.conditional_universal(Condition(kind="time", description="t"))
+    assert intersect(bound, cu).subject == "bound"
+
+
+def test_bound_condition_description_variants():
+    from services.resolution.capabilities import _bound_condition_description
+
+    via_check = CapabilityExpr.external_check_only(
+        ExternalCheck(target_address="0x" + "11" * 20, target_call_selector="0xdeadbeef")
+    )
+    via_check.subject = "bound"
+    desc = _bound_condition_description(via_check)
+    assert "0x" + "11" * 20 in desc and "0xdeadbeef" in desc
+
+    via_trace = CapabilityExpr.finite_set([], subject="bound", trace=[{"target": "0x" + "22" * 20}])
+    assert "0x" + "22" * 20 in _bound_condition_description(via_trace)
+
+    generic = CapabilityExpr.finite_set([], subject="bound")
+    assert "delegated cross-contract authorization" in _bound_condition_description(generic)
