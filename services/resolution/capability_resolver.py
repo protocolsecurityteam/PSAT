@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Mapping
 
@@ -49,6 +50,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from utils.logging import record_stage_metric
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
@@ -61,6 +63,92 @@ from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
+
+
+def _capability_function_slow_ms() -> int:
+    """Per-function log threshold for the resolver profiler — mirrors
+    ``predicate_artifacts._slow_function_threshold_ms`` (env
+    ``PSAT_CAPABILITY_FUNCTION_SLOW_MS``, default 250)."""
+    try:
+        return max(0, int(os.getenv("PSAT_CAPABILITY_FUNCTION_SLOW_MS", "250")))
+    except ValueError:
+        return 250
+
+
+def _capability_summary_ms() -> int:
+    """Aggregate threshold below which the per-contract capability summary is
+    suppressed — mirrors ``predicate_artifacts._predicate_summary_threshold_ms``
+    (env ``PSAT_CAPABILITY_SUMMARY_MS``, default 500)."""
+    try:
+        return max(0, int(os.getenv("PSAT_CAPABILITY_SUMMARY_MS", "500")))
+    except ValueError:
+        return 500
+
+
+def _capability_kind_label(cap: CapabilityExpr) -> str:
+    """Bucket a resolved capability for the per-job kind tally. ``finite_set``
+    splits into ``resolved_empty`` (an exact "nobody") vs a populated set; an
+    ``external_check_only`` carrying the cold-index marker becomes
+    ``deferred_pending_index`` (flags self-heal-pending cold-event-index races).
+    This tally is the run-over-run regression signal — e.g. the Veda OR-kind
+    17→106 jump that was previously invisible because per-function outcomes were
+    never recorded."""
+    kind = getattr(cap, "kind", "unknown")
+    if kind == "finite_set":
+        members = getattr(cap, "members", None) or []
+        if not members and getattr(cap, "membership_quality", None) == "exact":
+            return "resolved_empty"
+        return "finite_set"
+    if kind == "external_check_only":
+        check = getattr(cap, "check", None)
+        extra = (getattr(check, "extra", None) or {}) if check is not None else {}
+        if extra.get("deferred_pending_index"):
+            return "deferred_pending_index"
+        return "external_check_only"
+    return str(kind)
+
+
+def _emit_capability_summary(
+    *,
+    contract_address: str,
+    total_ms: int,
+    per_function_ms: list[tuple[str, int]],
+    kind_counts: dict[str, int],
+    resolve_counters: dict[str, Any],
+) -> None:
+    """Fold the per-job capability-kind tally + work-volume counters into the
+    stage_timing artifact and, when the contract was expensive enough, emit a
+    ``capability_summary`` line (mirrors ``predicate_artifacts``' predicate
+    summary). ``record_stage_metric`` is a no-op outside a worker job context."""
+    for label, count in kind_counts.items():
+        record_stage_metric(f"cap_{label}", count)
+    record_stage_metric("cap_total", sum(kind_counts.values()))
+    adapter_match = resolve_counters.get("adapter_match") if isinstance(resolve_counters, dict) else None
+    if isinstance(adapter_match, dict):
+        for name, count in adapter_match.items():
+            record_stage_metric(f"adapter_{str(name).replace('Adapter', '')}", count)
+    for ckey in ("live_getter_calls", "live_getter_failures", "inline_recursions", "hypersync_fallback_scans"):
+        if ckey in resolve_counters:
+            record_stage_metric(ckey, resolve_counters[ckey])
+
+    if total_ms < _capability_summary_ms():
+        return
+    top_slow = sorted(per_function_ms, key=lambda kv: kv[1], reverse=True)[:5]
+    logger.info(
+        "capability summary for %s: total=%dms fns=%d kinds=%s",
+        contract_address,
+        total_ms,
+        len(per_function_ms),
+        kind_counts,
+        extra={
+            "profile_kind": "capability_summary",
+            "total_ms": total_ms,
+            "function_count": len(per_function_ms),
+            "kind_counts": dict(kind_counts),
+            "resolve_counters": dict(resolve_counters),
+            "top_slow_functions": [{"function": name, "duration_ms": ms} for name, ms in top_slow],
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -242,6 +330,20 @@ def resolve_contract_capabilities(
         state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
     canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
     out: dict[str, dict[str, Any]] = {}
+    # Per-function profiling + per-job capability-kind tally + work-volume
+    # counters. This loop is the resolver-side twin of the static stage's
+    # ``build_predicate_artifacts`` loop, which has predicate_function_slow /
+    # predicate_summary lines; this one had none, so a function (or a cold
+    # HyperSync fallback) that ran away inside the policy stage was invisible.
+    # ``resolve_counters`` rides on each EvaluationContext.meta so the adapter
+    # dispatch and the cross-contract inline path increment it (adapter matches,
+    # live getter eth_calls, inline recursions, HyperSync scans) — surfacing
+    # redundant work without per-RPC latency noise.
+    started = time.monotonic()
+    per_function_ms: list[tuple[str, int]] = []
+    kind_counts: dict[str, int] = {}
+    resolve_counters: dict[str, Any] = {}
+    slow_threshold_ms = _capability_function_slow_ms()
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
             chain_id=chain_id,
@@ -259,9 +361,36 @@ def resolve_contract_capabilities(
                     fn_signature if isinstance(fn_signature, str) else None, canonical_signatures
                 ),
             ),
+            meta={"resolve_counters": resolve_counters},
         )
+        fn_started = time.monotonic()
         cap = evaluate_tree_with_registry(tree, registry, ctx)
+        fn_ms = int((time.monotonic() - fn_started) * 1000)
         out[fn_signature] = capability_to_dict(cap)
+        per_function_ms.append((str(fn_signature), fn_ms))
+        label = _capability_kind_label(cap)
+        kind_counts[label] = kind_counts.get(label, 0) + 1
+        if fn_ms >= slow_threshold_ms:
+            logger.info(
+                "capability function %s on %s took %dms (kind=%s)",
+                fn_signature,
+                runtime_addr,
+                fn_ms,
+                label,
+                extra={
+                    "profile_kind": "capability_function_slow",
+                    "duration_ms": fn_ms,
+                    "function": str(fn_signature),
+                    "kind": label,
+                },
+            )
+    _emit_capability_summary(
+        contract_address=runtime_addr,
+        total_ms=int((time.monotonic() - started) * 1000),
+        per_function_ms=per_function_ms,
+        kind_counts=kind_counts,
+        resolve_counters=resolve_counters,
+    )
     return out
 
 

@@ -21,7 +21,7 @@ from services.discovery.fetch import fetch, scaffold
 from services.policy.effective_permissions import build_effective_permissions
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric
 
 from .tracking import (
     build_control_snapshot,
@@ -107,7 +107,22 @@ def _build_effective_permissions(
             ),
         )
     except Exception as exc:
-        logger.debug("Recursive resolve: effective_permissions build failed: %s", exc)
+        # A nested contract whose effective-permissions build fails silently drops
+        # its role principals from the graph (consumed below in
+        # ``_role_principals_from_effective_permissions``). Was debug-only — surface
+        # it as a degraded breadcrumb so the gap is visible in stage_errors.
+        address = str((analysis.get("subject") or {}).get("address", "")) or "<unknown>"
+        record_degraded(
+            phase="recursive_effective_permissions",
+            exc=exc,
+            context={"address": address},
+        )
+        logger.warning(
+            "Recursive resolve: effective_permissions build failed for %s: %s",
+            address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
         return None
 
 
@@ -666,10 +681,14 @@ def resolve_control_graph(
     _classify_cache: dict[str, tuple[str, dict[str, object]]] = classify_cache if classify_cache is not None else {}
     nested_artifacts: dict[str, LoadedArtifacts] = dict(nested_artifacts_override or {})
 
+    classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
+
     def _cached_classify(addr: str) -> tuple[str, dict[str, object]]:
         key = addr.lower()
         if key in _classify_cache:
+            classify_stats["hits"] += 1
             return _classify_cache[key]
+        classify_stats["misses"] += 1
         kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr)
         # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
         # classified_addresses artifact.
@@ -726,6 +745,7 @@ def resolve_control_graph(
         except Exception as exc:
             return None, exc
 
+    _levels = 0
     while queue:
         # BFS guarantees ``queue`` is depth-ordered. Drain every pending entry
         # at the current minimum depth into one level so they materialize
@@ -741,6 +761,14 @@ def resolve_control_graph(
 
         if not level_pending:
             continue
+
+        _levels += 1
+        logger.info(
+            "recursive level depth=%d contracts=%d",
+            target_depth,
+            len(level_pending),
+            extra={"phase": "recursive_level", "depth": target_depth, "level_size": len(level_pending)},
+        )
 
         # Parallel materialization. ``_materialize_contract_artifacts``
         # consults ``contract_materializations`` (cheap on a hit) and runs
@@ -1006,6 +1034,33 @@ def resolve_control_graph(
                     max_depth=max_depth,
                     classify_fn=_cached_classify,
                 )
+
+    # Aggregate profile for the BFS orchestration. The per-contract static cost
+    # is already visible via the nested ``pipeline_profile`` lines; this surfaces
+    # the orchestration shape (levels walked, contracts processed, classify cache
+    # effectiveness) that was previously opaque inside the ``recursive_graph``
+    # phase. ``record_stage_metric`` is a no-op outside a worker job context.
+    logger.info(
+        "recursive graph profile: levels=%d processed=%d classify_hits=%d classify_misses=%d nodes=%d edges=%d",
+        _levels,
+        len(processed),
+        classify_stats["hits"],
+        classify_stats["misses"],
+        len(nodes),
+        len(edges),
+        extra={
+            "profile_kind": "recursive_profile",
+            "levels": _levels,
+            "processed": len(processed),
+            "classify_hits": classify_stats["hits"],
+            "classify_misses": classify_stats["misses"],
+            "nodes": len(nodes),
+            "edges": len(edges),
+        },
+    )
+    record_stage_metric("recursive_levels", _levels)
+    record_stage_metric("recursive_classify_hits", classify_stats["hits"])
+    record_stage_metric("recursive_classify_misses", classify_stats["misses"])
 
     graph: ResolvedControlGraph = {
         "schema_version": "0.1",

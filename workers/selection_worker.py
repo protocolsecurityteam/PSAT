@@ -37,7 +37,7 @@ from services.discovery.ranking import (
     not_superseded_impl_clause,
     rank_contract_rows,
 )
-from utils.logging import record_stage_metric
+from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.selection_worker")
@@ -203,7 +203,9 @@ class SelectionWorker(BaseWorker):
             self._finish(session, job, ranked=[], child_ids=[])
             return
 
-        ranked_dicts = rank_contract_rows(eligible_rows)
+        with log_timed_phase(logger, "ranking") as ph:
+            ranked_dicts = rank_contract_rows(eligible_rows)
+            ph["count"] = len(eligible_rows)
 
         # Persist rank_score onto the row so UI listings see the same ordering the selector picked.
         by_key: dict[tuple[str, str | None], dict] = {(d["__row_address"], d["__row_chain"]): d for d in ranked_dicts}

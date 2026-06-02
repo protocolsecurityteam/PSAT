@@ -25,7 +25,7 @@ from db.queue import (
 )
 from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
-from utils.logging import record_stage_metric
+from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.dapp_crawl")
@@ -86,12 +86,14 @@ class DAppCrawlWorker(BaseWorker):
             self.update_detail(session, job, detail)
 
         # Call crawler directly — no subprocess
-        result = crawl_dapp(
-            urls,
-            chain_id=chain_id,
-            wait=wait,
-            progress=report,
-        )
+        with log_timed_phase(logger, "dapp_crawl") as ph:
+            result = crawl_dapp(
+                urls,
+                chain_id=chain_id,
+                wait=wait,
+                progress=report,
+            )
+            ph["count"] = len(result["addresses"])
 
         addresses = result["addresses"]
         logger.info("DApp crawl found %d addresses for job %s", len(addresses), job.id)

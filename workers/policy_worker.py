@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -40,6 +41,23 @@ logger = logging.getLogger("workers.policy_worker")
 DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
+
+
+def _log_policy_phase(phase: str, t0: float, durations_ms: dict[str, int], **fields: Any) -> None:
+    """Emit one ``policy phase complete`` line + fold ``phase_ms_<phase>`` into the
+    stage_timing artifact, mirroring the inline per-phase pattern in
+    ``resolution_worker``/``static_worker``. ``process()`` had lifecycle markers but
+    no sub-step timing, so a slow run (e.g. the 780s CumulativeMerkleDrop policy job)
+    was an opaque single number; these lines attribute it to a named sub-step."""
+    ms = int((time.monotonic() - t0) * 1000)
+    durations_ms[phase] = ms
+    record_stage_metric(f"phase_ms_{phase}", ms)
+    logger.info(
+        "policy phase complete: %s (%dms)",
+        phase,
+        ms,
+        extra={"duration_ms": ms, "phase": phase, **fields},
+    )
 
 
 def _make_principal_type_resolver(
@@ -282,6 +300,7 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
+        durations_ms: dict[str, int] = {}
 
         # Load required artifacts from DB
         contract_analysis = get_artifact(session, job.id, "contract_analysis")
@@ -359,13 +378,21 @@ class PolicyWorker(BaseWorker):
         capability_resolver_output: dict[str, dict[str, Any]] | None = None
         if isinstance(predicate_trees, dict) and job.address:
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
+            cap_t0 = time.monotonic()
             capability_resolver_output = _resolve_semantic_capabilities(
                 session,
                 contract_address=(job.address or "").lower(),
                 job_id=job.id,
                 chain=job_chain if isinstance(job_chain, str) else None,
             )
+            _log_policy_phase(
+                "semantic_capabilities",
+                cap_t0,
+                durations_ms,
+                function_count=len(capability_resolver_output or {}),
+            )
 
+        ep_t0 = time.monotonic()
         ep_data: dict = cast(
             dict,
             build_effective_permissions(
@@ -378,6 +405,12 @@ class PolicyWorker(BaseWorker):
                 effects=effects_artifact if isinstance(effects_artifact, dict) else None,
             ),
         )
+        _log_policy_phase(
+            "effective_permissions",
+            ep_t0,
+            durations_ms,
+            function_count=len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0,
+        )
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
@@ -386,7 +419,8 @@ class PolicyWorker(BaseWorker):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
-            write_effective_function_rows(
+            rows_t0 = time.monotonic()
+            fp_added = write_effective_function_rows(
                 session,
                 contract_id=contract_row.id,
                 function_records=ep_data.get("functions", []),
@@ -395,12 +429,15 @@ class PolicyWorker(BaseWorker):
                 resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
             )
             session.commit()
+            _log_policy_phase("effective_function_rows", rows_t0, durations_ms, function_principals=fp_added)
+            record_stage_metric("function_principals", fp_added)
 
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain_id = CHAIN_IDS.get(str(job_chain or "ethereum").lower(), 1)
+            ph_t0 = time.monotonic()
             try:
                 state_var_values = _load_state_var_values(
                     session,
@@ -440,6 +477,7 @@ class PolicyWorker(BaseWorker):
                     "public_capabilities": [],
                 }
             store_artifact(session, job.id, "principal_history", data=principal_history)
+            _log_policy_phase("principal_history", ph_t0, durations_ms)
 
         logger.info(
             "Policy stage effective permissions complete for job %s address=%s name=%s",
@@ -459,6 +497,7 @@ class PolicyWorker(BaseWorker):
         # re-traversing the graph.
         root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
         root_bundle["effective_permissions"] = ep_data
+        graph_t0 = time.monotonic()
         refreshed_graph, refreshed_nested = resolve_control_graph(
             root_artifacts=root_bundle,
             rpc_url=rpc_url,
@@ -488,9 +527,16 @@ class PolicyWorker(BaseWorker):
                     job.id,
                     {addr: refreshed_nested[addr] for addr in new_addresses},
                 )
+        _log_policy_phase(
+            "graph_refresh",
+            graph_t0,
+            durations_ms,
+            graph_nodes=len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0,
+        )
 
         # Label principals
         self.update_detail(session, job, "Labeling principals")
+        labels_t0 = time.monotonic()
         pl_data = build_principal_labels(
             ep_data,
             resolved_control_graph=(
@@ -502,6 +548,12 @@ class PolicyWorker(BaseWorker):
             # principal — the dominant cost on big protocols (etherfi LP impl
             # spent 14+ min here on shared-cpu-2x).
             classify_cache=classify_cache,
+        )
+        _log_policy_phase(
+            "principal_labels",
+            labels_t0,
+            durations_ms,
+            principal_count=len(pl_data.get("principals", [])),
         )
 
         # Write to principal_labels table
@@ -535,10 +587,12 @@ class PolicyWorker(BaseWorker):
         )
 
         # Cross-contract effect enrichment: propagate labels across contract boundaries
+        enrich_t0 = time.monotonic()
         enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
         if enriched and ep_data is not None:
             self._apply_effect_label_updates(ep_data, enriched)
             store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        _log_policy_phase("cross_contract_enrichment", enrich_t0, durations_ms)
 
         self.update_detail(
             session,
@@ -555,6 +609,7 @@ class PolicyWorker(BaseWorker):
 
         # Auto-enroll protocol contracts into unified monitoring
         if job.protocol_id:
+            enroll_t0 = time.monotonic()
             try:
                 from services.monitoring.enrollment import maybe_enroll_protocol
 
@@ -615,6 +670,7 @@ class PolicyWorker(BaseWorker):
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
+            _log_policy_phase("auto_enrollment", enroll_t0, durations_ms)
 
         # Send completion webhook for re-analysis jobs
         request = job.request if isinstance(job.request, dict) else {}
@@ -632,6 +688,17 @@ class PolicyWorker(BaseWorker):
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
+
+        logger.info(
+            "policy profile: %s total=%dms",
+            job.name or "Contract",
+            sum(durations_ms.values()),
+            extra={
+                "profile_kind": "policy_profile",
+                "total_ms": sum(durations_ms.values()),
+                "durations_ms": dict(durations_ms),
+            },
+        )
 
     def _apply_effect_label_updates(self, payload: dict, enriched: dict[str, list[str]]) -> None:
         for fn in payload.get("functions", []):

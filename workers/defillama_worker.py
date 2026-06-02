@@ -27,7 +27,7 @@ from db.queue import (
 )
 from services.crawlers.defillama.scan import scan_protocol
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
-from utils.logging import record_stage_metric
+from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.defillama")
@@ -74,12 +74,14 @@ class DefiLlamaWorker(BaseWorker):
             self.update_detail(session, job, detail)
 
         # Call crawler directly — no subprocess
-        result = scan_protocol(
-            protocol_name=protocol,
-            repo_path=REPO_PATH,
-            no_clone=no_clone,
-            progress=report,
-        )
+        with log_timed_phase(logger, "defillama_scan") as ph:
+            result = scan_protocol(
+                protocol_name=protocol,
+                repo_path=REPO_PATH,
+                no_clone=no_clone,
+                progress=report,
+            )
+            ph["count"] = len(result["addresses"])
 
         addresses = result["addresses"]
         logger.info("DefiLlama scan found %d addresses for job %s", len(addresses), job.id)

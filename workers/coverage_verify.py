@@ -46,7 +46,7 @@ from sqlalchemy import text
 
 from db.models import SessionLocal
 from db.queue import HEARTBEAT_COVERAGE_VERIFY, record_heartbeat
-from utils.logging import configure_logging
+from utils.logging import configure_logging, log_timed_phase
 from utils.memory import (
     cgroup_memory_current_bytes,
     cgroup_memory_max_bytes,
@@ -236,7 +236,8 @@ class CoverageVerifyWorker:
         session = SessionLocal()
         try:
             try:
-                status = verify_one_coverage_row(session, row_id, github_token=github_token)
+                with log_timed_phase(logger, "verify_row", record_metric=False, row_id=row_id):
+                    status = verify_one_coverage_row(session, row_id, github_token=github_token)
                 session.commit()
                 # Re-read so the log line carries the post-verify state
                 # (the row may have been deleted by a concurrent rebuild,

@@ -19,6 +19,7 @@ from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
+from utils.logging import log_timed_phase
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -281,7 +282,12 @@ def _seed_block(address: str, cache: dict[str, int], *, chain_id: int = 1) -> in
         created = get_contract_creation_block(key, chain_id=chain_id)
         if isinstance(created, int) and created > 0:
             seed = created - 1
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "creation-block lookup failed for %s; falling back to genesis backfill (seed=0)",
+            key,
+            extra={"address": key, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
         seed = 0
     cache[key] = seed
     return seed
@@ -452,13 +458,18 @@ def run_event_log_indexer_loop(
         status = "running"
         with SessionLocal() as session:
             try:
-                enrolled = enroll_from_completed_jobs(session)
-                summary = scan_enrolled_events(
-                    session,
-                    fetchers=fetchers,
-                    head_fetchers=head_fetchers,
-                    block_hash_fetchers=block_hash_fetchers,
-                )
+                with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
+                    enrolled = enroll_from_completed_jobs(session)
+                    ph["enrolled"] = enrolled
+                with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
+                    summary = scan_enrolled_events(
+                        session,
+                        fetchers=fetchers,
+                        head_fetchers=head_fetchers,
+                        block_hash_fetchers=block_hash_fetchers,
+                    )
+                    ph["windows_scanned"] = summary.windows_scanned
+                    ph["inserted"] = summary.inserted
                 if enrolled or summary.inserted:
                     logger.info("event log indexer pass: enrolled=%d inserted=%d", enrolled, summary.inserted)
             except Exception:
@@ -470,7 +481,9 @@ def run_event_log_indexer_loop(
             # so it's the timely place to re-resolve). Isolated try: a reconcile
             # failure must not mark the indexing pass itself as errored.
             try:
-                reenqueued = reconcile_deferred_resolutions(session)
+                with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
+                    reenqueued = reconcile_deferred_resolutions(session)
+                    ph["reenqueued"] = reenqueued
                 if reenqueued:
                     logger.info("deferred-resolution reconciler re-enqueued %d job(s)", reenqueued)
             except Exception:

@@ -39,6 +39,7 @@ from sqlalchemy.sql import Select, Update
 from db.models import AuditReport, SessionLocal
 from db.queue import HEARTBEAT_AUDIT_SCOPE
 from services.audits import ScopeExtractionOutcome, process_audit_scope
+from utils.logging import log_timed_phase
 from workers.audit_row_worker import AuditRowWorker
 
 logger = logging.getLogger("workers.audit_scope_extraction")
@@ -188,13 +189,14 @@ class AuditScopeExtractionWorker(AuditRowWorker):
                 error="audit has text_extraction_status=success but no text_storage_key",
             )
 
-        outcome = process_audit_scope(
-            audit_report_id=audit.id,
-            text_storage_key=audit.text_storage_key,
-            text_sha256=audit.text_sha256,
-            audit_title=audit.title or "",
-            auditor=audit.auditor or "",
-        )
+        with log_timed_phase(logger, "audit_scope_extract", record_metric=False, audit_id=audit.id):
+            outcome = process_audit_scope(
+                audit_report_id=audit.id,
+                text_storage_key=audit.text_storage_key,
+                text_sha256=audit.text_sha256,
+                audit_title=audit.title or "",
+                auditor=audit.auditor or "",
+            )
         return audit.id, outcome
 
     # -- Persistence ---------------------------------------------------
