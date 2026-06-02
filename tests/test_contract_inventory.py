@@ -653,16 +653,18 @@ class TestResolveUnknownChains:
         assert by_name["Unknown1"]["chains"] == ["ethereum"]
         assert set(by_name["Unknown2"]["chains"]) == {"arbitrum", "base"}
 
-    def test_confirmed_prior_kept_first(self, monkeypatch):
-        """A confirmed prior chain stays first; newly found sibling chains append after."""
+    def test_ethereum_first_deterministic_ordering(self, monkeypatch):
+        """Multi-chain results are ordered deterministically with ethereum first."""
         a = "0x" + "a" * 40
-        contracts = [{"name": "A", "address": a, "chains": ["ethereum"]}]
+        contracts = [{"name": "A", "address": a, "chains": ["unknown"]}]
+        # Probe (in arbitrary order) confirms base, ethereum, arbitrum.
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chain_batch",
-            self._fake_probe({"ethereum": {a}, "base": {a}}),
+            self._fake_probe({"base": {a}, "ethereum": {a}, "arbitrum": {a}}),
         )
         result = resolve_chains(contracts)
-        assert result[0]["chains"] == ["ethereum", "base"]
+        assert result[0]["chains"][0] == "ethereum"
+        assert set(result[0]["chains"]) == {"ethereum", "base", "arbitrum"}
 
     def test_unresolved_stays_unknown(self, monkeypatch):
         """Address found on no chain keeps its prior (here ["unknown"])."""

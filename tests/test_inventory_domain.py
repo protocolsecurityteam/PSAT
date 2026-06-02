@@ -398,29 +398,19 @@ class TestInferChain:
 
 class TestResolveChain:
     def test_no_requested_returns_inferred(self):
-        chain, forced = _resolve_chain("ethereum", None)
-        assert chain == "ethereum"
-        assert forced is False
+        assert _resolve_chain("ethereum", None) == "ethereum"
 
     def test_empty_requested_returns_inferred(self):
-        chain, forced = _resolve_chain("arbitrum", "")
-        assert chain == "arbitrum"
-        assert forced is False
+        assert _resolve_chain("arbitrum", "") == "arbitrum"
 
     def test_matching_inferred_and_requested(self):
-        chain, forced = _resolve_chain("ethereum", "ethereum")
-        assert chain == "ethereum"
-        assert forced is False
+        assert _resolve_chain("ethereum", "ethereum") == "ethereum"
 
     def test_inferred_unknown_with_requested(self):
-        chain, forced = _resolve_chain("unknown", "polygon")
-        assert chain == "polygon"
-        assert forced is True
+        assert _resolve_chain("unknown", "polygon") == "polygon"
 
     def test_conflicting_chains_returns_none(self):
-        chain, forced = _resolve_chain("arbitrum", "ethereum")
-        assert chain is None
-        assert forced is False
+        assert _resolve_chain("arbitrum", "ethereum") is None
 
 
 # ---------------------------------------------------------------------------

@@ -157,12 +157,12 @@ def _infer_chain(url: str, text: str) -> str:
     return "unknown"
 
 
-def _resolve_chain(inferred: str, requested: str | None) -> tuple[str | None, bool]:
+def _resolve_chain(inferred: str, requested: str | None) -> str | None:
     if not requested:
-        return inferred, False
+        return inferred
     if inferred not in {requested, "unknown"}:
-        return None, False
-    return requested, inferred == "unknown"
+        return None
+    return requested
 
 
 def _fetch_page(url: str, debug: bool = False) -> str | None:

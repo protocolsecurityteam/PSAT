@@ -112,15 +112,18 @@ def resolve_chains(
     matched: dict[str, list[str]] = {a: [] for a in addrs}
     _probe_chains(addrs, list(CHAIN_IDS.keys()), matched, debug)
 
+    # Deterministic chain order — ethereum first (the canonical deployment when
+    # present), then the supported-chain order — so the primary chain a contract
+    # is analyzed on (chains[0]) is stable across runs. Probe completion order
+    # (as_completed) is not.
+    order = {ch: i for i, ch in enumerate(CHAIN_IDS)}
     resolved = 0
     for contract in contracts:
         found = canonical_chain_list(matched.get(contract.get("address", ""), [])) or []
         if not found:
             # Unprobeable (no endpoint / no code reachable): keep the prior.
             continue
-        prior = canonical_chain_list(contract.get("chains")) or []
-        confirmed = [ch for ch in prior if ch in found]
-        contract["chains"] = confirmed + [ch for ch in found if ch not in confirmed]
+        contract["chains"] = sorted(found, key=lambda ch: (ch != "ethereum", order.get(ch, len(order))))
         resolved += 1
 
     _debug_log(debug, f"Chain resolution: probed {len(addrs)} address(es), set chains for {resolved}")

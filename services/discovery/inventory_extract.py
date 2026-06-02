@@ -218,7 +218,7 @@ def _resolve_candidate_chains(
     resolved: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
-        final_chain, _hinted = _resolve_chain(candidate, requested_chain)
+        final_chain = _resolve_chain(candidate, requested_chain)
         if final_chain is None or final_chain in seen:
             continue
         seen.add(final_chain)
