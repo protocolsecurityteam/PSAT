@@ -384,3 +384,35 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
     assert row is not None
     assert row.status == "ready"
     assert row.bytecode_keccak == "0x" + "ab" * 32
+
+
+def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
+    """Build-vs-cache-hit fold: the first materialize runs the builder
+    (forge/Slither), the second is served from the cm cache. Drives the real
+    ``materialize_or_wait`` against the test DB; only the build wire is stubbed.
+    A cache-hit-rate collapse here is the redundant-rebuild signal this fold
+    exists to surface."""
+    from utils.logging import stage_metrics_var
+
+    scaffold_calls: list[Any] = []
+    collect_calls: list[Any] = []
+    snapshot_calls: list[Any] = []
+    _patch_pipeline(
+        monkeypatch,
+        scaffold_calls=scaffold_calls,
+        collect_calls=collect_calls,
+        snapshot_calls=snapshot_calls,
+    )
+
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+    finally:
+        stage_metrics_var.reset(token)
+
+    # Sanity: the cache actually engaged (scaffold ran once across two calls).
+    assert len(scaffold_calls) == 1
+    assert metrics.get("materialize_builds") == 1
+    assert metrics.get("materialize_cache_hits") == 1

@@ -926,6 +926,15 @@ class BaseWorker:
             for row in rows:
                 row.status = "satisfied"
                 row.satisfied_at = now
+            if rows:
+                logger.info(
+                    "Worker %s: job %s satisfied %d dependent edge(s) on completing %s",
+                    self.worker_id,
+                    job.id,
+                    len(rows),
+                    completed_stage.value,
+                    extra={"dependents_satisfied": len(rows), "completed_stage": completed_stage.value},
+                )
             return len(rows)
         except Exception as exc:
             logger.warning(
@@ -959,6 +968,14 @@ class BaseWorker:
             for row in rows:
                 row.status = "degraded"
                 row.satisfied_at = now
+            if rows:
+                logger.info(
+                    "Worker %s: job %s degraded %d dependent edge(s) after terminal failure",
+                    self.worker_id,
+                    job.id,
+                    len(rows),
+                    extra={"dependents_degraded": len(rows)},
+                )
             return len(rows)
         except Exception as exc:
             logger.warning(

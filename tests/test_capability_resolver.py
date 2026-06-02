@@ -1603,3 +1603,31 @@ def test_load_state_var_values_falls_back_when_job_id_missing(session, caplog):
     assert any("without job_id" in rec.message for rec in caplog.records), (
         f"expected a warn-log about job_id=None fallback; got {[r.message for r in caplog.records]}"
     )
+
+
+def test_capability_kind_label_buckets_and_lowercases():
+    """The per-job capability-kind tally (the Veda OR-regression detector) must
+    use uniform lowercase keys. ``CapabilityExpr`` stores composite kinds as
+    "OR"/"AND"; without lowercasing, the diff splits across cap_or vs cap_OR."""
+    from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck
+    from services.resolution.capability_resolver import _capability_kind_label
+
+    assert _capability_kind_label(CapabilityExpr.finite_set(["0x" + "11" * 20])) == "finite_set"
+    # Exact-empty finite_set is a real "nobody", bucketed separately.
+    assert _capability_kind_label(CapabilityExpr.finite_set([], quality="exact")) == "resolved_empty"
+    assert (
+        _capability_kind_label(CapabilityExpr.external_check_only(ExternalCheck("0x" + "22" * 20, "0x12345678")))
+        == "external_check_only"
+    )
+    # The cold-index marker promotes external_check_only into its own bucket.
+    deferred = CapabilityExpr.external_check_only(ExternalCheck(None, None, extra={"deferred_pending_index": True}))
+    assert _capability_kind_label(deferred) == "deferred_pending_index"
+    assert _capability_kind_label(CapabilityExpr.unsupported("nope")) == "unsupported"
+    assert (
+        _capability_kind_label(CapabilityExpr.conditional_universal(Condition(kind="business")))
+        == "conditional_universal"
+    )
+    # The fix: composite kinds are stored uppercase but must tally lowercase.
+    leaf = CapabilityExpr.finite_set(["0x" + "33" * 20])
+    assert _capability_kind_label(CapabilityExpr.structural_or([leaf, leaf])) == "or"
+    assert _capability_kind_label(CapabilityExpr.structural_and([leaf, leaf])) == "and"

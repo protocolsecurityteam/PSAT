@@ -658,6 +658,9 @@ class ResolutionWorker(BaseWorker):
         parent_company = job.company
 
         edges_inserted = 0
+        n_satisfied = 0
+        n_pending = 0
+        n_cycle = 0
         for target_addr in target_addresses:
             # Self-references — A's own state-var resolves to A's address
             # — never form a useful dependency. Skip.
@@ -753,14 +756,44 @@ class ResolutionWorker(BaseWorker):
             # ``workers.event_log_indexer._bulk_insert_logs``.
             if (getattr(result, "rowcount", 0) or 0) > 0:
                 edges_inserted += 1
+                if edge_status == "satisfied":
+                    n_satisfied += 1
+                elif edge_status == "cycle_degraded":
+                    n_cycle += 1
+                    # A dependency cycle is a degraded outcome — the edge is
+                    # inserted non-blocking so the depender doesn't deadlock under
+                    # the claim gate. Surface it instead of letting a real stall
+                    # condition land silently.
+                    logger.warning(
+                        "Job %s: dependency cycle on provider %s — edge inserted as cycle_degraded (path=%s)",
+                        job.id,
+                        dependency_provider_addr,
+                        cycle_path,
+                        extra={"provider_address": dependency_provider_addr, "cycle_path": cycle_path},
+                    )
+                else:
+                    n_pending += 1
 
         if edges_inserted:
             session.commit()
             logger.info(
-                "Job %s: emitted %d dependency edge(s) on external authority contracts",
+                "Job %s: emitted %d dependency edge(s) on external authority contracts "
+                "(satisfied=%d pending=%d cycle_degraded=%d)",
                 job.id,
                 edges_inserted,
+                n_satisfied,
+                n_pending,
+                n_cycle,
+                extra={
+                    "dep_edges_inserted": edges_inserted,
+                    "dep_satisfied": n_satisfied,
+                    "dep_pending": n_pending,
+                    "dep_cycle_degraded": n_cycle,
+                },
             )
+            record_stage_metric("dep_edges_inserted", edges_inserted)
+            record_stage_metric("dep_edges_pending", n_pending)
+            record_stage_metric("dep_edges_cycle_degraded", n_cycle)
 
 
 def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:

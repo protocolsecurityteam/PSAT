@@ -105,7 +105,11 @@ def _capability_kind_label(cap: CapabilityExpr) -> str:
         if extra.get("deferred_pending_index"):
             return "deferred_pending_index"
         return "external_check_only"
-    return str(kind)
+    # Lowercase so the metric keys are uniform (cap_or / cap_and /
+    # cap_cofinite_blacklist, matching the special-cased lowercase labels above)
+    # — ``CapabilityExpr`` stores composite kinds as "OR"/"AND". Mixed casing
+    # would split the run-over-run diff this tally exists for.
+    return str(kind).lower()
 
 
 def _emit_capability_summary(

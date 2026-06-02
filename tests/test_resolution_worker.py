@@ -890,6 +890,175 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     assert dep.status == "satisfied"
 
 
+def _authority_check_predicate_trees() -> dict:
+    """A minimal predicate_trees artifact whose only leaf delegates auth to an
+    external ``authority`` state variable — enough to emit one dependency edge."""
+    return {
+        "schema_version": "semantic",
+        "contract_name": "Depender",
+        "trees": {},
+        "check_trees": {
+            "canCall(address,address,bytes4)": {
+                "op": "LEAF",
+                "leaf": {
+                    "kind": "external_bool",
+                    "operator": "truthy",
+                    "authority_role": "delegated_authority",
+                    "operands": [{"source": "msg_sender"}],
+                    "set_descriptor": {
+                        "kind": "external_set",
+                        "authority_contract": {
+                            "address_source": {"source": "state_variable", "state_variable_name": "authority"}
+                        },
+                        "callee_signature": "canCall(address,address,bytes4)",
+                    },
+                },
+            }
+        },
+    }
+
+
+def test_dependency_emission_records_pending_status_metrics(db_session_for_resolution):
+    """A provider with no policy artifacts yet → a 'pending' edge; the emitter
+    folds the per-status breakdown into the stage metrics."""
+    from sqlalchemy import select
+
+    from db.models import JobDependency, JobStage
+    from db.queue import create_job, store_artifact
+    from utils.logging import stage_metrics_var
+
+    session = db_session_for_resolution
+    provider_addr = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
+    depender_addr = "0x" + uuid.uuid4().hex[:8] + "dd" * 16
+
+    depender_job = create_job(
+        session,
+        {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
+        initial_stage=JobStage.resolution,
+    )
+    store_artifact(session, depender_job.id, "predicate_trees", data=_authority_check_predicate_trees())
+    snapshot = {"controller_values": {"external_contract:authority": {"value": provider_addr}}}
+
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
+            session, cast(Any, depender_job), cast(Any, snapshot), "https://rpc.example"
+        )
+    finally:
+        stage_metrics_var.reset(token)
+
+    dep = session.execute(select(JobDependency).where(JobDependency.depender_job_id == depender_job.id)).scalar_one()
+    assert dep.status == "pending"
+    assert metrics["dep_edges_inserted"] == 1
+    assert metrics["dep_edges_pending"] == 1
+    assert metrics["dep_edges_cycle_degraded"] == 0
+
+
+def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolution, caplog):
+    """A would-be cycle (B already depends on A; A now depends on B) is inserted
+    non-blocking as ``cycle_degraded`` — and must surface a WARNING + metric
+    instead of landing silently."""
+    import logging as _logging
+
+    from sqlalchemy import select
+
+    from db.models import JobDependency, JobStage
+    from db.queue import create_job, store_artifact
+    from utils.logging import stage_metrics_var
+
+    session = db_session_for_resolution
+    a_addr = "0x" + uuid.uuid4().hex[:8] + "ee" * 16  # depender A
+    b_addr = "0x" + uuid.uuid4().hex[:8] + "ff" * 16  # provider B
+
+    job_a = create_job(
+        session, {"address": a_addr, "chain": "ethereum", "name": "A"}, initial_stage=JobStage.resolution
+    )
+    job_b = create_job(
+        session, {"address": b_addr, "chain": "ethereum", "name": "B"}, initial_stage=JobStage.resolution
+    )
+    session.commit()
+    # Pre-existing edge B → A; adding A → B closes the cycle.
+    session.add(
+        JobDependency(
+            depender_job_id=job_b.id,
+            provider_chain="ethereum",
+            provider_address=a_addr,
+            required_stage=JobStage.policy,
+            status="pending",
+        )
+    )
+    session.commit()
+
+    store_artifact(session, job_a.id, "predicate_trees", data=_authority_check_predicate_trees())
+    snapshot = {"controller_values": {"external_contract:authority": {"value": b_addr}}}
+
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        with caplog.at_level(_logging.WARNING, logger="workers.resolution_worker"):
+            ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
+                session, cast(Any, job_a), cast(Any, snapshot), "https://rpc.example"
+            )
+    finally:
+        stage_metrics_var.reset(token)
+
+    dep = session.execute(
+        select(JobDependency).where(
+            JobDependency.depender_job_id == job_a.id,
+            JobDependency.provider_address == b_addr,
+        )
+    ).scalar_one()
+    assert dep.status == "cycle_degraded"
+    assert dep.cycle_path is not None
+    assert metrics["dep_edges_cycle_degraded"] == 1
+    assert any("dependency cycle" in rec.message.lower() for rec in caplog.records)
+
+
+def test_satisfy_dependencies_logs_flipped_count(db_session_for_resolution, caplog):
+    """Completing a provider flips its dependents to ``satisfied`` and logs the
+    count (was discarded by the caller, so the cross-contract unblock was
+    invisible)."""
+    import logging as _logging
+
+    from sqlalchemy import select
+
+    from db.models import JobDependency, JobStage
+    from db.queue import create_job
+
+    session = db_session_for_resolution
+    provider_addr = "0x" + uuid.uuid4().hex[:8] + "ab" * 16
+    depender_addr = "0x" + uuid.uuid4().hex[:8] + "cd" * 16
+
+    provider_job = create_job(
+        session, {"address": provider_addr, "chain": "ethereum", "name": "Provider"}, initial_stage=JobStage.policy
+    )
+    depender_job = create_job(
+        session, {"address": depender_addr, "chain": "ethereum", "name": "Dep"}, initial_stage=JobStage.policy
+    )
+    session.commit()
+    session.add(
+        JobDependency(
+            depender_job_id=depender_job.id,
+            provider_chain="ethereum",
+            provider_address=provider_addr,
+            required_stage=JobStage.policy,
+            status="pending",
+        )
+    )
+    session.commit()
+
+    with caplog.at_level(_logging.INFO, logger="workers.base"):
+        flipped = ResolutionWorker()._satisfy_dependencies(
+            session, cast(Any, provider_job), completed_stage=JobStage.policy
+        )
+
+    assert flipped == 1
+    row = session.execute(select(JobDependency).where(JobDependency.depender_job_id == depender_job.id)).scalar_one()
+    assert row.status == "satisfied"
+    assert any("satisfied 1 dependent" in rec.message for rec in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # 13. resolved_graph_path does not exist
 # ---------------------------------------------------------------------------
