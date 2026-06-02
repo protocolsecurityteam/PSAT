@@ -34,10 +34,48 @@ from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, p
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
+from utils.chains import canonical_chain, canonical_chain_list
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
+
+
+def _fan_out_discovered_entries(discovered: list[dict]) -> list[dict]:
+    """Build bulk-upsert entries, one row per resolved chain.
+
+    A contract with identical bytecode on several chains is still governed
+    independently per chain (owner/admin/roles live in per-chain storage), so
+    each ``(address, chain)`` becomes its own catalogued + analyzable row. The
+    full sibling list is carried along in ``chains`` for display. Single-chain
+    or unknown-chain entries collapse to one row exactly as before, so
+    chain-less back-compat is unchanged.
+    """
+    bulk_entries: list[dict] = []
+    for entry in discovered:
+        row_chains = canonical_chain_list(entry.get("chains")) or []
+        real_chains = [c for c in row_chains if c != "unknown"]
+        if real_chains:
+            fan_chains: list[str | None] = list(real_chains)
+        elif row_chains:
+            fan_chains = [row_chains[0]]
+        else:
+            fan_chains = [canonical_chain(entry.get("chain"))]
+        entry_sources = entry.get("source") or ["inventory"]
+        if not isinstance(entry_sources, list):
+            entry_sources = [str(entry_sources)]
+        for row_chain in fan_chains:
+            bulk_entries.append(
+                {
+                    "address": str(entry["address"]),
+                    "chain": row_chain,
+                    "new_sources": entry_sources,
+                    "contract_name": entry.get("name"),
+                    "confidence": entry.get("confidence"),
+                    "chains": entry.get("chains"),
+                }
+            )
+    return bulk_entries
 
 
 def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[dict]) -> None:
@@ -268,23 +306,7 @@ class DiscoveryWorker(BaseWorker):
         # own ``source`` list (e.g. ``["ai_inventory", "deployer_expansion"]``)
         # when multiple inventory signals agreed; preserve that granularity
         # so ranking sees the richer corroboration story.
-        bulk_entries: list[dict] = []
-        for entry in discovered:
-            entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
-            entry_sources = entry.get("source") or ["inventory"]
-            if not isinstance(entry_sources, list):
-                entry_sources = [str(entry_sources)]
-            bulk_entries.append(
-                {
-                    "address": str(entry["address"]),
-                    "chain": entry_chain,
-                    "new_sources": entry_sources,
-                    "contract_name": entry.get("name"),
-                    "confidence": entry.get("confidence"),
-                    "chains": entry.get("chains"),
-                }
-            )
+        bulk_entries = _fan_out_discovered_entries(discovered)
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
         # into roughly one round-trip.

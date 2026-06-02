@@ -625,10 +625,18 @@ class TestResolveChains:
     KB = "0x" + "bb" * 32  # a different contract's bytecode keccak "B"
 
     @staticmethod
-    def _fake_codes(codes_by_chain):
-        """Build a _probe_chain_codes stub: codes_by_chain maps chain -> {address: code_keccak}."""
+    def _fake_codes(codes_by_chain, unprobeable=()):
+        """Build a _probe_chain_codes stub.
+
+        ``codes_by_chain`` maps chain -> {address: code_keccak} (a successful
+        probe). Chains in ``unprobeable`` return ``None`` (couldn't check —
+        eRPC down / no endpoint), distinct from a chain that probed clean.
+        """
+        unreachable = set(unprobeable)
 
         def _probe(addresses, chain_name, debug=False):
+            if chain_name in unreachable:
+                return None
             m = codes_by_chain.get(chain_name, {})
             return {a: m[a] for a in addresses if a in m}
 
@@ -717,10 +725,72 @@ class TestResolveChains:
         contracts = [{"name": "AI", "address": addr, "chains": ["base"], "source": ["exa_deep_research"]}]
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chain_codes",
-            lambda addresses, chain_name, debug=False: {},
+            lambda addresses, chain_name, debug=False: None,  # eRPC down on every chain
         )
         result = resolve_chains(contracts)
         assert result[0]["chains"] == ["base"]
+
+    def test_claimed_chain_error_keeps_claim_when_probed_elsewhere(self, monkeypatch):
+        """A claimed chain that errors is kept (unconfirmed) even when another chain answers.
+
+        Tri-state probing: 'errored' must not be conflated with 'no code', or a
+        flaky probe on the claimed chain would silently drop the source's claim.
+        """
+        addr = "0x" + "e" * 40
+        contracts = [{"name": "AI", "address": addr, "chains": ["base"], "source": ["exa_deep_research"]}]
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"ethereum": {addr: self.KA}}, unprobeable=["base"]),
+        )
+        result = resolve_chains(contracts)
+        assert set(result[0]["chains"]) == {"ethereum", "base"}
+
+    def test_source_backed_variant_kept_probe_only_collision_recorded(self, monkeypatch):
+        """Different bytecode on a source-claimed chain is a legit variant (kept);
+        different bytecode on an unclaimed chain is a collision (recorded, not folded)."""
+        addr = "0x" + "f" * 40
+        contracts = [{"name": "Multi", "address": addr, "chains": ["ethereum", "base"], "source": ["ai_inventory"]}]
+        # ethereum KA (anchor); base KB but source-claimed -> variant kept;
+        # arbitrum KB but unclaimed -> collision recorded, not analyzed.
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"ethereum": {addr: self.KA}, "base": {addr: self.KB}, "arbitrum": {addr: self.KB}}),
+        )
+        result = resolve_chains(contracts)
+        assert result[0]["chains"] == ["ethereum", "base"]  # ethereum first, base variant kept
+        assert result[0].get("chain_collisions") == ["arbitrum"]
+
+
+# ---------------------------------------------------------------------------
+# _fan_out_discovered_entries — one DB row per resolved chain
+# ---------------------------------------------------------------------------
+
+
+class TestFanOutDiscoveredEntries:
+    def test_multichain_contract_fans_out_one_row_per_chain(self):
+        from workers.discovery import _fan_out_discovered_entries
+
+        discovered = [{"address": "0x" + "a" * 40, "name": "Vault", "chains": ["ethereum", "base", "arbitrum"]}]
+        rows = _fan_out_discovered_entries(discovered)
+        assert [r["chain"] for r in rows] == ["ethereum", "base", "arbitrum"]
+        # Every row carries the same identity + the full sibling footprint.
+        assert {r["address"] for r in rows} == {"0x" + "a" * 40}
+        assert all(r["chains"] == ["ethereum", "base", "arbitrum"] for r in rows)
+
+    def test_single_chain_and_unknown_collapse_to_one_row(self):
+        from workers.discovery import _fan_out_discovered_entries
+
+        discovered = [
+            {"address": "0x" + "b" * 40, "name": "Solo", "chains": ["ethereum"]},
+            {"address": "0x" + "c" * 40, "name": "Ghost", "chains": ["unknown"]},
+            {"address": "0x" + "d" * 40, "name": "Bare"},  # no chains at all
+        ]
+        rows = _fan_out_discovered_entries(discovered)
+        by_addr = {r["address"]: r for r in rows}
+        assert len(rows) == 3  # no fan-out for single/unknown/bare
+        assert by_addr["0x" + "b" * 40]["chain"] == "ethereum"
+        assert by_addr["0x" + "c" * 40]["chain"] == "unknown"  # back-compat preserved
+        assert by_addr["0x" + "d" * 40]["chain"] is None  # chain-less back-compat
 
 
 # ---------------------------------------------------------------------------
