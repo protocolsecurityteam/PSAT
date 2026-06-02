@@ -34,7 +34,7 @@ from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, p
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
@@ -175,10 +175,13 @@ class DiscoveryWorker(BaseWorker):
         from services.discovery.run_discovery import run_discovery
 
         try:
-            unified = run_discovery(company, chain=chain)
-            inventory = unified["addresses"]
-            audit_result_raw: dict | None = unified["audits"]
-            discovery_meta = unified["meta"]
+            with log_timed_phase(logger, "unified_discovery") as ph:
+                unified = run_discovery(company, chain=chain)
+                inventory = unified["addresses"]
+                audit_result_raw: dict | None = unified["audits"]
+                discovery_meta = unified["meta"]
+                ph["contracts"] = len(inventory) if hasattr(inventory, "__len__") else None
+                ph["audits"] = len(audit_result_raw) if isinstance(audit_result_raw, (list, dict)) else None
         except Exception as exc:
             record_degraded(
                 phase="unified_discovery",
@@ -437,12 +440,13 @@ class DiscoveryWorker(BaseWorker):
         # Both calls hit Etherscan. parallel_get routes each thunk through
         # _wait_rate_limit, so the 5/sec global limit is preserved while the
         # serial RTT between them goes away.
-        fan_out = etherscan.parallel_get(
-            {
-                "fetch": lambda a=address: fetch(a),
-                "creators": lambda a=address: _batch_get_creators([a]),
-            }
-        )
+        with log_timed_phase(logger, "source_fetch"):
+            fan_out = etherscan.parallel_get(
+                {
+                    "fetch": lambda a=address: fetch(a),
+                    "creators": lambda a=address: _batch_get_creators([a]),
+                }
+            )
         result_or_exc = fan_out["fetch"]
         if isinstance(result_or_exc, BaseException):
             raise result_or_exc

@@ -229,6 +229,17 @@ class AdapterRegistry:
 
     def enumerate(self, descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr:
         adapter_cls = self.pick(descriptor, ctx)
+        # Tally which adapter claimed each descriptor onto the resolve-level
+        # counter (when the capability resolver wired one onto ``ctx.meta``), so
+        # a per-job ``adapter_match`` breakdown surfaces — Solmate vs generic
+        # event-indexed vs ``no_adapter``. A standard adapter that silently
+        # stops matching (e.g. the Veda RolesAuthority cold-index race) shows up
+        # as a shift in this distribution run-over-run.
+        counters = ctx.meta.get("resolve_counters") if isinstance(ctx.meta, dict) else None
+        if isinstance(counters, dict):
+            name = adapter_cls.__name__ if adapter_cls is not None else "no_adapter"
+            bucket = counters.setdefault("adapter_match", {})
+            bucket[name] = bucket.get(name, 0) + 1
         if adapter_cls is None:
             return CapabilityExpr.unsupported("no_adapter")
         adapter = adapter_cls()

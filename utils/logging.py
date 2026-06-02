@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import sys
+import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -311,11 +312,71 @@ def record_stage_metric(key: str, value: Any) -> None:
     metrics[key] = value
 
 
+@contextmanager
+def log_timed_phase(
+    logger: logging.Logger,
+    phase: str,
+    *,
+    durations_ms: dict[str, int] | None = None,
+    record_metric: bool = True,
+    **fields: Any,
+) -> Iterator[dict[str, Any]]:
+    """Time a pipeline sub-step and, on success, emit one ``phase complete``
+    INFO line carrying ``duration_ms`` + ``phase`` — the house per-phase
+    convention (see ``workers/resolution_worker.py``'s inline
+    ``"resolution phase complete: …"`` lines and ``contract_analysis_pipeline.
+    core._phase``). Use it to make a worker's ``process()`` self-describe where
+    its time went, so a slow run is attributable to a named sub-step rather than
+    a single opaque ``[JOB] elapsed_s`` number.
+
+    Yields a mutable dict so the caller can attach result-derived structured
+    fields discovered *inside* the block (counts, ids); they are merged into the
+    emitted line's ``extra``::
+
+        durations: dict[str, int] = {}
+        with log_timed_phase(logger, "semantic_capabilities", durations_ms=durations) as ph:
+            out = resolve(...)
+            ph["function_count"] = len(out)
+
+    Behaviour:
+
+    * The duration is always recorded into ``durations_ms`` (when provided) and
+      folded into the stage_timing artifact as ``phase_ms_<phase>`` (when
+      ``record_metric`` is set; a no-op outside a worker job context) — *even if
+      the block raises*, so an aggregate emitted by an outer handler still sees
+      the partial cost.
+    * The INFO line is emitted only on a clean exit. A raising block is left to
+      the worker's failure handler to log/record, so this never double-logs a
+      failure nor mislabels one as "complete" (which also keeps it clear of the
+      ``logger.warning``-in-except level contract).
+    """
+    start = time.monotonic()
+    extra: dict[str, Any] = dict(fields)
+    success = False
+    try:
+        yield extra
+        success = True
+    finally:
+        ms = int((time.monotonic() - start) * 1000)
+        if durations_ms is not None:
+            durations_ms[phase] = ms
+        if record_metric:
+            record_stage_metric(f"phase_ms_{phase}", ms)
+        if success:
+            logger.info(
+                "phase complete: %s (%dms)",
+                phase,
+                ms,
+                extra={"duration_ms": ms, "phase": phase, **extra},
+            )
+
+
 __all__ = [
     "JsonFormatter",
     "bind_trace_context",
     "configure_logging",
     "degraded_errors_var",
+    "log_timed_phase",
     "record_degraded",
     "record_stage_metric",
     "stage_metrics_var",

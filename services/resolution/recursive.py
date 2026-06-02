@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -21,7 +22,7 @@ from services.discovery.fetch import fetch, scaffold
 from services.policy.effective_permissions import build_effective_permissions
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
 
 from .tracking import (
     build_control_snapshot,
@@ -34,6 +35,23 @@ logger = logging.getLogger(__name__)
 
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
+
+_MATERIALIZE_METRIC_LOCK = threading.Lock()
+
+
+def _bump_materialize_metric(key: str) -> None:
+    """Thread-safe +1 to a stage metric from the parallel materialize fan-out.
+    ``record_stage_metric`` overwrites, but the build-vs-cache-hit fold needs an
+    increment — and ``_materialize_with_cross_process_cache`` runs inside the
+    ``parallel_map`` worker threads, which inherit ``stage_metrics_var`` via
+    copy_context — so guard the read-modify-write. A cache-hit-rate collapse
+    here is the canonical cause of a resolution stage silently multiplying its
+    forge/Slither spend run-over-run. No-op outside a worker job context."""
+    metrics = stage_metrics_var.get()
+    if metrics is None:
+        return
+    with _MATERIALIZE_METRIC_LOCK:
+        metrics[key] = metrics.get(key, 0) + 1
 
 
 class LoadedArtifacts(TypedDict):
@@ -107,7 +125,22 @@ def _build_effective_permissions(
             ),
         )
     except Exception as exc:
-        logger.debug("Recursive resolve: effective_permissions build failed: %s", exc)
+        # A nested contract whose effective-permissions build fails silently drops
+        # its role principals from the graph (consumed below in
+        # ``_role_principals_from_effective_permissions``). Was debug-only — surface
+        # it as a degraded breadcrumb so the gap is visible in stage_errors.
+        address = str((analysis.get("subject") or {}).get("address", "")) or "<unknown>"
+        record_degraded(
+            phase="recursive_effective_permissions",
+            exc=exc,
+            context={"address": address},
+        )
+        logger.warning(
+            "Recursive resolve: effective_permissions build failed for %s: %s",
+            address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
         return None
 
 
@@ -161,12 +194,14 @@ def _materialize_with_cross_process_cache(
         fixture-isolated test, or the DB is unreachable).
     """
     if not bytecode_keccak:
+        _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix)
 
     try:
         from db import contract_materializations as cm
     except Exception as exc:
         logger.debug("contract_materializations unavailable, falling back to direct build: %s", exc)
+        _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix)
 
     if not cm.is_enabled():
@@ -174,11 +209,15 @@ def _materialize_with_cross_process_cache(
         # for prod incidents. Bypasses the persistent layer entirely so a
         # broken table or hot-spot lock contention can't fail-stop the
         # pipeline.
+        _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix)
 
     chain = os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+    built = {"ran": False}
 
     def _builder() -> Mapping[str, Any]:
+        built["ran"] = True
+        _bump_materialize_metric("materialize_builds")
         name, analysis, plan, predicate_trees = _build_static_artifacts(effective_address, workspace_prefix)
         return {
             "contract_name": name,
@@ -204,7 +243,14 @@ def _materialize_with_cross_process_cache(
         if _is_builder_exception(exc):
             raise
         logger.warning("contract_materializations.materialize_or_wait failed, falling back: %s", exc)
+        _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix)
+
+    if not built["ran"]:
+        # materialize_or_wait returned without invoking our builder — served from
+        # the persistent cache (or a sibling process built it); either way this
+        # process did not pay the forge/Slither cost.
+        _bump_materialize_metric("materialize_cache_hits")
 
     # ``hydrate_*`` transparently reads from blob storage when the row's
     # ``*_blob_key`` is set or falls back to inline JSONB (rows written
@@ -666,10 +712,14 @@ def resolve_control_graph(
     _classify_cache: dict[str, tuple[str, dict[str, object]]] = classify_cache if classify_cache is not None else {}
     nested_artifacts: dict[str, LoadedArtifacts] = dict(nested_artifacts_override or {})
 
+    classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
+
     def _cached_classify(addr: str) -> tuple[str, dict[str, object]]:
         key = addr.lower()
         if key in _classify_cache:
+            classify_stats["hits"] += 1
             return _classify_cache[key]
+        classify_stats["misses"] += 1
         kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr)
         # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
         # classified_addresses artifact.
@@ -726,6 +776,7 @@ def resolve_control_graph(
         except Exception as exc:
             return None, exc
 
+    _levels = 0
     while queue:
         # BFS guarantees ``queue`` is depth-ordered. Drain every pending entry
         # at the current minimum depth into one level so they materialize
@@ -741,6 +792,14 @@ def resolve_control_graph(
 
         if not level_pending:
             continue
+
+        _levels += 1
+        logger.info(
+            "recursive level depth=%d contracts=%d",
+            target_depth,
+            len(level_pending),
+            extra={"phase": "recursive_level", "depth": target_depth, "level_size": len(level_pending)},
+        )
 
         # Parallel materialization. ``_materialize_contract_artifacts``
         # consults ``contract_materializations`` (cheap on a hit) and runs
@@ -1006,6 +1065,41 @@ def resolve_control_graph(
                     max_depth=max_depth,
                     classify_fn=_cached_classify,
                 )
+
+    # Aggregate profile for the BFS orchestration. The per-contract static cost
+    # is already visible via the nested ``pipeline_profile`` lines; this surfaces
+    # the orchestration shape (levels walked, contracts processed, classify cache
+    # effectiveness) that was previously opaque inside the ``recursive_graph``
+    # phase. ``record_stage_metric`` is a no-op outside a worker job context.
+    _mat_metrics = stage_metrics_var.get() or {}
+    _mat_builds = _mat_metrics.get("materialize_builds", 0)
+    _mat_hits = _mat_metrics.get("materialize_cache_hits", 0)
+    logger.info(
+        "recursive graph profile: levels=%d processed=%d builds=%d cache_hits=%d "
+        "classify_hits=%d classify_misses=%d nodes=%d edges=%d",
+        _levels,
+        len(processed),
+        _mat_builds,
+        _mat_hits,
+        classify_stats["hits"],
+        classify_stats["misses"],
+        len(nodes),
+        len(edges),
+        extra={
+            "profile_kind": "recursive_profile",
+            "levels": _levels,
+            "processed": len(processed),
+            "materialize_builds": _mat_builds,
+            "materialize_cache_hits": _mat_hits,
+            "classify_hits": classify_stats["hits"],
+            "classify_misses": classify_stats["misses"],
+            "nodes": len(nodes),
+            "edges": len(edges),
+        },
+    )
+    record_stage_metric("recursive_levels", _levels)
+    record_stage_metric("recursive_classify_hits", classify_stats["hits"])
+    record_stage_metric("recursive_classify_misses", classify_stats["misses"])
 
     graph: ResolvedControlGraph = {
         "schema_version": "0.1",

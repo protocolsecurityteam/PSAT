@@ -31,7 +31,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -932,7 +932,8 @@ class StaticWorker(BaseWorker):
             self._scaffold_project(project_dir, sources, meta, build_settings, remappings)
 
             # Phase 0: Dependency artifacts (always runs — proxy deps are useful)
-            self._run_dependency_phase(session, job, project_dir, contract_name, address, target_classification)
+            with log_timed_phase(logger, "dependency_discovery"):
+                self._run_dependency_phase(session, job, project_dir, contract_name, address, target_classification)
 
             secondary_analysis: Any = None
             if is_proxy:

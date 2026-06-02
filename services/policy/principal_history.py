@@ -14,6 +14,7 @@ import requests
 from eth_utils.crypto import keccak
 
 from services.resolution.capability_resolver import _selector_for_signature
+from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ def build_principal_history(
                 functions=functions,
             )
         except Exception as exc:
+            record_degraded(
+                phase="principal_history_authority",
+                exc=exc,
+                context={"authority_address": authority_address},
+            )
             logger.warning(
                 "principal history failed for authority %s: %s",
                 authority_address,
@@ -85,6 +91,31 @@ def build_principal_history(
         public_capabilities.extend(authority_history["public_capabilities"])
 
     status = "ok" if any(source.get("status") == "ok" for source in sources) else "unsupported"
+    n_ok = sum(1 for source in sources if source.get("status") == "ok")
+    n_unsupported = sum(1 for source in sources if source.get("status") == "unsupported")
+    n_error = sum(1 for source in sources if source.get("status") == "error")
+    total_role_events = sum(
+        sum(v for v in (source.get("events") or {}).values() if isinstance(v, int))
+        for source in sources
+        if isinstance(source.get("events"), dict)
+    )
+    logger.info(
+        "principal history: %d authorities (ok=%d unsupported=%d error=%d, %d role events)",
+        len(sources),
+        n_ok,
+        n_unsupported,
+        n_error,
+        total_role_events,
+        extra={
+            "authority_count": len(sources),
+            "ok": n_ok,
+            "unsupported": n_unsupported,
+            "error": n_error,
+            "total_role_events": total_role_events,
+        },
+    )
+    record_stage_metric("principal_history_authorities", len(sources))
+    record_stage_metric("principal_history_role_events", total_role_events)
     return {
         "schema_version": "principal_history.v1",
         "contract_address": contract_address,

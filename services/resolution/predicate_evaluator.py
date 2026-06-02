@@ -49,6 +49,21 @@ from .capabilities import (
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 
+def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
+    """Increment a resolve-level work-volume counter on the outer
+    EvaluationContext's ``meta['resolve_counters']`` (wired by the capability
+    resolver). No-op when absent, so unit evaluations and the pure-week-4 path
+    are untouched. Surfaces redundant work (live getter eth_calls, cross-contract
+    inline recursions, HyperSync fallback scans) on the per-job
+    ``capability_summary`` without per-RPC latency noise."""
+    meta = getattr(outer_ctx, "meta", None)
+    if not isinstance(meta, dict):
+        return
+    counters = meta.get("resolve_counters")
+    if isinstance(counters, dict):
+        counters[key] = counters.get(key, 0) + n
+
+
 def _frame_is_inlined(ctx: "EvaluationContext") -> bool:
     """True when we're resolving inside an inlined cross-contract call — the frame's
     ``msg.sender`` has been bound to a concrete intermediate contract (the caller of
@@ -558,6 +573,7 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         return None
     if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
         return None
+    _bump_resolve_counter(outer, "live_getter_calls")
     try:
         from utils.rpc import rpc_request
 
@@ -568,6 +584,7 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
             retries=1,
         )
     except Exception:
+        _bump_resolve_counter(outer, "live_getter_failures")
         return None
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return None
@@ -934,6 +951,7 @@ def _observed_event_key_words_from_hypersync(
     token = os.getenv("ENVIO_API_TOKEN") or getattr(outer_ctx, "meta", {}).get("hypersync_token")
     if not token:
         return []
+    _bump_resolve_counter(outer_ctx, "hypersync_fallback_scans")
     address_topics: dict[str, set[str]] = {}
     hints_by_address_topic: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for hint in event_hints:
@@ -1318,6 +1336,7 @@ def _maybe_inline_cross_contract_call(
         if hasattr(ctx.adapter, "_registry")
         else _Reg()
     )
+    _bump_resolve_counter(outer_ctx, "inline_recursions")
     resolved = evaluate_tree_with_registry(callee_tree, registry_adapters, child_outer)
     if _inline_result_needs_materialization(resolved):
         materialized = _materialize_external_check_from_candidates(

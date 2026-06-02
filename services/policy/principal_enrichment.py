@@ -11,6 +11,7 @@ from typing import Any
 from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
+from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,11 @@ def build_principal_labels(
     # Fast path is the cache hit (artifact pre-populated by resolution stage),
     # so the lock is uncontended in the common case.
     classify_cache_lock = threading.Lock()
+    # Cache effectiveness is the dominant perf signal here (labeling re-runs
+    # classify_resolved_address = 6-10 RPCs on a miss; the memory note records a
+    # 14+ min etherfi LP-impl labeling pass). A hit-rate collapse run-over-run is
+    # the regression to watch.
+    classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
     def _per_address(address: str) -> PrincipalProfile | None:
         if not address.startswith("0x") or len(address) != 42:
@@ -346,9 +352,13 @@ def build_principal_labels(
                 with classify_cache_lock:
                     cached = classify_cache.get(cache_key)
             if cached is not None:
+                with classify_cache_lock:
+                    classify_stats["hits"] += 1
                 resolved_type, cached_details = cached
                 details = dict(cached_details)
             else:
+                with classify_cache_lock:
+                    classify_stats["misses"] += 1
                 resolved_type, details, cacheable = classify_resolved_address_with_status(rpc_url, address)
                 # Skip per-job cache write if any underlying probe errored —
                 # otherwise a transient blip during labeling would persist
@@ -411,6 +421,21 @@ def build_principal_labels(
             raise outcome
         if outcome is not None:
             principals.append(outcome)
+
+    logger.info(
+        "principal labels: %d principals (classify %d hit / %d miss)",
+        len(principals),
+        classify_stats["hits"],
+        classify_stats["misses"],
+        extra={
+            "phase": "principal_labels_detail",
+            "principal_count": len(principals),
+            "classify_hits": classify_stats["hits"],
+            "classify_misses": classify_stats["misses"],
+        },
+    )
+    record_stage_metric("label_classify_hits", classify_stats["hits"])
+    record_stage_metric("label_classify_misses", classify_stats["misses"])
 
     return {
         "schema_version": "0.1",

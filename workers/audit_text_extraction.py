@@ -31,6 +31,7 @@ from sqlalchemy.sql import Select, Update
 from db.models import AuditReport, SessionLocal
 from db.queue import HEARTBEAT_AUDIT_TEXT
 from services.audits import ExtractionOutcome, process_audit_report
+from utils.logging import log_timed_phase
 from workers.audit_row_worker import AuditRowWorker
 
 logger = logging.getLogger("workers.audit_text_extraction")
@@ -135,11 +136,12 @@ class AuditTextExtractionWorker(AuditRowWorker):
 
         host_sem = self._host_semaphore(url)
         with host_sem:
-            outcome = process_audit_report(
-                audit_report_id=audit.id,
-                url=url,
-                session=self._http_session,
-            )
+            with log_timed_phase(logger, "audit_text_extract", record_metric=False, audit_id=audit.id):
+                outcome = process_audit_report(
+                    audit_report_id=audit.id,
+                    url=url,
+                    session=self._http_session,
+                )
         return audit.id, outcome
 
     def _persist_outcome(self, audit_id: int, outcome: ExtractionOutcome) -> None:
