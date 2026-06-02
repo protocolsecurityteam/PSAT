@@ -17,7 +17,14 @@ from typing import Any, cast
 from sqlalchemy import select
 
 from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition
-from db.queue import _MUTABLE_CONTRACT_FIELDS, create_job, get_artifact, get_source_files, store_artifact
+from db.queue import (
+    _MUTABLE_CONTRACT_FIELDS,
+    create_job,
+    get_artifact,
+    get_source_files,
+    reconcile_impl_job_for_proxy,
+    store_artifact,
+)
 from schemas.contract_analysis import ContractAnalysis
 from services.discovery import (
     build_dependency_visualization,
@@ -1190,22 +1197,26 @@ class StaticWorker(BaseWorker):
 
         for impl_addr, label in impl_entries:
             if force:
-                # Advisory xact lock serializes the SELECT-then-INSERT against concurrent static workers.
+                # Advisory xact lock serializes the reconcile-then-INSERT against concurrent static workers.
                 lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{impl_addr.lower()}"
                 lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
                 session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
-                # Same (address, root_job_id, chain) → reject; chain is required for multi-chain cascades.
-                stmt = select(Job).where(
-                    Job.address == impl_addr,
-                    Job.request["root_job_id"].as_string() == root_job_id,
-                )
-                if chain is not None:
-                    stmt = stmt.where(Job.request["chain"].as_string() == chain)
-                existing = session.execute(stmt.limit(1)).scalar_one_or_none()
-            else:
-                existing = session.execute(select(Job).where(Job.address == impl_addr).limit(1)).scalar_one_or_none()
-            if existing:
+            # Proxy-aware dedupe. A standalone (no-proxy) job for this impl is the
+            # discovery-ordering race — convert it to proxy context so it stops
+            # resolving against its own empty storage, rather than skipping it. A
+            # same-proxy job is a true duplicate; a different-proxy job means a
+            # shared impl (N proxies → 1 impl), which spawns its own per-deployment
+            # job keyed by deployment_address.
+            decision = reconcile_impl_job_for_proxy(
+                session,
+                impl_addr=impl_addr,
+                proxy_addr=address,
+                proxy_type=proxy_type,
+                chain=chain,
+                root_job_id=root_job_id if force else None,
+            )
+            if decision in ("skip", "backpatched"):
                 _redirect_proxy_policy_dependencies(
                     session,
                     chain=chain,
@@ -1213,11 +1224,12 @@ class StaticWorker(BaseWorker):
                     impl_addr=impl_addr,
                 )
                 logger.info(
-                    "Job %s: %s %s already has job %s in this cascade, skipping",
+                    "Job %s: %s %s -> %s (proxy %s)",
                     job.id,
                     label,
                     impl_addr,
-                    existing.id,
+                    decision,
+                    address,
                 )
                 continue
 

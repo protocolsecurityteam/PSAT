@@ -128,11 +128,9 @@ def queue_secondary_impl_jobs(
     new address. Deduped by ``(address, root_job_id, chain)`` like the primary
     impl spawn (``static_worker._resolve_proxy``). Returns the created jobs.
     """
-    from sqlalchemy import select
     from sqlalchemy import text as sa_text
 
-    from db.models import Job
-    from db.queue import create_job
+    from db.queue import create_job, reconcile_impl_job_for_proxy
 
     if not secondary_addrs:
         return []
@@ -151,22 +149,23 @@ def queue_secondary_impl_jobs(
     for addr in secondary_addrs:
         addr_lc = addr.lower()
         if force:
-            # Advisory xact lock serialises the SELECT-then-INSERT against
+            # Advisory xact lock serialises the reconcile-then-INSERT against
             # concurrent static workers in the same cascade.
             lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{addr_lc}"
             lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
             session.execute(sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
-            stmt = select(Job).where(
-                Job.address == addr_lc,
-                Job.request["root_job_id"].as_string() == root_job_id,
-            )
-            if chain is not None:
-                stmt = stmt.where(Job.request["chain"].as_string() == chain)
-            existing = session.execute(stmt.limit(1)).scalar_one_or_none()
-        else:
-            existing = session.execute(select(Job).where(Job.address == addr_lc).limit(1)).scalar_one_or_none()
-        if existing is not None:
-            logger.info("secondary impl %s already has job %s in this cascade, skipping", addr_lc, existing.id)
+
+        decision = reconcile_impl_job_for_proxy(
+            session,
+            impl_addr=addr_lc,
+            proxy_addr=proxy_lc,
+            proxy_type=proxy_type,
+            chain=chain,
+            root_job_id=root_job_id if force else None,
+            discovery_relationship="secondary_implementation",
+        )
+        if decision in ("skip", "backpatched"):
+            logger.info("secondary impl %s -> %s (proxy %s)", addr_lc, decision, proxy_lc)
             continue
         child_request: dict[str, Any] = {
             "address": addr_lc,

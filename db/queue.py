@@ -662,6 +662,122 @@ def complete_job(
     session.commit()
 
 
+def _convert_impl_job_to_proxy_context(
+    session: Session,
+    job: Job,
+    *,
+    proxy_addr: str,
+    proxy_type: str | None = None,
+    discovery_relationship: str = "implementation",
+) -> None:
+    """Back-patch a standalone impl job to proxy context, re-enqueuing it if it ran.
+
+    An impl discovered standalone (e.g. via deployer expansion) before its proxy is
+    classified gets a job with no ``proxy_address`` and resolves against its own
+    empty storage. When the proxy later links it, convert that same job to proxy
+    context — one job, no duplicate — and re-run from static so split-proxy
+    secondary-impl linkage fires and resolution re-reads against the proxy. The
+    re-resolution's deployment-scoped writes sweep the stale standalone rows.
+    """
+    req = dict(job.request) if isinstance(job.request, dict) else {}
+    req["proxy_address"] = proxy_addr
+    if proxy_type:
+        req["proxy_type"] = proxy_type
+    req.setdefault("discovery_relationship", discovery_relationship)
+    job.request = req  # reassign so SQLAlchemy flushes the JSONB change
+
+    already_ran_resolution = job.status == JobStatus.completed or job.stage in (
+        JobStage.resolution,
+        JobStage.policy,
+        JobStage.coverage,
+        JobStage.done,
+    )
+    if already_ran_resolution:
+        job.stage = JobStage.static
+        job.status = JobStatus.queued
+        job.worker_id = None
+        job.lease_id = None
+        job.lease_expires_at = None
+        job.next_attempt_at = None
+        job.detail = f"Re-resolving in proxy context ({proxy_addr})"
+    session.commit()
+
+
+def reconcile_impl_job_for_proxy(
+    session: Session,
+    *,
+    impl_addr: str,
+    proxy_addr: str,
+    proxy_type: str | None = None,
+    chain: str | None = None,
+    root_job_id: str | None = None,
+    discovery_relationship: str = "implementation",
+) -> str:
+    """Decide how to spawn/dedupe an implementation job now known to sit behind
+    ``proxy_addr``. Returns one of:
+
+    * ``"skip"`` — a proxy-context job for this exact ``(impl, proxy)`` already
+      exists (true duplicate).
+    * ``"backpatched"`` — an existing standalone (no ``proxy_address``) job for the
+      impl was converted to proxy context (and re-enqueued if it had already run).
+      Fixes the discovery-ordering race where the impl was analyzed before its proxy.
+    * ``"spawn"`` — caller should create a fresh proxy-context child: either no job
+      exists, or only a *different* proxy's job exists (a genuine shared impl behind
+      N proxies — each proxy is its own deployment, keyed by ``deployment_address``).
+
+    ``root_job_id`` scopes the lookup to the current cascade for ``--force`` re-runs
+    (mirrors the existing per-cascade dedupe).
+    """
+    impl_lc = impl_addr.lower()
+    proxy_lc = proxy_addr.lower()
+
+    def _scoped(stmt):
+        if root_job_id is not None:
+            stmt = stmt.where(Job.request["root_job_id"].as_string() == root_job_id)
+            if chain is not None:
+                stmt = stmt.where(Job.request["chain"].as_string() == chain)
+        return stmt
+
+    same_proxy = session.execute(
+        _scoped(
+            select(Job).where(
+                Job.address == impl_lc,
+                func.lower(Job.request["proxy_address"].as_string()) == proxy_lc,
+            )
+        ).limit(1)
+    ).scalar_one_or_none()
+    if same_proxy is not None:
+        return "skip"
+
+    standalone = session.execute(
+        _scoped(
+            select(Job).where(
+                Job.address == impl_lc,
+                Job.request["proxy_address"].as_string().is_(None),
+            )
+        ).limit(1)
+    ).scalar_one_or_none()
+    if standalone is not None:
+        _convert_impl_job_to_proxy_context(
+            session,
+            standalone,
+            proxy_addr=proxy_lc,
+            proxy_type=proxy_type,
+            discovery_relationship=discovery_relationship,
+        )
+        return "backpatched"
+
+    other_proxy = session.execute(_scoped(select(Job.id).where(Job.address == impl_lc)).limit(1)).scalar_one_or_none()
+    if other_proxy is not None:
+        logger.warning(
+            "Shared implementation %s is behind multiple proxies; spawning a separate "
+            "per-deployment job for proxy %s (resolution keyed by deployment_address)",
+            impl_lc,
+            proxy_lc,
+        )
+    return "spawn"
+
+
 def fail_job(session: Session, job_id: Any, error: str) -> None:
     """Mark a job as failed with the error traceback.
 
