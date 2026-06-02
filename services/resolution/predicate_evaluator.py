@@ -78,6 +78,25 @@ def _adapter_declined_external_set(cap: "CapabilityExpr") -> bool:
     )
 
 
+def _adapter_deferred_pending_index(cap: "CapabilityExpr") -> bool:
+    """True when an adapter's decline is a *cold durable-index* deferral it has tagged
+    for self-heal (``check.extra.deferred_pending_index``): the authority's events
+    aren't backfilled yet, so the exact caller set becomes recoverable once they are.
+
+    Distinct from a settled decline (``unsupported`` / a warm authority that emitted no
+    role events). ``deferred_reconciler`` re-enqueues the owning job's policy stage once
+    the cursor reaches head — but ONLY if this marker survives into the persisted
+    ``capability_expr``. So the external_set path must preserve such a deferral verbatim
+    and NOT overwrite it with the inline cross-contract probe / event-candidate
+    materializer: that live probe is a non-self-healing heuristic that drops the marker
+    and freezes the cold result (the Veda RolesAuthority cold-start race)."""
+    return (
+        cap.kind == "external_check_only"
+        and cap.check is not None
+        and bool((cap.check.extra or {}).get("deferred_pending_index"))
+    )
+
+
 def _state_var_lookup_key(operand: dict[str, Any]) -> str | None:
     name = operand.get("state_variable_name")
     if not isinstance(name, str) or not name:
@@ -356,15 +375,26 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 # "no standard-aware answer", so this never special-cases by name.
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
                 if _adapter_declined_external_set(cap):
-                    inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
-                    if inlined is not None:
-                        # The inline result carries its own subject — ``bound`` when the
-                        # inlined downstream call's auth keyed on the frame-bound
-                        # intermediate caller (so it stays a side-condition, not a caller
-                        # set). Do NOT re-tag against the (root) outer frame.
-                        cap = inlined
+                    if _adapter_deferred_pending_index(cap):
+                        # Cold durable index: keep the adapter's tagged deferral so
+                        # ``deferred_reconciler`` re-resolves this function *exactly* once
+                        # the authority's events backfill. Falling through to the inline
+                        # probe / event-candidate materializer would drop the
+                        # ``deferred_pending_index`` marker and freeze a cold result
+                        # (a lower_bound live probe, or a bare external check that masks a
+                        # role-less owner-renounced gate) that never self-heals — the Veda
+                        # RolesAuthority cold-start race.
+                        cap = _tag_caller_subject(cap, ctx)
                     else:
-                        cap = _tag_caller_subject(_external_check_from_descriptor(leaf, descriptor, ctx), ctx)
+                        inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
+                        if inlined is not None:
+                            # The inline result carries its own subject — ``bound`` when the
+                            # inlined downstream call's auth keyed on the frame-bound
+                            # intermediate caller (so it stays a side-condition, not a caller
+                            # set). Do NOT re-tag against the (root) outer frame.
+                            cap = inlined
+                        else:
+                            cap = _tag_caller_subject(_external_check_from_descriptor(leaf, descriptor, ctx), ctx)
                 else:
                     cap = _tag_caller_subject(cap, ctx)
             else:

@@ -47,6 +47,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck  # noqa: E402
+from services.resolution.deferred_reconciler import (  # noqa: E402
+    DEFERRED_MARKER,
+    _iter_deferred_authorities,
+)
 
 _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "veda_teller_stack.json"
@@ -430,6 +434,42 @@ def test_pin5_uncrawled_authority_does_not_surface_public(session, fixture, seed
     assert surface.authority_public is False, f"an unresolved caller gate must not surface as `anyone`; status={status}"
     assert status != "public"
     assert _row_addresses(surface) == set(), "no principals may be minted for an unresolved gate"
+
+
+# ---------------------------------------------------------------------------
+# #6 — cold-start race self-heal: the cold own gate must persist the
+# ``deferred_pending_index`` marker so ``deferred_reconciler`` re-resolves it once the
+# authority backfills. End-to-end through the production resolver against a cold DB.
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+@pytest.mark.parametrize("seed_vault", [True, False])
+def test_pin6_cold_index_gate_persists_deferral_for_selfheal(session, fixture, seed_vault):
+    # The Veda cold-start race: the RolesAuthority's role events aren't indexed when the
+    # Teller is resolved (resolution runs during the job; the durable index is backfilled
+    # after). The own ``canCall`` gate must fail closed to an ``external_check_only``
+    # tagged ``deferred_pending_index`` — the marker ``deferred_reconciler`` keys on to
+    # re-enqueue this job's policy stage once the authority's cursor reaches head, which
+    # then re-resolves it to the exact role set / ``resolved_empty``.
+    #
+    # Regression (Veda OR-unresolved 17→106): the ``external_set`` branch overwrote that
+    # tagged deferral with the inline cross-contract probe / event-candidate materializer,
+    # dropping the marker. ``effective_functions`` then carried 0 deferral markers, the
+    # reconciler never re-enqueued, and the cold result (a ``lower_bound`` live probe or a
+    # role-less ``external_check_only`` → OR, 0 principals) stuck forever. The reconciler's
+    # re-enqueue-on-marker half is pinned by ``test_deferred_resolution_reconcile.py``;
+    # this pins that a cold resolution actually emits the marker the reconciler needs.
+    out = _resolve(session, fixture, seed_vault=seed_vault, seed_role_events=False)
+
+    authority = fixture["authority_address"].lower()
+    for signature in (_DENY_ALL, _BULKWITHDRAW):
+        deferred = set(_iter_deferred_authorities(out[signature]))
+        assert authority in deferred, (
+            f"{signature}: a cold-index canCall gate must persist its {DEFERRED_MARKER!r} "
+            f"marker (authority={authority}) so deferred_reconciler self-heals it once the "
+            f"index warms; got {json.dumps(out[signature])[:700]}"
+        )
 
 
 # ---------------------------------------------------------------------------
