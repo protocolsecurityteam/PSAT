@@ -48,6 +48,7 @@ from typing import Any, Mapping
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from utils.logging import record_stage_metric
@@ -584,7 +585,15 @@ def _load_state_var_values(
             stmt = stmt.where(Contract.chain == chain)
         contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
         if contract is not None:
-            return _controller_values_for_contract(session, contract)
+            # Scope to this job's deployment so a shared impl (N proxies → 1 impl
+            # row) reads only its own proxy's controller values, not a sibling's.
+            job = session.get(Job, job_id)
+            deployment = (
+                normalize_deployment(job.request.get("proxy_address"))
+                if job is not None and isinstance(job.request, dict)
+                else None
+            )
+            return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
     else:
         logger.warning(
             "_load_state_var_values called without job_id for address=%s; "
@@ -604,8 +613,19 @@ def _load_state_var_values(
     return _controller_values_for_contract(session, contract)
 
 
-def _controller_values_for_contract(session: Session, contract: Contract) -> dict[str, str]:
-    rows = session.execute(select(ControllerValue).where(ControllerValue.contract_id == contract.id)).scalars()
+def _controller_values_for_contract(
+    session: Session,
+    contract: Contract,
+    deployment_address: str | None = None,
+    *,
+    scope_deployment: bool = False,
+) -> dict[str, str]:
+    stmt = select(ControllerValue).where(ControllerValue.contract_id == contract.id)
+    if scope_deployment:
+        # One impl row can hold N per-proxy controller sets; read only this
+        # deployment's (plus legacy untagged NULL) rows. No-op for 1:1.
+        stmt = stmt.where(deployment_scope(ControllerValue.deployment_address, deployment_address))
+    rows = session.execute(stmt).scalars()
     state_var: dict[str, str] = {}
     other: dict[str, str] = {}
     for row in rows:

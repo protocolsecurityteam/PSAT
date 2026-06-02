@@ -83,6 +83,7 @@ class _TEffectiveFunction(_TestBase):
     __tablename__ = "effective_functions"
     id = Column(Integer, primary_key=True)
     contract_id = Column(Integer, ForeignKey("contracts.id"))
+    deployment_address = Column(String(42))
     function_name = Column(String(255))
     selector = Column(String(10))
     abi_signature = Column(Text)

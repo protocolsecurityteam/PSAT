@@ -37,6 +37,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.deployment import deployment_scope
 from db.models import EffectiveFunction, FunctionPrincipal
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
@@ -121,6 +122,7 @@ def write_effective_function_rows(
     capability_by_function: Mapping[str, CapabilityExpr | dict[str, Any]] | None,
     safe_address_lookup: dict[str, str] | None = None,
     resolve_principal_type: Callable[[str], tuple[str | None, dict[str, Any] | None]] | None = None,
+    deployment_address: str | None = None,
 ) -> int:
     """Replace this contract's ``EffectiveFunction`` rows with semantic
     rows and their associated ``FunctionPrincipal`` rows.
@@ -153,10 +155,13 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
-    # Replace the contract's effective_functions wholesale (matches the
-    # pre-B.1 worker behavior; FunctionPrincipal rows cascade-delete via
-    # the relationship's cascade="all, delete-orphan").
-    session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).delete()
+    # Replace this deployment's effective_functions wholesale, sweeping any
+    # legacy untagged (NULL) rows. FunctionPrincipal rows are removed by the
+    # DB-level ON DELETE CASCADE on function_principals.function_id.
+    session.query(EffectiveFunction).filter(
+        EffectiveFunction.contract_id == contract_id,
+        deployment_scope(EffectiveFunction.deployment_address, deployment_address),
+    ).delete(synchronize_session=False)
     session.flush()
 
     added_principals = 0
@@ -201,6 +206,7 @@ def write_effective_function_rows(
 
         ef_kwargs: dict[str, Any] = {
             "contract_id": contract_id,
+            "deployment_address": deployment_address,
             "function_name": function_name,
             "selector": fn.get("selector"),
             "abi_signature": fn_signature,
