@@ -620,19 +620,22 @@ class TestGroupMultiDeployments:
 # ---------------------------------------------------------------------------
 
 
-class TestResolveUnknownChains:
+class TestResolveChains:
+    KA = "0x" + "aa" * 32  # bytecode keccak "A"
+    KB = "0x" + "bb" * 32  # a different contract's bytecode keccak "B"
+
     @staticmethod
-    def _fake_probe(code_by_chain):
-        """Build a _probe_chain_batch stub: code_by_chain maps chain_name -> set(addresses with code)."""
+    def _fake_codes(codes_by_chain):
+        """Build a _probe_chain_codes stub: codes_by_chain maps chain -> {address: code_keccak}."""
 
         def _probe(addresses, chain_name, debug=False):
-            have = code_by_chain.get(chain_name, set())
-            return {a for a in addresses if a in have}
+            m = codes_by_chain.get(chain_name, {})
+            return {a: m[a] for a in addresses if a in m}
 
         return _probe
 
     def test_resolves_unknown_to_correct_chain(self, monkeypatch):
-        """Contracts with chains=["unknown"] get resolved via cross-chain getCode probing."""
+        """chains=["unknown"] entries get resolved via cross-chain getCode probing."""
         b = "0x" + "b" * 40
         c = "0x" + "c" * 40
         contracts = [
@@ -640,81 +643,84 @@ class TestResolveUnknownChains:
             {"name": "Unknown1", "address": b, "chains": ["unknown"]},
             {"name": "Unknown2", "address": c, "chains": ["unknown"]},
         ]
-        # Unknown1 found on ethereum; Unknown2 found on arbitrum + base.
+        # Unknown1 on ethereum; Unknown2 a true sibling on arbitrum + base (same bytecode).
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            self._fake_probe({"ethereum": {b}, "arbitrum": {c}, "base": {c}}),
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"ethereum": {b: self.KA}, "arbitrum": {c: self.KB}, "base": {c: self.KB}}),
         )
-
         result = resolve_chains(contracts, debug=False)
         by_name = {row["name"]: row for row in result}
 
-        assert by_name["Known"]["chains"] == ["ethereum"]
+        assert by_name["Known"]["chains"] == ["ethereum"]  # no code probed -> prior kept
         assert by_name["Unknown1"]["chains"] == ["ethereum"]
         assert set(by_name["Unknown2"]["chains"]) == {"arbitrum", "base"}
 
     def test_ethereum_first_deterministic_ordering(self, monkeypatch):
-        """Multi-chain results are ordered deterministically with ethereum first."""
+        """Same-bytecode siblings are ordered deterministically with ethereum first."""
         a = "0x" + "a" * 40
         contracts = [{"name": "A", "address": a, "chains": ["unknown"]}]
-        # Probe (in arbitrary order) confirms base, ethereum, arbitrum.
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            self._fake_probe({"base": {a}, "ethereum": {a}, "arbitrum": {a}}),
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"base": {a: self.KA}, "ethereum": {a: self.KA}, "arbitrum": {a: self.KA}}),
         )
         result = resolve_chains(contracts)
         assert result[0]["chains"][0] == "ethereum"
         assert set(result[0]["chains"]) == {"ethereum", "base", "arbitrum"}
 
+    def test_collision_excluded_not_merged(self, monkeypatch):
+        """A different contract sharing the address on another chain is excluded, not merged."""
+        addr = "0x" + "e" * 40
+        contracts = [{"name": "X", "address": addr, "chains": ["base"], "source": ["exa_deep_research"]}]
+        # Found on base (bytecode B); ethereum has a DIFFERENT contract (bytecode A) at the same address.
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"base": {addr: self.KB}, "ethereum": {addr: self.KA}}),
+        )
+        result = resolve_chains(contracts)
+        assert result[0]["chains"] == ["base"]  # ethereum collision excluded, not folded in
+
+    def test_siblings_grouped_collision_dropped(self, monkeypatch):
+        """True siblings (same bytecode) fold together; a different-bytecode chain is dropped."""
+        addr = "0x" + "f" * 40
+        contracts = [{"name": "Y", "address": addr, "chains": ["ethereum"], "source": ["ai_inventory"]}]
+        monkeypatch.setattr(
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"ethereum": {addr: self.KA}, "arbitrum": {addr: self.KA}, "base": {addr: self.KB}}),
+        )
+        result = resolve_chains(contracts)
+        assert result[0]["chains"] == ["ethereum", "arbitrum"]  # base (different bytecode) dropped
+
     def test_unresolved_stays_unknown(self, monkeypatch):
         """Address found on no chain keeps its prior (here ["unknown"])."""
         contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            lambda addresses, chain_name, debug=False: set(),
+            "services.discovery.chain_resolver._probe_chain_codes",
+            lambda addresses, chain_name, debug=False: {},
         )
         result = resolve_chains(contracts)
         assert result[0]["chains"] == ["unknown"]
 
     def test_wrong_claim_overwritten_by_probe(self, monkeypatch):
-        """A wrong (LLM) claim is just overwritten by where the code actually is — no verify/correct path."""
+        """A wrong (LLM) claim is overwritten by where the code actually is."""
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]}]
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            self._fake_probe({"base": {addr}}),
+            "services.discovery.chain_resolver._probe_chain_codes",
+            self._fake_codes({"base": {addr: self.KA}}),
         )
         result = resolve_chains(contracts)
         assert result[0]["chains"] == ["base"]
 
     def test_unprobeable_keeps_prior_claim(self, monkeypatch):
-        """When the probe reaches nothing (eRPC down / unreachable), the prior is kept, not downgraded."""
+        """When the probe reaches nothing (eRPC down), the prior is kept, not downgraded."""
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["base"], "source": ["exa_deep_research"]}]
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            lambda addresses, chain_name, debug=False: set(),
+            "services.discovery.chain_resolver._probe_chain_codes",
+            lambda addresses, chain_name, debug=False: {},
         )
         result = resolve_chains(contracts)
         assert result[0]["chains"] == ["base"]
-
-    def test_resolve_chains_composes_unknown_and_validate(self, monkeypatch):
-        """resolve_chains() resolves unknowns AND verifies speculative claims in one pass."""
-        unk = "0x" + "1" * 40
-        exa = "0x" + "2" * 40
-        contracts = [
-            {"name": "Unk", "address": unk, "chains": ["unknown"]},
-            {"name": "Exa", "address": exa, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]},
-        ]
-        # Unk's code lives on base; Exa's ethereum claim is wrong — code is on optimism.
-        monkeypatch.setattr(
-            "services.discovery.chain_resolver._probe_chain_batch",
-            self._fake_probe({"base": {unk}, "optimism": {exa}}),
-        )
-        result = resolve_chains(contracts)
-        by_name = {row["name"]: row for row in result}
-        assert by_name["Unk"]["chains"] == ["base"]
-        assert by_name["Exa"]["chains"] == ["optimism"]
 
 
 # ---------------------------------------------------------------------------
@@ -830,9 +836,11 @@ class TestOrchestratorIntegration:
 
         # Chain resolver: Bridge found on arbitrum.
         def fake_probe(addresses, chain_name, debug=False):
-            return {a for a in addresses if a == addr_unknown and chain_name == "arbitrum"}
+            if chain_name == "arbitrum" and addr_unknown in addresses:
+                return {addr_unknown: "0x" + "ab" * 32}
+            return {}
 
-        monkeypatch.setattr("services.discovery.chain_resolver._probe_chain_batch", fake_probe)
+        monkeypatch.setattr("services.discovery.chain_resolver._probe_chain_codes", fake_probe)
 
         result = search_protocol_inventory("docs.example.com", limit=10)
 
