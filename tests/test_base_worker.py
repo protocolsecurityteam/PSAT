@@ -69,6 +69,19 @@ def _make_job(**overrides):
     return SimpleNamespace(**defaults)
 
 
+@pytest.fixture(autouse=True)
+def _force_single_job_concurrency(monkeypatch):
+    """Run-loop tests here assert the K=1 legacy single-job path. A developer's
+    ``.env`` may set ``PSAT_<STAGE>_JOB_CONCURRENCY`` > 1 (``db.models`` calls
+    ``load_dotenv`` at import), which routes the worker onto the futures
+    dispatcher and breaks the exact-call assertions. Strip the concurrency vars
+    so the default K=1 holds; a test that wants K>1 sets it explicitly.
+    """
+    for key in list(os.environ):
+        if key.startswith("PSAT_") and key.endswith("_JOB_CONCURRENCY"):
+            monkeypatch.delenv(key, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Tests: __init__
 # ---------------------------------------------------------------------------

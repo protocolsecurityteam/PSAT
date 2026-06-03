@@ -350,6 +350,7 @@ def test_no_rpc_env_fallback_used_when_request_has_no_rpc(monkeypatch):
 
     store_calls, created_jobs = _capture_store_and_create(monkeypatch)
     monkeypatch.setenv("ETH_RPC", "https://env-rpc.example")
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)  # else the eRPC route preempts the ETH_RPC fallback
 
     captured_rpc = []
     monkeypatch.setattr(

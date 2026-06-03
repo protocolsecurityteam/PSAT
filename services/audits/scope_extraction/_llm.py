@@ -201,7 +201,7 @@ def _call_llm(prompt: str) -> tuple[str, str]:
     except Exception as exc:  # pragma: no cover - dep configured in pyproject
         raise LLMUnavailableError(f"openrouter client unavailable: {exc}") from exc
 
-    model = os.environ.get("PSAT_SCOPE_LLM_MODEL", "google/gemini-2.0-flash-001")
+    model = os.environ.get("PSAT_SCOPE_LLM_MODEL", "google/gemini-2.5-flash-lite")
     try:
         response = openrouter.chat(
             [{"role": "user", "content": prompt}],

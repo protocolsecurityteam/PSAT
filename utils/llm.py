@@ -187,7 +187,9 @@ class LLMClient:
 openrouter = LLMClient(
     url="https://openrouter.ai/api/v1/chat/completions",
     env_var="OPEN_ROUTER_KEY",
-    default_model="google/gemini-2.0-flash-001",
+    # gemini-2.0-flash-001 was delisted from OpenRouter; 2.5-flash-lite is its
+    # successor at the same price ($0.10/$0.40 per 1M) and 1M context.
+    default_model="google/gemini-2.5-flash-lite",
 )
 
 # Agent uses a separate model env so it can be tuned independently of

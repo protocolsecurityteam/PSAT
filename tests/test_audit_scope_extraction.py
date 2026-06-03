@@ -444,6 +444,33 @@ def test_call_llm_raises_when_no_stub(tmp_path, monkeypatch):
         _call_llm("no matching fixture")
 
 
+def test_call_llm_live_path_uses_default_model(monkeypatch):
+    """With no stub dir, ``_call_llm`` selects the model and calls OpenRouter.
+    The offline suite always sets ``PSAT_LLM_STUB_DIR``, so this is the only test
+    exercising the live branch (and pins the default model)."""
+    monkeypatch.delenv("PSAT_LLM_STUB_DIR", raising=False)
+    monkeypatch.delenv("PSAT_SCOPE_LLM_MODEL", raising=False)
+    captured = {}
+
+    def fake_chat(messages, model=None, **kwargs):
+        captured["model"] = model
+        return '["FromLLM"]'
+
+    monkeypatch.setattr("utils.llm.openrouter.chat", fake_chat)
+    response, model = _call_llm("a scope prompt")
+    assert response == '["FromLLM"]'
+    assert model == "google/gemini-2.5-flash-lite"
+    assert captured["model"] == "google/gemini-2.5-flash-lite"
+
+
+def test_call_llm_live_path_honors_model_override(monkeypatch):
+    monkeypatch.delenv("PSAT_LLM_STUB_DIR", raising=False)
+    monkeypatch.setenv("PSAT_SCOPE_LLM_MODEL", "anthropic/claude-test")
+    monkeypatch.setattr("utils.llm.openrouter.chat", lambda *a, **k: "[]")
+    _response, model = _call_llm("a scope prompt")
+    assert model == "anthropic/claude-test"
+
+
 # ---------------------------------------------------------------------------
 # extract_scope_with_llm — parsing tolerance
 # ---------------------------------------------------------------------------
