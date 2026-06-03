@@ -149,8 +149,26 @@ if not getattr(requests.adapters.HTTPAdapter.send, "_psat_offline_guard", False)
     urllib.request.urlopen = _guarded_urlopen
 
 
+def pytest_configure(config):
+    # The guard protects the OFFLINE suite. A live run (-m "live ...") legitimately
+    # talks to the deployed server during collection and session-scoped fixtures
+    # (e.g. tests/live/conftest.py's health gate), so disable the guard wholesale.
+    markexpr = getattr(config.option, "markexpr", "") or ""
+    if "live" in markexpr and "not live" not in markexpr:
+        _guard_state["allow_all"] = True
+
+
 def pytest_runtest_logstart(nodeid, location):
     _guard_state["nodeid"] = nodeid
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    # Arm/disarm per item BEFORE its fixtures are built — including session-scoped
+    # ones like the live health gate, which a function-scoped fixture ran too late
+    # to cover. Live tests (auto-marked under tests/live/) legitimately hit external
+    # hosts, so they opt out; everything else stays guarded.
+    _guard_state["allow_all"] = item.get_closest_marker("live") is not None
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -252,22 +270,6 @@ def storage_bucket(monkeypatch):
     finally:
         _purge_bucket(client)
         reset_client_cache()
-
-
-@pytest.fixture(autouse=True)
-def _offline_network_guard(request):
-    """Arm the external-HTTP guard for every offline test.
-
-    Live tests (``-m live``, auto-marked under ``tests/live/``) legitimately
-    talk to a real server, so they opt out for their duration.
-    """
-    is_live = request.node.get_closest_marker("live") is not None
-    prev = _guard_state["allow_all"]
-    _guard_state["allow_all"] = is_live
-    try:
-        yield
-    finally:
-        _guard_state["allow_all"] = prev
 
 
 @pytest.fixture
