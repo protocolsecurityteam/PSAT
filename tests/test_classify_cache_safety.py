@@ -33,6 +33,18 @@ def _isolated_cache():
     clear_classify_cache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_batch_probe_rpc(monkeypatch):
+    """Offline: the batched classify probe hits the wire. Return all-error so the
+    code falls back to the sequential classifier, which uses the per-call probes
+    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock."""
+    monkeypatch.setattr(
+        tracking,
+        "_rpc_batch_request_with_status",
+        lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
+    )
+
+
 def test_clear_empties_process_cache(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)

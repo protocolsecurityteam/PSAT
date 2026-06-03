@@ -29,7 +29,24 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# offline: the dependency phase probes eth_getCode and company mode resolves the
+# protocol via DefiLlama — stub both so the cross-module wiring runs with no wire.
+pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_defillama_protocols", "_stub_classifier_rpc")
+
+
+@pytest.fixture(autouse=True)
+def _stub_etherscan_balances(monkeypatch):
+    """Offline: the resolution worker's ``_fetch_balances`` probes ETH + token
+    balances via Etherscan; benign defaults (these tests assert on address
+    rewriting / handoff, not balances)."""
+    monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+
 
 # ---------------------------------------------------------------------------
 # Shared constants

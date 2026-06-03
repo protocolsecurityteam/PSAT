@@ -19,6 +19,18 @@ from workers.resolution_worker import ResolutionWorker
 _DB_URL = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 
 
+@pytest.fixture(autouse=True)
+def _stub_etherscan_balances(monkeypatch):
+    """Offline: ``_fetch_balances`` probes ETH + token balances via Etherscan.
+
+    Benign defaults (no balances); tests exercising specific balance behaviour
+    override these in-body (monkeypatch order lets the later setattr win).
+    """
+    monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+
+
 def _can_connect() -> bool:
     if not _DB_URL:
         return False

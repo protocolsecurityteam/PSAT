@@ -26,7 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 
-pytestmark = [requires_postgres]
+pytestmark = [
+    requires_postgres,
+    # offline: no RPC for the coverage upsert's eth_getCode bytecode-drift anchor
+    pytest.mark.usefixtures("_stub_rpc_bytecode"),
+]
 
 
 # ---------------------------------------------------------------------------
