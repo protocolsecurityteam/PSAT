@@ -333,15 +333,18 @@ def _stub_classifier_rpc(monkeypatch):
 
 @pytest.fixture
 def _stub_chain_resolver(monkeypatch):
-    """Stub multi-chain resolution (``chain_resolver`` probes Alchemy via urllib).
+    """Stub multi-chain resolution so resolution runs with no wire.
 
-    Neutralises the per-chain ``eth_getCode`` probes (``_probe_chains`` mutates
-    its ``matched`` dict in place, so a no-op leaves every address unresolved —
-    the same outcome as the probes finding nothing) and the Alchemy-key parse,
-    so resolution runs with no wire and no ``ETH_RPC`` dependency.
+    ``resolve_chains`` probes ``eth_getCode`` per chain through
+    ``_probe_footprint``; stub it to report no code anywhere (empty footprint,
+    nothing unprobeable), which leaves every address on its prior chain — the
+    same outcome as the probes finding nothing — with no network and no
+    ``ETH_RPC`` dependency.
     """
-    monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "offline-stub")
-    monkeypatch.setattr("services.discovery.chain_resolver._probe_chains", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "services.discovery.chain_resolver._probe_footprint",
+        lambda addresses, chains, debug=False: ({a: {} for a in addresses}, set()),
+    )
 
 
 @pytest.fixture(autouse=True)
