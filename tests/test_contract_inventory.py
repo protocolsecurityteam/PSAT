@@ -25,6 +25,16 @@ from services.discovery.inventory_extract import (
     extract_inventory_entries_from_page_text,
 )
 
+
+@pytest.fixture(autouse=True)
+def _stub_inventory_search(monkeypatch):
+    """Offline: the orchestrator runs a broad Tavily search + LLM domain pick before
+    page extraction. Stub both (no Tavily/OpenRouter); tests that exercise specific
+    search/LLM results override these in-body."""
+    monkeypatch.setattr("services.discovery.inventory._tavily_search", lambda *a, **k: [])
+    monkeypatch.setattr("services.discovery.inventory._llm_select_domain", lambda *a, **k: (None, []))
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -240,6 +250,7 @@ class TestSearchProtocolInventoryOffline:
             assert 0 < contract["confidence"] <= 0.99
             assert isinstance(contract["source"], list)
 
+    @pytest.mark.usefixtures("_stub_chain_resolver")  # deployer entries are chain="unknown" → would probe Alchemy
     def test_full_pipeline_with_deployer_expansion(self, monkeypatch):
         """Deployer entries merge with Tavily entries and boost confidence."""
         addr_both = "0x" + "a" * 40

@@ -12,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.discovery import audit_enrichment as ae
 from services.discovery import run_discovery as rd
 
+# offline: discovery validates/resolves contract chains via Alchemy (chain_resolver)
+# and probes bytecode via eth_getCode — stub both so the pipeline runs without a wire.
+pytestmark = pytest.mark.usefixtures("_stub_chain_resolver", "_stub_rpc_bytecode")
+
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
@@ -232,6 +236,8 @@ def test_enrich_extracts_static_pdf_and_verified_github_commit(monkeypatch):
 def test_enrich_drops_ai_commits_that_do_not_resolve(monkeypatch):
     monkeypatch.setattr(ae, "_fetch_html", lambda url, debug=False: None)
     monkeypatch.setattr(ae, "_commit_exists", lambda repo, commit: False)
+    # The repo-hosted-PDF pass would otherwise probe GitHub for audit folders.
+    monkeypatch.setattr(ae, "_discover_repo_audit_folders", lambda owner, repo, debug=False: [])
 
     result = {
         "reports": [

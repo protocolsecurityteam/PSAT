@@ -606,6 +606,14 @@ class TestCheckAuditCoversImplShortCircuits:
             "services.audits.source_equivalence.fetch_github_source_hash",
             lambda *_a, **_k: source_equivalence.GithubHashResult(sha256=None, status="http_404", detail="not found"),
         )
+        # After every candidate path 404s, the verifier probes the repo root to
+        # tell "commit missing" from "commit exists, path missing" — stub that
+        # probe to "commit exists" so we exercise the path-missing branch (and
+        # don't hit raw.githubusercontent.com).
+        monkeypatch.setattr(
+            "services.audits.source_equivalence._commit_exists_in_repo",
+            lambda *_a, **_k: source_equivalence.GithubFetch(content="# readme", status="ok", detail=""),
+        )
         assert (
             check_audit_covers_impl(
                 reviewed_commits=["abc1234"],

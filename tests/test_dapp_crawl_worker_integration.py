@@ -30,6 +30,9 @@ from db.models import Base, Contract, DAppInteraction, Job, JobStage, JobStatus,
 from db.queue import create_job, get_artifact
 from workers.base import JobHandledDirectly
 
+# offline: stub the DefiLlama protocol-list fetch done during company resolution
+pytestmark = pytest.mark.usefixtures("_stub_defillama_protocols")
+
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

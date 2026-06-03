@@ -29,7 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
 
-pytestmark = [requires_postgres, requires_storage]
+pytestmark = [
+    requires_postgres,
+    requires_storage,
+    # offline: no RPC for the coverage upsert's eth_getCode bytecode-drift anchor
+    pytest.mark.usefixtures("_stub_rpc_bytecode"),
+]
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,9 @@ from pathlib import Path
 
 import pytest
 
+# offline: no live owner()/governor() eth_call during predicate evaluation
+pytestmark = pytest.mark.usefixtures("_stub_live_authority")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")

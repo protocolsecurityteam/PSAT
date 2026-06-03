@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery import classifier as cls
@@ -14,6 +16,24 @@ RPC = "https://rpc.example"
 BIG_BYTECODE = "0x" + "60" * 500
 SHORT_BYTECODE = "0x" + "6000" * 10 + "f4" + "00" * 5
 ZERO_SLOT = "0x" + "0" * 64
+
+
+@pytest.fixture(autouse=True)
+def _stub_classifier_slot_rpc(monkeypatch):
+    """Offline: the batched proxy-slot read (``rpc_batch_request_with_status``)
+    hits the wire. Return all-error so the code falls back to the per-slot
+    ``rpc_call`` reader (defaulted to empty here); proxy tests set ``cls.rpc_call``
+    in-body and the fallback uses their slot values."""
+    monkeypatch.setattr(
+        cls,
+        "rpc_batch_request_with_status",
+        lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
+    )
+    monkeypatch.setattr(
+        cls,
+        "rpc_call",
+        lambda rpc, method, params, retries=1: ZERO_SLOT if method == "eth_getStorageAt" else None,
+    )
 
 
 def _slot_for(addr: str) -> str:

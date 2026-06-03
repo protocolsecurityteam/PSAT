@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import urllib.error
+import urllib.request
 import uuid
+from collections import defaultdict
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
+import requests
+import requests.adapters
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -35,6 +43,156 @@ from db.models import (  # noqa: E402
     TvlSnapshot,
     WatchedProxy,
 )
+
+# ---------------------------------------------------------------------------
+# Offline network guard
+# ---------------------------------------------------------------------------
+#
+# The offline suite (`pytest -m "not live"`) must make ZERO real external
+# network calls. `.env` carries real *paid* keys (OpenRouter, Alchemy, Tavily,
+# Exa) and `db.models` calls `load_dotenv()` at import, so those values leak
+# into the test process — an unmocked call would spend money / burn rate limits
+# / hit live state. Every external wire in this codebase goes through the
+# `requests` library (RPC, Etherscan, OpenRouter, GitHub, DeFiLlama, Exa,
+# Tavily). The local services do not: TestClient speaks httpx, MinIO/boto3 use
+# urllib3 directly, Postgres uses libpq (C). So patching the single `requests`
+# transport chokepoint fences off exactly the paid surface and leaves Postgres,
+# MinIO and the in-process API untouched.
+#
+# Tests must stub their wire (the `utils.rpc` / `utils.etherscan` / `utils.llm`
+# / github / defillama helpers). Anything left unmocked trips this guard and
+# fails loudly in-process. `local_netguard.py` is the socket-level backstop
+# that also catches any non-`requests` egress.
+
+_guard_lock = threading.Lock()
+_guard_blocked: list[tuple[str, str]] = []  # (nodeid, host)
+_guard_state = {"nodeid": "<collection>", "allow_all": False}
+_real_http_send = requests.adapters.HTTPAdapter.send
+_real_urlopen = urllib.request.urlopen
+
+
+def _host_is_local(host: str | None) -> bool:
+    """True for loopback / private / link-local hosts (Postgres, MinIO, Anvil)."""
+    if not host:
+        return False
+    lowered = host.lower()
+    if lowered == "localhost" or lowered.endswith((".localhost", ".local")):
+        return True
+    try:
+        ip = ip_address(host)
+    except ValueError:
+        return False  # a real hostname → treat as external
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def _guard_check(url: str) -> str | None:
+    """Return the offending host when *url* is external and the guard is armed.
+
+    Records the block (and, with ``PSAT_GUARD_TRACE``, the call site) as a side
+    effect; returns ``None`` when the call is allowed through.
+    """
+    if _guard_state["allow_all"]:
+        return None
+    host = urlsplit(url).hostname
+    if _host_is_local(host):
+        return None
+    host = host or url
+    # The guard's own self-test deliberately triggers blocks: raise (so the test
+    # observes it) but don't record — a recorded block fails the session.
+    if "test_offline_network_guard" in _guard_state["nodeid"]:
+        return host
+    with _guard_lock:
+        _guard_blocked.append((_guard_state["nodeid"], host))
+    trace_to = os.environ.get("PSAT_GUARD_TRACE")
+    if trace_to:
+        import traceback
+
+        # Append the call site to a file (survives pytest/xdist output capture).
+        path = trace_to if "/" in trace_to else "/tmp/psat_guard_trace.log"
+        block = (
+            f"\n[trace] {host} <= {_guard_state['nodeid']}\n"
+            + "".join(f for f in traceback.format_stack()[:-1] if "/PSAT/" in f and "/conftest.py" not in f)[-1600:]
+        )
+        with open(path, "a") as fh:
+            fh.write(block)
+    return host
+
+
+def _guarded_http_send(self, request, *args, **kwargs):
+    host = _guard_check(request.url)
+    if host is not None:
+        parts = urlsplit(request.url)
+        # Drop the query string — Etherscan & friends carry the API key there.
+        raise requests.exceptions.ConnectionError(
+            f"[offline-guard] blocked external {request.method} {parts.scheme}://{host}{parts.path} — "
+            f"offline tests must stub this wire (test: {_guard_state['nodeid']}). See the offline "
+            f"network guard in tests/conftest.py."
+        )
+    return _real_http_send(self, request, *args, **kwargs)
+
+
+def _guarded_urlopen(url, *args, **kwargs):
+    # `urllib.request.urlopen` accepts a URL string or a Request object.
+    target = url.full_url if isinstance(url, urllib.request.Request) else url
+    host = _guard_check(target) if isinstance(target, str) else None
+    if host is not None:
+        raise urllib.error.URLError(
+            f"[offline-guard] blocked external urlopen {host} — offline tests must stub this wire "
+            f"(test: {_guard_state['nodeid']}). See the offline network guard in tests/conftest.py."
+        )
+    return _real_urlopen(url, *args, **kwargs)
+
+
+if not getattr(requests.adapters.HTTPAdapter.send, "_psat_offline_guard", False):
+    _guarded_http_send._psat_offline_guard = True
+    requests.adapters.HTTPAdapter.send = _guarded_http_send
+    urllib.request.urlopen = _guarded_urlopen
+
+
+def pytest_configure(config):
+    # The guard protects the OFFLINE suite. A live run (-m "live ...") legitimately
+    # talks to the deployed server during collection and session-scoped fixtures
+    # (e.g. tests/live/conftest.py's health gate), so disable the guard wholesale.
+    markexpr = getattr(config.option, "markexpr", "") or ""
+    if "live" in markexpr and "not live" not in markexpr:
+        _guard_state["allow_all"] = True
+
+
+def pytest_runtest_logstart(nodeid, location):
+    _guard_state["nodeid"] = nodeid
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    # Arm/disarm per item BEFORE its fixtures are built — including session-scoped
+    # ones like the live health gate, which a function-scoped fixture ran too late
+    # to cover. Live tests (auto-marked under tests/live/) legitimately hit external
+    # hosts, so they opt out; everything else stays guarded.
+    _guard_state["allow_all"] = item.get_closest_marker("live") is not None
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Report any blocked external calls and fail the session if there were any.
+
+    A degraded-path test can *swallow* the guard's ConnectionError and still
+    pass — so the per-test result alone won't catch a leak. Escalating the
+    session exit status here makes an unmocked wire fail the (serial) build
+    even when the calling code degrades gracefully.
+    """
+    if not _guard_blocked:
+        return
+    worker = getattr(session.config, "workerinput", None)
+    tag = worker["workerid"] if worker else "main"
+    by_host: dict[str, set[str]] = defaultdict(set)
+    for nodeid, host in _guard_blocked:
+        by_host[host].add(nodeid.split("::")[0])
+    print(f"\n[offline-guard:{tag}] {len(_guard_blocked)} blocked external call(s):", file=sys.stderr)
+    for host in sorted(by_host):
+        for f in sorted(by_host[host]):
+            print(f"[offline-guard:{tag}] {host} <= {f}", file=sys.stderr)
+    if session.exitstatus == 0:
+        session.exitstatus = 1
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL connection
@@ -112,6 +270,78 @@ def storage_bucket(monkeypatch):
     finally:
         _purge_bucket(client)
         reset_client_cache()
+
+
+@pytest.fixture
+def _stub_rpc_bytecode(monkeypatch):
+    """Stub the eth_getCode bytecode helpers so offline tests never probe a real RPC.
+
+    Returns empty code (``"0x"``); every caller treats that as "no / unknown
+    bytecode" — the same path these tests already took when the RPC was
+    unreachable. Patching ``get_code_with_keccak`` covers ``get_code`` too (it
+    delegates), regardless of how a module imported the name.
+    """
+    from eth_utils.crypto import keccak
+
+    empty_keccak = "0x" + keccak(b"").hex()
+    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda *a, **k: ("0x", empty_keccak))
+    monkeypatch.setattr("utils.rpc.get_code", lambda *a, **k: "0x")
+    monkeypatch.setattr("utils.rpc.get_code_batch", lambda rpc_url, addresses, **k: {})
+
+
+@pytest.fixture
+def _stub_live_authority(monkeypatch):
+    """Stub the live owner()/governor() getter read in predicate evaluation.
+
+    ``_live_resolve_authority`` issues an ``eth_call`` when a reachable RPC is in
+    the evaluation context; offline there is none, so it returns ``None`` (the
+    documented "pure-unit evaluation, keep the lower_bound placeholder" path).
+    Returning ``None`` here reproduces that exact behaviour without the wire.
+    """
+    monkeypatch.setattr(
+        "services.resolution.predicate_evaluator._live_resolve_authority",
+        lambda *a, **k: None,
+    )
+
+
+@pytest.fixture
+def _stub_defillama_protocols(monkeypatch):
+    """Stub the DefiLlama protocol-list fetch (``api.llama.fi/protocols``).
+
+    Returns ``[]`` — ``resolve_protocol`` already maps "no protocols" to the
+    same empty ``{"slug": None, ...}`` result it returns when the live fetch
+    fails, so offline tests see identical behaviour without the wire.
+    """
+    monkeypatch.setattr("services.discovery.protocol_resolver._fetch_protocols", lambda: [])
+
+
+@pytest.fixture
+def _stub_classifier_rpc(monkeypatch):
+    """Stub the proxy/impl classifier's RPC probes (batched slot read → all-error
+    so it falls back to the per-slot reader, plus the per-slot ``rpc_call`` used by
+    storage-slot / implementation / facet probes). Classification then runs offline
+    as 'no proxy pattern' — incidental to callers that only need a dependency map."""
+    import services.discovery.classifier as _cls
+
+    monkeypatch.setattr(
+        _cls,
+        "rpc_batch_request_with_status",
+        lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
+    )
+    monkeypatch.setattr(_cls, "rpc_call", lambda *a, **k: None)
+
+
+@pytest.fixture
+def _stub_chain_resolver(monkeypatch):
+    """Stub multi-chain resolution (``chain_resolver`` probes Alchemy via urllib).
+
+    Neutralises the per-chain ``eth_getCode`` probes (``_probe_chains`` mutates
+    its ``matched`` dict in place, so a no-op leaves every address unresolved —
+    the same outcome as the probes finding nothing) and the Alchemy-key parse,
+    so resolution runs with no wire and no ``ETH_RPC`` dependency.
+    """
+    monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "offline-stub")
+    monkeypatch.setattr("services.discovery.chain_resolver._probe_chains", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)

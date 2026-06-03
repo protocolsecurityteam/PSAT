@@ -168,8 +168,12 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
 
+      # `-p local_netguard` is the socket-level backstop: it fails the offline
+      # job if any test attempts a real connect to a public IP (the in-process
+      # guard in tests/conftest.py is the first line of defense; this catches
+      # anything that bypasses `requests`/`urllib`). See tests/conftest.py.
       - name: Run tests with coverage
-        run: uv run coverage run -m pytest -m "not live" -q
+        run: uv run coverage run -m pytest -m "not live" -p local_netguard -q
 
       - name: Coverage report
         run: |

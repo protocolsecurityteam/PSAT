@@ -71,6 +71,14 @@ def _addr(prefix: str) -> str:
     return "0x" + prefix + pad
 
 
+@pytest.fixture(autouse=True)
+def _stub_etherscan_source_fallback(monkeypatch):
+    """Offline: the contract-source tool falls back to live Etherscan when DB /
+    storage bodies are absent. That fallback already returns {} on failure, so
+    stub it to {} (the tool tests assert on DB-backed data, not the fallback)."""
+    monkeypatch.setattr("services.chat.tools._etherscan_sources", lambda address: {})
+
+
 @pytest.fixture()
 def seeded_protocol(db_session: Session):
     """Create a self-contained protocol with the entities the agent
