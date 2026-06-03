@@ -20,6 +20,17 @@ _HAS_ANVIL = shutil.which("anvil") is not None
 
 pytestmark = requires_postgres
 
+
+@pytest.fixture(autouse=True)
+def _stub_dynamic_tx_fetch(monkeypatch):
+    """Offline: the dependency phase pulls a contract's tx list from Etherscan to
+    seed dynamic-dependency tracing; the cache-upgrade test needs no dynamic deps."""
+    monkeypatch.setattr(
+        "services.discovery.dynamic_dependencies.fetch_contract_transactions",
+        lambda *a, **k: [],
+    )
+
+
 # EIP-1967 implementation storage slot
 _EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 

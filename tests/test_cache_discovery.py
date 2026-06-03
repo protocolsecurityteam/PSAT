@@ -13,7 +13,8 @@ from cache_helpers import (
     requires_postgres,
 )
 
-pytestmark = requires_postgres
+# offline: stub the DefiLlama protocol-list fetch done during company resolution
+pytestmark = [requires_postgres, pytest.mark.usefixtures("_stub_defillama_protocols")]
 
 # Extra addresses used in inventory merge / dedup tests
 ADDR_C = "0x1111111111111111111111111111111111111111"

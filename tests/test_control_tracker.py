@@ -27,6 +27,20 @@ def _isolated_classify_cache():
     clear_classify_cache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_batch_probe_rpc(monkeypatch):
+    """Offline: ``classify_resolved_address`` fires a batched eth_call probe.
+    Return all-error so it falls back to the sequential classifier, which reads
+    through ``_rpc_request`` — the path these tests mock."""
+    import services.resolution.tracking as _tracking
+
+    monkeypatch.setattr(
+        _tracking,
+        "_rpc_batch_request_with_status",
+        lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
+    )
+
+
 def test_build_control_snapshot(monkeypatch):
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",

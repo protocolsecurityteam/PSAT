@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from schemas.resolved_control_graph import ResolvedGraphEdge
@@ -12,6 +14,17 @@ from services.resolution.recursive import (
     _materialize_contract_artifacts,
     resolve_control_graph,
 )
+
+# offline: recursive resolution probes bytecode (eth_getCode) and, when a nested
+# contract fails to materialize, fetches its name from Etherscan to label the node.
+pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_classifier_rpc")
+
+
+@pytest.fixture(autouse=True)
+def _stub_failed_node_name(monkeypatch):
+    """The failed-node name lookup fetches verified source from Etherscan; default
+    to None offline (tests that assert a specific name override this in-body)."""
+    monkeypatch.setattr("services.resolution.recursive._contract_name_for_address", lambda address: None)
 
 
 def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permissions: dict | None = None) -> dict:

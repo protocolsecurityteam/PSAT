@@ -59,6 +59,9 @@ def _patch_discovery(monkeypatch, etherscan_result):
         "workers.discovery.fetch",
         lambda _addr: etherscan_result,
     )
+    # Deployer expansion probes Etherscan (getcontractcreation) for the creator;
+    # these tests assert on the parsed source/contract, not deployer data.
+    monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addresses, **kw: {})
 
     source_calls: list[tuple] = []
     monkeypatch.setattr(
