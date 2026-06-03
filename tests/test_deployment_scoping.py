@@ -365,3 +365,213 @@ def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
         assert (proxy_row.implementation or "").lower() == impl
     finally:
         _cleanup_jobs(db_session, [proxy, impl])
+
+
+# ---------------------------------------------------------------------------
+# End-to-end heal: a governor-gated impl function resolves to the on-chain
+# controller (not resolved_empty) once the proxy back-patches the impl job.
+#
+# This is the verdict's regression point (d) — driven through the REAL
+# resolution + policy stack. Only the snapshot/graph/balance wire is stubbed,
+# and ``build_control_snapshot`` keys its governor read off the address the
+# worker hands it: the proxy when ``request.proxy_address`` is set (the fix),
+# else the impl's own (empty) storage. So if the proxy-override regresses, the
+# governor reads 0x0 here and the function stays resolved_empty — the test fails.
+# ---------------------------------------------------------------------------
+
+_GATE_FN = "setGovernor(address)"
+
+
+def _governor_gate_tree() -> dict:
+    """A ``msg.sender == governor`` caller-authority equality leaf — the shape
+    ``build_predicate_artifacts`` emits (see test_canonical_authority_getter_resolution)."""
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [
+                {"source": "msg_sender"},
+                {"source": "state_variable", "state_variable_name": "governor"},
+            ],
+            "references_msg_sender": True,
+            "parameter_indices": [],
+            "expression": "msg.sender == governor",
+            "basis": [],
+        },
+    }
+
+
+def _gate_fn_record() -> dict:
+    return {
+        "function": _GATE_FN,
+        "abi_signature": _GATE_FN,
+        "selector": "0x1c0d2bf2",
+        "effect_labels": [],
+        "effect_targets": [],
+        "authority_public": False,
+    }
+
+
+def _stub_resolution_wire(monkeypatch, worker, *, proxy: str, governor: str) -> None:
+    """Stub only the RPC-touching seams of ResolutionWorker so the test stays
+    offline. ``build_control_snapshot`` models proxy-vs-impl storage: the
+    governor lives in the proxy's storage and reads 0x0 against the impl's own.
+    The address it sees is whatever the worker put on the plan — the proxy iff
+    ``request.proxy_address`` was honored, which is exactly the behavior the fix
+    restores."""
+    zero = "0x" + "00" * 20
+
+    def fake_snapshot(plan, rpc_url, *_a, **_k):
+        read_addr = (plan.get("contract_address") or "").lower()
+        gov = governor if read_addr == proxy.lower() else zero
+        return {
+            "contract_address": read_addr,
+            "block_number": 7_000_000,
+            "controller_values": {
+                "state_variable:governor": {
+                    "value": gov,
+                    "resolved_type": "eoa",
+                    "details": {},
+                    "source": "governor",
+                    "block_number": 7_000_000,
+                    "observed_via": "eth_call",
+                }
+            },
+        }
+
+    def fake_graph(*, root_artifacts=None, rpc_url="", **_k):
+        return {"root_contract_address": root_artifacts and "", "nodes": [], "edges": []}, {}
+
+    monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_snapshot)
+    monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_graph)
+    monkeypatch.setattr("workers.resolution_worker.store_nested_artifacts", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_fetch_balances", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_queue_discovered_contracts", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_emit_dependency_edges_from_predicate_trees", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_heartbeat", lambda *a, **k: None)
+
+
+def _gate_status_and_principal(db_session, job, contract, deployment):
+    """Run the REAL policy resolve + writer for ``job`` and return
+    ``(status, principal_addresses)`` for the governor-gated function."""
+    from db.models import EffectiveFunction, FunctionPrincipal
+    from services.policy.effective_permissions_writer import write_effective_function_rows
+    from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    caps = resolve_contract_capabilities(db_session, address=contract.address, chain_id=1, job_id=job.id)
+    assert caps is not None and _GATE_FN in caps, f"resolver returned no capability for {_GATE_FN}: {caps}"
+    write_effective_function_rows(
+        db_session,
+        contract_id=contract.id,
+        function_records=[_gate_fn_record()],
+        capability_by_function=caps,
+        deployment_address=deployment,
+    )
+    db_session.commit()
+    rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).all()
+    assert len(rows) == 1, (
+        f"expected exactly one effective_function row, got {[(r.abi_signature, r.deployment_address) for r in rows]}"
+    )
+    ef = rows[0]
+    principals = [
+        p.address for p in db_session.query(FunctionPrincipal).filter(FunctionPrincipal.function_id == ef.id).all()
+    ]
+    return ef, principals, caps[_GATE_FN]
+
+
+@requires_postgres
+def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, monkeypatch):
+    """The full LRTSquared-shaped heal, end to end through the real stack:
+
+    A governor-gated impl function that resolves_empty when the impl is analyzed
+    standalone (governor read against its own empty storage == 0x0) resolves to
+    the governor once the proxy is discovered and ``reconcile_impl_job_for_proxy``
+    back-patches the impl job — at which point re-resolution reads the governor
+    against the PROXY's storage. Asserts the verdict's point (d): 0 resolved_empty
+    on the gated function after re-resolution, and the controller is the governor.
+
+    Revert-proof at three independent points: the reconcile back-patch (step 2),
+    the resolution proxy-override (the stubbed snapshot reads 0x0 off the impl if
+    the override regresses), and the per-deployment controller-value read/sweep.
+    """
+    from db.models import Contract, JobStage, JobStatus
+    from db.queue import reconcile_impl_job_for_proxy, store_artifact
+    from workers.resolution_worker import ResolutionWorker
+
+    impl, proxy = _addr(), _addr()
+    governor = "0x" + "a1" * 20
+
+    # Standalone-first: the impl already ran (completed) with NO proxy_address.
+    job = _mk_job(db_session, impl, status=JobStatus.completed, stage=JobStage.done, root=str(uuid.uuid4()))
+    job.request = {**(job.request or {}), "rpc_url": "http://stub", "chain": "ethereum"}
+    contract = Contract(address=impl, chain="ethereum", contract_name="Core", job_id=job.id)
+    db_session.add(contract)
+    db_session.commit()
+    store_artifact(
+        db_session,
+        job.id,
+        "contract_analysis",
+        data={"subject": {"address": impl}, "contract_name": "Core", "functions": []},
+    )
+    store_artifact(
+        db_session,
+        job.id,
+        "control_tracking_plan",
+        data={"schema_version": "0.1", "contract_address": impl, "contract_name": "Core", "tracked_controllers": []},
+    )
+    store_artifact(
+        db_session,
+        job.id,
+        "predicate_trees",
+        data={
+            "schema_version": "semantic",
+            "contract_name": "Core",
+            "trees": {_GATE_FN: _governor_gate_tree()},
+            "check_trees": {},
+        },
+    )
+    db_session.commit()
+
+    worker = ResolutionWorker()
+    _stub_resolution_wire(monkeypatch, worker, proxy=proxy, governor=governor)
+
+    try:
+        # --- Phase A: standalone resolution is a false-negative (the bug) ---
+        worker.process(db_session, job)
+        ef_a, principals_a, cap_a = _gate_status_and_principal(db_session, job, contract, deployment=None)
+        assert ef_a.status == "resolved_empty", f"standalone gate should be resolved_empty, got {ef_a.status} ({cap_a})"
+        assert principals_a == []
+        assert ef_a.deployment_address is None
+
+        # --- Step: proxy discovered later → reconcile back-patches the impl job ---
+        decision = reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967")
+        assert decision == "backpatched"
+        db_session.refresh(job)
+        req = job.request
+        assert isinstance(req, dict)
+        assert req["proxy_address"] == proxy  # the impl now carries proxy context
+
+        # --- Phase B: re-resolution against the proxy heals the function ---
+        worker.process(db_session, job)
+        ef_b, principals_b, cap_b = _gate_status_and_principal(db_session, job, contract, deployment=proxy)
+        assert ef_b.status != "resolved_empty", f"proxy-context gate should resolve, got resolved_empty ({cap_b})"
+        assert principals_b == [governor], f"gate should resolve to the proxy's governor, got {principals_b}"
+        assert ef_b.deployment_address == proxy
+        # The stale standalone (NULL-deployment) controller value + EF row were
+        # swept by the deployment-scoped re-resolution — no resolved_empty remains.
+        from db.models import EffectiveFunction
+
+        assert (
+            db_session.query(EffectiveFunction)
+            .filter(EffectiveFunction.contract_id == contract.id, EffectiveFunction.status == "resolved_empty")
+            .count()
+            == 0
+        )
+    finally:
+        db_session.rollback()
+        db_session.query(Contract).filter(Contract.address == impl).delete(synchronize_session=False)
+        db_session.commit()
+        _cleanup_jobs(db_session, [impl])
