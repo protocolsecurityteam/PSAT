@@ -11,6 +11,7 @@ from typing import Any, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     EffectiveFunction,
@@ -414,6 +415,11 @@ class PolicyWorker(BaseWorker):
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
+        # An impl analyzed in proxy context resolves against the proxy's storage;
+        # tag its rows with that deployment so a shared impl can hold N sets.
+        deployment_address = normalize_deployment(
+            (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
+        )
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if contract_row and isinstance(ep_data, dict):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
@@ -427,6 +433,7 @@ class PolicyWorker(BaseWorker):
                 capability_by_function=capability_resolver_output,
                 safe_address_lookup=safe_lookup or None,
                 resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
+                deployment_address=deployment_address,
             )
             session.commit()
             _log_policy_phase("effective_function_rows", rows_t0, durations_ms, function_principals=fp_added)
@@ -558,12 +565,16 @@ class PolicyWorker(BaseWorker):
 
         # Write to principal_labels table
         if contract_row:
-            session.query(PrincipalLabel).filter(PrincipalLabel.contract_id == contract_row.id).delete()
+            session.query(PrincipalLabel).filter(
+                PrincipalLabel.contract_id == contract_row.id,
+                deployment_scope(PrincipalLabel.deployment_address, deployment_address),
+            ).delete(synchronize_session=False)
             for p in pl_data.get("principals", []):
                 if p.get("address"):
                     session.add(
                         PrincipalLabel(
                             contract_id=contract_row.id,
+                            deployment_address=deployment_address,
                             address=p["address"].lower(),
                             label=p.get("display_name"),
                             display_name=p.get("display_name"),

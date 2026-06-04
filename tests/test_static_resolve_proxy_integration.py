@@ -479,12 +479,15 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
 
-    # First call is Contract table lookup, then impl job check, then facet job check
+    # reconcile_impl_job_for_proxy issues up to 3 lookups per impl (same-proxy /
+    # standalone / different-proxy); a same-proxy hit short-circuits to "skip".
     existing_job = SimpleNamespace(id="existing-job-id")
     session.execute.return_value.scalar_one_or_none.side_effect = [
         None,  # Contract table lookup (no row)
-        existing_job,  # impl already exists
-        None,  # facet 1 does not exist
+        existing_job,  # impl: same-proxy job exists -> "skip" (one query)
+        None,  # facet: same-proxy lookup (miss)
+        None,  # facet: standalone lookup (miss)
+        None,  # facet: different-proxy lookup (miss) -> "spawn"
     ]
 
     job = _job()

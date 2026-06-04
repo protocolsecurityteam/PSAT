@@ -237,7 +237,7 @@ def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str
     is PG-cached (immutable), so this is a one-time cost per address. Prefers the
     ``blockNumber`` Etherscan v2 returns directly; falls back to resolving the
     creation ``txHash`` via RPC (through eRPC) when an older response omits it.
-    Best-effort: any failure returns ``None`` and the caller seeds at 0.
+    Best-effort: any failure returns ``None`` and the caller defers enrollment.
     """
     if not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
         return None

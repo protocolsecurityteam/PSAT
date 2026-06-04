@@ -160,6 +160,28 @@ def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
     assert "authority_unconfirmed_no_role_events" in cap.check.extra["basis"]
 
 
+def test_solmate_renounced_zero_authority_settles_not_deferred():
+    # A renounced/unset authority resolves to 0x0. The adapter must treat it as
+    # authority_unresolved (a SETTLED external check), never a cold-index deferral:
+    # there is no 0x0 event cursor to wait on (the indexer won't seed one), so a
+    # deferred_pending_index marker here would never clear. The repo reports NO
+    # cursor (min_indexed_block=None) to prove the 0x0 short-circuit fires BEFORE
+    # the index check — the pre-fix path would have marked this deferred.
+    fixture = _load()
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=fixture["teller"],
+        meta={"event_log_repo": FixtureRepo(_rows(fixture), indexed_block=None)},
+        state_var_values={"authority": "0x" + "0" * 40},
+        call_frame=CallFrame.root(contract_address=fixture["teller"], function_signature=None, function_selector=PAUSE),
+    )
+    cap = SolmateRolesAuthorityAdapter().enumerate(_descriptor(), ctx)
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert "authority_unresolved" in cap.check.extra["basis"]
+    assert "deferred_pending_index" not in cap.check.extra
+
+
 _AUTHORITY = "0x" + "a1" * 20
 
 

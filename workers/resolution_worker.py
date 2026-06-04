@@ -12,6 +12,7 @@ from typing import cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     ContractBalance,
@@ -99,6 +100,9 @@ class ResolutionWorker(BaseWorker):
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
+        # Deployment this resolution is attributed to (proxy for an impl in proxy
+        # context, else NULL) so a shared impl can hold per-proxy result sets.
+        deployment_address = normalize_deployment(proxy_address)
         getter_fallback_address: str | None = None
         if proxy_address:
             # Reading impl state via the proxy is correct for storage-backed
@@ -140,11 +144,15 @@ class ResolutionWorker(BaseWorker):
         # Write to controller_values table
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if contract_row:
-            session.query(ControllerValue).filter(ControllerValue.contract_id == contract_row.id).delete()
+            session.query(ControllerValue).filter(
+                ControllerValue.contract_id == contract_row.id,
+                deployment_scope(ControllerValue.deployment_address, deployment_address),
+            ).delete(synchronize_session=False)
             for cid, cv in snapshot.get("controller_values", {}).items():
                 session.add(
                     ControllerValue(
                         contract_id=contract_row.id,
+                        deployment_address=deployment_address,
                         controller_id=cid,
                         value=cv.get("value"),
                         resolved_type=cv.get("resolved_type"),
@@ -218,12 +226,19 @@ class ResolutionWorker(BaseWorker):
 
             # Write to control_graph_nodes and control_graph_edges tables
             if contract_row:
-                session.query(ControlGraphNode).filter(ControlGraphNode.contract_id == contract_row.id).delete()
-                session.query(ControlGraphEdge).filter(ControlGraphEdge.contract_id == contract_row.id).delete()
+                session.query(ControlGraphNode).filter(
+                    ControlGraphNode.contract_id == contract_row.id,
+                    deployment_scope(ControlGraphNode.deployment_address, deployment_address),
+                ).delete(synchronize_session=False)
+                session.query(ControlGraphEdge).filter(
+                    ControlGraphEdge.contract_id == contract_row.id,
+                    deployment_scope(ControlGraphEdge.deployment_address, deployment_address),
+                ).delete(synchronize_session=False)
                 for node in resolved_graph.get("nodes", []):
                     session.add(
                         ControlGraphNode(
                             contract_id=contract_row.id,
+                            deployment_address=deployment_address,
                             address=(node.get("address") or "").lower(),
                             node_type=node.get("node_type"),
                             resolved_type=node.get("resolved_type"),
@@ -238,6 +253,7 @@ class ResolutionWorker(BaseWorker):
                     session.add(
                         ControlGraphEdge(
                             contract_id=contract_row.id,
+                            deployment_address=deployment_address,
                             from_node_id=edge.get("from_id", ""),
                             to_node_id=edge.get("to_id", ""),
                             relation=edge.get("relation"),

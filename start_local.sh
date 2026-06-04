@@ -12,12 +12,19 @@ set -a
 source .env
 set +a
 
-WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|coverage_worker|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction)'
+# Unbuffered Python so each process's JSON logs flush to the log file promptly
+# (block buffering would otherwise delay them). start_workers.sh sets this for the
+# worker fleet; here it also covers the API, monitors, and dapp worker below.
+export PYTHONUNBUFFERED=1
+
+WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
 API_PID=""
 WORKERS_PID=""
+BROWSER_PID=""
 PROXY_SCANNER_PID=""
 PROXY_POLLER_PID=""
 TVL_TRACKER_PID=""
+RECONCILE_PID=""
 
 # Check required env vars
 missing=()
@@ -124,6 +131,10 @@ cleanup() {
     kill "$WORKERS_PID" 2>/dev/null || true
     wait "$WORKERS_PID" 2>/dev/null || true
   fi
+  if [ -n "$BROWSER_PID" ]; then
+    kill "$BROWSER_PID" 2>/dev/null || true
+    wait "$BROWSER_PID" 2>/dev/null || true
+  fi
   if [ -n "$PROXY_SCANNER_PID" ]; then
     kill "$PROXY_SCANNER_PID" 2>/dev/null || true
     wait "$PROXY_SCANNER_PID" 2>/dev/null || true
@@ -136,34 +147,60 @@ cleanup() {
     kill "$TVL_TRACKER_PID" 2>/dev/null || true
     wait "$TVL_TRACKER_PID" 2>/dev/null || true
   fi
+  if [ -n "$RECONCILE_PID" ]; then
+    kill "$RECONCILE_PID" 2>/dev/null || true
+    wait "$RECONCILE_PID" 2>/dev/null || true
+  fi
   echo "Done."
 }
 trap cleanup EXIT INT TERM
 
+# Stream every long-running process's logs (JSON on stderr, see utils/logging.py) to
+# one timestamped file instead of the terminal, so a run stays queryable afterward.
+# logs/local-latest.jsonl always points at the newest run. (logs/ is git-ignored.)
+mkdir -p logs
+LOG_FILE="logs/local-$(date +%F-%H%M%S).jsonl"
+ln -sfn "$(basename "$LOG_FILE")" logs/local-latest.jsonl 2>/dev/null || true
+
 # Start API
 echo "Starting API on http://127.0.0.1:8000 ..."
-uv run uvicorn api:app --host 127.0.0.1 --port 8000 --reload &
+uv run uvicorn api:app --host 127.0.0.1 --port 8000 --reload >>"$LOG_FILE" 2>&1 &
 API_PID=$!
 sleep 2
 
 # Start workers
 echo "Starting workers..."
-bash start_workers.sh &
+bash start_workers.sh >>"$LOG_FILE" 2>&1 &
 WORKERS_PID=$!
+
+# Start dapp crawl worker — the `browser` process group (start_browser.sh).
+# Prod isolates it on its own RAM-heavy VM for Chromium; locally it runs
+# alongside. Playwright chromium was ensured above.
+echo "Starting dapp crawl worker (browser)..."
+uv run python -m workers.dapp_crawl_worker >>"$LOG_FILE" 2>&1 &
+BROWSER_PID=$!
 
 # Start protocol monitor (unified event scanner + storage poller)
 echo "Starting protocol monitor..."
-uv run python -m workers.protocol_monitor &
+uv run python -m workers.protocol_monitor >>"$LOG_FILE" 2>&1 &
 PROXY_SCANNER_PID=$!
-uv run python -m workers.protocol_monitor --poll &
+uv run python -m workers.protocol_monitor --poll >>"$LOG_FILE" 2>&1 &
 PROXY_POLLER_PID=$!
-uv run python -m workers.protocol_monitor --tvl &
+uv run python -m workers.protocol_monitor --tvl >>"$LOG_FILE" 2>&1 &
 TVL_TRACKER_PID=$!
+# Enrollment reconciler (mirrors start_monitor.sh) — converges monitored_contracts,
+# notably the controller Safes/Timelocks the per-job enroll hint skips; without it
+# they never land in monitoring locally. Idempotent upserts, safe as a co-process.
+uv run python -m workers.protocol_monitor --reconcile >>"$LOG_FILE" 2>&1 &
+RECONCILE_PID=$!
 
 echo ""
 echo "=== PSAT running ==="
 echo "  API:     http://127.0.0.1:8000"
 echo "  Health:  http://127.0.0.1:8000/api/health"
+echo "  Logs:    $LOG_FILE  (newest -> logs/local-latest.jsonl)"
+echo "           follow:  tail -f logs/local-latest.jsonl"
+echo "           query:   jq -c 'select(.level==\"ERROR\")' logs/local-latest.jsonl     (browse: lnav logs/local-latest.jsonl)"
 echo ""
 echo "Press Ctrl+C to stop."
 wait

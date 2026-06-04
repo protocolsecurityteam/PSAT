@@ -626,6 +626,9 @@ class ControllerValue(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    # Proxy/deployment this row was resolved against (NULL = own/sole deployment).
+    # Lets one impl-bytecode contract row hold N per-proxy sets; see migration d4e8f1a9c2b7.
+    deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     controller_id: Mapped[str] = mapped_column(String(255), nullable=False)
     value: Mapped[str | None] = mapped_column(String(66), nullable=True)
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -644,6 +647,7 @@ class ControlGraphNode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     node_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -663,6 +667,7 @@ class ControlGraphEdge(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     from_node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     to_node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     relation: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -696,6 +701,7 @@ class EffectiveFunction(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     function_name: Mapped[str] = mapped_column(String(255), nullable=False)
     selector: Mapped[str | None] = mapped_column(String(10), nullable=True)
     abi_signature: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -748,6 +754,7 @@ class PrincipalLabel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
