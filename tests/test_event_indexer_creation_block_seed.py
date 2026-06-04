@@ -276,6 +276,53 @@ def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(sessi
         assert row[1] is False
 
 
+@requires_postgres
+def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
+    # A Solmate canCall descriptor whose authority is renounced (0x0) must enroll
+    # NO cursor: 0x0 has no creation block, so it would seed at genesis and backfill
+    # the whole chain for an address that can never emit role events.
+    import workers.event_log_indexer as eli
+    from db.models import Contract, ControllerValue, IndexedEventCursor, Job, JobStage, JobStatus, Protocol
+    from db.queue import store_artifact
+
+    # If the guard works, _seed_block is never reached for 0x0; stub anyway so a
+    # regression that *does* reach it can't quietly "succeed" with a real block.
+    monkeypatch.setattr(eli, "get_contract_creation_block", lambda *a, **k: 18_500_000)
+
+    protected = "0x" + "11" * 20
+    job = Job(
+        address=protected,
+        request={"address": protected, "name": "T"},
+        status=JobStatus.completed,
+        stage=JobStage.done,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(job)
+    session.flush()
+    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
+
+    proto = Protocol(name=f"zero_auth_{uuid.uuid4().hex[:8]}")
+    session.add(proto)
+    session.flush()
+    contract = Contract(address=protected, chain="ethereum", protocol_id=proto.id, job_id=job.id)
+    session.add(contract)
+    session.flush()
+    session.add(
+        ControllerValue(contract_id=contract.id, controller_id="state_variable:authority", value="0x" + "0" * 40)
+    )
+    session.commit()
+
+    inserted = enroll_from_completed_jobs(session, chain_id=1)
+    assert inserted == 0
+    zero_cursors = session.execute(
+        select(func.count())
+        .select_from(IndexedEventCursor)
+        .where(func.lower(IndexedEventCursor.event_address) == "0x" + "0" * 40)
+    ).scalar()
+    assert zero_cursors == 0
+
+
 def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
     import utils.etherscan as es
 
@@ -333,14 +380,14 @@ def test_get_contract_creation_block_rejects_non_address():
 def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatch):
     import utils.etherscan as es
 
-    # Neither blockNumber nor a usable txHash → None (caller seeds at 0).
+    # Neither blockNumber nor a usable txHash → None (caller defers enrollment).
     monkeypatch.setattr(
         es, "get", lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]}
     )
     assert es.get_contract_creation_block("0x" + "ab" * 20) is None
 
 
-def test_seed_block_falls_back_to_zero_on_lookup_error(monkeypatch):
+def test_seed_block_defers_on_lookup_error(monkeypatch):
     import workers.event_log_indexer as eli
     from workers.event_log_indexer import _seed_block
 
@@ -348,7 +395,19 @@ def test_seed_block_falls_back_to_zero_on_lookup_error(monkeypatch):
         raise RuntimeError("etherscan down")
 
     monkeypatch.setattr(eli, "get_contract_creation_block", _raise)
-    assert _seed_block(_AUTHORITY, {}, chain_id=1) == 0
+    # A transient lookup failure must DEFER (None), never seed at genesis (0) — the
+    # caller then skips enrollment and retries next pass rather than backfilling
+    # ~20M empty pre-deploy blocks.
+    assert _seed_block(_AUTHORITY, {}, chain_id=1) is None
+
+
+def test_is_enrollable_event_address_rejects_zero_and_none():
+    from workers.event_log_indexer import _is_enrollable_event_address
+
+    assert _is_enrollable_event_address(_AUTHORITY) is True
+    assert _is_enrollable_event_address("0x" + "0" * 40) is False  # renounced/unset authority
+    assert _is_enrollable_event_address(None) is False
+    assert _is_enrollable_event_address("0xdeadbeef") is False  # wrong length
 
 
 @requires_postgres

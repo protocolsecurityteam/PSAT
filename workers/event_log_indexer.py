@@ -7,7 +7,7 @@ import os
 import signal
 from dataclasses import dataclass
 from threading import Event
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, TypeGuard
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -264,31 +264,47 @@ def scan_enrolled_events(
     )
 
 
-def _seed_block(address: str, cache: dict[str, int], *, chain_id: int = 1) -> int:
+_ZERO_ADDRESS = "0x" + "0" * 40
+
+
+def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
+    """True only for a real, non-zero 0x address. A descriptor whose event
+    emitter resolves to None or the zero address (an unset/renounced state var)
+    must be skipped: 0x0 has no creation block, so it would seed at genesis and
+    backfill the whole chain for an address that can never emit logs."""
+    return (
+        isinstance(address, str)
+        and len(address) == 42
+        and address.lower().startswith("0x")
+        and address.lower() != _ZERO_ADDRESS
+    )
+
+
+def _seed_block(address: str, cache: dict[str, int | None], *, chain_id: int = 1) -> int | None:
     """The ``last_indexed_block`` a new cursor should start at: one below the
     event address's creation block, so the first scan window begins at the
     deploy block and the ~20M empty pre-deployment blocks are never fetched.
 
-    Cached per pass (one Etherscan lookup per address, not per topic). Falls
-    back to 0 on any lookup failure — the cursor then backfills from genesis as
-    before, so a missing creation block degrades to the old behavior rather than
-    skipping real history.
+    Returns ``None`` when the creation block can't be determined, so the caller
+    defers enrollment to a later pass (retrying once it resolves) instead of
+    seeding at genesis: a single transient Etherscan failure must never pin a
+    cursor to a full-chain backfill. Cached per pass (one lookup per address).
     """
     key = address.lower()
     if key in cache:
         return cache[key]
-    seed = 0
+    seed: int | None = None
     try:
         created = get_contract_creation_block(key, chain_id=chain_id)
         if isinstance(created, int) and created > 0:
             seed = created - 1
     except Exception as exc:
         logger.warning(
-            "creation-block lookup failed for %s; falling back to genesis backfill (seed=0)",
+            "creation-block lookup failed for %s; deferring enrollment to a later pass",
             key,
             extra={"address": key, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
-        seed = 0
+        seed = None
     cache[key] = seed
     return seed
 
@@ -302,7 +318,7 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
         .limit(limit)
     ).scalars()
     inserted = 0
-    seed_cache: dict[str, int] = {}
+    seed_cache: dict[str, int | None] = {}
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
@@ -314,9 +330,13 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 if not isinstance(topic0, str) or not topic0.startswith("0x"):
                     continue
                 address = _event_address_for_descriptor(descriptor, hint, job, values)
-                if address is None:
+                if not _is_enrollable_event_address(address):
                     continue
                 start_block = _seed_block(address, seed_cache, chain_id=chain_id)
+                if start_block is None:
+                    # Creation block not yet known — enroll on a later pass at the
+                    # real deploy block rather than backfilling from genesis.
+                    continue
                 if enroll_event_cursor(
                     session, chain_id=chain_id, event_address=address, topic0=topic0, start_block=start_block
                 ):
@@ -329,13 +349,18 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 # If the authority isn't resolved yet, skip; a later pass enrolls
                 # it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if authority is not None:
+                if _is_enrollable_event_address(authority):
                     start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
-                    for topic0 in _SOLMATE_ROLE_TOPICS:
-                        if enroll_event_cursor(
-                            session, chain_id=chain_id, event_address=authority, topic0=topic0, start_block=start_block
-                        ):
-                            inserted += 1
+                    if start_block is not None:
+                        for topic0 in _SOLMATE_ROLE_TOPICS:
+                            if enroll_event_cursor(
+                                session,
+                                chain_id=chain_id,
+                                event_address=authority,
+                                topic0=topic0,
+                                start_block=start_block,
+                            ):
+                                inserted += 1
     session.commit()
     return inserted
 
