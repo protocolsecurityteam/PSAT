@@ -226,13 +226,13 @@ def _safe_has_selector(repo: Any, ctx: EvaluationContext, address: str, selector
 def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str | None:
     authority = descriptor.get("authority_contract") or {}
     raw = authority.get("address")
-    if _is_address(raw):
+    if _is_nonzero_address(raw):
         return raw.lower()
     source = authority.get("address_source") or {}
     if source.get("source") == "state_variable":
         name = source.get("state_variable_name")
         value = (ctx.state_var_values or {}).get(name) if isinstance(name, str) else None
-        if _is_address(value):
+        if _is_nonzero_address(value):
             return value.lower()
     return None
 
@@ -266,6 +266,17 @@ def _min_indexed_block(repo: Any, chain_id: int, event_address: str) -> int | No
 
 def _is_address(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and value.startswith("0x") and len(value) == 42
+
+
+_ZERO_ADDRESS = "0x" + "0" * 40
+
+
+def _is_nonzero_address(value: Any) -> TypeGuard[str]:
+    # A renounced/unset authority is the zero address. Treat it as "no authority"
+    # so the function settles to ``authority_unresolved`` (a non-deferred external
+    # check) instead of stranding a ``no_index_cursor`` deferral that waits forever
+    # on a 0x0 event cursor the indexer will never seed.
+    return _is_address(value) and value.lower() != _ZERO_ADDRESS
 
 
 def _is_selector(value: Any) -> TypeGuard[str]:
