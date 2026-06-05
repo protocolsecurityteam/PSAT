@@ -686,4 +686,10 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     # their existing wire shape; ``bound`` marks an inlined downstream-call subject.
     if cap.subject != "root":
         out["subject"] = cap.subject
+    # Same emit-when-non-default discipline: every cofinite produced today is ``exact``,
+    # so this key is absent and the wire shape is byte-identical to before this field
+    # existed. ``lower_bound`` marks an un-enumerated denylist; carried so the projector
+    # can surface it once Part 2 produces such cofinites.
+    if cap.blacklist_quality != "exact":
+        out["blacklist_quality"] = cap.blacklist_quality
     return out

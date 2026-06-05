@@ -13,7 +13,8 @@ counts match the Option A table:
 | signature_witness(finite)     | capability_expr only             | N       |
 | signature_witness(non-finite) | capability_expr only             | 0       |
 | finite_set(empty exact)       | + status='resolved_empty'        | 0       |
-| cofinite_blacklist            | capability_expr only             | 0       |
+| cofinite_blacklist            | + conditions, status='public',   | 0       |
+|                               |   authority_public=True          |         |
 | external_check_only           | capability_expr only             | 0       |
 | conditional_universal         | + conditions, status='public',   | 0       |
 |                               |   authority_public=True          |         |
@@ -352,7 +353,11 @@ def test_signature_witness_external_emits_zero_rows(db_session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cofinite_blacklist_emits_zero_rows(db_session) -> None:
+def test_cofinite_blacklist_is_public_with_no_rows(db_session) -> None:
+    # "Anyone except a finite exclusion" is permissionless modulo a denylist: it projects
+    # to a PUBLIC path with no enumerated principals, carrying the exclusion as a business
+    # side-condition so a reviewer still sees the filter — NOT an under-resolved residual
+    # (status=None), which is the dead-end behavior this asserts we no longer produce.
     cap = CapabilityExpr.cofinite_blacklist(["0x" + "a" * 40, "0x" + "b" * 40])
 
     write_effective_function_rows(
@@ -367,8 +372,12 @@ def test_cofinite_blacklist_emits_zero_rows(db_session) -> None:
     ef = _ef_row(db_session)
     assert ef.capability_expr["kind"] == "cofinite_blacklist"
     assert len(ef.capability_expr["blacklist"]) == 2
-    assert ef.status is None
-    assert ef.authority_public is False
+    assert ef.status == "public"
+    assert ef.authority_public is True
+    assert ef.conditions is not None
+    assert any(
+        c.get("kind") == "business" and "denylist exclusion" in (c.get("description") or "") for c in ef.conditions
+    ), f"the denylist must be surfaced as a side-condition; got {ef.conditions}"
 
 
 def test_external_check_only_emits_zero_rows(db_session) -> None:

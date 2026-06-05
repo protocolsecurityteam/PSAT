@@ -314,6 +314,71 @@ def test_negate_de_morgan_and():
 
 
 # ---------------------------------------------------------------------------
+# blacklist_quality — Part 1 representation. The field describes the EXCLUDED set
+# (vs membership_quality for an allow-list); it is carried through every cofinite-
+# producing combinator and is inert today (every cofinite is exact).
+# ---------------------------------------------------------------------------
+
+
+def test_cofinite_blacklist_quality_defaults_exact():
+    assert CapabilityExpr.cofinite_blacklist([ADDR_A]).blacklist_quality == "exact"
+
+
+def test_cofinite_blacklist_quality_lower_bound_is_carried():
+    cap = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
+    assert cap.blacklist_quality == "lower_bound"
+
+
+def test_negate_finite_exact_yields_exact_blacklist():
+    # The complement of an exact finite set is an exact cofinite. negate is unchanged in
+    # Part 1, so this rides the default — pinned to lock the no-op.
+    out = negate(CapabilityExpr.finite_set([ADDR_A, ADDR_B]))
+    assert out.kind == "cofinite_blacklist"
+    assert out.blacklist_quality == "exact"
+
+
+def test_intersect_blacklists_threads_quality():
+    a = CapabilityExpr.cofinite_blacklist([ADDR_A])
+    b = CapabilityExpr.cofinite_blacklist([ADDR_B])
+    assert intersect(a, b).blacklist_quality == "exact"  # exact ∩ exact stays exact (no-op today)
+    c = CapabilityExpr.cofinite_blacklist([ADDR_B], blacklist_quality="lower_bound")
+    assert intersect(a, c).blacklist_quality == "lower_bound"  # carried, not dropped
+
+
+def test_union_blacklists_threads_quality():
+    a = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])
+    b = CapabilityExpr.cofinite_blacklist([ADDR_B, ADDR_C])
+    assert union(a, b).blacklist_quality == "exact"
+    c = CapabilityExpr.cofinite_blacklist([ADDR_B, ADDR_C], blacklist_quality="lower_bound")
+    assert union(a, c).blacklist_quality == "lower_bound"
+
+
+def test_attach_conditions_preserves_blacklist_quality():
+    # register's cofinite flows through _attach_conditions (cofinite ∩ conditional_universal);
+    # the quality must survive that field-by-field rebuild.
+    bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
+    cu = CapabilityExpr.conditional_universal(Condition(kind="pause", description="whenNotPaused"))
+    out = intersect(bl, cu)
+    assert out.kind == "cofinite_blacklist"
+    assert out.blacklist_quality == "lower_bound"
+    assert any(c.description == "whenNotPaused" for c in out.conditions)
+
+
+def test_default_cofinite_serializes_identically_to_pre_field():
+    # The P1 no-op guarantee: an exact cofinite's wire dict must NOT gain a
+    # blacklist_quality key, so every stored cofinite is byte-identical to before this
+    # field existed; a lower_bound cofinite DOES carry it for Part 2.
+    from services.resolution.capability_resolver import capability_to_dict
+
+    exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B]))
+    assert "blacklist_quality" not in exact
+    assert set(exact.keys()) == {"kind", "blacklist", "membership_quality", "confidence"}
+
+    lower = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
+    assert lower["blacklist_quality"] == "lower_bound"
+
+
+# ---------------------------------------------------------------------------
 # Total-function discipline: nothing raises across the kind cross-product.
 # ---------------------------------------------------------------------------
 

@@ -112,6 +112,18 @@ def _project_node(
             )
             surface = _and_surface(surface, child_surface)
         return _with_node_conditions(surface, node_conditions)
+    if kind == "cofinite_blacklist":
+        # "Anyone except a finite exclusion" is a PUBLIC path with the denylist as a
+        # side-condition, not an unresolved residual. Surface the exclusion so a reviewer
+        # still sees the filter; the cofinite's own conditions (whenNotPaused, a share
+        # time-lock) ride along in ``node_conditions``. Quality (exact vs lower_bound) is
+        # informational only — every cofinite is "open modulo a finite/condition filter",
+        # so the openness verdict never branches on it.
+        denial = {
+            "kind": "business",
+            "description": f"denylist exclusion ({len(cap_dict.get('blacklist') or [])} known excluded)",
+        }
+        return CapabilitySurface(public_paths=[node_conditions + [denial]])
     return CapabilitySurface(residual=[dict(cap_dict)])
 
 

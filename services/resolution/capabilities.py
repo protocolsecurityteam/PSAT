@@ -118,6 +118,13 @@ class CapabilityExpr:
     unsupported_reason: str | None = None
     children: list["CapabilityExpr"] = field(default_factory=list)
     membership_quality: MembershipQuality = "exact"
+    # Quality of a cofinite_blacklist's ``blacklist`` (the EXCLUDED set), independent of
+    # ``membership_quality`` (which describes a finite_set's allow-list). ``exact`` = the
+    # exclusion is fully enumerated, so the complement is exactly "anyone else";
+    # ``lower_bound`` = at least these are excluded (an un-enumerated denylist), so the
+    # complement is an upper bound on who may call. Inert today — every cofinite produced
+    # now is exact — and carried for surfacing only; the projection never branches on it.
+    blacklist_quality: MembershipQuality = "exact"
     confidence: Confidence = "enumerable"
     last_indexed_block: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
@@ -176,6 +183,7 @@ class CapabilityExpr:
         confidence: Confidence = "enumerable",
         conditions: list[Condition] | None = None,
         subject: Subject = "root",
+        blacklist_quality: MembershipQuality = "exact",
     ) -> "CapabilityExpr":
         return cls(
             kind="cofinite_blacklist",
@@ -183,6 +191,7 @@ class CapabilityExpr:
             confidence=confidence,
             conditions=list(conditions or []),
             subject=subject,
+            blacklist_quality=blacklist_quality,
         )
 
     @classmethod
@@ -286,7 +295,10 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     # cofinite_blacklist ∩ cofinite_blacklist
     if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
         # Anyone not in (a.blacklist ∪ b.blacklist).
-        return CapabilityExpr.cofinite_blacklist(_canon_addresses((a.blacklist or []) + (b.blacklist or [])))
+        return CapabilityExpr.cofinite_blacklist(
+            _canon_addresses((a.blacklist or []) + (b.blacklist or [])),
+            blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+        )
 
     # threshold_group ∩ X — defer to structural AND.
     if a.kind == "threshold_group" or b.kind == "threshold_group":
@@ -318,7 +330,10 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         # Anyone not in (a.blacklist ∩ b.blacklist).
         ab = set((a.blacklist or []))
         bb = set((b.blacklist or []))
-        return CapabilityExpr.cofinite_blacklist(_canon_addresses(list(ab & bb)))
+        return CapabilityExpr.cofinite_blacklist(
+            _canon_addresses(list(ab & bb)),
+            blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+        )
 
     # finite_set ∪ cofinite_blacklist: cofinite minus members already in
     # finite_set (those are still in finite_set, so allowed).
@@ -448,6 +463,7 @@ def _union_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -
         out,
         confidence=_meet_confidence(finite.confidence, blacklist.confidence),
         conditions=list(finite.conditions) + list(blacklist.conditions),
+        blacklist_quality=blacklist.blacklist_quality,
     )
 
 
@@ -486,6 +502,19 @@ def _union_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQu
     return None
 
 
+def _combine_blacklist_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQuality:
+    """Quality of a blacklist combined from two cofinite blacklists (the union under
+    cofinite ∩ cofinite, the intersection under cofinite ∪ cofinite). Inert in Part 1:
+    every cofinite is ``exact`` today, so this returns ``exact`` and changes nothing. It
+    exists so the field is carried, never silently dropped, once Part 2 introduces
+    ``lower_bound`` denylists. Matching qualities survive; a mismatch degrades to the
+    conservative ``lower_bound`` (a combination involving an under-known exclusion can
+    only be a lower bound on the true excluded set)."""
+    if qa == qb:
+        return qa
+    return "lower_bound"
+
+
 def _meet_confidence(a: Confidence, b: Confidence) -> Confidence:
     """Confidence lattice meet (least-confident wins)."""
     order = {"enumerable": 2, "partial": 1, "check_only": 0}
@@ -511,6 +540,7 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
         unsupported_reason=cap.unsupported_reason,
         children=list(cap.children),
         membership_quality=cap.membership_quality,
+        blacklist_quality=cap.blacklist_quality,
         confidence=cap.confidence,
         last_indexed_block=cap.last_indexed_block,
         trace=list(cap.trace),
