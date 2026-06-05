@@ -352,10 +352,29 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
 
 def negate(a: CapabilityExpr) -> CapabilityExpr:
     """``NOT a`` — used when a leaf has operator=falsy / op=ne and the
-    underlying capability needs inversion. Total."""
+    underlying capability needs inversion. Total.
+
+    ``falsy``/``ne`` is the static lowering of an ``if (predicate) revert``
+    exclusion: the predicate names the *denied* set, so the function proceeds for
+    everyone else. ``negate`` maps a constraint on that excluded set to its
+    complement — an open (cofinite) caller set — wherever the complement is
+    faithfully representable. The polarity is the safety boundary: a positive gate
+    (``require(...)`` → ``truthy``/``eq``) is never negated, so an authority never
+    reaches these arms.
+    """
     if a.kind == "finite_set":
         if a.membership_quality != "exact":
-            return CapabilityExpr.unsupported("negate_partial_set")
+            # A non-exact (lower_bound) exclusion is "at least these are denied";
+            # its complement is "anyone except an un-enumerated exclusion" — a
+            # lower_bound cofinite, not an unknown. (Was unsupported("negate_partial_set"),
+            # which discarded the denylist.)
+            return CapabilityExpr.cofinite_blacklist(
+                list(a.members or []),
+                blacklist_quality="lower_bound",
+                confidence=a.confidence,
+                conditions=a.conditions,
+                subject=a.subject,
+            )
         return CapabilityExpr.cofinite_blacklist(
             list(a.members or []),
             confidence=a.confidence,
@@ -370,6 +389,25 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             conditions=a.conditions,
             subject=a.subject,
         )
+    if a.kind == "external_check_only":
+        # An external membership probe under ``falsy`` is an un-enumerated denylist
+        # (``if (check(caller)) revert``): anyone the probe does NOT flag may call. Its
+        # complement is an empty-known, lower_bound cofinite. Surface the probe as a
+        # side-condition so the filter stays visible, and preserve ``subject`` so a
+        # bound (inlined-hook) denylist folds as a condition under cross-subject AND
+        # rather than opening an authority'd function. (Was
+        # unsupported("negate_unsupported_capability_external_check_only").)
+        conditions = list(a.conditions)
+        probe = _external_check_as_condition(a.check)
+        if probe is not None:
+            conditions.append(probe)
+        return CapabilityExpr.cofinite_blacklist(
+            [],
+            blacklist_quality="lower_bound",
+            confidence=a.confidence,
+            conditions=conditions,
+            subject=a.subject,
+        )
     if a.kind == "conditional_universal":
         # Negation of "anyone if C" is "no one if C" — empty set with
         # the condition negated. Concretely: empty set if C, full
@@ -377,7 +415,8 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
         # a condition isn't always representable as a typed
         # condition (e.g., negation of a business invariant).
         return CapabilityExpr.unsupported("negate_conditional_universal")
-    if a.kind in ("threshold_group", "signature_witness", "external_check_only"):
+    if a.kind in ("threshold_group", "signature_witness"):
+        # An M-of-N or signature gate has no faithful open complement — keep gated.
         return CapabilityExpr.unsupported(f"negate_unsupported_capability_{a.kind}")
     if a.kind == "unsupported":
         return CapabilityExpr.unsupported(f"negate_of_{a.unsupported_reason}")
@@ -569,6 +608,21 @@ def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
     """Render a bound-subject capability as side-condition(s): carry forward any
     conditions it already accumulated, plus one describing the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+def _external_check_as_condition(check: ExternalCheck | None) -> Condition | None:
+    """Render an ``external_check_only``'s probe as a side-condition describing the
+    denylist filter, for the ``negate(external_check_only) → cofinite`` arm. Returns
+    None when there's no probe to describe (the cofinite still carries the generic
+    ``denylist exclusion`` from the projector)."""
+    if check is None:
+        return None
+    target = check.target_address
+    selector = check.target_call_selector
+    if target is not None:
+        sel = f".{selector}" if selector else ""
+        return Condition(kind="business", description=f"denylist exclusion via external check {target}{sel}")
+    return Condition(kind="business", description="denylist exclusion via external check")
 
 
 def _bound_condition_description(bound: CapabilityExpr) -> str:

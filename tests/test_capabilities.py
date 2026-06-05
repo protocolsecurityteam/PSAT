@@ -263,12 +263,15 @@ def test_negate_finite_exact_yields_blacklist():
     assert out.blacklist == [ADDR_A.lower(), ADDR_B.lower()]
 
 
-def test_negate_finite_lower_bound_unsupported():
+def test_negate_finite_lower_bound_yields_lower_bound_blacklist():
+    # Part 2: a non-exact (lower_bound) exclusion negates to a lower_bound cofinite
+    # ("anyone except an un-enumerated denylist"), not unsupported. This is the seam
+    # that lets a partially-known denylist open instead of being discarded.
     fin = CapabilityExpr.finite_set([ADDR_A], quality="lower_bound")
     out = negate(fin)
-    assert out.kind == "unsupported"
-    assert out.unsupported_reason is not None
-    assert "negate_partial_set" in out.unsupported_reason
+    assert out.kind == "cofinite_blacklist"
+    assert out.blacklist == [ADDR_A.lower()]
+    assert out.blacklist_quality == "lower_bound"
 
 
 def test_negate_blacklist_yields_finite():
@@ -376,6 +379,98 @@ def test_default_cofinite_serializes_identically_to_pre_field():
 
     lower = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
     assert lower["blacklist_quality"] == "lower_bound"
+
+
+# ---------------------------------------------------------------------------
+# Part 2: negate totality — un-enumerable exclusions open through the algebra.
+# The ``falsy``/``ne`` operator is the only path to negate; it is the static
+# lowering of ``if (predicate) revert`` (the predicate names the EXCLUDED set), so
+# negating its un-resolved forms to an open cofinite is faithful, not a guess.
+# ---------------------------------------------------------------------------
+
+
+def test_negate_external_check_yields_lower_bound_blacklist_carrying_probe():
+    # A denylist hook that resolves to an external probe (``if (check(caller)) revert``)
+    # negates to "anyone except an un-enumerated exclusion" — a lower_bound cofinite —
+    # with the probe preserved as a side-condition so the filter stays visible.
+    check = ExternalCheck(target_address=ADDR_A, target_call_selector="0xdeadbeef")
+    out = negate(CapabilityExpr.external_check_only(check))
+    assert out.kind == "cofinite_blacklist"
+    assert out.blacklist == []
+    assert out.blacklist_quality == "lower_bound"
+    assert any(ADDR_A.lower() in c.description and "0xdeadbeef" in c.description for c in out.conditions), (
+        "the external probe must survive as a surfaced condition"
+    )
+
+
+def test_negate_unsupported_no_adapter_stays_unsupported():
+    # THE SEAM: the no_adapter → cofinite conversion lives in the membership branch of
+    # ``_evaluate_leaf`` (narrow, falsy-only), NOT in ``negate``. ``negate`` keeps every
+    # ``unsupported`` reason ``unsupported`` so a genuinely-unknown predicate
+    # (membership_without_descriptor, equality_op_*_unsupported, negate_of_*) can never
+    # be "helpfully" opened. Pin it here so nobody widens negate into a blanket opener.
+    out = negate(CapabilityExpr.unsupported("no_adapter"))
+    assert out.kind == "unsupported"
+    assert out.unsupported_reason == "negate_of_no_adapter"
+
+
+def test_negate_external_check_preserves_subject():
+    # A bound (inlined-hook) denylist must stay ``bound`` through the new arm so the
+    # cross-subject intersect keeps it a side-condition rather than opening an
+    # authority'd function (see the security invariants below).
+    bound = CapabilityExpr.external_check_only(ExternalCheck(target_address=ADDR_A, target_call_selector="0x01"))
+    bound.subject = "bound"
+    assert negate(bound).subject == "bound"
+
+
+def test_negate_threshold_and_signature_stay_gated():
+    # Only external_check_only joined finite_set/cofinite as a negate-opens arm; an
+    # M-of-N or signature gate has no faithful open complement and stays unsupported.
+    assert negate(CapabilityExpr.threshold_group(2, [ADDR_A, ADDR_B])).kind == "unsupported"
+    assert negate(CapabilityExpr.signature_witness(CapabilityExpr.finite_set([ADDR_A]))).kind == "unsupported"
+
+
+# ---------------------------------------------------------------------------
+# Part 2 security invariants (the heart of the gate): a denylist must NEVER open a
+# function whose authorization is a positive gate. Pinned directly on the algebra.
+# ---------------------------------------------------------------------------
+
+
+def test_truthy_unenumerable_allowlist_never_becomes_cofinite():
+    # A ``truthy`` allowlist (``require(admins[caller])``) that can't be enumerated stays
+    # unsupported/finite — it is NEVER negated, so it never reaches the cofinite arm.
+    # (Polarity is enforced by the operator gate in ``_evaluate_leaf``; here we pin that
+    # the algebra itself does not invent an open set from a positive gate's decline.)
+    allow_decline = CapabilityExpr.unsupported("no_adapter")
+    assert negate(allow_decline).kind == "unsupported"  # would only be reached on falsy; stays gated
+    # An enumerated allowlist is a finite_set and stays a finite_set (gated).
+    enumerated = CapabilityExpr.finite_set([ADDR_A])
+    assert enumerated.kind == "finite_set"
+
+
+def test_mixed_role_gate_and_denylist_stays_gated():
+    # role gate (enumerated admins) AND denylist (cofinite) → the AND keeps the role
+    # finite_set and folds the denylist as a set-subtraction; the function stays gated
+    # on the admins, never opens. A denylist must never erase a positive gate.
+    role = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
+    denylist = CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound")
+    out = intersect(role, denylist)
+    assert out.kind == "finite_set"
+    assert set(out.members or []) == {ADDR_A.lower(), ADDR_B.lower()}
+
+
+def test_cross_subject_root_authority_and_bound_denylist_stays_gated():
+    # The structural cross-contract safety: a function with a real ROOT authority AND a
+    # BOUND denylist (reached via an inlined hook) keeps its root callers; the bound
+    # denylist folds as a side-condition. Only a function whose SOLE gate is a denylist
+    # opens. Drop the ``bound`` tag and this would open an authority'd function.
+    root_authority = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
+    bound_denylist = CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="bound")
+    out = intersect(root_authority, bound_denylist)
+    assert out.kind == "finite_set"
+    assert set(out.members or []) == {ADDR_A.lower(), ADDR_B.lower()}
+    assert out.subject == "root"
+    assert out.conditions, "the bound denylist must survive as a side-condition, not be set-intersected away"
 
 
 # ---------------------------------------------------------------------------

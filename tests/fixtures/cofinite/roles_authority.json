@@ -1,0 +1,655 @@
+{
+ "address": "0x02904af5c3be78481528e0f01780439f024109a6",
+ "canonical_signatures": {
+  "setAuthority(Authority)": "setAuthority(address)"
+ },
+ "contract": "0x02904af5c3be78481528e0f01780439f024109a6",
+ "job_id": "31a232c8-e935-417f-bbf0-5ea970785d6c",
+ "name": "roles_authority",
+ "schema_version": "semantic",
+ "state_var_values": {
+  "authority": "0x0000000000000000000000000000000000000000",
+  "owner": "0xcea8039076e35a825854c5c2f85659430b06ec96"
+ },
+ "trees": {
+  "setAuthority(Authority)": {
+   "children": [
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_33)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool)(msg.sender == owner || authority.canCall(msg.sender,address(this),msg.sig))",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "owner"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": true
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "delegated_authority",
+      "basis": [
+       "require(TMP_33)"
+      ],
+      "confidence": "medium",
+      "expression": "canCall(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "self_address"
+       },
+       {
+        "computed_kind": "msg.sig",
+        "source": "computed"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": true,
+      "set_descriptor": {
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "authority"
+        }
+       },
+       "callee_function": "canCall",
+       "callee_selector": "0xb7009613",
+       "callee_signature": "canCall(address,address,bytes4)",
+       "enumeration_hint": [
+        {
+         "data_to_keys": {},
+         "direction": "set",
+         "event_address": null,
+         "topic0": "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",
+         "topics_to_keys": {}
+        },
+        {
+         "data_to_keys": {},
+         "direction": "set",
+         "event_address": null,
+         "topic0": "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",
+         "topics_to_keys": {}
+        },
+        {
+         "data_to_keys": {},
+         "direction": "set",
+         "event_address": null,
+         "topic0": "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",
+         "topics_to_keys": {}
+        }
+       ],
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        },
+        {
+         "source": "self_address"
+        },
+        {
+         "computed_kind": "msg.sig",
+         "source": "computed"
+        }
+       ],
+       "kind": "external_set"
+      }
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "OR"
+  },
+  "setPublicCapability(address,bytes4,bool)": {
+   "children": [
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "low",
+        "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+        "kind": "equality",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "authority"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "delegated_authority",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "medium",
+        "expression": "canCall(...)",
+        "kind": "external_bool",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "self_address"
+         },
+         {
+          "computed_kind": "msg.sig",
+          "source": "computed"
+         }
+        ],
+        "operator": "truthy",
+        "parameter_indices": [],
+        "references_msg_sender": true,
+        "set_descriptor": {
+         "authority_contract": {
+          "address_source": {
+           "source": "state_variable",
+           "state_variable_name": "authority"
+          }
+         },
+         "callee_function": "canCall",
+         "callee_selector": "0xb7009613",
+         "callee_signature": "canCall(address,address,bytes4)",
+         "enumeration_hint": [
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",
+           "topics_to_keys": {}
+          }
+         ],
+         "key_sources": [
+          {
+           "source": "msg_sender"
+          },
+          {
+           "source": "self_address"
+          },
+          {
+           "computed_kind": "msg.sig",
+           "source": "computed"
+          }
+         ],
+         "kind": "external_set"
+        }
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_67)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "owner"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": true
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "OR"
+  },
+  "setRoleCapability(uint8,address,bytes4,bool)": {
+   "children": [
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "low",
+        "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+        "kind": "equality",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "authority"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "delegated_authority",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "medium",
+        "expression": "canCall(...)",
+        "kind": "external_bool",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "self_address"
+         },
+         {
+          "computed_kind": "msg.sig",
+          "source": "computed"
+         }
+        ],
+        "operator": "truthy",
+        "parameter_indices": [],
+        "references_msg_sender": true,
+        "set_descriptor": {
+         "authority_contract": {
+          "address_source": {
+           "source": "state_variable",
+           "state_variable_name": "authority"
+          }
+         },
+         "callee_function": "canCall",
+         "callee_selector": "0xb7009613",
+         "callee_signature": "canCall(address,address,bytes4)",
+         "enumeration_hint": [
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",
+           "topics_to_keys": {}
+          }
+         ],
+         "key_sources": [
+          {
+           "source": "msg_sender"
+          },
+          {
+           "source": "self_address"
+          },
+          {
+           "computed_kind": "msg.sig",
+           "source": "computed"
+          }
+         ],
+         "kind": "external_set"
+        }
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_67)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "owner"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": true
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "OR"
+  },
+  "setUserRole(address,uint8,bool)": {
+   "children": [
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "low",
+        "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+        "kind": "equality",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "authority"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "delegated_authority",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "medium",
+        "expression": "canCall(...)",
+        "kind": "external_bool",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "self_address"
+         },
+         {
+          "computed_kind": "msg.sig",
+          "source": "computed"
+         }
+        ],
+        "operator": "truthy",
+        "parameter_indices": [],
+        "references_msg_sender": true,
+        "set_descriptor": {
+         "authority_contract": {
+          "address_source": {
+           "source": "state_variable",
+           "state_variable_name": "authority"
+          }
+         },
+         "callee_function": "canCall",
+         "callee_selector": "0xb7009613",
+         "callee_signature": "canCall(address,address,bytes4)",
+         "enumeration_hint": [
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",
+           "topics_to_keys": {}
+          }
+         ],
+         "key_sources": [
+          {
+           "source": "msg_sender"
+          },
+          {
+           "source": "self_address"
+          },
+          {
+           "computed_kind": "msg.sig",
+           "source": "computed"
+          }
+         ],
+         "kind": "external_set"
+        }
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_67)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "owner"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": true
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "OR"
+  },
+  "transferOwnership(address)": {
+   "children": [
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "low",
+        "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+        "kind": "equality",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "authority"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "delegated_authority",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "medium",
+        "expression": "canCall(...)",
+        "kind": "external_bool",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "self_address"
+         },
+         {
+          "computed_kind": "msg.sig",
+          "source": "computed"
+         }
+        ],
+        "operator": "truthy",
+        "parameter_indices": [],
+        "references_msg_sender": true,
+        "set_descriptor": {
+         "authority_contract": {
+          "address_source": {
+           "source": "state_variable",
+           "state_variable_name": "authority"
+          }
+         },
+         "callee_function": "canCall",
+         "callee_selector": "0xb7009613",
+         "callee_signature": "canCall(address,address,bytes4)",
+         "enumeration_hint": [
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",
+           "topics_to_keys": {}
+          },
+          {
+           "data_to_keys": {},
+           "direction": "set",
+           "event_address": null,
+           "topic0": "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",
+           "topics_to_keys": {}
+          }
+         ],
+         "key_sources": [
+          {
+           "source": "msg_sender"
+          },
+          {
+           "source": "self_address"
+          },
+          {
+           "computed_kind": "msg.sig",
+           "source": "computed"
+          }
+         ],
+         "kind": "external_set"
+        }
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_67)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "owner"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": true
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "OR"
+  }
+ }
+}

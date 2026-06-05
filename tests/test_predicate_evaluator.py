@@ -279,14 +279,13 @@ def test_two_keys_membership_yields_finite_set_lower(tmp_path):
     assert cap.membership_quality == "lower_bound"
 
 
-def test_negated_membership_partial_yields_unsupported(tmp_path):
-    """``require(!_blacklist[msg.sender])`` (writer-gate b.i admin-
-    written). The adapter returns an empty lower_bound finite_set
-    placeholder; negating a partial-quality finite_set is unsound
-    (we don't know the full member list, so we can't safely express
-    its complement). Negate emits unsupported(negate_partial_set).
-    Week-5 adapter fills in the real list, after which negation is
-    sound and the leaf becomes cofinite_blacklist."""
+def test_negated_membership_denylist_yields_cofinite(tmp_path):
+    """``require(!_blacklist[msg.sender])`` is a denylist (``if (blacklist[caller])
+    revert``): the function proceeds for anyone NOT on the list. With no enumerator,
+    the membership branch normalizes the decline to an external check and ``negate``
+    yields a lower_bound ``cofinite_blacklist`` — "anyone except an un-enumerated
+    exclusion", which the surface projects to ``public``. (Part 2: previously this
+    was discarded as ``unsupported(negate_partial_set)`` → under-resolved.)"""
     sl = _compile(
         tmp_path,
         """
@@ -307,10 +306,11 @@ def test_negated_membership_partial_yields_unsupported(tmp_path):
     contract = sl.contracts[0]
     trees = _build_pipeline(contract)
     cap = evaluate_tree(trees["someAction()"])
-    # Pre-adapter: negate(lower_bound finite_set) → unsupported.
-    assert cap.kind == "unsupported"
-    assert cap.unsupported_reason is not None
-    assert "negate_partial_set" in cap.unsupported_reason
+    assert cap.kind == "cofinite_blacklist"
+    assert cap.blacklist_quality == "lower_bound"
+    # Polarity safety: the SETTER stays gated — only the falsy denylist opens.
+    setter = evaluate_tree(trees["setBlacklist(address,bool)"])
+    assert setter.kind != "cofinite_blacklist"
 
 
 def test_external_bool_yields_check_only(tmp_path):

@@ -352,6 +352,12 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
         cap = _tag_caller_subject(cap, ctx)
         if operator == "falsy":
+            # A falsy membership leaf is an exclusion gate (``if (set[caller]) revert``).
+            # When the set can't be enumerated, normalize that decline to an external
+            # check so the negate below reaches its cofinite arm and the denylist
+            # resolves to "anyone except an un-enumerated exclusion", rather than being
+            # discarded as ``negate_of_no_adapter``. See the helper.
+            cap = _normalize_membership_decline_for_negation(cap, leaf, descriptor, ctx)
             cap = negate(cap)
         return cap
 
@@ -1670,6 +1676,39 @@ def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = 
     if operator == "falsy":
         cap = negate(cap)
     return cap
+
+
+def _normalize_membership_decline_for_negation(
+    cap: CapabilityExpr,
+    leaf: LeafPredicate,
+    descriptor: SetDescriptor,
+    ctx: EvaluationContext,
+) -> CapabilityExpr:
+    """Turn an *un-enumerable* membership decline into an ``external_check_only`` so a
+    pending ``falsy`` negate reaches ``negate``'s cofinite arm.
+
+    A ``falsy`` membership leaf (``if (set[caller]) revert``) proceeds for anyone NOT in
+    the set, so its faithful resolution is the complement (cofinite/open). But when the
+    adapter can't enumerate the set the decline arrives as ``unsupported("no_adapter")``
+    (the real ``AdapterRegistry`` has no enumerator for this ``mapping_membership``) or
+    as the null adapter's ``finite_set([], lower_bound)`` placeholder — and the raw
+    ``unsupported`` would negate to ``unsupported("negate_of_no_adapter")``, discarding
+    the denylist. Convert *only* that decline to an ``external_check_only`` describing
+    the membership probe; ``negate(external_check_only)`` then yields a lower_bound
+    cofinite. ``subject`` is carried through so a bound (inlined-hook) denylist stays a
+    side-condition.
+
+    Narrow by construction — a populated/exact ``finite_set``,
+    ``membership_without_descriptor``, or any other reason is returned untouched and
+    stays gated. Mirrors the external_bool branch's existing ``no_adapter`` handling.
+    """
+    is_no_adapter = cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter"
+    is_null_placeholder = cap.kind == "finite_set" and not cap.members and cap.membership_quality == "lower_bound"
+    if not (is_no_adapter or is_null_placeholder):
+        return cap
+    check = _external_check_from_descriptor(leaf, descriptor, ctx)
+    check.subject = cap.subject
+    return check
 
 
 def _external_check_from_descriptor(
