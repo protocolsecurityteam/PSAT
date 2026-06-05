@@ -26,13 +26,40 @@ TARGETS = [
         "teller",
         "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884",
         "442a91d7-ed0f-4b68-a924-305c5001ca0f",
+        ["beforeTransfer(address,address,address)"],  # the only tree BoringVault.transfer inlines
+    ),
+    (
+        "weeth",
+        "0x2d10683e941275d502173053927ad6066e6afd6b",
+        "53f9aaa8-8c37-43b8-8c01-6323a24886ff",
+        [
+            "recoverERC20(address,address,uint256)",
+            "recoverERC721(address,address,uint256)",
+            "recoverETH(address,uint256)",
+        ],
+    ),
+    (
+        "roles_authority",
+        "0x02904af5c3be78481528e0f01780439f024109a6",
+        "31a232c8-e935-417f-bbf0-5ea970785d6c",
+        ["setUserRole(address,uint8,bool)"],
+    ),
+    (
+        "accountant",
+        "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+        "ec2bd476-0796-4f5a-93f4-749eae9cb4b8",
+        ["updateExchangeRate(uint96)", "setRateProviderData(ERC20,bool,address)"],
+    ),
+    (
+        "node_operator_manager",
+        "0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf",
         None,
-    ),  # keep all; we need beforeTransfer
-    ("weeth", "0x2d10683e941275d502173053927ad6066e6afd6b", "53f9aaa8-8c37-43b8-8c01-6323a24886ff", None),
-    ("roles_authority", "0x02904af5c3be78481528e0f01780439f024109a6", "31a232c8-e935-417f-bbf0-5ea970785d6c", None),
-    ("accountant", "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8", "ec2bd476-0796-4f5a-93f4-749eae9cb4b8", None),
-    ("node_operator_manager", "0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf", None, None),
+        ["registerNodeOperator(bytes,uint64)"],
+    ),
 ]
+# Each ``keep`` is exactly the signatures the e2e test asserts on (the trees resolve
+# independently and inlining pulls from the *callee's* artifact, so siblings are dead
+# weight). Trimming was verified to change 0 resolver output for the kept functions.
 
 OUT = "/home/riley/PSAT/tests/fixtures/cofinite"
 os.makedirs(OUT, exist_ok=True)
