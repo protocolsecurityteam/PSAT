@@ -697,4 +697,10 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     # can surface it once Part 2 produces such cofinites.
     if cap.blacklist_quality != "exact":
         out["blacklist_quality"] = cap.blacklist_quality
+    # Emit-when-non-default: only labeled empties carry a reason, so populated
+    # sets and pre-existing empties keep their wire shape. Carries the
+    # empty-by-design ceiling / read-failure flavor to the persisted
+    # ``capability_expr`` the policy + surface layers read.
+    if cap.empty_reason is not None:
+        out["empty_reason"] = cap.empty_reason
     return out

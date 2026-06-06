@@ -144,7 +144,12 @@ def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str,
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
     kind = cap_dict.get("kind")
     if kind == "finite_set":
-        return cap_dict.get("membership_quality") == "exact" and cap_dict.get("members") == []
+        if cap_dict.get("members") != []:
+            return False
+        # An exact-empty set is provably nobody; an empty-by-design ceiling (the
+        # accept side of a 2-step transfer with none pending) is too, even when
+        # the read that confirmed it could only structurally infer a lower_bound.
+        return cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design"
     if kind == "AND":
         return any(_is_resolved_empty_capability(child) for child in _child_dicts(cap_dict))
     if kind == "OR":

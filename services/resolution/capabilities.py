@@ -46,6 +46,21 @@ CapKind = Literal[
 MembershipQuality = Literal["exact", "lower_bound", "upper_bound"]
 Confidence = Literal["enumerable", "partial", "check_only"]
 
+# Why a finite_set is empty, when it is. Lets the policy layer tell an
+# empty-by-design ceiling (a 2-step accept gate with no pending transfer) apart
+# from a silent read gap, and distinguishes the gap's flavor (revert vs empty
+# return vs nothing-attempted) so each is classified instead of funneling to one
+# ``lower_bound`` sink. ``None`` on a populated set, or on an empty set whose
+# emptiness predates this field. See ``predicate_evaluator`` for who sets each.
+EmptyReason = Literal[
+    "empty_by_design",
+    "unreadable_revert",
+    "unreadable_empty",
+    "needs_enumeration",
+    "bad_input",
+    "not_read",
+]
+
 # Which caller dimension a capability constrains. ``root`` = the function's
 # end-user caller (msg.sender / tx.origin at the protected entrypoint). ``bound``
 # = an already-resolved intermediate subject — the caller of an *inlined*
@@ -126,6 +141,10 @@ class CapabilityExpr:
     # now is exact — and carried for surfacing only; the projection never branches on it.
     blacklist_quality: MembershipQuality = "exact"
     confidence: Confidence = "enumerable"
+    # Why this set is empty (see ``EmptyReason``); only meaningful for an empty
+    # finite_set. Default-None keeps the wire shape of every populated set and of
+    # the pre-existing empty sets byte-identical.
+    empty_reason: EmptyReason | None = None
     last_indexed_block: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
     # Caller dimension this capability constrains; see ``Subject``. Set at leaf
@@ -147,6 +166,7 @@ class CapabilityExpr:
         last_indexed_block: int | None = None,
         trace: list[dict[str, Any]] | None = None,
         subject: Subject = "root",
+        empty_reason: EmptyReason | None = None,
     ) -> "CapabilityExpr":
         return cls(
             kind="finite_set",
@@ -157,6 +177,7 @@ class CapabilityExpr:
             last_indexed_block=last_indexed_block,
             trace=list(trace or []),
             subject=subject,
+            empty_reason=empty_reason,
         )
 
     @classmethod
@@ -581,6 +602,10 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
         membership_quality=cap.membership_quality,
         blacklist_quality=cap.blacklist_quality,
         confidence=cap.confidence,
+        # Preserved so an empty-by-design ceiling that gains a side condition
+        # (e.g. an OZ accept-admin gate AND-ed with its schedule check) keeps its
+        # reason — otherwise the policy layer would re-read it as a silent gap.
+        empty_reason=cap.empty_reason,
         last_indexed_block=cap.last_indexed_block,
         trace=list(cap.trace),
         subject=cap.subject,
