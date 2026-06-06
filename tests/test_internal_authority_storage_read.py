@@ -333,6 +333,30 @@ class TestMembershipNFTStorageSlot:
         assert op["state_variable_name"] == "_owner"
         assert op.get("storage_slot") is None
 
+    def test_owner_gate_resolves_via_canonical_getter_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The flip side of the slot path, end-to-end: ``adminAction()`` gates on
+        ``msg.sender == _owner`` (private, no slot — ``owner()`` exists), so on a
+        ``state_var_values`` miss the resolver de-underscores ``_owner``→``owner()``
+        and reads it live. Revert-proof: ``_owner()`` and any storage read revert;
+        only ``owner()`` (0x8da5cb5b) returns the principal, so this fails on the
+        pre-fix evaluator that tried only the var's own dead ``_owner()`` selector."""
+        tree = _tree_for(_membership_nft(), "adminAction()")
+        recorder: list = []
+
+        def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
+            recorder.append((method, params))
+            if method == "eth_call" and params[0]["data"] == "0x8da5cb5b":  # owner()
+                return _word(MANAGER)
+            raise RuntimeError("execution reverted")
+
+        monkeypatch.setattr("utils.rpc.rpc_request", fake)
+        cap = evaluate_tree(tree, _ctx_with_rpc())
+
+        assert _principals(cap) == [MANAGER]
+        assert cap.membership_quality == "exact"
+        assert _status(cap) != "resolved_empty"
+        assert "0x8da5cb5b" in [p[0]["data"] for m, p in recorder if m == "eth_call"]
+
     def test_operand_carries_sequential_slot(self) -> None:
         """The static stage stamps the var's sequential layout slot onto the
         getter-less ``state_variable`` operand of every gated function."""

@@ -30,6 +30,7 @@ CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20
 GOVERNOR = "0x" + "cd" * 20
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
+GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
 
 
 # --------------------------------------------------------------------------
@@ -101,6 +102,32 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, return_addr: str | None, *, recor
         if return_addr is None:
             raise RuntimeError("rpc unavailable")
         return "0x" + return_addr[2:].rjust(64, "0")
+
+    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+
+
+def _sel(signature: str) -> str:
+    from eth_utils.crypto import keccak
+
+    return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _stub_rpc_by_selector(
+    monkeypatch: pytest.MonkeyPatch, returns: dict[str, str], *, recorder: list | None = None
+) -> None:
+    """Selector-aware ``eth_call`` stub: returns the 32-byte word for
+    ``returns[selector]`` and reverts on any other selector — so a test can prove
+    *which* getter recovered the principal (e.g. ``owner()`` but never
+    ``_owner()``)."""
+
+    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
+        if recorder is not None:
+            recorder.append((method, params))
+        if method == "eth_call":
+            data = params[0]["data"]
+            if data in returns:
+                return "0x" + returns[data][2:].rjust(64, "0")
+        raise RuntimeError("execution reverted")
 
     monkeypatch.setattr("utils.rpc.rpc_request", fake)
 
@@ -179,6 +206,75 @@ def test_renounced_getter_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatc
     assert cap.kind == "finite_set"
     assert cap.members == []
     assert cap.membership_quality == "exact"
+
+
+# --------------------------------------------------------------------------
+# Leading-underscore state-var operand: an OZ-v4 ``onlyOwner`` lowers to
+# ``msg.sender == _owner`` (the trivial ``owner(){return _owner;}`` getter is
+# inlined to its backing private var). ``_owner()`` has no selector, so on a
+# snapshot miss the state_variable branch must de-underscore to ``owner()`` —
+# the same fallback the view_call branch already does for ``_governor()``. Pins
+# the gap where this branch tried only ``_owner()`` (revert) and dropped the
+# principal. Selector-aware stub proves ``owner()`` — never ``_owner()`` — is
+# what recovers it.
+# --------------------------------------------------------------------------
+
+
+def test_underscore_owner_state_var_resolves_via_canonical_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder: list = []
+    _stub_rpc_by_selector(monkeypatch, {OWNER_SELECTOR: OWNER}, recorder=recorder)
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_owner"})
+
+    cap = evaluate_tree(tree, _ctx_with_rpc())
+
+    assert cap.kind == "finite_set"
+    assert cap.members == [OWNER]
+    assert cap.membership_quality == "exact"
+    # ``_owner()`` (the var's own dead selector) is tried and reverts; ``owner()``
+    # (de-underscored) is what actually resolves the principal.
+    selectors = [p[0]["data"] for m, p in recorder if m == "eth_call"]
+    assert _sel("_owner()") in selectors
+    assert OWNER_SELECTOR in selectors
+
+
+def test_underscore_governor_state_var_resolves_via_canonical_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_rpc_by_selector(monkeypatch, {GOVERNOR_SELECTOR: GOVERNOR})
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_governor"})
+
+    cap = evaluate_tree(tree, _ctx_with_rpc())
+
+    assert cap.kind == "finite_set"
+    assert cap.members == [GOVERNOR]
+    assert cap.membership_quality == "exact"
+
+
+def test_underscore_owner_renounced_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A de-underscored ``owner()`` reading the zero address is a renounced/unset
+    authority — ``exact`` empty, not the ``lower_bound`` unresolved placeholder."""
+    _stub_rpc_by_selector(monkeypatch, {OWNER_SELECTOR: "0x" + "00" * 20})
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_owner"})
+
+    cap = evaluate_tree(tree, _ctx_with_rpc())
+
+    assert cap.members == []
+    assert cap.membership_quality == "exact"
+
+
+def test_arbitrary_underscore_state_var_is_not_de_underscored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-closed over-reach guard: only {owner,governor,authority} de-underscore.
+    A ``_secret`` whose own ``_secret()`` getter reverts must NOT be bound to
+    whatever public ``secret()`` returns — a wrong controller is worse than a
+    missing one. ``secret()`` is readable here yet must never be called."""
+    recorder: list = []
+    _stub_rpc_by_selector(monkeypatch, {_sel("secret()"): OWNER}, recorder=recorder)
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_secret"})
+
+    cap = evaluate_tree(tree, _ctx_with_rpc())
+
+    assert cap.members == []
+    assert cap.membership_quality == "lower_bound"
+    selectors = [p[0]["data"] for m, p in recorder if m == "eth_call"]
+    assert _sel("secret()") not in selectors  # the de-underscored getter was never guessed
 
 
 # --------------------------------------------------------------------------

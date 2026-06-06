@@ -937,18 +937,34 @@ def _resolve_equality_principal(
         # equality ``msg.sender == X`` names X as the sole authorized caller, so
         # reading X's getter live recovers the principal the persisted
         # ControllerValue feed didn't carry (or carried under a different key,
-        # e.g. an owner()/governor() gate). Storage-slot authority constants
-        # (Solady ``_OWNER_SLOT``, OZ-v5 ``OwnableStorageLocation``,
-        # ``_GOVERNOR_SLOT``) name a slot *locator* whose own ``<slot>()`` getter
-        # reverts, so the canonical public getter reading the same slot is the
-        # fallback behind it. Struct members are read only for the OZ-v5
-        # namespaced ``_owner``; others (``accountantState.payoutAddress``) have
-        # no nullary getter and describe fund destinations, not callers.
+        # e.g. an owner()/governor() gate). Three getter candidates are tried in
+        # order until one reads a concrete value:
+        #   1. ``<name>()`` — the auto-getter of a ``public`` state var, named
+        #      after the var itself (``owner``→``owner()``).
+        #   2. the de-underscored canonical getter — an OZ-v4 ``onlyOwner`` lowers
+        #      to ``msg.sender == _owner`` (the private backing var, since the
+        #      trivial ``owner(){return _owner;}`` getter is inlined), and
+        #      ``_owner()`` has no selector of its own, but ``owner()`` reads the
+        #      same storage (``_governor``→``governor()`` likewise). Mirrors the
+        #      view_call branch's internal-accessor fallback and is fail-closed to
+        #      {owner,governor,authority}(+pending), so an arbitrary ``_x`` is left
+        #      alone rather than bound to whatever public ``x()`` returns.
+        #   3. the canonical getter behind a storage-slot *locator* (Solady
+        #      ``_OWNER_SLOT``, OZ-v5 ``OwnableStorageLocation``, ``_GOVERNOR_SLOT``)
+        #      whose own ``<slot>()`` getter reverts.
+        # Struct members are read only for the OZ-v5 namespaced ``_owner``; others
+        # (``accountantState.payoutAddress``) have no nullary getter and describe
+        # fund destinations, not callers.
         name = op.get("state_variable_name")
         result: CapabilityExpr | None = None
         if not op.get("member_path"):
             result = _resolve_authority_via_getters(
-                ctx, [_nullary_getter_selector(name), _canonical_authority_selector_for_slot(name)]
+                ctx,
+                [
+                    _nullary_getter_selector(name),
+                    _public_getter_selector_for_internal_accessor(f"{name}()") if name else None,
+                    _canonical_authority_selector_for_slot(name),
+                ],
             )
         elif op.get("member_path") == ["_owner"]:
             result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
