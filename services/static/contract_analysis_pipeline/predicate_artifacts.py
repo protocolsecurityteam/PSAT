@@ -31,6 +31,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .predicate_types import PredicateTree
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
@@ -224,6 +225,10 @@ def build_predicate_artifacts_with_pause_info(
         pass_started = time.monotonic()
         apply_solmate_authority_hint_pass(contract, all_trees)
         pass_durations_ms["solmate_authority_hints"] = int((time.monotonic() - pass_started) * 1000)
+
+        pass_started = time.monotonic()
+        apply_internal_authority_slot_pass(contract, all_trees)
+        pass_durations_ms["internal_authority_slot"] = int((time.monotonic() - pass_started) * 1000)
 
         pass_started = time.monotonic()
         pause_info = apply_reentrancy_pause_pass(contract, all_trees)

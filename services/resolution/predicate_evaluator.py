@@ -40,6 +40,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
 from .capabilities import (
     CapabilityExpr,
     Condition,
+    EmptyReason,
     ExternalCheck,
     intersect,
     negate,
@@ -707,21 +708,33 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
     return _live_authority_result(result_addr, selector, contract)
 
 
-def _live_resolve_authority_slot(ctx: EvaluationContext | None, slot: str | None) -> CapabilityExpr | None:
-    """Resolve ``msg.sender == <getter-less slot accessor>`` by reading the raw
+def _live_resolve_authority_slot(
+    ctx: EvaluationContext | None,
+    slot: str | None,
+    *,
+    zero_empty_reason: EmptyReason | None = "empty_by_design",
+) -> CapabilityExpr | None:
+    """Resolve ``msg.sender == <getter-less slot reader>`` by reading the raw
     storage slot live.
 
-    For an authority whose internal accessor ``sload``s a constant slot and has
-    **no public getter** (Governable ``_pendingGovernor`` reads
-    ``keccak256("LRTSquare.pending.governor")``), the static stage attaches the
-    slot to the operand and this reads it with ``eth_getStorageAt`` against the
-    runtime address — the proxy when the job is proxy-linked, so the *live*
-    pending value is seen rather than a standalone impl's empty storage. Mirrors
-    :func:`_live_resolve_authority`'s contract: ``finite_set([addr], exact)`` for
-    a non-zero slot, ``finite_set([], exact, empty_by_design)`` for a
-    confirmed-zero slot (no transfer pending — a *read-confirmed* accept-side
-    ceiling), a labeled ``lower_bound`` when the read was attempted but
-    unreadable, or ``None`` when nothing could be attempted."""
+    Two getter-less authority shapes use this. (1) An internal accessor that
+    ``sload``s a *constant* slot (Governable ``_pendingGovernor`` reads
+    ``keccak256("LRTSquare.pending.governor")``) — a ``view_call`` operand. (2) A
+    *named* address state var declared without ``public`` (ether.fi
+    ``MembershipNFT.membershipManager``) — a ``state_variable`` operand whose slot
+    is its sequential layout position. In both the static stage attaches the slot
+    and this reads it with ``eth_getStorageAt`` against the runtime address — the
+    proxy when the job is proxy-linked, so the *live* value is seen rather than a
+    standalone impl's empty storage.
+
+    Mirrors :func:`_live_resolve_authority`'s contract: ``finite_set([addr],
+    exact)`` for a non-zero slot, ``finite_set([], exact)`` for a confirmed-zero
+    slot, a labeled ``lower_bound`` when the read was attempted but unreadable, or
+    ``None`` when nothing could be attempted. ``zero_empty_reason`` labels the
+    confirmed-zero outcome: ``empty_by_design`` for a pending-transfer accept gate
+    (a read-confirmed ceiling — no transfer queued), ``None`` for a plain
+    authority var that simply reads zero (renounced/unset, like
+    :func:`_live_resolve_authority`'s clean-zero)."""
     if ctx is None or not isinstance(slot, str) or not slot.startswith("0x") or len(slot) != 66:
         return None
     outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
@@ -753,7 +766,7 @@ def _live_resolve_authority_slot(ctx: EvaluationContext | None, slot: str | None
         )
     addr = "0x" + raw[-40:].lower()
     if _is_zero_address(addr) or addr == _BURN_ADDRESS:
-        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", empty_reason="empty_by_design")
+        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", empty_reason=zero_empty_reason)
     return CapabilityExpr.finite_set(
         [addr],
         quality="exact",
@@ -941,6 +954,24 @@ def _resolve_equality_principal(
             result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
         if result is not None and result.membership_quality == "exact":
             return result
+        # Getter-less internal address var (ether.fi ``MembershipNFT.membershipManager``
+        # is declared without ``public``, so its ``membershipManager()`` getter
+        # reverts on every deployment): the *sequential* storage slot the static
+        # stage carried is AUTHORITATIVE — the value lives in the contract's own
+        # storage, read it directly. A non-zero slot IS the principal; a
+        # confirmed-zero slot is a renounced/unset authority (resolved_empty, like a
+        # clean-zero getter — NOT empty-by-design, hence ``zero_empty_reason=None``);
+        # an unreadable slot stays an honest ``lower_bound``. Only bare address
+        # scalars carry a slot (the static pass excludes mappings/structs/packed
+        # vars), so a non-address word is never misread as a principal.
+        slot = op.get("storage_slot")
+        if isinstance(slot, str) and not op.get("member_path"):
+            slot_result = _live_resolve_authority_slot(ctx, slot, zero_empty_reason=None)
+            if slot_result is not None:
+                return slot_result
+            # Slot present but no read attempted (no reachable RPC) — honest
+            # unknown, not a guess.
+            return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
         # An accept-side 2-step transfer gate (pending governor / default admin)
         # that read empty — or, like ``_pendingDefaultAdmin.newAdmin``, has no
         # getter to read — is uncallable until a transfer is queued. That is
