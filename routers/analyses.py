@@ -10,8 +10,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
 from db.models import Artifact, Contract, Job, JobStatus
+from schemas.common import make_contract
+from schemas.governance_schemas import AnalysisListEntry
 from services.aggregations import build_analysis_detail
+from services.artifacts import expand_available_artifact_names, get_artifact_or_stage_field
 from services.governance.proxies import _merge_proxy_impl_entries
+from utils.rpc import chain_id_for_chain_name
 
 from . import deps
 
@@ -21,7 +25,7 @@ router = APIRouter()
 
 
 @router.get("/api/analyses")
-def analyses(response: Response) -> list[dict]:
+def analyses(response: Response) -> list[AnalysisListEntry]:
     """List completed analyses with their available artifacts."""
     # Read-mostly listing — let the browser reuse it across navigations.
     # Short max-age + SWR keeps freshness while letting back/forward and
@@ -81,7 +85,7 @@ def analyses(response: Response) -> list[dict]:
             current = jobs_by_id.get(parent_job_id)
         return None
 
-    results = []
+    results: list[AnalysisListEntry] = []
     for job in jobs:
         run_name = job.name or str(job.id)
         request = job.request if isinstance(job.request, dict) else {}
@@ -89,7 +93,7 @@ def analyses(response: Response) -> list[dict]:
         company = company_for_job(job)
         addr_lower = (job.address or "").lower()
         contract = contracts_by_address.get(addr_lower)
-        entry: dict[str, Any] = {
+        entry: AnalysisListEntry = {
             "run_name": run_name,
             "job_id": str(job.id),
             "address": job.address,
@@ -102,7 +106,23 @@ def analyses(response: Response) -> list[dict]:
             "implementation_address": contract.implementation if contract else None,
             "proxy_address": request.get("proxy_address"),
         }
-        entry["available_artifacts"] = sorted(artifact_names_by_job.get(job.id, []))
+        if contract is not None:
+            entry["contract"] = make_contract(
+                address=contract.address,
+                chain_id=chain_id_for_chain_name(contract.chain) or 1,
+                name=contract.contract_name,
+                label=run_name,
+                is_proxy=bool(contract.is_proxy),
+                proxy_address=contract.address if contract.is_proxy else None,
+                implementation_addresses=[
+                    item for item in [contract.implementation, *(contract.secondary_implementations or [])] if item
+                ],
+                admin_addresses=[contract.admin] if contract.admin else [],
+                beacon_addresses=[contract.beacon] if contract.beacon else [],
+                deployer_address=contract.deployer,
+                proxy_type=contract.proxy_type,
+            )
+        entry["available_artifacts"] = sorted(expand_available_artifact_names(artifact_names_by_job.get(job.id, [])))
 
         # Hide proxy entries until the impl is completed — otherwise the
         # listing renders a half-populated card that mutates once the impl
@@ -164,9 +184,9 @@ def analysis_artifact(run_name: str, artifact_name: str):
 
         artifact: Any = None
         try:
-            artifact = deps.get_artifact(session, job.id, lookup_name)
+            artifact = get_artifact_or_stage_field(session, job.id, lookup_name)
             if artifact is None:
-                artifact = deps.get_artifact(session, job.id, artifact_name)
+                artifact = get_artifact_or_stage_field(session, job.id, artifact_name)
         except Exception as exc:
             # Storage backend can be transiently unreachable (MinIO/Tigris
             # outage, expired credentials, missing object). Don't 500 — log

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from schemas.audit_schemas import ScopeSection
+from services.audits.types import ScopeSection
 
 from ._utils import _normalize_ligatures, _page_of_offset, _page_offsets
 

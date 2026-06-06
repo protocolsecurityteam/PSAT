@@ -58,8 +58,7 @@ try:
 except Exception:  # pragma: no cover
     SLITHER_AVAILABLE = False
 
-from schemas.static_pipeline_schemas import PauseInfo, ReentrancyPauseGuardKind
-
+from .pipeline_types import PauseInfo, ReentrancyPauseGuardKind
 from .predicate_types import LeafPredicate, PredicateTree
 
 GuardKind = ReentrancyPauseGuardKind

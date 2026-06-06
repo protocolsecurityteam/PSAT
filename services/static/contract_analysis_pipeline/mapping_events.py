@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas.static_pipeline_schemas import EventMetadata as _EventMetadata
-from schemas.static_pipeline_schemas import WriterEventDirection, WriterEventSpec
-
+from .pipeline_types import EventMetadata as _EventMetadata
+from .pipeline_types import WriterEventDirection, WriterEventSpec
 from .shared import _contract_functions
 
 

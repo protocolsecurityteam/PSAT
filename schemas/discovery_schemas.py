@@ -1,56 +1,86 @@
-"""Schemas owned by discovery services."""
+"""Public schemas for discovery service boundaries."""
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing_extensions import NotRequired, TypeAlias, TypedDict
 
-UpgradeEventType = Literal["upgraded", "admin_changed", "beacon_upgraded"]
+from schemas.common import (
+    Address,
+    ChainId,
+    Contract,
+    JsonObject,
+    ServiceBoundaryMetadata,
+    StageArtifact,
+    StageContext,
+)
 
-
-class UpgradeEvent(TypedDict, total=False):
-    event_type: UpgradeEventType
-    block_number: int
-    timestamp: int | None
-    tx_hash: str | None
-    log_index: int | None
-    implementation: str | None
-    previous_admin: str | None
-    new_admin: str | None
-    beacon: str | None
-
-
-class ImplementationRecord(TypedDict, total=False):
-    address: str
-    contract_name: str | None
-    block_introduced: int
-    timestamp_introduced: int | None
-    tx_hash: str | None
-    block_replaced: int | None
-    timestamp_replaced: int | None
-
-
-class ProxyUpgradeHistory(TypedDict):
-    proxy_address: str
-    proxy_type: str
-    current_implementation: str | None
-    upgrade_count: int
-    first_upgrade_block: int | None
-    last_upgrade_block: int | None
-    implementations: list[ImplementationRecord]
-    events: list[UpgradeEvent]
+UpgradeEventType: TypeAlias = str
+UpgradeEvent: TypeAlias = JsonObject
+ImplementationRecord: TypeAlias = JsonObject
+ProxyUpgradeHistory: TypeAlias = JsonObject
+DiscoveryContractCandidate: TypeAlias = JsonObject
+DiscoveryInventory: TypeAlias = JsonObject
 
 
 class UpgradeHistoryOutput(TypedDict):
     schema_version: str
-    target_address: str
+    contract: NotRequired[Contract]
+    target_address: Address
     proxies: dict[str, ProxyUpgradeHistory]
     total_upgrades: int
 
 
+class DiscoveryInput(TypedDict, total=False):
+    context: StageContext
+    metadata: ServiceBoundaryMetadata
+    address: Address | None
+    company: str | None
+    name: str | None
+    chain: str | None
+    chain_id: ChainId | None
+    rpc_url: str | None
+    dapp_urls: list[str] | None
+    defillama_protocol: str | None
+    analyze_limit: int
+    force: bool
+
+
+class DiscoveryPayload(TypedDict):
+    contracts: list[Contract]
+    inventory: NotRequired[DiscoveryInventory]
+    metadata: NotRequired[JsonObject]
+    audit_reports: NotRequired[JsonObject]
+    summary: NotRequired[JsonObject]
+    upgrade_history: NotRequired[UpgradeHistoryOutput]
+
+
+DiscoveryArtifact = StageArtifact[DiscoveryPayload]
+
+
+class SelectionPayload(TypedDict):
+    company: str | None
+    ranked_count: int
+    analyzed_count: int
+    ranked_contracts: list[JsonObject]
+    selected_contracts: list[JsonObject]
+    child_jobs: list[JsonObject]
+    summary: JsonObject
+
+
+SelectionArtifact = StageArtifact[SelectionPayload]
+
+
 __all__ = [
+    "DiscoveryContractCandidate",
+    "DiscoveryInput",
+    "DiscoveryInventory",
+    "DiscoveryArtifact",
+    "DiscoveryPayload",
     "ImplementationRecord",
     "ProxyUpgradeHistory",
     "UpgradeEvent",
     "UpgradeEventType",
+    "SelectionArtifact",
+    "SelectionPayload",
     "UpgradeHistoryOutput",
 ]

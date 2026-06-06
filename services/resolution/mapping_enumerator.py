@@ -11,13 +11,13 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     EnumeratedKeyValue,
     EnumeratedPrincipal,
     EnumerationValueResult,
     MappingEnumerationResult,
 )
-from schemas.static_pipeline_schemas import (
+from services.static.contract_analysis_pipeline.pipeline_types import (
     WriterEventSpec,
 )
 from utils.rpc import normalize_hex as _normalize_hex

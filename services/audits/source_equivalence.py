@@ -29,7 +29,7 @@ from typing import Any, Final
 
 import requests
 
-from schemas.audit_schemas import (
+from services.audits.types import (
     EquivalenceMatch,
     EquivalenceOutcome,
     EtherscanFetch,

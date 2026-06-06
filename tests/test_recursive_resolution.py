@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from schemas.resolved_control_graph import ResolvedGraphEdge
+from schemas.resolution_schemas import ResolvedGraphEdge
 from services.resolution.recursive import (
     LoadedArtifacts,
     _add_edge,

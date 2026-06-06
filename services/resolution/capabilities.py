@@ -23,10 +23,10 @@ a typed capability or returns ``unsupported(reason)``. Never raises.
 
 from __future__ import annotations
 
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     CapabilityConfidence as Confidence,
 )
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     CapabilityExpr,
     CapKind,
     Condition,
@@ -34,7 +34,7 @@ from schemas.resolution_schemas import (
     MembershipQuality,
     _canon_addresses,
 )
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     CapabilitySubject as Subject,
 )
 

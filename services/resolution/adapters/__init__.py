@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     AdapterEnumerationResult,
     AdapterRegistry,
     BytecodeRepo,
@@ -13,7 +13,7 @@ from schemas.resolution_schemas import (
     SetAdapter,
     Trit,
 )
-from schemas.resolution_schemas import (
+from services.resolution.types import (
     CapabilityConfidence as Confidence,
 )
 

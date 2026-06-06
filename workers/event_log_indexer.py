@@ -15,7 +15,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
-from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from db.queue import HEARTBEAT_EVENT_INDEXER, record_heartbeat
+from services.artifacts import get_artifact_field
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
@@ -320,7 +321,7 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
     inserted = 0
     seed_cache: dict[str, int | None] = {}
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
+        artifact = get_artifact_field(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
         values = _state_var_values_for_job(session, job)

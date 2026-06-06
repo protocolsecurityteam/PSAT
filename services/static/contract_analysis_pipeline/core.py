@@ -14,8 +14,9 @@ from typing import Any
 
 from slither.slither import Slither
 
-from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
+from schemas.common import make_contract
 
+from .analysis_types import AuditAlignment, ContractAnalysis, Summary
 from .effects import EffectsArtifact, apply_authority_effect_labels, build_effects
 from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
@@ -277,12 +278,25 @@ def collect_contract_analysis_with_artifacts(
         "is_factory": classification["is_factory"],
         "is_nft": classification["is_nft"],
     }
+    subject_contract_ref = make_contract(
+        address=str(meta.get("address") or ""),
+        chain_id=meta.get("chain_id"),
+        name=subject_contract.name,
+        label=meta.get("label") or meta.get("display_name"),
+        is_proxy=bool(meta.get("is_proxy")),
+        proxy_address=meta.get("proxy_address"),
+        implementation_addresses=meta.get("implementation_addresses"),
+        admin_addresses=meta.get("admin_addresses"),
+        beacon_addresses=meta.get("beacon_addresses"),
+        deployer_address=meta.get("deployer_address"),
+        proxy_type=meta.get("proxy_type"),
+    )
+    effects_artifact["contract"] = subject_contract_ref
 
     analysis: ContractAnalysis = {
         "schema_version": "0.1",
         "subject": {
-            "address": meta.get("address", ""),
-            "name": subject_contract.name,
+            **subject_contract_ref,
             "compiler_version": meta.get("compiler_version", ""),
             "source_verified": bool(list(project_dir.rglob("src/**/*.sol"))),
         },

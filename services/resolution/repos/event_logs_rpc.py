@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas.resolution_schemas import FetchedEventLog
+from services.resolution.types import FetchedEventLog
 from utils.rpc import rpc_request
 
 MAX_BLOCK_RANGE = 10_000

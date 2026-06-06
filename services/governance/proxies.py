@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from schemas.governance_schemas import AnalysisListEntry
 
 GENERIC_PROXY_NAMES = {
     "uupsproxy",
@@ -16,7 +16,7 @@ GENERIC_PROXY_NAMES = {
 }
 
 
-def _display_name(entry: dict[str, Any]) -> str:
+def _display_name(entry: AnalysisListEntry) -> str:
     chain = str(entry.get("chain") or "").strip()
 
     def with_chain(name: str) -> str:
@@ -36,8 +36,8 @@ def _display_name(entry: dict[str, Any]) -> str:
     return with_chain(str(entry.get("run_name") or contract_name or "").strip())
 
 
-def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    impl_by_proxy: dict[str, dict[str, Any]] = {}
+def _merge_proxy_impl_entries(entries: list[AnalysisListEntry]) -> list[AnalysisListEntry]:
+    impl_by_proxy: dict[str, AnalysisListEntry] = {}
     merged_proxies: set[str] = set()
 
     for entry in entries:
@@ -45,7 +45,7 @@ def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
         if proxy_address:
             impl_by_proxy[proxy_address] = entry
 
-    merged: list[dict[str, Any]] = []
+    merged: list[AnalysisListEntry] = []
     for entry in entries:
         proxy_address = str(entry.get("proxy_address") or "").lower()
         if proxy_address:

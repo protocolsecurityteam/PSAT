@@ -9,7 +9,7 @@ from typing import Any
 
 from slither.slither import Slither
 
-from schemas.contract_analysis import Evidence
+from .analysis_types import Evidence
 
 
 def _load_json(path: Path, default: Any) -> Any:

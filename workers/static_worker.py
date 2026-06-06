@@ -25,7 +25,14 @@ from db.queue import (
     reconcile_impl_job_for_proxy,
     store_artifact,
 )
-from schemas.contract_analysis import ContractAnalysis
+from schemas.control_tracking import ControlTrackingPlan
+from services.artifacts import (
+    STATIC_ANALYSIS_ARTIFACT,
+    get_artifact_field,
+    make_job_contract,
+    make_job_stage_context,
+    make_stage_artifact,
+)
 from services.discovery import (
     build_dependency_visualization,
     build_unified_dependencies,
@@ -38,8 +45,9 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from services.static.contract_analysis_pipeline.analysis_types import ContractAnalysis
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
+from utils.rpc import chain_id_for_chain_name, default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.static_worker")
@@ -860,17 +868,41 @@ class StaticWorker(BaseWorker):
         contract_name = contract_row.contract_name or "Contract"
         address = contract_row.address or job.address or "0x0"
         job_id_str = str(job.id)
+        request = job.request if isinstance(job.request, dict) else {}
+        request_proxy_address = request.get("proxy_address") if isinstance(request.get("proxy_address"), str) else None
+        implementation_addresses = [
+            item
+            for item in [
+                contract_row.implementation,
+                *(contract_row.secondary_implementations or []),
+            ]
+            if item
+        ]
+        if request_proxy_address and contract_row.address:
+            implementation_addresses.insert(0, contract_row.address)
+        is_proxy_context = bool(contract_row.is_proxy or request_proxy_address)
+        proxy_address = request_proxy_address or (address if contract_row.is_proxy else None)
+        chain_id = request.get("chain_id") or chain_id_for_chain_name(contract_row.chain or request.get("chain")) or 1
 
         # Build meta dict for downstream tools that still expect it
         meta = {
             "address": address,
+            "chain_id": chain_id,
             "contract_name": contract_name,
+            "label": job.name,
             "compiler_version": contract_row.compiler_version or "",
             "language": contract_row.language or "solidity",
             "evm_version": contract_row.evm_version or "shanghai",
             "source_format": contract_row.source_format or "flat",
             "source_file_count": contract_row.source_file_count or len(sources),
             "remappings": list(contract_row.remappings or []),
+            "is_proxy": is_proxy_context,
+            "proxy_address": proxy_address,
+            "implementation_addresses": implementation_addresses,
+            "admin_addresses": [contract_row.admin] if contract_row.admin else [],
+            "beacon_addresses": [contract_row.beacon] if contract_row.beacon else [],
+            "deployer_address": contract_row.deployer,
+            "proxy_type": request.get("proxy_type") or contract_row.proxy_type,
         }
         build_settings = {
             "evm_version": contract_row.evm_version or "shanghai",
@@ -883,8 +915,6 @@ class StaticWorker(BaseWorker):
         # can use it instead of the Etherscan contract name for proxy contracts.
         if job.name:
             meta["display_name"] = job.name
-
-        request = job.request if isinstance(job.request, dict) else {}
 
         logger.info(
             "Static stage started for job %s address=%s contract=%s",
@@ -966,30 +996,56 @@ class StaticWorker(BaseWorker):
                 # The cached contract_analysis still carries secondary_impl_pointers
                 # (copy_static_cache copies it), so secondaries get resolved on the
                 # cache path too — not only on a fresh (Slither) analysis.
-                cached_analysis = get_artifact(session, job.id, "contract_analysis")
+                cached_analysis = get_artifact_field(session, job.id, "contract_analysis")
                 secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
+                cached_tracking_plan = get_artifact_field(session, job.id, "control_tracking_plan")
+                if isinstance(cached_analysis, dict) and isinstance(cached_tracking_plan, dict):
+                    self._store_static_analysis_artifact(
+                        session,
+                        job,
+                        contract_row,
+                        chain_id=chain_id,
+                        rpc_url=_request_rpc_url(request),
+                        contract_analysis=cast(ContractAnalysis, cached_analysis),
+                        control_tracking_plan=cast(Any, cached_tracking_plan),
+                        predicate_trees=get_artifact_field(session, job.id, "predicate_trees"),
+                        effects=get_artifact_field(session, job.id, "effects"),
+                    )
             else:
                 # Phase 1: Contract analysis (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;
                 # vulnerability triage is now an out-of-band concern, not part
                 # of the cascade pipeline).
                 t0 = time.monotonic()
-                analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
+                analysis_result = self._run_analysis_phase(session, job, project_dir, contract_name, address)
                 logger.info(
                     "static phase complete: contract analysis",
                     extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "contract_analysis"},
                 )
 
-                if analysis_data is None:
+                if analysis_result is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
+                analysis_data, semantic_predicate_trees, semantic_effects = analysis_result
 
                 # Phase 2: Control tracking plan
                 t0 = time.monotonic()
-                self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
+                tracking_plan = self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
                 logger.info(
                     "static phase complete: tracking plan",
                     extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "tracking_plan"},
                 )
+                if tracking_plan is not None:
+                    self._store_static_analysis_artifact(
+                        session,
+                        job,
+                        contract_row,
+                        chain_id=chain_id,
+                        rpc_url=_request_rpc_url(request),
+                        contract_analysis=analysis_data,
+                        control_tracking_plan=tracking_plan,
+                        predicate_trees=semantic_predicate_trees,
+                        effects=semantic_effects,
+                    )
                 secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
 
             # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
@@ -1782,7 +1838,7 @@ class StaticWorker(BaseWorker):
 
     def _run_analysis_phase(
         self, session, job, project_dir: Path, contract_name: str, address: str
-    ) -> ContractAnalysis | None:
+    ) -> tuple[ContractAnalysis, dict[str, Any] | None, Any] | None:
         """Run structured contract analysis. Returns the analysis dict or None on failure."""
         self.update_detail(session, job, "Building structured contract analysis")
         try:
@@ -1807,33 +1863,6 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2) + "\n")
 
-        store_artifact(session, job.id, "contract_analysis", data=analysis_data)
-        if semantic_predicate_trees is not None:
-            try:
-                store_artifact(session, job.id, "predicate_trees", data=semantic_predicate_trees)
-            except Exception as exc:
-                record_degraded(
-                    phase="predicate_trees_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: predicate_trees artifact store failed for job %s",
-                    job.id,
-                )
-        if semantic_effects is not None:
-            try:
-                store_artifact(session, job.id, "effects", data=semantic_effects)
-            except Exception as exc:
-                record_degraded(
-                    phase="effects_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: effects artifact store failed for job %s",
-                    job.id,
-                )
         self._write_analysis_tables(session, job, analysis_data)
         logger.info(
             "Static stage contract analysis complete for job %s address=%s contract=%s",
@@ -1841,7 +1870,7 @@ class StaticWorker(BaseWorker):
             address,
             contract_name,
         )
-        return analysis_data
+        return analysis_data, semantic_predicate_trees, semantic_effects
 
     def _write_analysis_tables(self, session, job: Job, analysis: ContractAnalysis | dict) -> None:
         """Extract structured data from contract_analysis JSON into relational tables."""
@@ -1900,18 +1929,18 @@ class StaticWorker(BaseWorker):
 
     def _run_tracking_plan_phase(
         self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str
-    ) -> None:
+    ) -> ControlTrackingPlan | None:
         """Build control tracking plan. Non-fatal on failure."""
         self.update_detail(session, job, "Building control tracking plan")
         try:
             tracking_plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))
-            store_artifact(session, job.id, "control_tracking_plan", data=tracking_plan)
             logger.info(
                 "Static stage tracking plan complete for job %s address=%s contract=%s",
                 job.id,
                 address,
                 contract_name,
             )
+            return tracking_plan
         except Exception as exc:
             record_degraded(
                 phase="tracking_plan",
@@ -1920,6 +1949,42 @@ class StaticWorker(BaseWorker):
             )
             _log_phase_error(str(job.id), address, contract_name, "tracking_plan", str(exc))
             store_artifact(session, job.id, "tracking_plan_error", data={"error": str(exc)})
+            return None
+
+    def _store_static_analysis_artifact(
+        self,
+        session,
+        job: Job,
+        contract_row: Contract,
+        *,
+        chain_id: int,
+        rpc_url: str | None,
+        contract_analysis: ContractAnalysis,
+        control_tracking_plan: ControlTrackingPlan,
+        predicate_trees: Any,
+        effects: Any,
+    ) -> None:
+        data = {
+            "contract_analysis": contract_analysis,
+            "control_tracking_plan": control_tracking_plan,
+            "predicate_trees": predicate_trees if isinstance(predicate_trees, dict) else None,
+            "effects": effects if isinstance(effects, dict) else None,
+        }
+        artifact = make_stage_artifact(
+            kind=STATIC_ANALYSIS_ARTIFACT,
+            stage="static",
+            schema_version="static_analysis.v1",
+            context=make_job_stage_context(
+                job,
+                stage="static",
+                schema_version="static_analysis.v1",
+                chain_id=int(chain_id),
+                rpc_url=rpc_url,
+            ),
+            contract=make_job_contract(session, job, contract_row),
+            data=data,
+        )
+        store_artifact(session, job.id, STATIC_ANALYSIS_ARTIFACT, data=artifact)
 
 
 def main():

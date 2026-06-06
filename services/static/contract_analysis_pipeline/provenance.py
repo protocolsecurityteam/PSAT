@@ -29,7 +29,7 @@ from typing import Any, Iterable
 
 from eth_utils.crypto import keccak
 
-from schemas.static_pipeline_schemas import EMPTY, TOP, ProvenanceMap, Source, SourceSet, is_top, source_union
+from .pipeline_types import EMPTY, TOP, ProvenanceMap, Source, SourceSet, is_top, source_union
 
 # Slither IR types — imported lazily where they aren't part of the
 # module's public surface so this file remains importable in test

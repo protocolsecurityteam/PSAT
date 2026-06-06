@@ -26,8 +26,31 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from schemas.common import Contract as ContractSchema
+from schemas.common import make_contract
+from services.artifacts import expand_available_artifact_names, get_artifact_field, get_artifact_or_stage_field
+from utils.rpc import chain_id_for_chain_name
 
 logger = logging.getLogger(__name__)
+
+
+def _contract_ref(contract_row: Contract, *, label: str | None = None) -> ContractSchema:
+    implementation_addresses = [
+        item for item in [contract_row.implementation, *(contract_row.secondary_implementations or [])] if item
+    ]
+    return make_contract(
+        address=contract_row.address,
+        chain_id=chain_id_for_chain_name(contract_row.chain) or 1,
+        name=contract_row.contract_name,
+        label=label,
+        is_proxy=bool(contract_row.is_proxy),
+        proxy_address=contract_row.address if contract_row.is_proxy else None,
+        implementation_addresses=implementation_addresses,
+        admin_addresses=[contract_row.admin] if contract_row.admin else [],
+        beacon_addresses=[contract_row.beacon] if contract_row.beacon else [],
+        deployer_address=contract_row.deployer,
+        proxy_type=contract_row.proxy_type,
+    )
 
 
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
@@ -78,6 +101,20 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             current = session.get(Job, parent_id)
         return None
 
+    derived_artifact_names = {
+        name
+        for name in (
+            "contract_analysis",
+            "control_snapshot",
+            "resolved_control_graph",
+            "principal_history",
+            "predicate_trees",
+            "effective_permissions",
+            "principal_labels",
+        )
+        if get_artifact_field(session, job.id, name) is not None
+    }
+
     payload: dict[str, Any] = {
         "run_name": job.name or str(job.id),
         "job_id": str(job.id),
@@ -85,7 +122,9 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         "contract_id": contract_row.id if contract_row else None,
         "company": _company_for(job),
         "deployer": contract_row.deployer if contract_row else None,
-        "available_artifacts": sorted(all_artifacts.keys()),
+        "available_artifacts": sorted(
+            expand_available_artifact_names(set(all_artifacts.keys()) | derived_artifact_names)
+        ),
     }
 
     for artifact_name in (
@@ -101,15 +140,16 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         # below.
         "predicate_trees",
     ):
-        if artifact_name in all_artifacts and isinstance(all_artifacts[artifact_name], dict):
-            payload[artifact_name] = all_artifacts[artifact_name]
+        artifact = get_artifact_or_stage_field(session, job.id, artifact_name)
+        if isinstance(artifact, dict):
+            payload[artifact_name] = artifact
 
     # Resolved semantic capabilities. Computed lazily — the raw
     # predicate_trees lives on the artifact; resolving it to the typed
     # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
     # capability-resolution failure MUST NOT fail the whole analysis_detail
     # response; the rest of the detail payload is still useful.
-    if "predicate_trees" in all_artifacts and job.address:
+    if isinstance(payload.get("predicate_trees"), dict) and job.address:
         try:
             from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -137,7 +177,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             )
 
     if contract_row:
-        _populate_from_contract(session, payload, contract_row)
+        _populate_from_contract(session, payload, contract_row, label=job.name)
 
     # For impl jobs, inherit proxy-specific artifacts from the proxy job
     request = job.request if isinstance(job.request, dict) else {}
@@ -165,10 +205,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             _inherit_from_impl(session, payload, job, impl_job, impl_addr)
 
     # Add subject info from contract_analysis if available
-    if isinstance(all_artifacts.get("contract_analysis"), dict):
-        subject = all_artifacts["contract_analysis"].get("subject", {})
+    if isinstance(payload.get("contract_analysis"), dict):
+        contract_analysis = payload["contract_analysis"]
+        subject = contract_analysis.get("subject", {})
         payload["contract_name"] = subject.get("name", payload["run_name"])
-        payload["summary"] = all_artifacts["contract_analysis"].get("summary")
+        payload["summary"] = contract_analysis.get("summary")
 
     # Synthesis fallback for upgrade_history. Mirrors the per-artifact
     # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
@@ -186,7 +227,9 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     return payload
 
 
-def _populate_from_contract(session: Session, payload: dict[str, Any], contract_row: Contract) -> None:
+def _populate_from_contract(
+    session: Session, payload: dict[str, Any], contract_row: Contract, *, label: str | None = None
+) -> None:
     ef_rows = list(
         session.execute(
             select(EffectiveFunction)
@@ -198,6 +241,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
     ef_list = _serialize_effective_functions(ef_rows)
     if ef_list:
         payload["effective_permissions"] = {
+            "contract": _contract_ref(contract_row, label=label),
             "functions": ef_list,
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
@@ -213,6 +257,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
     )
     if pl_rows:
         payload["principal_labels"] = {
+            "contract": _contract_ref(contract_row, label=label),
             "principals": [
                 {
                     "address": p.address,
@@ -303,6 +348,7 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
 
 def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[ControllerValue]) -> dict[str, Any]:
     return {
+        "contract": _contract_ref(contract_row),
         "contract_name": contract_row.contract_name,
         "contract_address": contract_row.address,
         "controller_values": {
@@ -330,6 +376,7 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "resolved_type": n.resolved_type,
                 "label": n.label,
                 "contract_name": n.contract_name,
+                "contract": make_contract(address=n.address, name=n.contract_name, label=n.label),
                 "depth": n.depth,
                 "analyzed": n.analyzed,
                 "details": n.details or {},
@@ -351,7 +398,6 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
 
 
 def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl_job: Job, impl_addr: str) -> None:
-    impl_artifacts = deps.get_all_artifacts(session, impl_job.id)
     for fallback_name in (
         "contract_analysis",
         "control_snapshot",
@@ -361,7 +407,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
         "principal_history",
     ):
         if fallback_name not in payload:
-            val = impl_artifacts.get(fallback_name)
+            val = get_artifact_field(session, impl_job.id, fallback_name)
             if val is not None:
                 payload[fallback_name] = val
 
@@ -377,6 +423,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             )
             if impl_efs:
                 payload["effective_permissions"] = {
+                    "contract": _contract_ref(impl_c, label=impl_job.name),
                     "functions": _serialize_effective_functions(impl_efs),
                     "contract_name": impl_c.contract_name,
                     "contract_address": impl_c.address,
@@ -411,6 +458,9 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             )
             if impl_pls:
                 payload["principal_labels"] = {
+                    "contract": _contract_ref(impl_c, label=impl_job.name),
+                    "contract_name": impl_c.contract_name,
+                    "contract_address": impl_c.address,
                     "principals": [
                         {"address": p.address, "label": p.label, "resolved_type": p.resolved_type} for p in impl_pls
                     ],

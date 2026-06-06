@@ -38,7 +38,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from schemas.resolved_control_graph import ResolvedControlGraph
+from schemas.resolution_schemas import ResolvedControlGraph
 from services.resolution import recursive
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 

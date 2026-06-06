@@ -5,13 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from typing_extensions import NotRequired, TypedDict
+
+from schemas.common import Address, JsonObject, ServiceBoundaryMetadata, StageArtifact, StageContext
+
 
 @dataclass
 class CapturedInteraction:
     type: str
     url: str
     timestamp: int
-    to: str | None = None
+    to: Address | None = None
     value: str | None = None
     data: str | None = None
     method_selector: str | None = None
@@ -98,4 +102,23 @@ class InteractionLog:
         return [item for item in self.interactions if item.type == "sendTransaction"]
 
 
-__all__ = ["CapturedInteraction", "InteractionLog"]
+class CrawlerStageRequest(TypedDict):
+    context: StageContext
+    dapp_urls: list[str]
+    wallet_address: Address | None
+    options: JsonObject
+    metadata: NotRequired[ServiceBoundaryMetadata]
+
+
+class CrawlerPayload(TypedDict):
+    source: str
+    discovered_contracts: list[Address]
+    address_details: list[JsonObject]
+    interactions: NotRequired[list[JsonObject]]
+    summary: NotRequired[JsonObject]
+
+
+CrawlerArtifact = StageArtifact[CrawlerPayload]
+
+
+__all__ = ["CapturedInteraction", "CrawlerArtifact", "CrawlerPayload", "CrawlerStageRequest", "InteractionLog"]

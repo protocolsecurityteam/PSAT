@@ -16,9 +16,10 @@ from eth_utils.crypto import keccak
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from schemas.contract_analysis import ContractAnalysis
+from schemas.common import make_contract
 from schemas.control_tracking import ControlSnapshot
-from schemas.policy_schemas import (
+from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.types import (
     EffectiveFunctionPermission,
     EffectivePermissions,
     PrincipalResolution,
@@ -26,7 +27,7 @@ from schemas.policy_schemas import (
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.static.contract_analysis_pipeline.analysis_types import ContractAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,12 @@ def _normalize_abi_type(type_name: str) -> str:
         return stripped
 
     return "address"
+
+
+def _required_contract_name(value: str | None) -> str:
+    if value is None:
+        raise ValueError("contract artifact is missing required name")
+    return value
 
 
 def _abi_signature(function_signature: str) -> str:
@@ -469,8 +476,40 @@ def build_effective_permissions(
 
     ``effects`` is the semantic ``effects`` artifact keyed by function full-name.
     """
-    contract_address = target_analysis["subject"]["address"].lower()
-    contract_name = target_analysis["subject"]["name"]
+    subject = target_analysis["subject"]
+    contract_address = subject["address"].lower()
+    contract_name = _required_contract_name(subject["name"])
+    raw_contract = target_snapshot.get("contract") if isinstance(target_snapshot, Mapping) else None
+    if isinstance(raw_contract, dict) and raw_contract.get("address"):
+        contract = make_contract(
+            address=str(raw_contract.get("address")),
+            chain_id=raw_contract.get("chain_id"),
+            name=raw_contract.get("name"),
+            label=raw_contract.get("label"),
+            is_proxy=bool(raw_contract.get("is_proxy")),
+            proxy_address=raw_contract.get("proxy_address"),
+            implementation_addresses=raw_contract.get("implementation_addresses"),
+            admin_addresses=raw_contract.get("admin_addresses"),
+            beacon_addresses=raw_contract.get("beacon_addresses"),
+            deployer_address=raw_contract.get("deployer_address"),
+            proxy_type=raw_contract.get("proxy_type"),
+        )
+        contract_address = contract["address"]
+        contract_name = _required_contract_name(contract["name"])
+    else:
+        contract = make_contract(
+            address=contract_address,
+            chain_id=subject.get("chain_id"),
+            name=subject.get("name"),
+            label=subject.get("label"),
+            is_proxy=bool(subject.get("is_proxy")),
+            proxy_address=subject.get("proxy_address"),
+            implementation_addresses=subject.get("implementation_addresses"),
+            admin_addresses=subject.get("admin_addresses"),
+            beacon_addresses=subject.get("beacon_addresses"),
+            deployer_address=subject.get("deployer_address"),
+            proxy_type=subject.get("proxy_type"),
+        )
 
     known = _known_principals(target_snapshot, authority_snapshot)
     controller_lookup = _controller_lookup(target_snapshot)
@@ -565,6 +604,7 @@ def build_effective_permissions(
 
     return {
         "schema_version": "0.1",
+        "contract": contract,
         "contract_address": contract_address,
         "contract_name": contract_name,
         "authority_contract": None,

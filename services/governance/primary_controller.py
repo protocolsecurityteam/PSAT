@@ -35,6 +35,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from schemas.common import Address
+from schemas.governance_schemas import GovernancePrincipal
+
 PRINCIPAL_PRIORITY: dict[str, int] = {
     "safe": 4,
     "timelock": 3,
@@ -50,10 +53,10 @@ _MAX_GOVERNANCE_HOPS = 4
 
 
 def assign_primary_controllers(
-    principals: list[dict[str, Any]],
-    fp_addrs_by_contract: Mapping[str, set[str]],
-    governance_passthrough: set[str] | None = None,
-) -> dict[str, list[str]]:
+    principals: list[GovernancePrincipal],
+    fp_addrs_by_contract: Mapping[Address, set[Address]],
+    governance_passthrough: set[Address] | None = None,
+) -> dict[Address, list[Address]]:
     """Pick one primary controller per contract.
 
     *principals* — non-contract principals (the ``_build_flows_and_principals``
@@ -80,7 +83,7 @@ def assign_primary_controllers(
     the dict with an empty list so a caller can distinguish "not primary"
     from "unknown principal". Each list is sorted for deterministic output.
     """
-    principal_by_addr: dict[str, dict[str, Any]] = {}
+    principal_by_addr: dict[Address, GovernancePrincipal] = {}
     for p in principals:
         addr = (p.get("address") or "").lower()
         if not addr:
@@ -91,19 +94,19 @@ def assign_primary_controllers(
 
     # Normalize the FP graph to lower-case keys/values once so the closure
     # below can walk it directly (callers don't always normalize both sides).
-    fp_graph: dict[str, set[str]] = {}
+    fp_graph: dict[Address, set[Address]] = {}
     for contract_addr, fp_addrs in fp_addrs_by_contract.items():
         fp_graph.setdefault(contract_addr.lower(), set()).update((a or "").lower() for a in fp_addrs)
     passthrough = {(a or "").lower() for a in (governance_passthrough or ())}
 
-    def _effective_controllers(contract_lc: str) -> set[str]:
+    def _effective_controllers(contract_lc: Address) -> set[Address]:
         """Terminal controllers of *contract_lc*: its direct FP callers, with
         any caller that is itself a ``passthrough`` governance contract
         expanded into *its* callers. Depth-bounded; the visited set breaks
         cycles and the ``addr != contract_lc`` guard avoids self-recursion."""
-        out: set[str] = set()
-        seen: set[str] = set()
-        stack: list[tuple[str, int]] = [(a, 1) for a in fp_graph.get(contract_lc, ())]
+        out: set[Address] = set()
+        seen: set[Address] = set()
+        stack: list[tuple[Address, int]] = [(a, 1) for a in fp_graph.get(contract_lc, ())]
         while stack:
             addr, depth = stack.pop()
             if addr in seen:
@@ -118,7 +121,7 @@ def assign_primary_controllers(
     # could primary-control. A principal is eligible for a contract iff it is
     # one of that contract's effective controllers (its FP callers, resolved
     # transitively through any in-protocol governance contract in between).
-    eligibility: dict[str, set[str]] = {addr: set() for addr in principal_by_addr}
+    eligibility: dict[Address, set[Address]] = {addr: set() for addr in principal_by_addr}
     for contract_lc in fp_graph:
         for ctrl in _effective_controllers(contract_lc):
             if ctrl in eligibility:
@@ -126,14 +129,14 @@ def assign_primary_controllers(
 
     total_owned = {addr: len(owned) for addr, owned in eligibility.items()}
 
-    primary_for: dict[str, list[str]] = {addr: [] for addr in principal_by_addr}
+    primary_for: dict[Address, list[Address]] = {addr: [] for addr in principal_by_addr}
 
-    all_contested: set[str] = set()
+    all_contested: set[Address] = set()
     for owned in eligibility.values():
         all_contested.update(owned)
 
     for contract_lc in all_contested:
-        best_addr: str | None = None
+        best_addr: Address | None = None
         best_key: tuple[int, int, str] | None = None
         for addr, owned in eligibility.items():
             if contract_lc not in owned:
@@ -188,13 +191,13 @@ _MAX_GATE_CALLERS = 4
 
 
 def assign_co_controllers(
-    principals: list[dict[str, Any]],
-    fp_function_detail_by_contract: Mapping[str, Sequence[Mapping[str, Any]]],
-    primary_for: Mapping[str, list[str]],
+    principals: list[GovernancePrincipal],
+    fp_function_detail_by_contract: Mapping[Address, Sequence[Mapping[str, Any]]],
+    primary_for: Mapping[Address, list[Address]],
     *,
     max_gate_callers: int = _MAX_GATE_CALLERS,
     privileged_labels: frozenset[str] = PRIVILEGED_EFFECT_LABELS,
-) -> dict[str, list[str]]:
+) -> dict[Address, list[Address]]:
     """Per principal, the contracts it *co-controls*: holds real authority on
     without being the canonical primary controller.
 
@@ -228,18 +231,18 @@ def assign_co_controllers(
     eligible principal (empty list when it co-controls nothing), each list
     sorted — same shape as :func:`assign_primary_controllers`.
     """
-    principal_addrs: set[str] = set()
+    principal_addrs: set[Address] = set()
     for p in principals:
         addr = (p.get("address") or "").lower()
         if addr and p.get("type") in PRINCIPAL_PRIORITY:
             principal_addrs.add(addr)
 
-    primary_of: dict[str, str] = {}
+    primary_of: dict[Address, Address] = {}
     for paddr, owned in primary_for.items():
         for c in owned:
             primary_of[(c or "").lower()] = (paddr or "").lower()
 
-    co: dict[str, set[str]] = {addr: set() for addr in principal_addrs}
+    co: dict[Address, set[Address]] = {addr: set() for addr in principal_addrs}
     for contract_addr, functions in fp_function_detail_by_contract.items():
         c_lc = (contract_addr or "").lower()
         for fn in functions:

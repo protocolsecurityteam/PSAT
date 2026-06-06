@@ -6,12 +6,18 @@ from collections.abc import Mapping
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
+from schemas.governance_schemas import (
+    FunctionPrincipalPayload,
+    GovernanceAuthorityRole,
+    GovernanceFunctionController,
+    GovernanceFunctionEntry,
+)
 
 
 def _function_principal_payload(
     fp: FunctionPrincipal,
     principal_lookup: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> FunctionPrincipalPayload:
     address = fp.address
     lookup = principal_lookup.get(address.lower()) if principal_lookup and address else None
     resolved_type = fp.resolved_type
@@ -24,7 +30,7 @@ def _function_principal_payload(
         if lookup_type and resolved_type in (None, "", "unknown", "contract"):
             resolved_type = str(lookup_type)
 
-    payload = {
+    payload: FunctionPrincipalPayload = {
         "address": fp.address,
         "resolved_type": resolved_type,
         "source_controller_id": fp.origin,
@@ -36,7 +42,7 @@ def _function_principal_payload(
     return payload
 
 
-def _is_generic_authority_contract_principal(principal: dict[str, Any]) -> bool:
+def _is_generic_authority_contract_principal(principal: FunctionPrincipalPayload) -> bool:
     details = principal.get("details")
     return (
         principal.get("resolved_type") == "contract"
@@ -61,11 +67,11 @@ def _build_company_function_entry(
     ef: EffectiveFunction,
     principals: list[FunctionPrincipal],
     principal_lookup: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    direct_owner = None
-    controllers_by_label: dict[str, dict[str, Any]] = {}
-    authority_roles_by_key: dict[str, dict[str, Any]] = {}
-    signature_witnesses: list[dict[str, Any]] = []
+) -> GovernanceFunctionEntry:
+    direct_owner: FunctionPrincipalPayload | None = None
+    controllers_by_label: dict[str, GovernanceFunctionController] = {}
+    authority_roles_by_key: dict[str, GovernanceAuthorityRole] = {}
+    signature_witnesses: list[FunctionPrincipalPayload] = []
 
     for fp in principals:
         principal_dict = _function_principal_payload(fp, principal_lookup)
@@ -120,7 +126,7 @@ def _build_company_function_entry(
             or not all(_is_generic_authority_contract_principal(principal) for principal in entry["principals"])
         ]
 
-    entry: dict[str, Any] = {
+    entry: GovernanceFunctionEntry = {
         "function": ef.abi_signature or ef.function_name,
         "selector": ef.selector,
         "effect_labels": list(ef.effect_labels or []),

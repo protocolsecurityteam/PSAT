@@ -174,7 +174,9 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     # metadata
     meta = {
         "address": address,
+        "chain_id": 1,
         "contract_name": result.get("ContractName", ""),
+        "label": None,
         "compiler_version": result.get("CompilerVersion", ""),
         "language": language,
         "optimization_used": result.get("OptimizationUsed", ""),
@@ -184,6 +186,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         "source_format": "standard_json" if bundle else "flat",
         "source_file_count": len(sources),
         "remappings": remappings,
+        "is_proxy": False,
+        "proxy_address": None,
+        "implementation_addresses": [],
+        "admin_addresses": [],
+        "beacon_addresses": [],
+        "deployer_address": None,
+        "proxy_type": None,
     }
     (project_dir / "contract_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
 

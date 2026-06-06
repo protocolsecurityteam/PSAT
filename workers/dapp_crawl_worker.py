@@ -23,6 +23,7 @@ from db.queue import (
     get_or_create_protocol,
     store_artifact,
 )
+from services.artifacts import CRAWLER_ARTIFACT, make_job_stage_context, make_stage_artifact
 from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.logging import log_timed_phase, record_stage_metric
@@ -98,19 +99,6 @@ class DAppCrawlWorker(BaseWorker):
         addresses = result["addresses"]
         logger.info("DApp crawl found %d addresses for job %s", len(addresses), job.id)
 
-        # Store raw results
-        store_artifact(
-            session,
-            job.id,
-            "dapp_crawl_results",
-            data={
-                "urls_crawled": urls,
-                "addresses_found": len(addresses),
-                "addresses": addresses,
-                "interaction_count": result.get("interaction_count", 0),
-            },
-        )
-
         # Persist full interaction log for later audit / analytics
         for entry in result.get("interactions", []):
             to_raw = entry.get("to") or ""
@@ -160,15 +148,31 @@ class DAppCrawlWorker(BaseWorker):
         session.commit()
         record_stage_metric("contracts_found", len(addresses))
 
+        summary = {
+            "mode": "dapp_crawl",
+            "urls": urls,
+            "urls_crawled": urls,
+            "addresses_found": len(addresses),
+            "discovered_count": len(addresses),
+            "interaction_count": result.get("interaction_count", 0),
+        }
         store_artifact(
             session,
             job.id,
-            "discovery_summary",
-            data={
-                "mode": "dapp_crawl",
-                "urls": urls,
-                "discovered_count": len(addresses),
-            },
+            CRAWLER_ARTIFACT,
+            data=make_stage_artifact(
+                kind=CRAWLER_ARTIFACT,
+                stage=JobStage.dapp_crawl.value,
+                schema_version="1.0",
+                context=make_job_stage_context(job, stage=JobStage.dapp_crawl.value, schema_version="1.0"),
+                data={
+                    "source": "dapp_crawl",
+                    "discovered_contracts": addresses,
+                    "address_details": result.get("address_details", []),
+                    "interactions": result.get("interactions", []),
+                    "summary": summary,
+                },
+            ),
         )
 
         if not job.name:

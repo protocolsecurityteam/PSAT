@@ -31,8 +31,8 @@ from typing import Any, cast
 
 from eth_utils.crypto import keccak
 
-from schemas.resolution_schemas import PredicateEvaluationContext, PredicateEvaluatorSetAdapter
-from schemas.static_pipeline_schemas import (
+from services.resolution.types import PredicateEvaluationContext, PredicateEvaluatorSetAdapter
+from services.static.contract_analysis_pipeline.pipeline_types import (
     LeafPredicate,
     PredicateSetDescriptor,
     PredicateTree,
@@ -1150,7 +1150,7 @@ def _maybe_inline_cross_contract_call(
 
     # Look up the registry's semantic artifacts. If the registry address is
     # a proxy, predicate_trees live on its implementation child job.
-    from db.queue import get_artifact
+    from services.artifacts import get_artifact_field
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     lookup = find_analysis_job_for_address(
@@ -1161,7 +1161,7 @@ def _maybe_inline_cross_contract_call(
     )
     if lookup is None:
         return None
-    artifact = get_artifact(session, lookup.analysis_job.id, "predicate_trees")
+    artifact = get_artifact_field(session, lookup.analysis_job.id, "predicate_trees")
     if not isinstance(artifact, dict):
         return None
     from services.resolution.adapters import CallFrame

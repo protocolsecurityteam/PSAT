@@ -14,7 +14,7 @@ from typing import Any, Iterable, cast
 
 from eth_utils.crypto import keccak
 
-from schemas.contract_analysis import (
+from .analysis_types import (
     AssociatedEvent,
     AssociatedEventInput,
     ControllerReadSpec,
@@ -25,7 +25,6 @@ from schemas.contract_analysis import (
     Evidence,
     SemanticControlAnalysis,
 )
-
 from .shared import (
     _contract_functions,
     _declaring_contract_name,

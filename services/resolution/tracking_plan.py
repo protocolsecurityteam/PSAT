@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from schemas.contract_analysis import ContractAnalysis
+from schemas.common import make_contract
 from schemas.control_tracking import ControlTrackingPlan, EventWatch, PollingFallback, TrackedController
+from services.static.contract_analysis_pipeline.analysis_types import ContractAnalysis
 
 
 def _is_address_like_read_spec(read_spec: object) -> bool:
@@ -58,6 +59,12 @@ def is_primitive_scalar_read_spec(read_spec: object) -> bool:
     return type_name.startswith(("uint", "int", "bool", "bytes", "string", "enum"))
 
 
+def _required_contract_name(value: str | None) -> str:
+    if value is None:
+        raise ValueError("contract analysis subject is missing required name")
+    return value
+
+
 def _is_runtime_resolvable_controller(target: object) -> bool:
     """A controller earns inclusion in the tracking plan if it's either
     pollable (address-like state we can read via eth_call) OR
@@ -90,8 +97,22 @@ def _is_runtime_resolvable_controller(target: object) -> bool:
 
 def build_control_tracking_plan(analysis: ContractAnalysis) -> ControlTrackingPlan:
     """Build an event-first, polling-backed watch plan from contract analysis output."""
-    contract_address = analysis["subject"]["address"]
-    contract_name = analysis["subject"]["name"]
+    subject = analysis["subject"]
+    contract_address = subject["address"]
+    contract_name = _required_contract_name(subject["name"])
+    contract = make_contract(
+        address=contract_address,
+        chain_id=subject.get("chain_id"),
+        name=subject.get("name"),
+        label=subject.get("label"),
+        is_proxy=bool(subject.get("is_proxy")),
+        proxy_address=subject.get("proxy_address"),
+        implementation_addresses=subject.get("implementation_addresses"),
+        admin_addresses=subject.get("admin_addresses"),
+        beacon_addresses=subject.get("beacon_addresses"),
+        deployer_address=subject.get("deployer_address"),
+        proxy_type=subject.get("proxy_type"),
+    )
 
     tracked_controllers: list[TrackedController] = []
     for target in analysis.get("controller_tracking", []):
@@ -138,6 +159,7 @@ def build_control_tracking_plan(analysis: ContractAnalysis) -> ControlTrackingPl
 
     return {
         "schema_version": "0.1",
+        "contract": contract,
         "contract_address": contract_address,
         "contract_name": contract_name,
         "tracking_strategy": "event_first_with_polling_fallback",

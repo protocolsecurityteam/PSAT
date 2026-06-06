@@ -55,7 +55,7 @@ from db.models import (
     Contract,
     UpgradeEvent,
 )
-from schemas.audit_schemas import CoverageMatch, ImplWindow, _EquivalenceInputs
+from services.audits.types import CoverageMatch, ImplWindow, _EquivalenceInputs
 
 logger = logging.getLogger(__name__)
 

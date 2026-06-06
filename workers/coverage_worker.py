@@ -43,11 +43,14 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStage, JobStatus
+from db.models import AuditContractCoverage, Contract, Job, JobStage, JobStatus
+from db.queue import store_artifact
+from services.artifacts import AUDIT_ARTIFACT, make_job_contract, make_job_stage_context, make_stage_artifact
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker
 
@@ -58,6 +61,55 @@ logger = logging.getLogger("workers.coverage_worker")
 # stuck audit PDF extraction to unstick on its own (or be manually
 # reset) without leaving analysis users waiting indefinitely.
 _STUCK_COVERAGE_TIMEOUT = int(os.getenv("PSAT_COVERAGE_STUCK_TIMEOUT", "3600"))
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _coverage_row_payload(row: AuditContractCoverage) -> dict[str, object]:
+    return {
+        "audit_report_id": row.audit_report_id,
+        "contract_id": row.contract_id,
+        "protocol_id": row.protocol_id,
+        "matched_name": row.matched_name,
+        "match_type": row.match_type,
+        "match_confidence": row.match_confidence,
+        "covered_from_block": row.covered_from_block,
+        "covered_to_block": row.covered_to_block,
+        "bytecode_keccak_at_match": row.bytecode_keccak_at_match,
+        "verified_at": _iso(row.verified_at),
+        "equivalence_status": row.equivalence_status,
+        "equivalence_reason": row.equivalence_reason,
+        "equivalence_checked_at": _iso(row.equivalence_checked_at),
+        "proof_kind": row.proof_kind,
+        "matched_commit_sha": row.matched_commit_sha,
+    }
+
+
+def _store_audit_artifact(
+    session: Session,
+    job: Job,
+    contract: Contract | None,
+    coverage_matches: list[dict[str, object]],
+) -> None:
+    contract_payload = make_job_contract(session, job, contract)
+    store_artifact(
+        session,
+        job.id,
+        AUDIT_ARTIFACT,
+        data=make_stage_artifact(
+            kind=AUDIT_ARTIFACT,
+            stage=JobStage.coverage.value,
+            schema_version="1.0",
+            context=make_job_stage_context(job, stage=JobStage.coverage.value, schema_version="1.0"),
+            data={
+                "contract": contract_payload,
+                "coverage_matches": coverage_matches,
+            },
+            contract=contract_payload,
+        ),
+    )
 
 
 class CoverageWorker(BaseWorker):
@@ -197,6 +249,7 @@ class CoverageWorker(BaseWorker):
                 "Coverage stage: job %s has no Contract row — skipping refresh, advancing to done",
                 job.id,
             )
+            _store_audit_artifact(session, job, None, [])
             return
 
         self.update_detail(session, job, "Refreshing audit coverage")
@@ -207,6 +260,20 @@ class CoverageWorker(BaseWorker):
                 verify_source_equivalence=False,
             )
         session.commit()
+        coverage_matches = [
+            _coverage_row_payload(row)
+            for row in session.execute(
+                select(AuditContractCoverage)
+                .where(
+                    AuditContractCoverage.contract_id == contract.id,
+                    AuditContractCoverage.protocol_id == contract.protocol_id,
+                )
+                .order_by(AuditContractCoverage.audit_report_id.asc())
+            )
+            .scalars()
+            .all()
+        ]
+        _store_audit_artifact(session, job, contract, coverage_matches)
         record_stage_metric("coverage_rows", inserted)
         self.update_detail(session, job, f"Audit coverage refreshed: {inserted} row(s)")
         logger.info(

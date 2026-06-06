@@ -8,7 +8,8 @@ import threading
 from collections import defaultdict
 from typing import Any
 
-from schemas.policy_schemas import PrincipalLabels, PrincipalPermission, PrincipalProfile
+from schemas.common import make_contract
+from services.policy.types import PrincipalLabels, PrincipalPermission, PrincipalProfile
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric
@@ -326,6 +327,24 @@ def build_principal_labels(
 
     target_address = effective_permissions["contract_address"].lower()
     contract_name = effective_permissions["contract_name"]
+    raw_contract = effective_permissions.get("contract")
+    contract = (
+        make_contract(
+            address=str(raw_contract.get("address")),
+            chain_id=raw_contract.get("chain_id"),
+            name=raw_contract.get("name"),
+            label=raw_contract.get("label"),
+            is_proxy=bool(raw_contract.get("is_proxy")),
+            proxy_address=raw_contract.get("proxy_address"),
+            implementation_addresses=raw_contract.get("implementation_addresses"),
+            admin_addresses=raw_contract.get("admin_addresses"),
+            beacon_addresses=raw_contract.get("beacon_addresses"),
+            deployer_address=raw_contract.get("deployer_address"),
+            proxy_type=raw_contract.get("proxy_type"),
+        )
+        if isinstance(raw_contract, dict) and raw_contract.get("address")
+        else make_contract(address=target_address, name=contract_name)
+    )
     # The per-job classify_cache is shared read+write across worker threads.
     # Fast path is the cache hit (artifact pre-populated by resolution stage),
     # so the lock is uncontended in the common case.
@@ -439,6 +458,7 @@ def build_principal_labels(
 
     return {
         "schema_version": "0.1",
+        "contract": contract,
         "contract_address": effective_permissions["contract_address"],
         "contract_name": contract_name,
         "principals": principals,

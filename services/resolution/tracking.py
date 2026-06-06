@@ -8,13 +8,14 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from eth_abi.abi import decode
 
-from schemas.contract_analysis import AssociatedEvent, ControllerReadSpec
+from schemas.common import Contract, make_contract
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from services.static.contract_analysis_pipeline.analysis_types import AssociatedEvent, ControllerReadSpec
 from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
@@ -529,7 +530,7 @@ def build_control_snapshot(
         # (a bare getter reverts on them) so they must pass through untouched.
         if controller["kind"] == "state_variable" and is_primitive_scalar_read_spec(read_spec):
             return controller_id, None
-        spec = read_spec if isinstance(read_spec, dict) else None
+        spec = cast(ControllerReadSpec | None, read_spec if isinstance(read_spec, dict) else None)
 
         def _read_entry(read_address: str, observed_via: str) -> dict[str, Any]:
             value = _read_polling_source(rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec)
@@ -600,8 +601,16 @@ def build_control_snapshot(
             continue
         controller_values[cid] = entry
 
+    raw_contract = plan.get("contract")
+    contract = (
+        cast(Contract, raw_contract)
+        if isinstance(raw_contract, dict)
+        else make_contract(address=plan["contract_address"], name=plan.get("contract_name"))
+    )
+
     return {
         "schema_version": "0.1",
+        "contract": contract,
         "contract_address": plan["contract_address"],
         "contract_name": plan["contract_name"],
         "block_number": block_number,

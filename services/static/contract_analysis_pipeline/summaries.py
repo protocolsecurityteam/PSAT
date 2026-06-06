@@ -8,7 +8,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
-from schemas.contract_analysis import (
+from .analysis_types import (
     ContractClassification,
     ControlModel,
     PausabilityAnalysis,
@@ -21,7 +21,6 @@ from schemas.contract_analysis import (
     TrackingHint,
     UpgradeabilityAnalysis,
 )
-
 from .constants import (
     SEVERITY_ORDER,
     STANDARD_EVENTS,

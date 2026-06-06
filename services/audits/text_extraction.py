@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import requests
 
 from db.storage import StorageUnavailable, get_storage_client
-from schemas.audit_schemas import ExtractionOutcome
+from services.audits.types import ExtractionOutcome
 from utils.github_urls import github_blob_to_raw
 
 logger = logging.getLogger(__name__)

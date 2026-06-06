@@ -1251,14 +1251,11 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
 # slither_results / analysis_report were removed when vulnerability-detector
 # triage was split out of PSAT's pipeline; downstream stages don't depend on
 # them, and the only writer (StaticWorker._run_slither_phase) is gone.
-# predicate_trees / effects are emitted by semantic static analysis and are
-# required by resolution and policy, so cache hits must carry them forward.
+# static_analysis_artifact is the canonical static-stage bundle consumed by
+# resolution and policy.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
-        "contract_analysis",
-        "control_tracking_plan",
-        "predicate_trees",
-        "effects",
+        "static_analysis_artifact",
         "static_dependencies",
         "enrichment_cache",
     }
@@ -1323,7 +1320,7 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
     Returns the cached :class:`Job` if one exists with:
     - status = completed, stage = done
     - at least one ``source_files`` row
-    - the ``contract_analysis`` artifact (key indicator that the static stage finished)
+    - the ``static_analysis_artifact`` artifact (key indicator that the static stage finished)
     - a ``contracts`` row for this address/chain with a ``contract_summaries`` row
 
     The contract lookup uses (address, chain) rather than ``job_id`` so that
@@ -1370,15 +1367,11 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
             continue
 
         # Static-stage-finished check. For non-proxy contracts the canonical
-        # indicator is ``contract_analysis`` (slither output + summary).
-        # Proxies never produce ``contract_analysis`` on their own job —
-        # it lives on the impl child — so require ``contract_flags`` instead,
-        # which proxies do write (is_proxy + proxy_type). Without this
-        # branch, re-discovered proxies would miss the cache and do a full
-        # fresh Etherscan fetch + slither run every time.
-        required_artifact = "contract_flags" if contract_row.is_proxy else "contract_analysis"
+        # indicator is ``static_analysis_artifact``. Proxies skip full static
+        # analysis on their own job, so require ``contract_flags`` instead.
+        required_artifacts = ("contract_flags",) if contract_row.is_proxy else ("static_analysis_artifact",)
         has_required = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == required_artifact).limit(1)
+            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name.in_(required_artifacts)).limit(1)
         ).scalar_one_or_none()
         if not has_required:
             continue
@@ -1400,7 +1393,7 @@ def find_previous_company_inventory(
     exclude_job_id: Any = None,
     chain: str | None = None,
 ) -> Job | None:
-    """Find the most recent completed company job with a contract_inventory artifact.
+    """Find the most recent completed company job with a discovery artifact.
 
     When *chain* is given, only jobs whose ``request["chain"]`` matches are
     considered, preventing cross-chain inventory contamination.
@@ -1423,7 +1416,7 @@ def find_previous_company_inventory(
             if req.get("chain") != chain:
                 continue
         art = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_inventory").limit(1)
+            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "discovery_artifact").limit(1)
         ).scalar_one_or_none()
         if art:
             return candidate
@@ -1474,8 +1467,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     - ``source_files`` rows
     - ``contract_summaries`` and ``role_definitions``
       rows (linked to the new contract row)
-    - Static artifacts (``contract_analysis``, ``control_tracking_plan``,
-      ``predicate_trees``, ``effects``, ``static_dependencies``,
+    - Static artifacts (``static_analysis_artifact``, ``static_dependencies``,
       ``enrichment_cache``)
 
     The source contract is looked up by (address, chain) rather than by

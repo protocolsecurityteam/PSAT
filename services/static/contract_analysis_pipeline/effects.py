@@ -35,8 +35,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
-from schemas.static_pipeline_schemas import EffectInfo, EffectsArtifact, SinkRecord
-
+from .pipeline_types import EffectInfo, EffectsArtifact, SinkRecord
 from .summaries import (
     _action_summary,
     _effect_labels,

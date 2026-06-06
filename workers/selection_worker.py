@@ -31,6 +31,7 @@ from db.queue import (
     is_known_proxy,
     store_artifact,
 )
+from services.artifacts import SELECTION_ARTIFACT, make_job_stage_context, make_stage_artifact
 from services.discovery.ranking import (
     MIN_CONFIDENCE_THRESHOLD,
     effective_confidence,
@@ -353,13 +354,25 @@ class SelectionWorker(BaseWorker):
         store_artifact(
             session,
             job.id,
-            "selection_summary",
-            data={
-                "ranked_count": len(ranked),
-                "analyzed_count": len(child_ids),
-                "child_jobs": child_ids,
-                "ranked": summary_ranked,
-            },
+            SELECTION_ARTIFACT,
+            data=make_stage_artifact(
+                kind=SELECTION_ARTIFACT,
+                stage=JobStage.selection.value,
+                schema_version="1.0",
+                context=make_job_stage_context(job, stage=JobStage.selection.value, schema_version="1.0"),
+                data={
+                    "company": job.company,
+                    "ranked_count": len(ranked),
+                    "analyzed_count": len(child_ids),
+                    "ranked_contracts": summary_ranked,
+                    "selected_contracts": child_ids,
+                    "child_jobs": child_ids,
+                    "summary": {
+                        "ranked_count": len(ranked),
+                        "analyzed_count": len(child_ids),
+                    },
+                },
+            ),
         )
         record_stage_metric("ranked_candidates", len(ranked))
         record_stage_metric("queued", len(child_ids))

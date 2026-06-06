@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas.policy_schemas import CapabilitySurface
+from services.policy.types import CapabilitySurface
 
 
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:

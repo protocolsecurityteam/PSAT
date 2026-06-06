@@ -10,15 +10,18 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from schemas.common import Address, ChainId, JsonObject
+from schemas.monitoring_schemas import MonitoringEventFilter
+
 
 class AnalyzeRequest(BaseModel):
-    address: str | None = Field(default=None, min_length=42, max_length=42)
+    address: Address | None = Field(default=None, min_length=42, max_length=42)
     company: str | None = Field(default=None, min_length=1)
     dapp_urls: list[str] | None = None
     defillama_protocol: str | None = Field(default=None, min_length=1)
     name: str | None = None
     chain: str | None = None
-    chain_id: int | None = Field(default=None, ge=1)
+    chain_id: ChainId | None = Field(default=None, ge=1)
     wait: int | None = Field(default=None, ge=1, le=120)
     analyze_limit: int = Field(default=5, ge=1, le=200)
     rpc_url: str | None = None
@@ -41,11 +44,14 @@ class AnalyzeRequest(BaseModel):
 class ProtocolSubscribeRequest(BaseModel):
     discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")
     label: str | None = None
-    event_filter: dict | None = Field(default=None, description='Optional filter: {"event_types": ["upgraded", ...]}')
+    event_filter: MonitoringEventFilter | None = Field(
+        default=None,
+        description='Optional filter: {"event_types": ["upgraded", ...]}',
+    )
 
     @field_validator("event_filter")
     @classmethod
-    def validate_event_filter(cls, v: dict | None) -> dict | None:
+    def validate_event_filter(cls, v: MonitoringEventFilter | None) -> MonitoringEventFilter | None:
         if v is None:
             return v
         if "event_types" not in v:
@@ -69,10 +75,10 @@ class ProtocolSubscribeRequest(BaseModel):
 
 
 class UpsertMonitoredContractRequest(BaseModel):
-    address: str = Field(min_length=42, max_length=42)
+    address: Address = Field(min_length=42, max_length=42)
     chain: str = "ethereum"
     contract_type: str = "regular"
-    monitoring_config: dict | None = None
+    monitoring_config: JsonObject | None = None
     needs_polling: bool = False
     is_active: bool = True
 
@@ -95,7 +101,7 @@ class AddAuditRequest(BaseModel):
 
 
 class UpdateMonitoredContractRequest(BaseModel):
-    monitoring_config: dict | None = Field(default=None, description="Updated monitoring config flags")
+    monitoring_config: JsonObject | None = Field(default=None, description="Updated monitoring config flags")
     is_active: bool | None = Field(default=None, description="Toggle monitoring on/off")
     needs_polling: bool | None = Field(default=None, description="Toggle storage-slot polling")
 

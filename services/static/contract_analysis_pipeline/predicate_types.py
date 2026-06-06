@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from schemas.static_pipeline_schemas import (
+from .pipeline_types import (
     AuthorityContract,
     AuthorityRole,
     EventHint,
@@ -23,10 +23,10 @@ from schemas.static_pipeline_schemas import (
     make_or_node,
     operand,
 )
-from schemas.static_pipeline_schemas import (
+from .pipeline_types import (
     PredicateConfidence as Confidence,
 )
-from schemas.static_pipeline_schemas import (
+from .pipeline_types import (
     PredicateSetDescriptor as SetDescriptor,
 )
 

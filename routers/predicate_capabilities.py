@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from db.models import Job, JobStatus, Protocol
+from services.artifacts import get_artifact_field
 
 from . import deps
 
@@ -227,7 +228,7 @@ def probe_contract_membership(
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
+        artifact = get_artifact_field(session, job.id, "predicate_trees")
         if artifact is None:
             raise HTTPException(
                 status_code=404,
@@ -307,7 +308,7 @@ def probe_contract_signature(
         ).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
+        artifact = get_artifact_field(session, job.id, "predicate_trees")
         if artifact is None:
             raise HTTPException(
                 status_code=404,

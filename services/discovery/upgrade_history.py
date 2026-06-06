@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from schemas.common import make_contract
 from services.discovery.static_dependencies import normalize_address
 
 logger = logging.getLogger(__name__)
@@ -337,6 +338,17 @@ def _build_implementation_timeline(
     return records
 
 
+def _stamp_implementation_contracts(implementations: list[dict]) -> None:
+    for impl in implementations:
+        address = impl.get("address")
+        if not isinstance(address, str) or not address:
+            continue
+        impl["contract"] = make_contract(
+            address=address,
+            name=impl.get("contract_name"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Reading proxy metadata from dependencies.json
 # ---------------------------------------------------------------------------
@@ -442,6 +454,7 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     if not proxy_meta:
         return {
             "schema_version": "0.1",
+            "contract": make_contract(address=target_address),
             "target_address": target_address,
             "proxies": {},
             "total_upgrades": 0,
@@ -467,6 +480,13 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         upgrade_events = [e for e in proxy_events if e["event_type"] == "upgraded"]
 
         proxies[addr] = {
+            "contract": make_contract(
+                address=addr,
+                is_proxy=True,
+                proxy_address=addr,
+                implementation_addresses=[current_impl] if current_impl else [],
+                proxy_type=proxy_type,
+            ),
             "proxy_address": addr,
             "proxy_type": proxy_type,
             "current_implementation": current_impl,
@@ -488,9 +508,19 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         for impl in all_implementations:
             if impl["address"] in known_names:
                 impl["contract_name"] = known_names[impl["address"]]
+    _stamp_implementation_contracts(all_implementations)
+
+    target_proxy_type, target_current_impl = proxy_meta.get(target_address, ("unknown", None))
 
     return {
         "schema_version": "0.1",
+        "contract": make_contract(
+            address=target_address,
+            is_proxy=target_address in proxy_meta,
+            proxy_address=target_address if target_address in proxy_meta else None,
+            implementation_addresses=[target_current_impl] if target_current_impl else [],
+            proxy_type=target_proxy_type if target_address in proxy_meta else None,
+        ),
         "target_address": target_address,
         "proxies": proxies,
         "total_upgrades": total_upgrades,
@@ -892,9 +922,21 @@ def synthesize_from_events(session, contract) -> dict | None:
             n = names.get(impl["address"].lower())
             if n:
                 impl["contract_name"] = n
+    _stamp_implementation_contracts(implementations)
 
     proxy_addr = (contract.address or "").lower()
     proxy = {
+        "contract": make_contract(
+            address=proxy_addr,
+            name=contract.contract_name,
+            is_proxy=True,
+            proxy_address=proxy_addr,
+            implementation_addresses=[current_impl] if current_impl else [],
+            admin_addresses=[contract.admin] if contract.admin else [],
+            beacon_addresses=[contract.beacon] if contract.beacon else [],
+            deployer_address=contract.deployer,
+            proxy_type=contract.proxy_type,
+        ),
         "proxy_address": proxy_addr,
         "proxy_type": contract.proxy_type or "unknown",
         "current_implementation": current_impl,
@@ -906,6 +948,17 @@ def synthesize_from_events(session, contract) -> dict | None:
     }
     return {
         "schema_version": "0.1",
+        "contract": make_contract(
+            address=proxy_addr,
+            name=contract.contract_name,
+            is_proxy=True,
+            proxy_address=proxy_addr,
+            implementation_addresses=[current_impl] if current_impl else [],
+            admin_addresses=[contract.admin] if contract.admin else [],
+            beacon_addresses=[contract.beacon] if contract.beacon else [],
+            deployer_address=contract.deployer,
+            proxy_type=contract.proxy_type,
+        ),
         "target_address": proxy_addr,
         "proxies": {proxy_addr: proxy},
         "total_upgrades": len(events),

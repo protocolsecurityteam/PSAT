@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas.static_pipeline_schemas import Polarity, RevertGate, RevertKind
+from .pipeline_types import Polarity, RevertGate, RevertKind
 
 try:
     from slither.core.cfg.node import NodeType  # type: ignore[import]

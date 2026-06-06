@@ -25,6 +25,7 @@ from db.queue import (
     get_or_create_protocol,
     store_artifact,
 )
+from services.artifacts import CRAWLER_ARTIFACT, make_job_stage_context, make_stage_artifact
 from services.crawlers.defillama.scan import scan_protocol
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.logging import log_timed_phase, record_stage_metric
@@ -86,30 +87,6 @@ class DefiLlamaWorker(BaseWorker):
         addresses = result["addresses"]
         logger.info("DefiLlama scan found %d addresses for job %s", len(addresses), job.id)
 
-        # Store full scan details as artifact
-        store_artifact(
-            session,
-            job.id,
-            "defillama_full_scan",
-            data={
-                "protocol": protocol,
-                "scan_time": result["scan_time"],
-                "address_details": result["address_details"],
-            },
-        )
-
-        # Store raw results
-        store_artifact(
-            session,
-            job.id,
-            "defillama_scan_results",
-            data={
-                "protocol": protocol,
-                "addresses_found": len(addresses),
-                "addresses": addresses,
-            },
-        )
-
         # Build chain lookup from detailed results
         chain_by_address: dict[str, str | None] = {}
         for entry in result.get("address_details", []):
@@ -135,15 +112,29 @@ class DefiLlamaWorker(BaseWorker):
         session.commit()
         record_stage_metric("contracts_found", len(addresses))
 
+        summary = {
+            "mode": "defillama_scan",
+            "protocol": protocol,
+            "scan_time": result["scan_time"],
+            "addresses_found": len(addresses),
+            "discovered_count": len(addresses),
+        }
         store_artifact(
             session,
             job.id,
-            "discovery_summary",
-            data={
-                "mode": "defillama_scan",
-                "protocol": protocol,
-                "discovered_count": len(addresses),
-            },
+            CRAWLER_ARTIFACT,
+            data=make_stage_artifact(
+                kind=CRAWLER_ARTIFACT,
+                stage=JobStage.defillama_scan.value,
+                schema_version="1.0",
+                context=make_job_stage_context(job, stage=JobStage.defillama_scan.value, schema_version="1.0"),
+                data={
+                    "source": "defillama_scan",
+                    "discovered_contracts": addresses,
+                    "address_details": result["address_details"],
+                    "summary": summary,
+                },
+            ),
         )
 
         if not job.name:

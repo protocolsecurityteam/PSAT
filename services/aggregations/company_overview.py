@@ -47,9 +47,22 @@ from db.models import (
     TvlSnapshot,
     UpgradeEvent,
 )
-from schemas.aggregation_schemas import GovernanceView
+from schemas.aggregation_schemas import (
+    ContractControlGraph,
+    ContractControlGraphEdge,
+    ContractControlGraphNode,
+    GovernanceContract,
+    GovernanceFundFlow,
+    GovernanceHierarchyEntry,
+    GovernanceView,
+    TokenBalanceEntry,
+)
+from schemas.common import Contract as ContractSchema
+from schemas.common import make_contract
+from schemas.governance_schemas import GovernanceControlDetail, GovernanceFunctionEntry, GovernancePrincipal
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
+from utils.rpc import chain_id_for_chain_name
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -76,6 +89,32 @@ class CompanyNotFound(Exception):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.name = name
+
+
+def _contract_ref_from_row(
+    contract_row: Contract | None,
+    *,
+    address: str | None,
+    label: str | None = None,
+) -> ContractSchema:
+    if contract_row is None:
+        return make_contract(address=address or "", name=None, label=label)
+    implementations = [
+        item for item in [contract_row.implementation, *(contract_row.secondary_implementations or [])] if item
+    ]
+    return make_contract(
+        address=contract_row.address,
+        chain_id=chain_id_for_chain_name(contract_row.chain) or 1,
+        name=contract_row.contract_name,
+        label=label,
+        is_proxy=bool(contract_row.is_proxy),
+        proxy_address=contract_row.address if contract_row.is_proxy else None,
+        implementation_addresses=implementations,
+        admin_addresses=[contract_row.admin] if contract_row.admin else [],
+        beacon_addresses=[contract_row.beacon] if contract_row.beacon else [],
+        deployer_address=contract_row.deployer,
+        proxy_type=contract_row.proxy_type,
+    )
 
 
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
@@ -763,7 +802,9 @@ def _is_active_owner_controller(controller_id: str | None) -> bool:
     return (controller_id or "").lower() in _ACTIVE_OWNER_CONTROLLER_IDS
 
 
-def _trim_control_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _trim_control_graph(
+    nodes: list[ContractControlGraphNode], edges: list[ContractControlGraphEdge]
+) -> ContractControlGraph:
     """Drop mapping-entry leaf nodes (and edges pointing at them) from a
     contract's local control_graph.
 
@@ -784,7 +825,7 @@ def _trim_control_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
     """
     sources = {(e.get("from") or "").lower() for e in edges}
     dropped: set[str] = set()
-    kept_nodes: list[dict[str, Any]] = []
+    kept_nodes: list[ContractControlGraphNode] = []
     for n in nodes:
         addr = (n.get("address") or "").lower()
         if (n.get("type") in _PRINCIPAL_TYPES) or (addr in sources):
@@ -1008,8 +1049,8 @@ def build_governance_view(
 
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 
-    contracts: list[dict[str, Any]] = []
-    owner_groups: dict[str, list[dict]] = {}
+    contracts: list[GovernanceContract] = []
+    owner_groups: dict[str, list[GovernanceContract]] = {}
 
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
@@ -1092,9 +1133,9 @@ def build_governance_view(
         if not contract_name:
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
-        is_factory = summary_row.is_factory if summary_row else False
-        has_timelock = summary_row.has_timelock if summary_row else False
-        is_pausable = summary_row.is_pausable if summary_row else False
+        is_factory = bool(summary_row.is_factory) if summary_row else False
+        has_timelock = bool(summary_row.has_timelock) if summary_row else False
+        is_pausable = bool(summary_row.is_pausable) if summary_row else False
         control_model = summary_row.control_model if summary_row else None
 
         name_lower = contract_name.lower()
@@ -1112,7 +1153,7 @@ def build_governance_view(
             role = "utility"
 
         balance_contract = lookup_contract or contract_row
-        balances_list = []
+        balances_list: list[TokenBalanceEntry] = []
         total_usd = 0.0
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
@@ -1131,7 +1172,8 @@ def build_governance_view(
                 if usd:
                     total_usd += usd
 
-        entry: dict[str, Any] = {
+        entry: GovernanceContract = {
+            "contract": _contract_ref_from_row(contract_row, address=job.address, label=contract_name),
             "address": job.address,
             "name": contract_name,
             "contract_id": contract_row.id if contract_row else None,
@@ -1168,7 +1210,7 @@ def build_governance_view(
             cg_nodes = cgn_by_cid.get(graph_contract.id, [])
             cg_edges = cge_by_cid.get(graph_contract.id, [])
             node_meta = {n.address: _principal_lookup_meta(principal_lookup, n.address, n.details) for n in cg_nodes}
-            nodes_payload = [
+            nodes_payload: list[ContractControlGraphNode] = [
                 {
                     "address": n.address,
                     "type": node_meta[n.address].get("resolved_type") or n.resolved_type,
@@ -1177,11 +1219,11 @@ def build_governance_view(
                 }
                 for n in cg_nodes
             ]
-            edges_payload = [
+            edges_payload: list[ContractControlGraphEdge] = [
                 {
                     "from": e.from_node_id.replace("address:", ""),
                     "to": e.to_node_id.replace("address:", ""),
-                    "relation": e.relation,
+                    "relation": e.relation or "",
                 }
                 for e in cg_edges
             ]
@@ -1194,7 +1236,7 @@ def build_governance_view(
     # Deduplicate: remove standalone impl contracts already represented via a
     # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
     # latter were analysed standalone in older runs, so drop them by address).
-    impl_addresses = {c["implementation"].lower() for c in contracts if c.get("implementation")}
+    impl_addresses = {impl.lower() for c in contracts if (impl := c.get("implementation"))}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
             impl_addresses.add(saddr.lower())
@@ -1247,9 +1289,13 @@ def build_governance_view(
     for c in contracts:
         if not (c.get("is_proxy") and c.get("address")):
             continue
-        proxy_addr_lc = c["address"].lower()
-        if c.get("implementation"):
-            impl_to_proxy[c["implementation"].lower()] = proxy_addr_lc
+        proxy_addr = c["address"]
+        if proxy_addr is None:
+            continue
+        proxy_addr_lc = proxy_addr.lower()
+        implementation = c.get("implementation")
+        if implementation:
+            impl_to_proxy[implementation.lower()] = proxy_addr_lc
         # Secondary impls render under the proxy too, so their FunctionPrincipal
         # authority (e.g. a governor over admin functions) attributes here.
         for saddr in c.get("secondary_implementations") or []:
@@ -1291,7 +1337,9 @@ def build_governance_view(
         fp_function_detail_by_addr.setdefault(rendered_addr, []).extend(functions)
     co_controls = assign_co_controllers(principals, fp_function_detail_by_addr, primary_for)
 
-    principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
+    principal_meta: dict[str, GovernancePrincipal] = {
+        (p.get("address") or "").lower(): p for p in principals if p.get("address")
+    }
 
     # Per-(controller, contract) capability detail: the concrete functions — and
     # effect-category tags — each FP caller can actually invoke. Lets the canvas
@@ -1343,9 +1391,9 @@ def build_governance_view(
                 if gov_addr in governance_passthrough and la in caller_detail.get(gov_addr, {}):
                     _accumulate(la, caddr, gov_detail)
 
-    detail_by_principal: dict[str, list[dict[str, Any]]] = {}
+    detail_by_principal: dict[str, list[GovernanceControlDetail]] = {}
     for la, by_contract in detail_acc.items():
-        rows = [
+        rows: list[GovernanceControlDetail] = [
             {"address": caddr, "functions": sorted(d["functions"]), "capabilities": _capabilities_for(d["labels"])}
             for caddr, d in by_contract.items()
         ]
@@ -1399,9 +1447,9 @@ def build_governance_view(
 
 
 def _build_ownership_hierarchy(
-    contracts: list[dict[str, Any]], owner_groups: dict[str, list[dict]]
-) -> list[dict[str, Any]]:
-    hierarchy: list[dict[str, Any]] = []
+    contracts: list[GovernanceContract], owner_groups: dict[str, list[GovernanceContract]]
+) -> list[GovernanceHierarchyEntry]:
+    hierarchy: list[GovernanceHierarchyEntry] = []
     assigned: set[str | None] = set()
     for owner_addr, owned in sorted(owner_groups.items(), key=lambda x: -len(x[1])):
         owner_contract = next((c for c in contracts if c["address"] and c["address"].lower() == owner_addr), None)
@@ -1429,7 +1477,7 @@ def _build_ownership_hierarchy(
 
 
 def _build_flows_and_principals(
-    contracts: list[dict[str, Any]],
+    contracts: list[GovernanceContract],
     contracts_by_job_id: dict[Any, Contract],
     controller_values_by_cid: dict[int, list[ControllerValue]],
     fp_governance_by_cid: dict[int, list[dict[str, Any]]],
@@ -1437,11 +1485,11 @@ def _build_flows_and_principals(
     cge_by_cid: dict[int, list[ControlGraphEdge]],
     fp_in_contract_by_cid: dict[int, set[str]],
     principal_lookup: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[GovernanceFundFlow], list[GovernancePrincipal]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
     contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
     flow_seen: set[tuple[str, str]] = set()
-    fund_flows: list[dict[str, Any]] = []
+    fund_flows: list[GovernanceFundFlow] = []
 
     def add_flow(from_addr: str, to_addr: str, flow_type: str, lane: str = "control") -> None:
         key = (from_addr, to_addr)
@@ -1459,7 +1507,7 @@ def _build_flows_and_principals(
             }
         )
 
-    def _lookup_contract_for(entry: dict[str, Any]) -> Contract | None:
+    def _lookup_contract_for(entry: GovernanceContract) -> Contract | None:
         import uuid as _uuid
 
         lookup_job_id = entry.get("impl_job_id") or entry["job_id"]
@@ -1471,8 +1519,9 @@ def _build_flows_and_principals(
 
     lookup_contract_by_entry: dict[str, Contract | None] = {}
     for entry in contracts:
-        if entry.get("address"):
-            lookup_contract_by_entry[entry["address"].lower()] = _lookup_contract_for(entry)
+        entry_address = entry.get("address")
+        if entry_address:
+            lookup_contract_by_entry[entry_address.lower()] = _lookup_contract_for(entry)
 
     for c in contracts:
         if not c["address"]:
@@ -1526,7 +1575,7 @@ def _build_flows_and_principals(
 
     # Collect non-contract principals from control graph + function principals.
     # First pass: find safe_owner edges so we can nest Safe owners later.
-    principal_map: dict[str, dict[str, Any]] = {}
+    principal_map: dict[str, GovernancePrincipal] = {}
     safe_owners_map: dict[str, list[str]] = {}
     owner_of_safe: set[str] = set()
 
@@ -1659,7 +1708,7 @@ def _build_flows_and_principals(
     return fund_flows, list(principal_map.values())
 
 
-def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[dict[str, Any]]]:
+def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[GovernanceFunctionEntry]]:
     """Return ``{address: [function_entries]}`` for every contract in the
     protocol.
 
@@ -1750,7 +1799,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 cgn_by_cid.setdefault(n.contract_id, []).append(n)
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 
-    out: dict[str, list[dict[str, Any]]] = {}
+    out: dict[str, list[GovernanceFunctionEntry]] = {}
     with _time_phase(timings_ms, "serialize"):
         for addr, ef_cids in job_addr_to_ef_cids.items():
             ef_rows = [ef for cid in ef_cids for ef in ef_rows_by_cid.get(cid, [])]

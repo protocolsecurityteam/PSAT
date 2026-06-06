@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from schemas.contract_analysis import SecondaryImplPointer
+from .analysis_types import SecondaryImplPointer
 
 logger = logging.getLogger(__name__)
 

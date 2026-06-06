@@ -23,10 +23,18 @@ from db.queue import (
     create_job,
     find_completed_static_cache,
     find_previous_company_inventory,
-    get_artifact,
     get_or_create_protocol,
     store_artifact,
     store_source_files,
+)
+from schemas.common import Contract as ContractSchema
+from schemas.common import make_contract
+from services.artifacts import (
+    DISCOVERY_ARTIFACT,
+    get_artifact_field,
+    make_job_contract,
+    make_job_stage_context,
+    make_stage_artifact,
 )
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
@@ -35,9 +43,76 @@ from services.discovery.inventory import merge_inventory, search_protocol_invent
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
+from utils.rpc import chain_id_for_chain_name
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
+
+
+def _request_chain_id(request: dict) -> int | None:
+    raw = request.get("chain_id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _contract_from_inventory_entry(entry: dict, request: dict, default_chain: str | None) -> ContractSchema | None:
+    address = entry.get("address")
+    if not isinstance(address, str) or not address:
+        return None
+    entry_chains = entry.get("chains")
+    entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
+    chain_name = entry_chain if isinstance(entry_chain, str) and entry_chain else default_chain
+    chain_id = chain_id_for_chain_name(chain_name) or _request_chain_id(request) or 1
+    name = entry.get("name") if isinstance(entry.get("name"), str) else None
+    return make_contract(
+        address=address,
+        chain_id=chain_id,
+        name=name,
+        label=name,
+    )
+
+
+def _contracts_from_inventory(inventory: dict, request: dict, default_chain: str | None) -> list[ContractSchema]:
+    contracts: list[ContractSchema] = []
+    for entry in inventory.get("contracts", []):
+        if not isinstance(entry, dict):
+            continue
+        contract = _contract_from_inventory_entry(entry, request, default_chain)
+        if contract is not None:
+            contracts.append(contract)
+    return contracts
+
+
+def _store_address_discovery_artifact(
+    session: Session,
+    job: Job,
+    contract_row: Contract | None,
+    *,
+    summary: dict,
+    metadata: dict | None = None,
+) -> None:
+    contract = make_job_contract(session, job, contract_row)
+    data = {
+        "contracts": [contract],
+        "summary": summary,
+    }
+    if metadata is not None:
+        data["metadata"] = metadata
+    store_artifact(
+        session,
+        job.id,
+        DISCOVERY_ARTIFACT,
+        data=make_stage_artifact(
+            kind=DISCOVERY_ARTIFACT,
+            stage=JobStage.discovery.value,
+            schema_version="1.0",
+            context=make_job_stage_context(job, stage=JobStage.discovery.value, schema_version="1.0"),
+            data=data,
+            contract=contract,
+        ),
+    )
 
 
 def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[dict]) -> None:
@@ -162,7 +237,7 @@ class DiscoveryWorker(BaseWorker):
         prev_inventory: dict | None = None
         prev_job = find_previous_company_inventory(session, company, exclude_job_id=job.id, chain=chain)
         if prev_job:
-            _raw = get_artifact(session, prev_job.id, "contract_inventory")
+            _raw = get_artifact_field(session, prev_job.id, "discovery_inventory")
             if isinstance(_raw, dict):
                 prev_inventory = _raw
 
@@ -198,9 +273,6 @@ class DiscoveryWorker(BaseWorker):
         if prev_inventory and isinstance(prev_inventory, dict):
             inventory = merge_inventory(prev_inventory, inventory)
 
-        store_artifact(session, job.id, "contract_inventory", data=inventory)
-        store_artifact(session, job.id, "discovery_meta", data=discovery_meta)
-
         # Resolve to a DefiLlama family slug FIRST so the Protocol upsert is
         # keyed on a stable canonical id. Without this, the same protocol
         # discovered via different free-text spellings (e.g. "ether fi" vs
@@ -223,10 +295,11 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(session, job, f"Persisting audit reports for {company}")
         prev_audits: dict | None = None
         if prev_job:
-            _raw_audits = get_artifact(session, prev_job.id, "audit_reports")
+            _raw_audits = get_artifact_field(session, prev_job.id, "discovery_audit_reports")
             if isinstance(_raw_audits, dict):
                 prev_audits = _raw_audits
 
+        audit_result: dict | None = None
         try:
             if audit_result_raw is None:
                 # Legacy fallback path (unified discovery failed above)
@@ -237,7 +310,6 @@ class DiscoveryWorker(BaseWorker):
             audit_result = audit_result_raw
             if prev_audits:
                 audit_result = merge_audit_reports(prev_audits, audit_result)
-            store_artifact(session, job.id, "audit_reports", data=audit_result)
             _sync_audit_reports_to_db(session, protocol_row.id, audit_result.get("reports", []))
             audit_count = len(audit_result.get("reports", []))
             record_stage_metric("audit_reports", audit_count)
@@ -291,16 +363,31 @@ class DiscoveryWorker(BaseWorker):
         bulk_upsert_discovered_contracts(session, protocol_id=protocol_row.id, entries=bulk_entries)
         session.commit()
 
+        summary = {
+            "mode": "company",
+            "company": company,
+            "official_domain": inventory.get("official_domain"),
+            "discovered_count": len(discovered),
+        }
+        artifact_data = {
+            "contracts": _contracts_from_inventory(inventory, request, chain),
+            "inventory": inventory,
+            "metadata": discovery_meta,
+            "summary": summary,
+        }
+        if audit_result is not None:
+            artifact_data["audit_reports"] = audit_result
         store_artifact(
             session,
             job.id,
-            "discovery_summary",
-            data={
-                "mode": "company",
-                "company": company,
-                "official_domain": inventory.get("official_domain"),
-                "discovered_count": len(discovered),
-            },
+            DISCOVERY_ARTIFACT,
+            data=make_stage_artifact(
+                kind=DISCOVERY_ARTIFACT,
+                stage=JobStage.discovery.value,
+                schema_version="1.0",
+                context=make_job_stage_context(job, stage=JobStage.discovery.value, schema_version="1.0"),
+                data=artifact_data,
+            ),
         )
 
         if not job.name:
@@ -421,6 +508,20 @@ class DiscoveryWorker(BaseWorker):
                     if contract_row and contract_row.contract_name:
                         job.name = f"{contract_row.contract_name}_{address[2:10]}"
                         session.commit()
+                else:
+                    contract_row = session.get(Contract, new_contract_id)
+
+                _store_address_discovery_artifact(
+                    session,
+                    job,
+                    contract_row,
+                    summary={
+                        "mode": "address",
+                        "address": address.lower(),
+                        "cached": True,
+                        "cache_source_job_id": str(cached_job.id),
+                    },
+                )
 
                 logger.info(
                     "Discovery cache hit for %s — reused data from job %s",
@@ -504,6 +605,7 @@ class DiscoveryWorker(BaseWorker):
             parent_relationship=discovery_relationship,
         )
 
+        contract_row: Contract | None
         if existing:
             existing.job_id = job.id
             existing.contract_name = contract_name
@@ -549,6 +651,7 @@ class DiscoveryWorker(BaseWorker):
                     if "structural_adoption" not in merged:
                         merged.append("structural_adoption")
                     existing.discovery_sources = merged
+            contract_row = existing
         else:
             owning_protocol_id = None
             if job.protocol_id and (asserts_ownership(request_sources) or structural_ownership):
@@ -590,6 +693,7 @@ class DiscoveryWorker(BaseWorker):
                 source_verified=True,
             )
             session.add(contract)
+            contract_row = contract
         session.commit()
 
         if not job.name:
@@ -597,6 +701,24 @@ class DiscoveryWorker(BaseWorker):
             session.commit()
 
         record_stage_metric("source_files", len(sources))
+        _store_address_discovery_artifact(
+            session,
+            job,
+            contract_row,
+            summary={
+                "mode": "address",
+                "address": address.lower(),
+                "contract_name": contract_name,
+                "source_file_count": len(sources),
+                "source_verified": True,
+                "cached": False,
+            },
+            metadata={
+                "compiler_version": result.get("CompilerVersion", ""),
+                "language": "vyper" if is_vyper_result(result) else "solidity",
+                "evm_version": evm_version,
+            },
+        )
         self.update_detail(session, job, f"Discovery complete: {contract_name} ({len(sources)} source files)")
         logger.info("Discovery complete for %s (%s)", address, contract_name)
 

@@ -13,21 +13,24 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from schemas.contract_analysis import ContractAnalysis
+from schemas.common import Contract as ContractSchema
+from schemas.common import make_contract
 from schemas.control_tracking import ControlSnapshot
-from schemas.resolution_schemas import (
+from services.discovery.fetch import fetch, scaffold
+from services.policy.effective_permissions import build_effective_permissions
+from services.resolution.types import (
     LoadedArtifacts,
     PendingContract,
     ResolvedControlGraph,
     ResolvedGraphEdge,
     ResolvedGraphNode,
+    ResolvedNodeType,
     RolePrincipal,
     RolePrincipalAccumulator,
 )
-from schemas.static_pipeline_schemas import WriterEventSpec
-from services.discovery.fetch import fetch, scaffold
-from services.policy.effective_permissions import build_effective_permissions
+from services.static.contract_analysis_pipeline.analysis_types import ContractAnalysis
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
+from services.static.contract_analysis_pipeline.pipeline_types import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
 
 from .tracking import (
@@ -309,10 +312,57 @@ def _materialize_contract_artifacts(
     # plan["contract_address"] points at the OTHER address. Stamp it for
     # THIS call so build_control_snapshot reads from the right contract.
     if isinstance(analysis.get("subject"), dict):
-        analysis["subject"]["address"] = effective_address
+        analysis["subject"]["address"] = effective_address.lower()
     plan["contract_address"] = effective_address
+    if isinstance(plan.get("contract"), dict):
+        plan["contract"] = {**plan["contract"], "address": effective_address.lower()}
     if snapshot_address != effective_address:
-        plan = {**plan, "contract_address": snapshot_address}
+        if isinstance(analysis.get("subject"), dict):
+            raw_subject_implementations = analysis["subject"].get("implementation_addresses")
+            subject_implementation_addresses: list[str] = []
+            for candidate in [
+                effective_address,
+                *(raw_subject_implementations if isinstance(raw_subject_implementations, list) else []),
+            ]:
+                if not isinstance(candidate, str):
+                    continue
+                normalized = candidate.lower()
+                if normalized == snapshot_address.lower() or normalized in subject_implementation_addresses:
+                    continue
+                subject_implementation_addresses.append(normalized)
+            analysis["subject"] = {
+                **analysis["subject"],
+                "address": snapshot_address.lower(),
+                "is_proxy": True,
+                "proxy_address": snapshot_address.lower(),
+                "implementation_addresses": subject_implementation_addresses,
+            }
+        plan_contract = plan.get("contract")
+        if isinstance(plan_contract, dict):
+            raw_implementations = plan_contract.get("implementation_addresses")
+            implementation_addresses: list[str] = []
+            for candidate in [
+                effective_address,
+                *(raw_implementations if isinstance(raw_implementations, list) else []),
+            ]:
+                if not isinstance(candidate, str):
+                    continue
+                normalized = candidate.lower()
+                if normalized == snapshot_address.lower() or normalized in implementation_addresses:
+                    continue
+                implementation_addresses.append(normalized)
+            plan_contract = {
+                **plan_contract,
+                "address": snapshot_address.lower(),
+                "is_proxy": True,
+                "proxy_address": snapshot_address.lower(),
+                "implementation_addresses": implementation_addresses,
+            }
+        plan = {
+            **plan,
+            "contract_address": snapshot_address,
+            **({"contract": plan_contract} if isinstance(plan_contract, dict) else {}),
+        }
 
     snapshot = build_control_snapshot(cast(Any, plan), rpc_url)
     effective_permissions = _build_effective_permissions(cast(dict, analysis), snapshot)
@@ -333,8 +383,9 @@ def _ensure_node(
     resolved_type: str,
     label: str,
     depth: int,
-    node_type: str,
+    node_type: ResolvedNodeType,
     contract_name: str | None = None,
+    contract: ContractSchema | None = None,
     analyzed: bool = False,
     details: dict[str, object] | None = None,
     artifacts: dict[str, str] | None = None,
@@ -349,6 +400,7 @@ def _ensure_node(
         "resolved_type": resolved_type,  # type: ignore[typeddict-item]
         "label": label,
         "contract_name": contract_name,
+        **({"contract": contract} if contract is not None else {}),
         "depth": depth,
         "analyzed": analyzed,
         "details": details or {},
@@ -361,6 +413,8 @@ def _ensure_node(
     current["depth"] = min(current.get("depth", depth), depth)
     if contract_name:
         current["contract_name"] = contract_name
+    if contract is not None:
+        current["contract"] = contract
     if analyzed:
         current["analyzed"] = True
         current["node_type"] = "contract"
@@ -669,18 +723,30 @@ def resolve_control_graph(
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
     """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place."""
     root_analysis = root_artifacts["analysis"]
-    root_subject = root_analysis.get("subject", {})
+    root_subject_obj = root_analysis.get("subject", {})
+    root_subject = root_subject_obj if isinstance(root_subject_obj, dict) else {}
     root_address = str(root_subject.get("address", "")).lower()
 
-    queue: deque[PendingContract] = deque(
-        [
-            {
-                "address": root_address,
-                "depth": 0,
-                "artifacts": root_artifacts,
-            }
-        ]
-    )
+    root_pending: PendingContract = {
+        "address": root_address,
+        "depth": 0,
+        "artifacts": root_artifacts,
+    }
+    if root_subject:
+        root_pending["contract"] = make_contract(
+            address=str(root_subject.get("address") or root_address),
+            chain_id=root_subject.get("chain_id"),
+            name=root_subject.get("name"),
+            label=root_subject.get("label"),
+            is_proxy=bool(root_subject.get("is_proxy")),
+            proxy_address=root_subject.get("proxy_address"),
+            implementation_addresses=root_subject.get("implementation_addresses"),
+            admin_addresses=root_subject.get("admin_addresses"),
+            beacon_addresses=root_subject.get("beacon_addresses"),
+            deployer_address=root_subject.get("deployer_address"),
+            proxy_type=root_subject.get("proxy_type"),
+        )
+    queue: deque[PendingContract] = deque([root_pending])
     queued = {root_address}
     processed: set[str] = set()
     _classify_cache: dict[str, tuple[str, dict[str, object]]] = classify_cache if classify_cache is not None else {}
@@ -826,6 +892,7 @@ def resolve_control_graph(
                     node_type="contract",
                     analyzed=False,
                     contract_name=contract_name,
+                    contract=make_contract(address=address, name=contract_name),
                     details={"address": address, "materialize_error": err_text},
                 )
                 processed.add(address)
@@ -839,7 +906,25 @@ def resolve_control_graph(
             snapshot = artifacts["snapshot"]
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
-            contract_name = str(subject.get("name", address))
+            subject_mapping = subject if isinstance(subject, dict) else {}
+            contract_name = str(subject_mapping.get("name", address))
+            contract = (
+                make_contract(
+                    address=str(subject_mapping.get("address") or address),
+                    chain_id=subject_mapping.get("chain_id"),
+                    name=subject_mapping.get("name"),
+                    label=subject_mapping.get("label"),
+                    is_proxy=bool(subject_mapping.get("is_proxy")),
+                    proxy_address=subject_mapping.get("proxy_address"),
+                    implementation_addresses=subject_mapping.get("implementation_addresses"),
+                    admin_addresses=subject_mapping.get("admin_addresses"),
+                    beacon_addresses=subject_mapping.get("beacon_addresses"),
+                    deployer_address=subject_mapping.get("deployer_address"),
+                    proxy_type=subject_mapping.get("proxy_type"),
+                )
+                if subject_mapping
+                else make_contract(address=address, name=contract_name)
+            )
             node_details: dict[str, object] = {"address": address}
             contract_node_id = _ensure_node(
                 nodes,
@@ -849,6 +934,7 @@ def resolve_control_graph(
                 depth=depth,
                 node_type="contract",
                 contract_name=contract_name,
+                contract=contract,
                 analyzed=True,
                 details=node_details,
                 artifacts={"data_key": f"recursive:{address.lower()}"},

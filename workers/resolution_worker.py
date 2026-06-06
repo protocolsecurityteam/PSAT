@@ -23,8 +23,15 @@ from db.models import (
     JobStage,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, get_artifact, store_artifact
+from db.queue import create_job, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from services.artifacts import (
+    RESOLUTION_ARTIFACT,
+    get_artifact_field,
+    make_job_contract,
+    make_job_stage_context,
+    make_stage_artifact,
+)
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
@@ -85,15 +92,15 @@ class ResolutionWorker(BaseWorker):
         rpc_url = _rpc_url_for_job(job)
 
         # Read control_tracking_plan from DB
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+        tracking_plan = get_artifact_field(session, job.id, "control_tracking_plan")
         if not isinstance(tracking_plan, dict):
-            raise RuntimeError("control_tracking_plan artifact not found")
+            raise RuntimeError("static_analysis_artifact missing control_tracking_plan")
 
         # Read contract_analysis from DB (needed for recursive resolution)
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
+        contract_analysis = get_artifact_field(session, job.id, "contract_analysis")
         if not isinstance(contract_analysis, dict):
-            raise RuntimeError("contract_analysis artifact not found")
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            raise RuntimeError("static_analysis_artifact missing contract_analysis")
+        predicate_trees = get_artifact_field(session, job.id, "predicate_trees")
         if not isinstance(predicate_trees, dict):
             predicate_trees = None
 
@@ -104,17 +111,66 @@ class ResolutionWorker(BaseWorker):
         # context, else NULL) so a shared impl can hold per-proxy result sets.
         deployment_address = normalize_deployment(proxy_address)
         getter_fallback_address: str | None = None
-        if proxy_address:
+        if isinstance(proxy_address, str) and proxy_address:
             # Reading impl state via the proxy is correct for storage-backed
             # vars, but immutable authority addresses live in the impl bytecode
             # and revert when the proxy doesn't delegatecall to this impl
             # (beacon / per-instance patterns, e.g. EtherFiNode). Keep the impl
             # address as a getter fallback so those reverting reads recover.
             getter_fallback_address = tracking_plan.get("contract_address")
-            tracking_plan = {**tracking_plan, "contract_address": proxy_address}
+            normalized_proxy_address = proxy_address.lower()
+            plan_contract = tracking_plan.get("contract")
+            if isinstance(plan_contract, dict):
+                implementation_addresses: list[str] = []
+                current_contract_address = plan_contract.get("address")
+                raw_implementations = plan_contract.get("implementation_addresses")
+                for candidate in [
+                    current_contract_address,
+                    *(raw_implementations if isinstance(raw_implementations, list) else []),
+                ]:
+                    if not isinstance(candidate, str):
+                        continue
+                    normalized = candidate.lower()
+                    if normalized == normalized_proxy_address or normalized in implementation_addresses:
+                        continue
+                    implementation_addresses.append(normalized)
+                plan_contract = {
+                    **plan_contract,
+                    "address": normalized_proxy_address,
+                    "is_proxy": True,
+                    "proxy_address": normalized_proxy_address,
+                    "implementation_addresses": implementation_addresses,
+                }
+            tracking_plan = {
+                **tracking_plan,
+                "contract_address": normalized_proxy_address,
+                **({"contract": plan_contract} if isinstance(plan_contract, dict) else {}),
+            }
+            subject = contract_analysis.get("subject", {})
+            if isinstance(subject, dict):
+                implementation_addresses: list[str] = []
+                current_subject_address = subject.get("address")
+                raw_implementations = subject.get("implementation_addresses")
+                for candidate in [
+                    current_subject_address,
+                    *(raw_implementations if isinstance(raw_implementations, list) else []),
+                ]:
+                    if not isinstance(candidate, str):
+                        continue
+                    normalized = candidate.lower()
+                    if normalized == normalized_proxy_address or normalized in implementation_addresses:
+                        continue
+                    implementation_addresses.append(normalized)
+                subject = {
+                    **subject,
+                    "address": normalized_proxy_address,
+                    "is_proxy": True,
+                    "proxy_address": normalized_proxy_address,
+                    "implementation_addresses": implementation_addresses,
+                }
             contract_analysis = {
                 **contract_analysis,
-                "subject": {**contract_analysis.get("subject", {}), "address": proxy_address},
+                "subject": subject,
             }
             logger.info(
                 "Job %s: impl contract — reading state from proxy %s",
@@ -135,8 +191,6 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: control snapshot",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
         )
-        # Keep as artifact — policy stage reads it as JSON
-        store_artifact(session, job.id, "control_snapshot", data=snapshot)
         record_stage_metric("controllers_resolved", len(snapshot.get("controller_values", {})))
         if snapshot.get("block_number") is not None:
             record_stage_metric("block_number", snapshot.get("block_number"))
@@ -201,22 +255,14 @@ class ResolutionWorker(BaseWorker):
         graph_edges = len(resolved_graph.get("edges", [])) if resolved_graph else 0
         record_stage_metric("graph_nodes", graph_nodes)
         record_stage_metric("graph_edges", graph_edges)
+        classified_addresses = {addr: list(v) for addr, v in classify_cache.items()} if classify_cache else {}
         if resolved_graph:
             # Persist each nested contract's artifacts so the policy stage can
             # read them back by address (no local filesystem).
             store_nested_artifacts(session, job.id, nested_artifacts)
-            # Keep as artifact — policy stage reads it as JSON
-            store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
             # Persist the classify cache so the policy stage skips re-running
             # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
             # dict[str, list] for storage.
-            if classify_cache:
-                store_artifact(
-                    session,
-                    job.id,
-                    "classified_addresses",
-                    data={addr: list(v) for addr, v in classify_cache.items()},
-                )
             logger.info(
                 "Resolution stage graph complete for job %s address=%s name=%s",
                 job.id,
@@ -266,6 +312,28 @@ class ResolutionWorker(BaseWorker):
 
             # Queue analysis jobs for contracts discovered during resolution
             self._queue_discovered_contracts(session, job, cast(dict, resolved_graph), rpc_url)
+
+        resolution_payload = {
+            "control_snapshot": snapshot,
+            "resolved_control_graph": resolved_graph or {"nodes": [], "edges": []},
+            "nested_artifacts": nested_artifacts,
+            "classified_addresses": classified_addresses,
+        }
+        resolution_artifact = make_stage_artifact(
+            kind=RESOLUTION_ARTIFACT,
+            stage="resolution",
+            schema_version="resolution.v1",
+            context=make_job_stage_context(
+                job,
+                stage="resolution",
+                schema_version="resolution.v1",
+                block_number=snapshot.get("block_number") if isinstance(snapshot, dict) else None,
+                rpc_url=rpc_url,
+            ),
+            contract=make_job_contract(session, job, contract_row),
+            data=resolution_payload,
+        )
+        store_artifact(session, job.id, RESOLUTION_ARTIFACT, data=resolution_artifact)
 
         # Emit JobDependency edges so the policy stage waits for any
         # external authority contract referenced by this job's predicate
@@ -625,7 +693,7 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
+        predicate_trees = get_artifact_field(session, job.id, "predicate_trees")
         if not isinstance(predicate_trees, dict):
             return
         tree_maps = [

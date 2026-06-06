@@ -26,7 +26,7 @@ import json
 import logging
 
 from db.storage import StorageUnavailable, get_storage_client
-from schemas.audit_schemas import ScopeExtractionOutcome
+from services.audits.types import ScopeExtractionOutcome
 
 from ._artifact import SCOPE_ARTIFACT_CONTENT_TYPE, _store_artifact, build_artifact_payload
 from ._chunk_scan import _split_text_into_chunks, extract_scope_via_chunk_scan
