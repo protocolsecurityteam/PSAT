@@ -48,6 +48,11 @@ class Operand(TypedDict):
     callee_signature: NotRequired[str | None]
     callee_selector: NotRequired[str | None]
     callee_args: NotRequired[list["Operand"]]
+    # Keccak/constant storage slot a getter-less internal address accessor reads
+    # via inline ``sload(<constant>)`` (e.g. Governable ``_pendingGovernor``).
+    # Lets resolution read the live value through ``eth_getStorageAt`` when no
+    # public getter exists. Absent for every other operand.
+    storage_slot: NotRequired[str | None]
     constant_value: NotRequired[str | None]
     value_type: NotRequired[str | None]
     computed_kind: NotRequired[str | None]

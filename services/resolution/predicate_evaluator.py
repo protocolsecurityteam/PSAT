@@ -707,6 +707,61 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
     return _live_authority_result(result_addr, selector, contract)
 
 
+def _live_resolve_authority_slot(ctx: EvaluationContext | None, slot: str | None) -> CapabilityExpr | None:
+    """Resolve ``msg.sender == <getter-less slot accessor>`` by reading the raw
+    storage slot live.
+
+    For an authority whose internal accessor ``sload``s a constant slot and has
+    **no public getter** (Governable ``_pendingGovernor`` reads
+    ``keccak256("LRTSquare.pending.governor")``), the static stage attaches the
+    slot to the operand and this reads it with ``eth_getStorageAt`` against the
+    runtime address — the proxy when the job is proxy-linked, so the *live*
+    pending value is seen rather than a standalone impl's empty storage. Mirrors
+    :func:`_live_resolve_authority`'s contract: ``finite_set([addr], exact)`` for
+    a non-zero slot, ``finite_set([], exact, empty_by_design)`` for a
+    confirmed-zero slot (no transfer pending — a *read-confirmed* accept-side
+    ceiling), a labeled ``lower_bound`` when the read was attempted but
+    unreadable, or ``None`` when nothing could be attempted."""
+    if ctx is None or not isinstance(slot, str) or not slot.startswith("0x") or len(slot) != 66:
+        return None
+    outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
+    rpc_url = getattr(outer, "rpc_url", None)
+    contract = getattr(outer, "contract_address", None) or ctx.contract_address
+    block = getattr(outer, "block", None) if outer is not None else ctx.block
+    if not isinstance(rpc_url, str) or not rpc_url:
+        return None
+    if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
+        return None
+    _bump_resolve_counter(outer, "live_slot_calls")
+    try:
+        from utils.rpc import rpc_request
+
+        raw = rpc_request(
+            rpc_url,
+            "eth_getStorageAt",
+            [contract.lower(), slot, hex(block) if isinstance(block, int) else "latest"],
+            retries=1,
+        )
+    except Exception:
+        _bump_resolve_counter(outer, "live_slot_failures")
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_revert"
+        )
+    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"
+        )
+    addr = "0x" + raw[-40:].lower()
+    if _is_zero_address(addr) or addr == _BURN_ADDRESS:
+        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", empty_reason="empty_by_design")
+    return CapabilityExpr.finite_set(
+        [addr],
+        quality="exact",
+        confidence="enumerable",
+        trace=[{"step": "live_slot_resolution", "slot": slot, "contract": contract.lower()}],
+    )
+
+
 def _resolve_authority_via_getters(ctx: EvaluationContext | None, selectors: list[str | None]) -> CapabilityExpr | None:
     """Read an authority through the first of ``selectors`` that gives a concrete
     answer.
@@ -942,8 +997,26 @@ def _resolve_equality_principal(
         result = _resolve_authority_via_getters(ctx, list(dict.fromkeys((canonical_selector, selector))))
         if result is not None and result.membership_quality == "exact":
             return result
-        # A ``_pendingGovernor()``-style accept gate whose getter reverts/empties
-        # is empty-by-design (no transfer queued), not an unresolved gap.
+        # Getter-less slot-backed accessor (Governable ``_pendingGovernor`` reads a
+        # keccak slot via assembly, no public getter): the slot the static stage
+        # carried is AUTHORITATIVE. A non-zero slot IS the principal — on
+        # Governable ``_changeGovernor`` never clears the pending slot, so after a
+        # completed transfer it stays == governor and the accept gate is
+        # satisfiable by the sitting governor; a confirmed-zero slot is a
+        # read-confirmed accept-side ceiling; an unreadable slot stays an honest
+        # ``lower_bound``. We never downgrade an unreadable slot to a name guess,
+        # so resolved_empty here is always an evidenced (read-confirmed) verdict.
+        slot = op.get("storage_slot")
+        if isinstance(slot, str):
+            slot_result = _live_resolve_authority_slot(ctx, slot)
+            if slot_result is not None:
+                return slot_result
+            # Slot present but no read attempted (no reachable RPC) — honest
+            # unknown, not a guess.
+            return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
+        # No slot to read. A getter-less ``pending``-prefixed accept gate (the OZ
+        # ``_pendingDefaultAdmin.newAdmin`` struct member, which has no nullary
+        # getter) is uncallable until a transfer is queued — empty-by-design.
         if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
             return CapabilityExpr.finite_set([], quality="exact", empty_reason="empty_by_design")
         if result is not None:

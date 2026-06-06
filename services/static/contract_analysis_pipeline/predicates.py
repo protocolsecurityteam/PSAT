@@ -1498,6 +1498,8 @@ def _source_to_operand(source: Source) -> Operand:
         op["callee_signature"] = source.callee_signature
     if source.callee_selector is not None:
         op["callee_selector"] = source.callee_selector
+    if getattr(source, "storage_slot", None) is not None:
+        op["storage_slot"] = source.storage_slot
     if source.constant_value is not None:
         op["constant_value"] = source.constant_value
     if getattr(source, "value_type", None) is not None:
