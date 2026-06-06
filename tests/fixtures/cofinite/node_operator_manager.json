@@ -1,0 +1,90 @@
+{
+ "address": "0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf",
+ "canonical_signatures": {
+  "batchUpdateOperatorsApprovedTags(address[],ILiquidityPool.SourceOfFunds[],bool[])": "batchUpdateOperatorsApprovedTags(address[],uint8[],bool[])",
+  "isEligibleToRunValidatorsForSourceOfFund(address,ILiquidityPool.SourceOfFunds)": "isEligibleToRunValidatorsForSourceOfFund(address,uint8)"
+ },
+ "contract": "0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf",
+ "job_id": "137d623c-7bfd-4342-a2d5-5d0641579926",
+ "name": "node_operator_manager",
+ "schema_version": "semantic",
+ "state_var_values": {
+  "_owner": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+  "auctionManagerContractAddress": "0x00c452affee3a17d9cecc1bcd2b8d5c7635c4cb9"
+ },
+ "trees": {
+  "registerNodeOperator(bytes,uint64)": {
+   "children": [
+    {
+     "leaf": {
+      "authority_role": "caller_authority",
+      "basis": [
+       "require(TMP_1142)",
+       "writer-gate promoted: registered self-administered (writer reads same map)"
+      ],
+      "confidence": "high",
+      "expression": "require(bool,string)(! registered[msg.sender],Already registered)",
+      "kind": "membership",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "operator": "falsy",
+      "parameter_indices": [],
+      "references_msg_sender": true,
+      "set_descriptor": {
+       "enumeration_hint": [
+        {
+         "data_to_keys": {
+          "0": 0
+         },
+         "direction": "add",
+         "event_name": "OperatorRegistered",
+         "event_signature": "OperatorRegistered(address,uint64,uint64,bytes)",
+         "indexed_positions": [],
+         "key_position": 0,
+         "mapping_name": "registered",
+         "topic0": "0x14b65bf05bae9ffbba84981c0d4ac7830cdd44e4ddd1890bac55ae48b56e084a",
+         "topics_to_keys": {},
+         "value_position": null,
+         "writer_function": "registerNodeOperator(bytes,uint64)"
+        }
+       ],
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "kind": "mapping_membership",
+       "storage_var": "registered"
+      }
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "require(TMP_1056)"
+      ],
+      "confidence": "low",
+      "expression": "return _paused_2",
+      "kind": "equality",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "AND"
+  }
+ }
+}

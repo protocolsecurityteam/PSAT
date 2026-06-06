@@ -1,0 +1,621 @@
+{
+ "address": "0x2d10683e941275d502173053927ad6066e6afd6b",
+ "canonical_signatures": {
+  "wrapWithPermit(uint256,ILiquidityPool.PermitInput)": "wrapWithPermit(uint256,(uint256,uint256,uint8,bytes32,bytes32))"
+ },
+ "contract": "0x2d10683e941275d502173053927ad6066e6afd6b",
+ "job_id": "53f9aaa8-8c37-43b8-8c01-6323a24886ff",
+ "name": "weeth",
+ "schema_version": "semantic",
+ "state_var_values": {
+  "WEETH_OPERATING_ADMIN_ROLE": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+  "_owner": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+  "eETH": "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+  "liquidityPool": "0x308861a430be4cce5502d0a12724771fc6daf216",
+  "roleRegistry": "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"
+ },
+ "trees": {
+  "recoverERC20(address,address,uint256)": {
+   "children": [
+    {
+     "leaf": {
+      "authority_role": "delegated_authority",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "medium",
+      "expression": "hasRole(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+        "source": "state_variable",
+        "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": true,
+      "set_descriptor": {
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_selector": "0x91d14854",
+       "callee_signature": "hasRole(bytes32,address)",
+       "key_sources": [
+        {
+         "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+         "source": "state_variable",
+         "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "kind": "external_set"
+      }
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "low",
+      "expression": "token == address(eETH)",
+      "kind": "equality",
+      "operands": [
+       {
+        "parameter_index": 0,
+        "parameter_name": "token",
+        "source": "parameter"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "eETH"
+       }
+      ],
+      "operator": "ne",
+      "parameter_indices": [
+       0
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    },
+    {
+     "children": [
+      {
+       "children": [
+        {
+         "leaf": {
+          "authority_role": "business",
+          "basis": [
+           "if-revert via successor NodeType.EXPRESSION"
+          ],
+          "confidence": "low",
+          "expression": "token == address(0) || to == address(0) || amount == 0",
+          "kind": "equality",
+          "operands": [
+           {
+            "parameter_index": 0,
+            "parameter_name": "token",
+            "source": "parameter"
+           },
+           {
+            "constant_value": "0",
+            "source": "constant",
+            "value_type": "uint256"
+           }
+          ],
+          "operator": "ne",
+          "parameter_indices": [
+           0
+          ],
+          "references_msg_sender": false
+         },
+         "op": "LEAF"
+        },
+        {
+         "leaf": {
+          "authority_role": "business",
+          "basis": [
+           "if-revert via successor NodeType.EXPRESSION"
+          ],
+          "confidence": "low",
+          "expression": "token == address(0) || to == address(0) || amount == 0",
+          "kind": "equality",
+          "operands": [
+           {
+            "parameter_index": 1,
+            "parameter_name": "to",
+            "source": "parameter"
+           },
+           {
+            "constant_value": "0",
+            "source": "constant",
+            "value_type": "uint256"
+           }
+          ],
+          "operator": "ne",
+          "parameter_indices": [
+           1
+          ],
+          "references_msg_sender": false
+         },
+         "op": "LEAF"
+        }
+       ],
+       "op": "AND"
+      },
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "token == address(0) || to == address(0) || amount == 0",
+        "kind": "equality",
+        "operands": [
+         {
+          "parameter_index": 2,
+          "parameter_name": "amount",
+          "source": "parameter"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [
+         2
+        ],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "low",
+      "expression": "amount > IERC20(token).balanceOf(address(this))",
+      "kind": "comparison",
+      "operands": [
+       {
+        "parameter_index": 2,
+        "parameter_name": "amount",
+        "source": "parameter"
+       },
+       {
+        "callee": "balanceOf",
+        "callee_selector": "0x70a08231",
+        "callee_signature": "balanceOf(address)",
+        "source": "external_call"
+       }
+      ],
+      "operator": "lte",
+      "parameter_indices": [
+       2
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "external call must not revert"
+      ],
+      "confidence": "low",
+      "expression": "safeTransfer(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "constant_value": "TMP_1003",
+        "source": "constant",
+        "value_type": "IERC20"
+       },
+       {
+        "parameter_index": 1,
+        "parameter_name": "to",
+        "source": "parameter"
+       },
+       {
+        "parameter_index": 2,
+        "parameter_name": "amount",
+        "source": "parameter"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "solidity_call_abi.decode()_unsupported_as_gate"
+      ],
+      "confidence": "low",
+      "expression": "TMP_33(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+      "kind": "unsupported",
+      "operands": [],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": false,
+      "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate"
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "AND"
+  },
+  "recoverERC721(address,address,uint256)": {
+   "children": [
+    {
+     "leaf": {
+      "authority_role": "delegated_authority",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "medium",
+      "expression": "hasRole(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+        "source": "state_variable",
+        "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": true,
+      "set_descriptor": {
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_selector": "0x91d14854",
+       "callee_signature": "hasRole(bytes32,address)",
+       "key_sources": [
+        {
+         "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+         "source": "state_variable",
+         "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "kind": "external_set"
+      }
+     },
+     "op": "LEAF"
+    },
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "token == address(0) || to == address(0)",
+        "kind": "equality",
+        "operands": [
+         {
+          "parameter_index": 0,
+          "parameter_name": "token",
+          "source": "parameter"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [
+         0
+        ],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "token == address(0) || to == address(0)",
+        "kind": "equality",
+        "operands": [
+         {
+          "parameter_index": 1,
+          "parameter_name": "to",
+          "source": "parameter"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [
+         1
+        ],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "low",
+      "expression": "IERC721(token).ownerOf(tokenId) != address(this)",
+      "kind": "equality",
+      "operands": [
+       {
+        "callee": "ownerOf",
+        "callee_selector": "0x6352211e",
+        "callee_signature": "ownerOf(uint256)",
+        "source": "external_call"
+       },
+       {
+        "source": "self_address"
+       }
+      ],
+      "operator": "eq",
+      "parameter_indices": [],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "external call must not revert"
+      ],
+      "confidence": "low",
+      "expression": "safeTransferFrom(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "constant_value": "TMP_1019",
+        "source": "constant",
+        "value_type": "address"
+       },
+       {
+        "parameter_index": 1,
+        "parameter_name": "to",
+        "source": "parameter"
+       },
+       {
+        "parameter_index": 2,
+        "parameter_name": "tokenId",
+        "source": "parameter"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "AND"
+  },
+  "recoverETH(address,uint256)": {
+   "children": [
+    {
+     "leaf": {
+      "authority_role": "delegated_authority",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "medium",
+      "expression": "hasRole(...)",
+      "kind": "external_bool",
+      "operands": [
+       {
+        "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+        "source": "state_variable",
+        "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [],
+      "references_msg_sender": true,
+      "set_descriptor": {
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_selector": "0x91d14854",
+       "callee_signature": "hasRole(bytes32,address)",
+       "key_sources": [
+        {
+         "constant_value": "0xfeab26ff201be143cb96161bb5c9224b5761f7085c44d6677299b1cfc2153cd7",
+         "source": "state_variable",
+         "state_variable_name": "WEETH_OPERATING_ADMIN_ROLE"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "kind": "external_set"
+      }
+     },
+     "op": "LEAF"
+    },
+    {
+     "children": [
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "to == address(0) || amount == 0",
+        "kind": "equality",
+        "operands": [
+         {
+          "parameter_index": 0,
+          "parameter_name": "to",
+          "source": "parameter"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [
+         0
+        ],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      },
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "to == address(0) || amount == 0",
+        "kind": "equality",
+        "operands": [
+         {
+          "parameter_index": 1,
+          "parameter_name": "amount",
+          "source": "parameter"
+         },
+         {
+          "constant_value": "0",
+          "source": "constant",
+          "value_type": "uint256"
+         }
+        ],
+        "operator": "ne",
+        "parameter_indices": [
+         1
+        ],
+        "references_msg_sender": false
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "low",
+      "expression": "amount > address(this).balance",
+      "kind": "comparison",
+      "operands": [
+       {
+        "parameter_index": 1,
+        "parameter_name": "amount",
+        "source": "parameter"
+       },
+       {
+        "computed_kind": "balance(address)",
+        "source": "computed"
+       }
+      ],
+      "operator": "lte",
+      "parameter_indices": [
+       1
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    },
+    {
+     "leaf": {
+      "authority_role": "business",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "low",
+      "expression": "! success",
+      "kind": "equality",
+      "operands": [
+       {
+        "parameter_index": 0,
+        "parameter_name": "to",
+        "source": "parameter"
+       }
+      ],
+      "operator": "truthy",
+      "parameter_indices": [
+       0
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "AND"
+  }
+ }
+}

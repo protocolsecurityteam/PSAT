@@ -118,6 +118,13 @@ class CapabilityExpr:
     unsupported_reason: str | None = None
     children: list["CapabilityExpr"] = field(default_factory=list)
     membership_quality: MembershipQuality = "exact"
+    # Quality of a cofinite_blacklist's ``blacklist`` (the EXCLUDED set), independent of
+    # ``membership_quality`` (which describes a finite_set's allow-list). ``exact`` = the
+    # exclusion is fully enumerated, so the complement is exactly "anyone else";
+    # ``lower_bound`` = at least these are excluded (an un-enumerated denylist), so the
+    # complement is an upper bound on who may call. Inert today — every cofinite produced
+    # now is exact — and carried for surfacing only; the projection never branches on it.
+    blacklist_quality: MembershipQuality = "exact"
     confidence: Confidence = "enumerable"
     last_indexed_block: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
@@ -176,6 +183,7 @@ class CapabilityExpr:
         confidence: Confidence = "enumerable",
         conditions: list[Condition] | None = None,
         subject: Subject = "root",
+        blacklist_quality: MembershipQuality = "exact",
     ) -> "CapabilityExpr":
         return cls(
             kind="cofinite_blacklist",
@@ -183,6 +191,7 @@ class CapabilityExpr:
             confidence=confidence,
             conditions=list(conditions or []),
             subject=subject,
+            blacklist_quality=blacklist_quality,
         )
 
     @classmethod
@@ -286,7 +295,10 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     # cofinite_blacklist ∩ cofinite_blacklist
     if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
         # Anyone not in (a.blacklist ∪ b.blacklist).
-        return CapabilityExpr.cofinite_blacklist(_canon_addresses((a.blacklist or []) + (b.blacklist or [])))
+        return CapabilityExpr.cofinite_blacklist(
+            _canon_addresses((a.blacklist or []) + (b.blacklist or [])),
+            blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+        )
 
     # threshold_group ∩ X — defer to structural AND.
     if a.kind == "threshold_group" or b.kind == "threshold_group":
@@ -318,7 +330,10 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         # Anyone not in (a.blacklist ∩ b.blacklist).
         ab = set((a.blacklist or []))
         bb = set((b.blacklist or []))
-        return CapabilityExpr.cofinite_blacklist(_canon_addresses(list(ab & bb)))
+        return CapabilityExpr.cofinite_blacklist(
+            _canon_addresses(list(ab & bb)),
+            blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+        )
 
     # finite_set ∪ cofinite_blacklist: cofinite minus members already in
     # finite_set (those are still in finite_set, so allowed).
@@ -337,10 +352,29 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
 
 def negate(a: CapabilityExpr) -> CapabilityExpr:
     """``NOT a`` — used when a leaf has operator=falsy / op=ne and the
-    underlying capability needs inversion. Total."""
+    underlying capability needs inversion. Total.
+
+    ``falsy``/``ne`` is the static lowering of an ``if (predicate) revert``
+    exclusion: the predicate names the *denied* set, so the function proceeds for
+    everyone else. ``negate`` maps a constraint on that excluded set to its
+    complement — an open (cofinite) caller set — wherever the complement is
+    faithfully representable. The polarity is the safety boundary: a positive gate
+    (``require(...)`` → ``truthy``/``eq``) is never negated, so an authority never
+    reaches these arms.
+    """
     if a.kind == "finite_set":
         if a.membership_quality != "exact":
-            return CapabilityExpr.unsupported("negate_partial_set")
+            # A non-exact (lower_bound) exclusion is "at least these are denied";
+            # its complement is "anyone except an un-enumerated exclusion" — a
+            # lower_bound cofinite, not an unknown. (Was unsupported("negate_partial_set"),
+            # which discarded the denylist.)
+            return CapabilityExpr.cofinite_blacklist(
+                list(a.members or []),
+                blacklist_quality="lower_bound",
+                confidence=a.confidence,
+                conditions=a.conditions,
+                subject=a.subject,
+            )
         return CapabilityExpr.cofinite_blacklist(
             list(a.members or []),
             confidence=a.confidence,
@@ -355,6 +389,25 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             conditions=a.conditions,
             subject=a.subject,
         )
+    if a.kind == "external_check_only":
+        # An external membership probe under ``falsy`` is an un-enumerated denylist
+        # (``if (check(caller)) revert``): anyone the probe does NOT flag may call. Its
+        # complement is an empty-known, lower_bound cofinite. Surface the probe as a
+        # side-condition so the filter stays visible, and preserve ``subject`` so a
+        # bound (inlined-hook) denylist folds as a condition under cross-subject AND
+        # rather than opening an authority'd function. (Was
+        # unsupported("negate_unsupported_capability_external_check_only").)
+        conditions = list(a.conditions)
+        probe = _external_check_as_condition(a.check)
+        if probe is not None:
+            conditions.append(probe)
+        return CapabilityExpr.cofinite_blacklist(
+            [],
+            blacklist_quality="lower_bound",
+            confidence=a.confidence,
+            conditions=conditions,
+            subject=a.subject,
+        )
     if a.kind == "conditional_universal":
         # Negation of "anyone if C" is "no one if C" — empty set with
         # the condition negated. Concretely: empty set if C, full
@@ -362,7 +415,8 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
         # a condition isn't always representable as a typed
         # condition (e.g., negation of a business invariant).
         return CapabilityExpr.unsupported("negate_conditional_universal")
-    if a.kind in ("threshold_group", "signature_witness", "external_check_only"):
+    if a.kind in ("threshold_group", "signature_witness"):
+        # An M-of-N or signature gate has no faithful open complement — keep gated.
         return CapabilityExpr.unsupported(f"negate_unsupported_capability_{a.kind}")
     if a.kind == "unsupported":
         return CapabilityExpr.unsupported(f"negate_of_{a.unsupported_reason}")
@@ -448,6 +502,7 @@ def _union_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -
         out,
         confidence=_meet_confidence(finite.confidence, blacklist.confidence),
         conditions=list(finite.conditions) + list(blacklist.conditions),
+        blacklist_quality=blacklist.blacklist_quality,
     )
 
 
@@ -486,6 +541,19 @@ def _union_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQu
     return None
 
 
+def _combine_blacklist_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQuality:
+    """Quality of a blacklist combined from two cofinite blacklists (the union under
+    cofinite ∩ cofinite, the intersection under cofinite ∪ cofinite). Inert in Part 1:
+    every cofinite is ``exact`` today, so this returns ``exact`` and changes nothing. It
+    exists so the field is carried, never silently dropped, once Part 2 introduces
+    ``lower_bound`` denylists. Matching qualities survive; a mismatch degrades to the
+    conservative ``lower_bound`` (a combination involving an under-known exclusion can
+    only be a lower bound on the true excluded set)."""
+    if qa == qb:
+        return qa
+    return "lower_bound"
+
+
 def _meet_confidence(a: Confidence, b: Confidence) -> Confidence:
     """Confidence lattice meet (least-confident wins)."""
     order = {"enumerable": 2, "partial": 1, "check_only": 0}
@@ -511,6 +579,7 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
         unsupported_reason=cap.unsupported_reason,
         children=list(cap.children),
         membership_quality=cap.membership_quality,
+        blacklist_quality=cap.blacklist_quality,
         confidence=cap.confidence,
         last_indexed_block=cap.last_indexed_block,
         trace=list(cap.trace),
@@ -539,6 +608,21 @@ def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
     """Render a bound-subject capability as side-condition(s): carry forward any
     conditions it already accumulated, plus one describing the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+def _external_check_as_condition(check: ExternalCheck | None) -> Condition | None:
+    """Render an ``external_check_only``'s probe as a side-condition describing the
+    denylist filter, for the ``negate(external_check_only) → cofinite`` arm. Returns
+    None when there's no probe to describe (the cofinite still carries the generic
+    ``denylist exclusion`` from the projector)."""
+    if check is None:
+        return None
+    target = check.target_address
+    selector = check.target_call_selector
+    if target is not None:
+        sel = f".{selector}" if selector else ""
+        return Condition(kind="business", description=f"denylist exclusion via external check {target}{sel}")
+    return Condition(kind="business", description="denylist exclusion via external check")
 
 
 def _bound_condition_description(bound: CapabilityExpr) -> str:

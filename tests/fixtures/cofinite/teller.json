@@ -1,0 +1,172 @@
+{
+ "address": "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884",
+ "canonical_signatures": {
+  "bulkDeposit(ERC20,uint256,uint256,address)": "bulkDeposit(address,uint256,uint256,address)",
+  "bulkWithdraw(ERC20,uint256,uint256,address)": "bulkWithdraw(address,uint256,uint256,address)",
+  "deposit(ERC20,uint256,uint256)": "deposit(address,uint256,uint256)",
+  "depositWithPermit(ERC20,uint256,uint256,uint256,uint8,bytes32,bytes32)": "depositWithPermit(address,uint256,uint256,uint256,uint8,bytes32,bytes32)",
+  "setAuthority(Authority)": "setAuthority(address)",
+  "updateAssetData(ERC20,bool,bool,uint16)": "updateAssetData(address,bool,bool,uint16)"
+ },
+ "contract": "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884",
+ "job_id": "442a91d7-ed0f-4b68-a924-305c5001ca0f",
+ "name": "teller",
+ "schema_version": "semantic",
+ "state_var_values": {
+  "accountant": "0xb53244f7716dc83811c8fb1a91971dc188c1c5aa",
+  "authority": "0x7dcbd5c38c128f83aa8264120bcec8662f35adaf",
+  "nativeWrapper": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+  "owner": "0x0000000000000000000000000000000000000000",
+  "vault": "0xca8711daf13d852ed2121e4be3894dae366039e4"
+ },
+ "trees": {
+  "beforeTransfer(address,address,address)": {
+   "children": [
+    {
+     "children": [
+      {
+       "children": [
+        {
+         "leaf": {
+          "authority_role": "business",
+          "basis": [
+           "if-revert via successor NodeType.EXPRESSION"
+          ],
+          "confidence": "low",
+          "expression": "fromDenyList[from] || toDenyList[to] || operatorDenyList[operator]",
+          "kind": "membership",
+          "operands": [
+           {
+            "parameter_index": 0,
+            "parameter_name": "from",
+            "source": "parameter"
+           }
+          ],
+          "operator": "falsy",
+          "parameter_indices": [
+           0
+          ],
+          "references_msg_sender": false,
+          "set_descriptor": {
+           "key_sources": [
+            {
+             "parameter_index": 0,
+             "parameter_name": "from",
+             "source": "parameter"
+            }
+           ],
+           "kind": "mapping_membership",
+           "storage_var": "fromDenyList"
+          }
+         },
+         "op": "LEAF"
+        },
+        {
+         "leaf": {
+          "authority_role": "business",
+          "basis": [
+           "if-revert via successor NodeType.EXPRESSION"
+          ],
+          "confidence": "low",
+          "expression": "fromDenyList[from] || toDenyList[to] || operatorDenyList[operator]",
+          "kind": "membership",
+          "operands": [
+           {
+            "parameter_index": 1,
+            "parameter_name": "to",
+            "source": "parameter"
+           }
+          ],
+          "operator": "falsy",
+          "parameter_indices": [
+           1
+          ],
+          "references_msg_sender": false,
+          "set_descriptor": {
+           "key_sources": [
+            {
+             "parameter_index": 1,
+             "parameter_name": "to",
+             "source": "parameter"
+            }
+           ],
+           "kind": "mapping_membership",
+           "storage_var": "toDenyList"
+          }
+         },
+         "op": "LEAF"
+        }
+       ],
+       "op": "AND"
+      },
+      {
+       "leaf": {
+        "authority_role": "business",
+        "basis": [
+         "if-revert via successor NodeType.EXPRESSION"
+        ],
+        "confidence": "low",
+        "expression": "fromDenyList[from] || toDenyList[to] || operatorDenyList[operator]",
+        "kind": "membership",
+        "operands": [
+         {
+          "parameter_index": 2,
+          "parameter_name": "operator",
+          "source": "parameter"
+         }
+        ],
+        "operator": "falsy",
+        "parameter_indices": [
+         2
+        ],
+        "references_msg_sender": false,
+        "set_descriptor": {
+         "key_sources": [
+          {
+           "parameter_index": 2,
+           "parameter_name": "operator",
+           "source": "parameter"
+          }
+         ],
+         "kind": "mapping_membership",
+         "storage_var": "operatorDenyList"
+        }
+       },
+       "op": "LEAF"
+      }
+     ],
+     "op": "AND"
+    },
+    {
+     "leaf": {
+      "authority_role": "time",
+      "basis": [
+       "if-revert via successor NodeType.EXPRESSION"
+      ],
+      "confidence": "high",
+      "expression": "shareUnlockTime[from] > block.timestamp",
+      "kind": "comparison",
+      "operands": [
+       {
+        "parameter_index": 0,
+        "parameter_name": "from",
+        "source": "parameter"
+       },
+       {
+        "block_context_kind": "timestamp",
+        "source": "block_context"
+       }
+      ],
+      "operator": "lte",
+      "parameter_indices": [
+       0
+      ],
+      "references_msg_sender": false
+     },
+     "op": "LEAF"
+    }
+   ],
+   "op": "AND"
+  }
+ }
+}

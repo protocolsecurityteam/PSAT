@@ -1,0 +1,138 @@
+{
+ "address": "0xca8711daf13d852ed2121e4be3894dae366039e4",
+ "canonical_signatures": {
+  "enter(address,ERC20,uint256,address,uint256)": "enter(address,address,uint256,address,uint256)",
+  "exit(address,ERC20,uint256,address,uint256)": "exit(address,address,uint256,address,uint256)",
+  "setAuthority(Authority)": "setAuthority(address)"
+ },
+ "contract": "0xca8711daf13d852ed2121e4be3894dae366039e4",
+ "job_id": "69af56b4-f5c1-4f5a-824f-0d994880e8ce",
+ "name": "boring_vault",
+ "schema_version": "semantic",
+ "state_var_values": {
+  "authority": "0x7dcbd5c38c128f83aa8264120bcec8662f35adaf",
+  "hook": "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884",
+  "owner": "0x0000000000000000000000000000000000000000"
+ },
+ "trees": {
+  "transfer(address,uint256)": {
+   "leaf": {
+    "authority_role": "delegated_authority",
+    "basis": [
+     "external call must not revert"
+    ],
+    "confidence": "medium",
+    "expression": "beforeTransfer(...)",
+    "kind": "external_bool",
+    "operands": [
+     {
+      "constant_value": "from_1",
+      "source": "constant",
+      "value_type": "address"
+     },
+     {
+      "parameter_index": 0,
+      "parameter_name": "to",
+      "source": "parameter"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "operator": "truthy",
+    "parameter_indices": [
+     0
+    ],
+    "references_msg_sender": true,
+    "set_descriptor": {
+     "authority_contract": {
+      "address_source": {
+       "source": "state_variable",
+       "state_variable_name": "hook"
+      }
+     },
+     "callee_function": "beforeTransfer",
+     "callee_selector": "0xabd626b0",
+     "callee_signature": "beforeTransfer(address,address,address)",
+     "key_sources": [
+      {
+       "constant_value": "from_1",
+       "source": "constant",
+       "value_type": "address"
+      },
+      {
+       "parameter_index": 0,
+       "parameter_name": "to",
+       "source": "parameter"
+      },
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "kind": "external_set"
+    }
+   },
+   "op": "LEAF"
+  },
+  "transferFrom(address,address,uint256)": {
+   "leaf": {
+    "authority_role": "delegated_authority",
+    "basis": [
+     "external call must not revert"
+    ],
+    "confidence": "medium",
+    "expression": "beforeTransfer(...)",
+    "kind": "external_bool",
+    "operands": [
+     {
+      "parameter_index": 0,
+      "parameter_name": "from",
+      "source": "parameter"
+     },
+     {
+      "parameter_index": 1,
+      "parameter_name": "to",
+      "source": "parameter"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "operator": "truthy",
+    "parameter_indices": [
+     0,
+     1
+    ],
+    "references_msg_sender": true,
+    "set_descriptor": {
+     "authority_contract": {
+      "address_source": {
+       "source": "state_variable",
+       "state_variable_name": "hook"
+      }
+     },
+     "callee_function": "beforeTransfer",
+     "callee_selector": "0xabd626b0",
+     "callee_signature": "beforeTransfer(address,address,address)",
+     "key_sources": [
+      {
+       "parameter_index": 0,
+       "parameter_name": "from",
+       "source": "parameter"
+      },
+      {
+       "parameter_index": 1,
+       "parameter_name": "to",
+       "source": "parameter"
+      },
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "kind": "external_set"
+    }
+   },
+   "op": "LEAF"
+  }
+ }
+}
