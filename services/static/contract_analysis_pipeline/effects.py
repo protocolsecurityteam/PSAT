@@ -31,9 +31,11 @@ Function inclusion:
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any
 
 from eth_utils.crypto import keccak
+
+from schemas.static_pipeline_schemas import EffectInfo, EffectsArtifact, SinkRecord
 
 from .summaries import (
     _action_summary,
@@ -41,38 +43,6 @@ from .summaries import (
 )
 
 SCHEMA_VERSION = "semantic"
-
-
-class SinkRecord(TypedDict):
-    """One sink reachable from a given external function. ``id`` is a
-    stable cross-reference; ``function`` is the *originating* external
-    function (the entry-point), not the unit where the IR lives — that
-    way consumers can group sinks by entry without re-walking
-    internal calls."""
-
-    id: str
-    function: str
-    kind: str  # state_write | external_call | delegatecall | contract_creation | selfdestruct
-    target: str
-    selector: str | None
-
-
-class EffectInfo(TypedDict):
-    function: str
-    selector: str
-    abi_signature: str
-    sinks: list[SinkRecord]
-    effects: list[str]
-    effect_labels: list[str]
-    effect_targets: list[str]
-    action_summary: str
-    writer_selectors: list[str]
-
-
-class EffectsArtifact(TypedDict):
-    schema_version: str
-    contract_name: str | None
-    functions: dict[str, EffectInfo]
 
 
 # ---------------------------------------------------------------------------

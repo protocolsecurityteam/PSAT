@@ -27,14 +27,15 @@ correct, just unfilled.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from eth_utils.crypto import keccak
 
-from services.static.contract_analysis_pipeline.predicate_types import (
+from schemas.resolution_schemas import PredicateEvaluationContext, PredicateEvaluatorSetAdapter
+from schemas.static_pipeline_schemas import (
     LeafPredicate,
+    PredicateSetDescriptor,
     PredicateTree,
-    SetDescriptor,
 )
 
 from .capabilities import (
@@ -47,6 +48,9 @@ from .capabilities import (
 )
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+SetDescriptor = PredicateSetDescriptor
+SetAdapter = PredicateEvaluatorSetAdapter
+EvaluationContext = PredicateEvaluationContext
 
 
 def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
@@ -122,65 +126,6 @@ def _state_var_lookup_key(operand: dict[str, Any]) -> str | None:
         if parts:
             return ".".join([name, *parts])
     return name
-
-
-# ---------------------------------------------------------------------------
-# Adapter protocol (placeholder — week-5 fully-typed registry replaces this)
-# ---------------------------------------------------------------------------
-
-
-class SetAdapter(Protocol):
-    """Minimal adapter interface for week-4. The full SetAdapter
-    Protocol (with EvaluationContext, matches/enumerate/membership)
-    lands in week 5 alongside concrete adapters."""
-
-    def enumerate(self, descriptor: SetDescriptor, contract_address: str | None) -> CapabilityExpr: ...
-
-
-class _NullAdapter:
-    """Fallback when no real adapter is registered. Returns
-    finite_set(empty, lower_bound) — the structural skeleton without
-    a populated members list."""
-
-    def enumerate(self, descriptor: SetDescriptor, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set(
-            [],
-            quality="lower_bound",
-            confidence="partial",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-class EvaluationContext:
-    """Resolver-side context for the simple (week-4) evaluator path.
-
-    The full week-5 ``EvaluationContext`` lives in
-    ``services.resolution.adapters`` and carries chain/RPC/repos.
-    Use ``evaluate_tree_with_registry`` to dispatch via that fuller
-    context.
-    """
-
-    def __init__(
-        self,
-        *,
-        contract_address: str | None = None,
-        adapter: SetAdapter | None = None,
-        block: int | None = None,
-        state_var_values: dict[str, str] | None = None,
-        call_frame: Any = None,
-    ) -> None:
-        self.contract_address = contract_address
-        self.adapter: SetAdapter = adapter or _NullAdapter()
-        self.block = block
-        # Persisted state-variable values keyed by storage-var name.
-        # Used by ``_resolve_equality_principal`` to enumerate state-variable
-        # authority values into concrete addresses.
-        self.state_var_values = state_var_values or {}
-        self.call_frame = call_frame
 
 
 def evaluate_tree_with_registry(

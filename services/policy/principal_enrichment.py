@@ -8,7 +8,7 @@ import threading
 from collections import defaultdict
 from typing import Any
 
-from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
+from schemas.policy_schemas import PrincipalLabels, PrincipalPermission, PrincipalProfile
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric

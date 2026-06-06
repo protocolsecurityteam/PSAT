@@ -1,71 +1,27 @@
-"""Typed schemas for resolved effective-permission outputs."""
+"""Compatibility imports for policy effective-permission schemas."""
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from schemas.policy_schemas import (
+    AuthorityRoleGrant,
+    EffectiveFunctionPermission,
+    EffectiveFunctionStatus,
+    EffectivePermissions,
+    PrincipalResolution,
+    PrincipalResolutionStatus,
+    ResolvedAddressType,
+    ResolvedControllerGrant,
+    ResolvedPrincipal,
+)
 
-from typing_extensions import NotRequired
-
-ResolvedAddressType = Literal["zero", "eoa", "safe", "timelock", "proxy_admin", "contract", "unknown"]
-EffectiveFunctionStatus = Literal["public", "unsupported", "resolved_empty"]
-PrincipalResolutionStatus = Literal[
-    "complete",
-    "no_authority",
-    "no_authority_snapshot",
+__all__ = [
+    "AuthorityRoleGrant",
+    "EffectiveFunctionPermission",
+    "EffectiveFunctionStatus",
+    "EffectivePermissions",
+    "PrincipalResolution",
+    "PrincipalResolutionStatus",
+    "ResolvedAddressType",
+    "ResolvedControllerGrant",
+    "ResolvedPrincipal",
 ]
-
-
-class PrincipalResolution(TypedDict):
-    status: PrincipalResolutionStatus
-    reason: str
-
-
-class ResolvedPrincipal(TypedDict):
-    address: str
-    resolved_type: ResolvedAddressType
-    details: dict[str, object]
-    source_contract: NotRequired[str]
-    source_controller_id: NotRequired[str]
-    principal_type: NotRequired[str]
-
-
-class AuthorityRoleGrant(TypedDict):
-    role: int
-    principals: list[ResolvedPrincipal]
-
-
-class ResolvedControllerGrant(TypedDict):
-    controller_id: str
-    label: str
-    source: str
-    kind: str
-    principals: list[ResolvedPrincipal]
-    notes: list[str]
-
-
-class EffectiveFunctionPermission(TypedDict):
-    function: str
-    abi_signature: str
-    selector: str
-    direct_owner: ResolvedPrincipal | None
-    authority_public: bool
-    authority_roles: list[AuthorityRoleGrant]
-    controllers: list[ResolvedControllerGrant]
-    effect_targets: list[str]
-    effect_labels: list[str]
-    action_summary: str
-    notes: list[str]
-    capability_expr: NotRequired[dict[str, Any]]
-    conditions: NotRequired[list[dict[str, Any]]]
-    status: NotRequired[EffectiveFunctionStatus]
-    signature_witnesses: NotRequired[list[ResolvedPrincipal]]
-
-
-class EffectivePermissions(TypedDict):
-    schema_version: str
-    contract_address: str
-    contract_name: str
-    authority_contract: str | None
-    principal_resolution: PrincipalResolution
-    artifacts: dict[str, str]
-    functions: list[EffectiveFunctionPermission]

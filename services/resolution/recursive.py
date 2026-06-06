@@ -11,17 +11,23 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, TypedDict, cast
-
-from typing_extensions import NotRequired
+from typing import Any, cast
 
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
-from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
+from schemas.resolution_schemas import (
+    LoadedArtifacts,
+    PendingContract,
+    ResolvedControlGraph,
+    ResolvedGraphEdge,
+    ResolvedGraphNode,
+    RolePrincipal,
+    RolePrincipalAccumulator,
+)
+from schemas.static_pipeline_schemas import WriterEventSpec
 from services.discovery.fetch import fetch, scaffold
 from services.policy.effective_permissions import build_effective_permissions
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
-from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
 
 from .tracking import (
@@ -52,38 +58,6 @@ def _bump_materialize_metric(key: str) -> None:
         return
     with _MATERIALIZE_METRIC_LOCK:
         metrics[key] = metrics.get(key, 0) + 1
-
-
-class LoadedArtifacts(TypedDict):
-    """Per-contract artifact bundle emitted by ``resolve_control_graph`` and persisted by the worker as DB artifacts."""
-
-    analysis: dict[str, Any]
-    tracking_plan: dict[str, Any]
-    snapshot: ControlSnapshot
-    predicate_trees: NotRequired[dict[str, Any] | None]
-    effective_permissions: NotRequired[dict[str, Any] | None]
-
-
-class PendingContract(TypedDict):
-    address: str
-    depth: int
-    artifacts: NotRequired[LoadedArtifacts]
-
-
-class RolePrincipalAccumulator(TypedDict):
-    address: str
-    resolved_type: str
-    details: dict[str, object]
-    roles: set[int]
-    functions: set[str]
-
-
-class RolePrincipal(TypedDict):
-    address: str
-    resolved_type: str
-    details: dict[str, object]
-    roles: list[int]
-    functions: list[str]
 
 
 def _address_node_id(address: str) -> str:

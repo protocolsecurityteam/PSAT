@@ -42,7 +42,6 @@ equivalence pass.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
@@ -56,6 +55,7 @@ from db.models import (
     Contract,
     UpgradeEvent,
 )
+from schemas.audit_schemas import CoverageMatch, ImplWindow, _EquivalenceInputs
 
 logger = logging.getLogger(__name__)
 
@@ -64,63 +64,6 @@ logger = logging.getLogger(__name__)
 # after an upgrade usually reviewed the older impl (engagement predates
 # publication). 14d catches the common case without overreaching.
 GRACE_DAYS: Final[int] = 14
-
-
-# --- Result types -------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ImplWindow:
-    """A contiguous span during which an address was an active impl."""
-
-    proxy_contract_id: int  # Contract.id of the proxy this window is on
-    proxy_address: str
-    from_block: int
-    to_block: int | None  # None = still current on this proxy
-    from_ts: datetime | None
-    to_ts: datetime | None
-
-
-@dataclass(frozen=True)
-class CoverageMatch:
-    """One contract ↔ audit link that ``upsert_coverage_for_audit`` will persist."""
-
-    audit_report_id: int
-    contract_id: int
-    protocol_id: int
-    matched_name: str
-    match_type: str  # 'direct' | 'impl_era' | 'reviewed_address' | 'reviewed_commit'
-    match_confidence: str  # 'high' | 'medium' | 'low'
-    covered_from_block: int | None = None
-    covered_to_block: int | None = None
-    # Runtime bytecode keccak256 of the impl at the moment this match was
-    # resolved. Populated by ``_apply_bytecode_anchor`` during HTTP phase.
-    # NULL propagates when the RPC call failed — the UI treats NULL as
-    # "drift unknown" rather than "drift detected".
-    bytecode_keccak_at_match: str | None = None
-    verified_at: datetime | None = None
-    # Source-equivalence verdict for this specific (audit × matched_name)
-    # pair. See services.audits.source_equivalence.EQUIVALENCE_STATUSES.
-    # None means verification never ran — should only happen on legacy
-    # rows predating the rollout.
-    equivalence_status: str | None = None
-    equivalence_reason: str | None = None
-    equivalence_checked_at: datetime | None = None
-    # Phase F: the specific commit the auditor tied to THIS contract in
-    # the scope table, when available. Sourced from
-    # ``AuditReport.scope_entries[*].commit``. When non-null, source-
-    # equivalence uses only this commit instead of treating every SHA in
-    # the audit text as a candidate. Not persisted to the DB — it's a
-    # runtime hint from matcher to verifier inside one upsert cycle.
-    pinned_commit: str | None = None
-    # Phase C: strength kind for ``equivalence_status='proven'`` rows.
-    # See db.models.AuditContractCoverage.proof_kind for the vocabulary.
-    proof_kind: str | None = None
-    # The specific commit SHA from ``classified_commits`` that this row's
-    # bytecode matched, when verification resolved to one. Preference is
-    # for commits labeled ``reviewed`` so the UI can link to the commit the
-    # auditor actually reviewed. None on heuristic-only matches.
-    matched_commit_sha: str | None = None
 
 
 # --- Date parsing -------------------------------------------------------
@@ -993,36 +936,6 @@ def _apply_bytecode_anchor(
             )
         )
     return stamped
-
-
-@dataclass(frozen=True)
-class _EquivalenceInputs:
-    """Inputs to run ``check_audit_covers_impl`` without holding a session.
-
-    Materialized in the DB phase so the HTTP phase can run with no open
-    transaction: the GitHub fetches inside ``check_audit_covers_impl`` are
-    pure HTTP and need no session.
-    """
-
-    audit_report_id: int
-    contract_id: int
-    contract_address: str | None
-    reviewed_commits: tuple[str, ...]
-    scope_contracts: tuple[str, ...]
-    source_repo: str | None
-    # Phase D: every github.com/<owner>/<repo> the audit PDF mentions.
-    # Fallback candidates tried after ``source_repo`` when it doesn't
-    # contain the reviewed commit.
-    referenced_repos: tuple[str, ...]
-    # Phase C: LLM-labeled commits with {sha, label, context}. Used to
-    # derive ``proof_kind`` on proven rows.
-    classified_commits: tuple[dict, ...]
-    # DB-resolved impl source, if Contract.job_id had SourceFile rows.
-    # None means the HTTP phase should call Etherscan as a fallback.
-    # Typed as Any so we don't force import of VerifiedSource at module
-    # load (keeps the coverage module importable without the source_eq
-    # dep chain resolved).
-    db_impl_source: Any
 
 
 def _preload_equivalence_inputs(

@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
 from typing import Iterator
 
 from db.models import SessionLocal
+from schemas.chat_schemas import AgentContext
 from services.chat.data import contract_brief, list_protocol_addresses
 from services.chat.tools import TOOL_DEFINITIONS, run_tool
 from utils.llm import AGENT_MODEL, openrouter
@@ -27,13 +27,6 @@ logger = logging.getLogger("services.chat.agent")
 MAX_ITERATIONS = 20
 
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-
-
-@dataclass
-class AgentContext:
-    company: str
-    selected_address: str | None = None
-    selected_chain: str | None = None
 
 
 def _system_prompt(session, ctx: AgentContext) -> str:

@@ -16,13 +16,13 @@ import io
 import logging
 import random
 import time
-from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlparse
 
 import requests
 
 from db.storage import StorageUnavailable, get_storage_client
+from schemas.audit_schemas import ExtractionOutcome
 from utils.github_urls import github_blob_to_raw
 
 logger = logging.getLogger(__name__)
@@ -111,21 +111,6 @@ class StorageWriteError(TextExtractionError):
 
 
 # --- Result type ----------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ExtractionOutcome:
-    """Structured result of ``process_audit_report``.
-
-    Exactly one of ``storage_key`` / ``error`` is non-None for a given status.
-    ``status`` mirrors the ``AuditReport.text_extraction_status`` enum strings.
-    """
-
-    status: str  # "success" | "failed" | "skipped"
-    storage_key: str | None = None
-    text_size_bytes: int | None = None
-    text_sha256: str | None = None
-    error: str | None = None
 
 
 # --- Storage key ---------------------------------------------------------

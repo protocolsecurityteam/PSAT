@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
 
 from db.storage import StorageUnavailable, get_storage_client
+from schemas.audit_schemas import ScopeExtractionOutcome
 
 from ._artifact import SCOPE_ARTIFACT_CONTENT_TYPE, _store_artifact, build_artifact_payload
 from ._chunk_scan import _split_text_into_chunks, extract_scope_via_chunk_scan
@@ -41,38 +41,6 @@ from ._validate import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class ScopeExtractionOutcome:
-    """Structured result of ``process_audit_scope``.
-
-    ``status`` mirrors ``AuditReport.scope_extraction_status`` values
-    (``success`` / ``failed`` / ``skipped``). ``method`` tells the worker
-    where the contracts came from (``llm`` / ``llm_chunk_scan`` /
-    ``regex_fallback`` / ``cache_copy``). ``reviewed_commits`` carries git
-    SHAs pulled from the PDF text so the source-equivalence matcher can
-    prove coverage by diffing reviewed code against Etherscan source.
-
-    ``scope_entries`` (Phase F) carries structured ``{name, address,
-    commit, chain}`` tuples for audits whose scope section has an explicit
-    address column. Empty tuple for prose-only scopes. The coverage
-    matcher treats non-empty ``scope_entries`` as authoritative over the
-    flat ``contracts`` name list.
-    """
-
-    status: str
-    contracts: tuple[str, ...] = ()
-    storage_key: str | None = None
-    extracted_date: str | None = None
-    reviewed_commits: tuple[str, ...] = ()
-    referenced_repos: tuple[str, ...] = ()
-    scope_entries: tuple[dict, ...] = ()
-    classified_commits: tuple[dict, ...] = ()
-    error: str | None = None
-    method: str = "llm"
-    raw_response: str | None = field(default=None, repr=False)
-    model: str | None = None
 
 
 def process_audit_scope(

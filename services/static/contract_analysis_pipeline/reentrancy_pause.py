@@ -41,7 +41,7 @@ membership/equality leaves reading those vars.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any
 
 try:
     from slither.core.cfg.node import NodeType  # type: ignore[import]
@@ -58,24 +58,11 @@ try:
 except Exception:  # pragma: no cover
     SLITHER_AVAILABLE = False
 
+from schemas.static_pipeline_schemas import PauseInfo, ReentrancyPauseGuardKind
+
 from .predicate_types import LeafPredicate, PredicateTree
 
-GuardKind = Literal["reentrancy", "pause"]
-
-
-class PauseInfo(TypedDict):
-    """Structured export from ``apply_reentrancy_pause_pass``.
-
-    Lets ``_detect_pausability`` consume the structural classification
-    directly. ``pause_state_vars`` + ``reentrancy_state_vars`` are the
-    names PauseAnalyzer/ReentrancyAnalyzer flagged; the function lists
-    are derived from each state var's writers / from modifiers that
-    toggle the var."""
-
-    pause_state_vars: list[str]
-    pause_toggle_functions: list[str]
-    reentrancy_state_vars: list[str]
-    reentrancy_guarded_functions: list[str]
+GuardKind = ReentrancyPauseGuardKind
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
 
 from sqlalchemy import func, select
@@ -51,6 +51,7 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from schemas.resolution_schemas import AnalysisJobLookup
 from utils.logging import record_stage_metric
 from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
@@ -154,12 +155,6 @@ def _emit_capability_summary(
             "top_slow_functions": [{"function": name, "duration_ms": ms} for name, ms in top_slow],
         },
     )
-
-
-@dataclass(frozen=True)
-class AnalysisJobLookup:
-    runtime_job: Job
-    analysis_job: Job
 
 
 def find_analysis_job_for_address(

@@ -25,10 +25,18 @@ import logging
 import random
 import re
 import time
-from dataclasses import dataclass, field
 from typing import Any, Final
 
 import requests
+
+from schemas.audit_schemas import (
+    EquivalenceMatch,
+    EquivalenceOutcome,
+    EtherscanFetch,
+    GithubFetch,
+    GithubHashResult,
+    VerifiedSource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,40 +245,6 @@ def extract_reviewed_commits(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class GithubFetch:
-    """Outcome of a single GitHub raw fetch.
-
-    ``content`` is non-None only on success. ``status`` + ``detail``
-    distinguish transient transport failures (``http_5xx``,
-    ``transport_error``) from permanent ones (``http_404``,
-    ``content_type_rejected``, ``size_cap_exceeded``) so the orchestrator
-    can emit the right EQUIVALENCE_STATUS.
-    """
-
-    content: str | None
-    # "ok" | "http_404" | "http_5xx" | "http_other" | "transport_error"
-    # | "content_type_rejected" | "size_cap_exceeded"
-    status: str
-    detail: str
-
-
-@dataclass(frozen=True)
-class EtherscanFetch:
-    """Outcome of an Etherscan verified-source fetch.
-
-    ``source`` is non-None only when ``status == 'ok'``. ``status`` is
-    one of ``'ok'`` (verified source parsed), ``'unverified'`` (Etherscan
-    returned the empty-source sentinel), ``'fetch_failed'`` (API error,
-    transient).
-    """
-
-    source: VerifiedSource | None
-    # "ok" | "unverified" | "fetch_failed"
-    status: str
-    detail: str
-
-
 # ---------------------------------------------------------------------------
 # Etherscan source fetch
 # ---------------------------------------------------------------------------
@@ -279,15 +253,6 @@ class EtherscanFetch:
 def _hash_source_text(text: str) -> str:
     """Stable hash of a source file's content for equality comparison."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True)
-class VerifiedSource:
-    """Parsed Etherscan verified-source response for one address."""
-
-    contract_name: str | None
-    compiler_version: str | None
-    files: dict[str, str]  # path -> sha256(content)
 
 
 def fetch_etherscan_source_files(address: str) -> EtherscanFetch:
@@ -496,15 +461,6 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
     return GithubFetch(content=None, status="http_5xx", detail=f"{url}: {last_5xx_status}")
 
 
-@dataclass(frozen=True)
-class GithubHashResult:
-    """Hash of a file at a specific (repo, commit, path), or a failure detail."""
-
-    sha256: str | None
-    status: str  # mirrors GithubFetch.status
-    detail: str
-
-
 def _coerce_github_hash_result(result: Any) -> GithubHashResult:
     """Backward-compat for legacy test stubs that return bare hashes/None."""
     if isinstance(result, GithubHashResult):
@@ -581,29 +537,6 @@ def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class EquivalenceMatch:
-    """Proof that audit at commit X reviewed the source file at path Y."""
-
-    commit: str
-    scope_name: str
-    etherscan_path: str
-    source_sha256: str
-
-
-@dataclass(frozen=True)
-class EquivalenceOutcome:
-    """Verdict for one (audit, matched_name) verification attempt.
-
-    ``status`` is one of ``EQUIVALENCE_STATUSES``. ``reason`` is a short
-    human string. ``matches`` is non-empty only when ``status='proven'``.
-    """
-
-    status: str
-    reason: str
-    matches: tuple[EquivalenceMatch, ...] = field(default_factory=tuple)
 
 
 def verify_audit_covers_impl(

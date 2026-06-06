@@ -35,8 +35,9 @@ we mark the function as needing review.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
+
+from schemas.static_pipeline_schemas import Polarity, RevertGate, RevertKind
 
 try:
     from slither.core.cfg.node import NodeType  # type: ignore[import]
@@ -55,57 +56,6 @@ except Exception:  # pragma: no cover
 
 
 DEFAULT_INTERNAL_CALL_DEPTH = 4
-
-
-RevertKind = Literal[
-    "require",
-    "assert",
-    "custom_revert",
-    "if_revert",
-    "inline_asm",
-    "try_catch_revert",
-    "external_call_revert",
-    "opaque",
-]
-
-Polarity = Literal["allowed_when_true", "allowed_when_false"]
-
-
-@dataclass
-class RevertGate:
-    """One gated revert path in a function.
-
-    The predicate builder consumes a list of these to construct the
-    function's PredicateTree. Multiple gates AND together at the tree
-    root.
-    """
-
-    kind: RevertKind
-    # The condition IR value that drives the revert. None for opaque
-    # / unconditional revert paths.
-    condition_value: Any = None
-    polarity: Polarity = "allowed_when_true"
-    # Slither node where the gate lives — used by the predicate builder
-    # for parameter-binding / modifier-frame lookups.
-    node: Any = None
-    # Slither function/modifier whose body contains the gate node.
-    # When the gate is inside a cross-function helper (e.g.,
-    # ``_checkRole`` called from a modifier), this is the helper —
-    # the predicate builder uses it to walk the condition's defining
-    # IR through the right scope.
-    containing_function: Any = None
-    # Cross-fn call chain: list of InternalCall/LibraryCall IRs taken
-    # to reach the gate's containing_function from the top-level
-    # function being analyzed. Used by the predicate builder to
-    # substitute the helper's parameters with the caller's argument
-    # provenance (full ParameterBindingEnv per v4 plan §predicates).
-    call_chain: list[Any] = field(default_factory=list)
-    # Diagnostic text for predicate.expression / leaf.basis.
-    expression_text: str = ""
-    basis: list[str] = field(default_factory=list)
-    # If kind=="opaque", the reason string surfaced as
-    # unsupported_reason on the predicate leaf.
-    unsupported_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

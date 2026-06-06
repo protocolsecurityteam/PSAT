@@ -7,11 +7,19 @@ import logging
 import os
 import threading
 import time
-from typing import Any, TypedDict
+from typing import Any
 
 from eth_utils.crypto import keccak
 
-from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
+from schemas.resolution_schemas import (
+    EnumeratedKeyValue,
+    EnumeratedPrincipal,
+    EnumerationValueResult,
+    MappingEnumerationResult,
+)
+from schemas.static_pipeline_schemas import (
+    WriterEventSpec,
+)
 from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
@@ -31,47 +39,7 @@ def _cache_ttl_s() -> float:
     return float(os.getenv("PSAT_MAPPING_ENUMERATION_CACHE_TTL_S", "1800"))
 
 
-class EnumeratedPrincipal(TypedDict):
-    address: str
-    mapping_name: str
-    direction_history: list[str]
-    last_seen_block: int
-
-
-class EnumerationResult(TypedDict):
-    """Principal list + status; complete vs. truncated scans (silent [] would drop authorized addresses)."""
-
-    principals: list[EnumeratedPrincipal]
-    status: str  # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
-    pages_fetched: int
-    last_block_scanned: int
-    error: str | None
-
-
-class EnumeratedKeyValue(TypedDict):
-    """One key's latest observed value (D.2). Used by the value-aware
-    fold which replaces the add/remove ``present`` boolean with the
-    raw value of the most recent assignment, so a downstream
-    ``ValuePredicate`` can decide which keys belong in the finite
-    set.
-    """
-
-    key: str  # 0x-prefixed canonical address (or 0x... hex word for non-address keys)
-    mapping_name: str
-    value_hex: str  # 0x-prefixed canonical hex of the latest assigned value
-    last_block: int
-    last_log_index: int
-
-
-class EnumerationValueResult(TypedDict):
-    """Latest-value-per-key fold + status (mirrors ``EnumerationResult``)."""
-
-    entries: list[EnumeratedKeyValue]
-    status: str
-    pages_fetched: int
-    last_block_scanned: int
-    error: str | None
-
+EnumerationResult = MappingEnumerationResult
 
 # Process-wide cache keyed on lowercased contract address; head_block is in the value, not the key, so cascade siblings
 # reuse results.

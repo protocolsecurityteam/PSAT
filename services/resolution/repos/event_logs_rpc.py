@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
+from schemas.resolution_schemas import FetchedEventLog
 from utils.rpc import rpc_request
 
 MAX_BLOCK_RANGE = 10_000
-
-
-@dataclass(frozen=True)
-class FetchedEventLog:
-    tx_hash: bytes
-    log_index: int
-    block_number: int
-    block_hash: bytes
-    transaction_index: int
-    topics: list[str]
-    data_words: list[str]
 
 
 class RpcEventLogFetcher:

@@ -8,30 +8,9 @@ DB and artifact paths do not drift.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
-
-@dataclass
-class CapabilitySurface:
-    principal_rows: list[dict[str, Any]] = field(default_factory=list)
-    public_paths: list[list[dict[str, Any]]] = field(default_factory=list)
-    residual: list[dict[str, Any]] = field(default_factory=list)
-
-    @property
-    def authority_public(self) -> bool:
-        return bool(self.public_paths)
-
-    @property
-    def conditions(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for row in self.principal_rows:
-            details = row.get("details")
-            if isinstance(details, dict):
-                out.extend(_condition_dicts(details.get("conditions")))
-        for path in self.public_paths:
-            out.extend(path)
-        return _unique_conditions(out)
+from schemas.policy_schemas import CapabilitySurface
 
 
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:

@@ -24,10 +24,12 @@ shape and operand type.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, Iterable
 
 from eth_utils.crypto import keccak
+
+from schemas.static_pipeline_schemas import EMPTY, TOP, ProvenanceMap, Source, SourceSet, is_top, source_union
 
 # Slither IR types — imported lazily where they aren't part of the
 # module's public surface so this file remains importable in test
@@ -68,82 +70,7 @@ except Exception:  # pragma: no cover — only when slither unavailable
     SLITHER_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-# Source record — one origin tag for an SSA value.
-# ---------------------------------------------------------------------------
-
-
-SOURCE_KINDS = (
-    "msg_sender",
-    "tx_origin",
-    "parameter",
-    "state_variable",
-    "constant",
-    "view_call",
-    "external_call",
-    "computed",
-    "block_context",
-    "signature_recovery",
-    "self_address",
-    "top",
-)
-
-
-@dataclass(frozen=True)
-class Source:
-    """One origin record for an SSA value.
-
-    Equality is structural (frozen dataclass). Provenance sets are
-    ``frozenset[Source]`` so they hash cleanly for cycle detection and
-    fixed-point comparison.
-    """
-
-    kind: str  # one of SOURCE_KINDS
-    parameter_index: int | None = None
-    parameter_name: str | None = None
-    state_variable_name: str | None = None
-    callee: str | None = None
-    # Hash of constituent source frozensets — used to keep view_call /
-    # external_call recursive shape without making Source recursive.
-    callee_args_digest: str | None = None
-    callee_signature: str | None = None
-    callee_selector: str | None = None
-    constant_value: str | None = None
-    value_type: str | None = None
-    computed_kind: str | None = None
-    block_context_kind: str | None = None
-    member_path: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.kind not in SOURCE_KINDS:
-            raise ValueError(f"unknown source kind {self.kind!r}")
-        # The "top" lattice element is a bare sentinel — no metadata
-        # fields. ``is_top`` does an O(1) ``_TOP_SOURCE in set`` check,
-        # which only works if every kind="top" instance hashes/equals
-        # ``_TOP_SOURCE``. Enforce that here so a future caller can't
-        # silently break the optimization by tagging a "top with
-        # metadata".
-        if self.kind == "top" and (
-            self.parameter_index is not None
-            or self.parameter_name is not None
-            or self.state_variable_name is not None
-            or self.callee is not None
-            or self.callee_args_digest is not None
-            or self.callee_signature is not None
-            or self.callee_selector is not None
-            or self.constant_value is not None
-            or self.value_type is not None
-            or self.computed_kind is not None
-            or self.block_context_kind is not None
-            or self.member_path
-        ):
-            raise ValueError("Source(kind='top') must be the bare sentinel — no metadata fields")
-
-
-SourceSet = frozenset[Source]
-EMPTY: SourceSet = frozenset()
-_TOP_SOURCE = Source(kind="top")
-TOP: SourceSet = frozenset({_TOP_SOURCE})
+union = source_union
 
 
 def _solidity_type_name(value: Any) -> str | None:
@@ -152,21 +79,6 @@ def _solidity_type_name(value: Any) -> str | None:
         return None
     type_name = getattr(type_obj, "name", None) or str(type_obj)
     return type_name or None
-
-
-def is_top(s: SourceSet) -> bool:
-    # O(1) frozenset hash lookup. Equivalence with the prior
-    # ``any(src.kind == "top" for src in s)`` is held by the
-    # ``__post_init__`` invariant above: every kind="top" Source
-    # equals (and hashes as) ``_TOP_SOURCE``.
-    return _TOP_SOURCE in s
-
-
-def union(a: SourceSet, b: SourceSet) -> SourceSet:
-    """Lattice join: union of source sets, with TOP absorbing."""
-    if is_top(a) or is_top(b):
-        return TOP
-    return a | b
 
 
 # ---------------------------------------------------------------------------
@@ -192,30 +104,6 @@ def _env_int(name: str, default: int) -> int:
 
 DEFAULT_INTERNAL_CALL_DEPTH = _env_int("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", 4)
 DEFAULT_WORKLIST_ITER_CAP = _env_int("PSAT_PROVENANCE_WORKLIST_CAP", 200)
-
-
-@dataclass
-class ProvenanceMap:
-    """Per-SSA-value provenance for one function context.
-
-    Keyed by Slither variable name (string) since SSA values from
-    Slither expose a stable ``name`` attribute. Phi nodes share the
-    base name with versioning Slither already handles.
-    """
-
-    sources: dict[str, SourceSet]
-
-    def get(self, var_name: str) -> SourceSet:
-        return self.sources.get(var_name, EMPTY)
-
-    def set(self, var_name: str, value: SourceSet) -> bool:
-        """Returns True if this set changed the value (used by worklist
-        to detect convergence)."""
-        prev = self.sources.get(var_name, EMPTY)
-        if prev == value:
-            return False
-        self.sources[var_name] = value
-        return True
 
 
 class ProvenanceEngine:

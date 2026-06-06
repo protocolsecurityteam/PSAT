@@ -23,223 +23,33 @@ a typed capability or returns ``unsupported(reason)``. Never raises.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from schemas.resolution_schemas import (
+    CapabilityConfidence as Confidence,
+)
+from schemas.resolution_schemas import (
+    CapabilityExpr,
+    CapKind,
+    Condition,
+    ExternalCheck,
+    MembershipQuality,
+    _canon_addresses,
+)
+from schemas.resolution_schemas import (
+    CapabilitySubject as Subject,
+)
 
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
-
-CapKind = Literal[
-    "finite_set",
-    "threshold_group",
-    "cofinite_blacklist",
-    "signature_witness",
-    "external_check_only",
-    "conditional_universal",
-    "unsupported",
-    "AND",
-    "OR",
+__all__ = [
+    "CapKind",
+    "CapabilityExpr",
+    "Condition",
+    "Confidence",
+    "ExternalCheck",
+    "MembershipQuality",
+    "Subject",
+    "intersect",
+    "negate",
+    "union",
 ]
-
-MembershipQuality = Literal["exact", "lower_bound", "upper_bound"]
-Confidence = Literal["enumerable", "partial", "check_only"]
-
-# Which caller dimension a capability constrains. ``root`` = the function's
-# end-user caller (msg.sender / tx.origin at the protected entrypoint). ``bound``
-# = an already-resolved intermediate subject — the caller of an *inlined*
-# downstream cross-contract call (e.g. a Teller calling ``vault.exit``, where the
-# inner ``requiresAuth`` is keyed on the Teller's address, not the end user).
-# A bound-subject guard is a runtime side-condition, never a narrowing of the
-# end-user principal set: combining it via set-intersection (``{users} ∩ {teller}``)
-# wrongly zeroes the real callers. Default ``root`` — everything is an end-user
-# gate unless the leaf evaluator proves the subject was already bound.
-Subject = Literal["root", "bound"]
-
-
-# ---------------------------------------------------------------------------
-# Helper records
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Condition:
-    """A side condition that doesn't restrict the principal set but
-    must hold at runtime for the function to succeed (time, pause,
-    reentrancy, business invariants)."""
-
-    kind: Literal["time", "pause", "reentrancy", "business", "self_service"]
-    description: str = ""
-    parameter_index: int | None = None
-    parameter_name: str | None = None
-
-
-@dataclass(frozen=True)
-class ExternalCheck:
-    """Descriptor for an external_check_only capability — a probe
-    interface the UI / API can call to ask 'is this address
-    authorized'. The resolver populates the address + selector from
-    the predicate's set_descriptor."""
-
-    target_address: str | None
-    target_call_selector: str | None
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# CapabilityExpr
-# ---------------------------------------------------------------------------
-
-
-def _canon_addresses(values: list[str]) -> list[str]:
-    """Lowercase + sort + dedup the address list for stable equality.
-    Members are the universal canonical form for set ops."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for v in sorted(values, key=lambda x: x.lower() if isinstance(x, str) else str(x)):
-        key = v.lower() if isinstance(v, str) else str(v)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(key)
-    return out
-
-
-@dataclass
-class CapabilityExpr:
-    kind: CapKind
-    members: list[str] | None = None
-    threshold: tuple[int, list[str]] | None = None
-    blacklist: list[str] | None = None
-    signer: "CapabilityExpr | None" = None
-    check: ExternalCheck | None = None
-    conditions: list[Condition] = field(default_factory=list)
-    unsupported_reason: str | None = None
-    children: list["CapabilityExpr"] = field(default_factory=list)
-    membership_quality: MembershipQuality = "exact"
-    confidence: Confidence = "enumerable"
-    last_indexed_block: int | None = None
-    trace: list[dict[str, Any]] = field(default_factory=list)
-    # Caller dimension this capability constrains; see ``Subject``. Set at leaf
-    # resolution and propagated by the combinators below.
-    subject: Subject = "root"
-
-    # ------------------------------------------------------------------
-    # Factories
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def finite_set(
-        cls,
-        members: list[str],
-        *,
-        quality: MembershipQuality = "exact",
-        confidence: Confidence = "enumerable",
-        conditions: list[Condition] | None = None,
-        last_indexed_block: int | None = None,
-        trace: list[dict[str, Any]] | None = None,
-        subject: Subject = "root",
-    ) -> "CapabilityExpr":
-        return cls(
-            kind="finite_set",
-            members=_canon_addresses(members),
-            membership_quality=quality,
-            confidence=confidence,
-            conditions=list(conditions or []),
-            last_indexed_block=last_indexed_block,
-            trace=list(trace or []),
-            subject=subject,
-        )
-
-    @classmethod
-    def threshold_group(
-        cls,
-        m: int,
-        signers: list[str],
-        *,
-        confidence: Confidence = "enumerable",
-        conditions: list[Condition] | None = None,
-    ) -> "CapabilityExpr":
-        return cls(
-            kind="threshold_group",
-            threshold=(m, _canon_addresses(signers)),
-            confidence=confidence,
-            conditions=list(conditions or []),
-        )
-
-    @classmethod
-    def cofinite_blacklist(
-        cls,
-        blacklist: list[str],
-        *,
-        confidence: Confidence = "enumerable",
-        conditions: list[Condition] | None = None,
-        subject: Subject = "root",
-    ) -> "CapabilityExpr":
-        return cls(
-            kind="cofinite_blacklist",
-            blacklist=_canon_addresses(blacklist),
-            confidence=confidence,
-            conditions=list(conditions or []),
-            subject=subject,
-        )
-
-    @classmethod
-    def signature_witness(
-        cls,
-        signer: "CapabilityExpr",
-        *,
-        conditions: list[Condition] | None = None,
-    ) -> "CapabilityExpr":
-        return cls(
-            kind="signature_witness",
-            signer=signer,
-            conditions=list(conditions or []),
-            confidence="check_only",
-        )
-
-    @classmethod
-    def external_check_only(
-        cls,
-        check: ExternalCheck,
-        *,
-        conditions: list[Condition] | None = None,
-    ) -> "CapabilityExpr":
-        return cls(
-            kind="external_check_only",
-            check=check,
-            confidence="check_only",
-            conditions=list(conditions or []),
-        )
-
-    @classmethod
-    def conditional_universal(cls, condition: Condition) -> "CapabilityExpr":
-        """Universal set with side conditions (time gates, pause,
-        reentrancy, business invariants). Anyone may call, but the
-        condition must hold."""
-        return cls(
-            kind="conditional_universal",
-            conditions=[condition],
-            confidence="enumerable",
-        )
-
-    @classmethod
-    def unsupported(cls, reason: str) -> "CapabilityExpr":
-        return cls(kind="unsupported", unsupported_reason=reason, confidence="check_only")
-
-    @classmethod
-    def structural_and(cls, children: list["CapabilityExpr"]) -> "CapabilityExpr":
-        if len(children) == 1:
-            return children[0]
-        return cls(kind="AND", children=list(children))
-
-    @classmethod
-    def structural_or(cls, children: list["CapabilityExpr"]) -> "CapabilityExpr":
-        if len(children) == 1:
-            return children[0]
-        return cls(kind="OR", children=list(children))
-
 
 # ---------------------------------------------------------------------------
 # Combinators

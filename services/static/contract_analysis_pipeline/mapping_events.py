@@ -2,32 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any
+
+from schemas.static_pipeline_schemas import EventMetadata as _EventMetadata
+from schemas.static_pipeline_schemas import WriterEventDirection, WriterEventSpec
 
 from .shared import _contract_functions
-
-
-class WriterEventSpec(TypedDict):
-    mapping_name: str
-    event_signature: str
-    event_name: str
-    key_position: int
-    key_positions_by_index: dict[int, int]
-    indexed_positions: list[int]
-    direction: Literal["add", "remove", "set"]
-    writer_function: str
-    # Position of the assigned value in the event's args (D.1). For
-    # ``add``/``remove`` semantics the assigned value is implicit so
-    # this is ``None``; for ``set`` semantics it points at the topic
-    # / data slot carrying the new value, e.g. ``OwnerSet(addr, val)``
-    # would record ``key_position=0, value_position=1``.
-    value_position: int | None
-
-
-class _EventMetadata(TypedDict):
-    signature: str
-    arg_types: list[str]
-    indexed_positions: list[int]
 
 
 def _ir_name(ir: Any) -> str:
@@ -122,7 +102,7 @@ def _index_base_mapping_name_and_keys(index_ir: Any, definitions: dict[str, Any]
     return None, keys
 
 
-def _direction_of_write(value_var: Any) -> Literal["add", "remove", "set"] | None:
+def _direction_of_write(value_var: Any) -> WriterEventDirection | None:
     """Classify a mapping write by the assigned value.
 
     Returns ``"add"`` / ``"remove"`` for constant 1/0 (Maker

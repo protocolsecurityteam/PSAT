@@ -18,7 +18,7 @@ if __package__ in {None, ""}:
 
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
-from schemas.effective_permissions import (
+from schemas.policy_schemas import (
     EffectiveFunctionPermission,
     EffectivePermissions,
     PrincipalResolution,

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Final
+
+from schemas.audit_schemas import ScopeSection
 
 from ._utils import _normalize_ligatures, _page_of_offset, _page_offsets
 
@@ -57,16 +58,6 @@ _SCOPE_CONTENT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 # Optional numbered-section prefix real audits use ("5. Scope", "5.1 Files
 # in scope"). Anchored to line start so body prose doesn't match.
 _NUMBERED_PREFIX = r"(?:\d+(?:\.\d+)*\.?[ \t]+)?"
-
-
-@dataclass(frozen=True)
-class ScopeSection:
-    """One scope-section slice located by a header or content-pattern match."""
-
-    start_page: int
-    end_page: int
-    header: str
-    text_slice: str
 
 
 def locate_scope_section(text: str) -> list[ScopeSection]:

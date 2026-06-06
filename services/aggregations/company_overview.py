@@ -28,7 +28,6 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -48,6 +47,7 @@ from db.models import (
     TvlSnapshot,
     UpgradeEvent,
 )
+from schemas.aggregation_schemas import GovernanceView
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 
@@ -76,14 +76,6 @@ class CompanyNotFound(Exception):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.name = name
-
-
-@dataclass
-class GovernanceView:
-    contracts: list[dict[str, Any]] = field(default_factory=list)
-    principals: list[dict[str, Any]] = field(default_factory=list)
-    hierarchy: list[dict[str, Any]] = field(default_factory=list)
-    fund_flows: list[dict[str, Any]] = field(default_factory=list)
 
 
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:

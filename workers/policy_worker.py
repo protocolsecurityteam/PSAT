@@ -25,7 +25,7 @@ from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
-from schemas.effective_permissions import PrincipalResolution
+from schemas.policy_schemas import PrincipalResolution
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_history import build_principal_history
