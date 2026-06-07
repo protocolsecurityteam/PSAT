@@ -28,9 +28,10 @@ _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
 # Collapse the per-candidate checker probes (canCall/isAllowed/…) into one billable eth_call via Multicall3.
 # The checker takes the candidate as an explicit argument — the enumerable caller dimension — so it is
 # caller-independent and safe to route through Multicall3 (which becomes msg.sender). Falls back to the
-# JSON-RPC array batch (identical decode) on any failure. Default OFF: enabled in prod via env (fly.toml) so
-# the offline suite (which stubs the per-call wire, not Multicall3's eth_call) stays hermetic. Flip to "1".
-_EXTERNAL_CHECK_MULTICALL_ENABLED = os.getenv("PSAT_EXTERNAL_CHECK_MULTICALL", "0").lower() in ("1", "true", "yes")
+# JSON-RPC array batch (identical decode) on any failure. Default ON in every real run (no env needed); set
+# PSAT_EXTERNAL_CHECK_MULTICALL=0 as a kill switch. The offline suite forces this OFF via tests/conftest.py
+# (it stubs the per-call wire, not Multicall3's eth_call) for hermeticity.
+_EXTERNAL_CHECK_MULTICALL_ENABLED = os.getenv("PSAT_EXTERNAL_CHECK_MULTICALL", "1").lower() in ("1", "true", "yes")
 
 
 def _eval_candidate_calls(

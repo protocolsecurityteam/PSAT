@@ -49,10 +49,11 @@ _CLASSIFY_BATCH_ENABLED = os.getenv("PSAT_CLASSIFY_BATCH", "1").lower() in ("1",
 # Multicall3 aggregate3. Both fall back to the existing JSON-RPC-batch / per-controller path on any anomaly
 # (provider rejects Multicall3, chain lacks it, malformed response), so resolution results are byte-identical
 # whether on or off — proven by the parity tests in test_classify_batch_parity / test_control_tracker.
-# Default OFF: enabled in prod via env (fly.toml) so a fresh checkout / the offline suite never routes these
-# reads through Multicall3 (those tests stub the per-call wire, not Multicall3's eth_call). Flip to "1" to enable.
-_CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "0").lower() in ("1", "true", "yes")
-_SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "0").lower() in ("1", "true", "yes")
+# Default ON in every real run (no env needed); set PSAT_CLASSIFY_MULTICALL=0 / PSAT_SNAPSHOT_MULTICALL=0 as a
+# kill switch. The offline suite forces these OFF via tests/conftest.py for hermeticity — those tests stub the
+# per-call wire (_rpc_request / _rpc_batch_request_with_status), not Multicall3's eth_call.
+_CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "1").lower() in ("1", "true", "yes")
+_SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() in ("1", "true", "yes")
 
 
 def type_authority_contract(rpc_url: str, address: str, block_tag: str = "latest") -> dict[str, object]:
