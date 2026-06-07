@@ -894,6 +894,113 @@ def _is_pending_authority_accessor_operand(op: dict[str, Any]) -> bool:
     return _pending_authority_base(name) is not None
 
 
+def _resolve_param_keyed_authority_mapping(op: dict[str, Any], ctx: EvaluationContext | None) -> CapabilityExpr:
+    """``msg.sender == <mapping>[<param>]`` — resolve the parameter-keyed authority
+    mapping to the set of its VALUES (claim #3 group C).
+
+    L1BaseSyncPool gates ``onMessageReceived`` on ``msg.sender == receivers[originEid]``,
+    a ``mapping(uint32 => address)`` keyed by a function parameter. The authorized
+    caller is whichever receiver the (caller-chosen) eid maps to, so the principal is
+    the mapping's value set — there is no single getter to read. Fold those values
+    from the mapping's setter events (``ReceiverSet``) on the runtime address (the
+    proxy when proxy-linked, so the *live* receivers are seen rather than a standalone
+    impl's empty storage). Emit a ``finite_set`` of the folded receivers; when no
+    event source is reachable, no setter spec exists, or the live mapping folds empty,
+    emit an ``external_check_only`` query interface rather than a phantom "nobody"
+    (mirrors :func:`_resolve_view_key_membership`'s ``view_key_membership_unresolved``).
+    ``lower_bound`` because event replay is a lower bound on the live value set."""
+    mapping_name = op.get("mapping_name") or ""
+    writer_specs = op.get("mapping_writer_specs") or []
+    outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None) if ctx is not None else None
+    contract = getattr(outer, "contract_address", None) or (ctx.contract_address if ctx is not None else None)
+
+    def _unresolved(basis: str) -> CapabilityExpr:
+        target = contract.lower() if isinstance(contract, str) and contract.startswith("0x") else None
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=target,
+                target_call_selector=None,
+                extra={"basis": [basis], "mapping_name": mapping_name},
+            )
+        )
+
+    if not writer_specs:
+        return _unresolved("param_keyed_mapping_no_writer_spec")
+    if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
+        return _unresolved("param_keyed_mapping_no_address")
+
+    values = _enumerate_param_keyed_mapping_values(contract, list(writer_specs), outer)
+    if not values:
+        # No event source reachable, or the live mapping folded no receivers (e.g. a
+        # standalone impl whose receivers were set on the proxy): an honest query
+        # interface, never a fabricated empty principal set.
+        return _unresolved("param_keyed_mapping_unresolved")
+    return CapabilityExpr.finite_set(
+        values,
+        quality="lower_bound",
+        confidence="partial",
+        trace=[{"step": "param_keyed_mapping_enumeration", "mapping": mapping_name, "contract": contract.lower()}],
+    )
+
+
+def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict[str, Any]], outer: Any) -> list[str]:
+    """Fold the deduped non-zero address VALUE set of a parameter-keyed mapping from
+    its ``set``-direction setter events via on-demand replay. Returns an empty list
+    when no event source is reachable (no hypersync token / injected client), the
+    scan errors, or the mapping folds empty — the caller surfaces all three as an
+    external check. The hypersync client / module are read from ``outer.meta`` so a
+    test can seed the event source without replacing the enumerator (the wire is the
+    stub seam, mirroring ``rpc_request``)."""
+    import os
+
+    meta = getattr(outer, "meta", None) or {}
+    token = meta.get("hypersync_token") or os.getenv("ENVIO_API_TOKEN")
+    client = meta.get("hypersync_client")
+    module = meta.get("hypersync_module")
+    if not token and client is None:
+        return []
+    block = getattr(outer, "block", None)
+    chain_id = getattr(outer, "chain_id", None)
+    _bump_resolve_counter(outer, "mapping_value_scans")
+    kwargs: dict[str, Any] = {"from_block": 0}
+    if isinstance(block, int):
+        kwargs["to_block"] = block
+    if token:
+        kwargs["bearer_token"] = token
+    if client is not None:
+        kwargs["client"] = client
+    if module is not None:
+        kwargs["hypersync_module"] = module
+    hypersync_url = meta.get("hypersync_url")
+    if isinstance(hypersync_url, str) and hypersync_url:
+        kwargs["hypersync_url"] = hypersync_url
+    try:
+        from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
+
+        scan = enumerate_mapping_values_sync(
+            contract,
+            cast(Any, writer_specs),
+            chain=str(chain_id) if isinstance(chain_id, int) else None,
+            **kwargs,
+        )
+    except Exception:
+        return []
+    if scan["status"] == "error":
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for entry in scan["entries"]:
+        value_hex = entry.get("value_hex") or ""
+        if not isinstance(value_hex, str) or len(value_hex) != 66:
+            continue
+        addr = "0x" + value_hex[-40:].lower()
+        if _is_zero_address(addr) or addr == _BURN_ADDRESS or addr in seen:
+            continue
+        seen.add(addr)
+        values.append(addr)
+    return sorted(values)
+
+
 def _resolve_equality_principal(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
@@ -911,6 +1018,15 @@ def _resolve_equality_principal(
     if len(other) != 1:
         return CapabilityExpr.unsupported("equality_operand_ambiguous")
     op = other[0]
+
+    # ``msg.sender == <mapping>[<param>]`` — the authorized caller is any VALUE in a
+    # parameter-keyed address mapping (claim #3 group C, L1BaseSyncPool
+    # ``receivers[originEid]``). Route to event enumeration before the per-source
+    # getter dispatch: the operand's ``source`` is the bare storage accessor, and the
+    # mapping identity rides on ``mapping_name`` / ``mapping_writer_specs`` (stamped
+    # by the static stage). There is no getter to read here.
+    if op.get("mapping_name") is not None:
+        return _resolve_param_keyed_authority_mapping(cast(dict[str, Any], op), ctx)
 
     src = op["source"]
     if src == "constant":

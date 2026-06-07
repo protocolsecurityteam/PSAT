@@ -53,6 +53,14 @@ class Operand(TypedDict):
     # Lets resolution read the live value through ``eth_getStorageAt`` when no
     # public getter exists. Absent for every other operand.
     storage_slot: NotRequired[str | None]
+    # Set when ``msg.sender == <mapping>[<param>]`` gates a function on a mapping
+    # value keyed by a function parameter (L1BaseSyncPool ``receivers[originEid]``,
+    # claim #3 group C). ``mapping_name`` is the storage mapping; ``mapping_writer_specs``
+    # are the value-enumeration WriterEventSpecs the contract-wide mapping-event pass
+    # attaches. Resolution enumerates the mapping's VALUE set (the authorized callers)
+    # from those setter events rather than reading a getter. Absent for every other operand.
+    mapping_name: NotRequired[str | None]
+    mapping_writer_specs: NotRequired[list[dict[str, Any]] | None]
     constant_value: NotRequired[str | None]
     value_type: NotRequired[str | None]
     computed_kind: NotRequired[str | None]

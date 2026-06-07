@@ -155,6 +155,13 @@
       "detection_patterns": ["governor_guard", "internal_accessor_authority", "assembly_slot_authority", "canonical_getter_resolution"]
     },
     {
+      "path": "authority/L1SyncPoolReceiver.sol",
+      "category": "authority",
+      "contract_name": "L1SyncPoolReceiver",
+      "description": "Faithful ether.fi L1BaseSyncPool: onMessageReceived gates on msg.sender == receivers[originEid], a mapping(uint32 => address) keyed by a function parameter inside ERC-7201 namespaced storage (claim #3 group C). There is no getter to read; resolution must enumerate the mapping's VALUE set from its ReceiverSet setter events, or surface an external check when none are observed.",
+      "detection_patterns": ["receiver_guard", "param_keyed_mapping_authority", "mapping_value_enumeration", "namespaced_storage_authority"]
+    },
+    {
       "path": "authority/MembershipNFT.sol",
       "category": "authority",
       "contract_name": "MembershipNFT",
