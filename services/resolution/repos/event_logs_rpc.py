@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from utils.rpc import rpc_request
 
@@ -22,9 +22,16 @@ class FetchedEventLog:
 
 
 class RpcEventLogFetcher:
-    def __init__(self, rpc_url: str, *, max_block_range: int = MAX_BLOCK_RANGE) -> None:
+    def __init__(
+        self,
+        rpc_url: str,
+        *,
+        max_block_range: int = MAX_BLOCK_RANGE,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max_block_range
+        self.headers = headers
 
     def fetch_logs(
         self,
@@ -46,7 +53,7 @@ class RpcEventLogFetcher:
                     "toBlock": hex(end),
                 }
             ]
-            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
+            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, headers=self.headers)
             if isinstance(raw_logs, list):
                 for raw in raw_logs:
                     decoded = _decode_log(raw)
@@ -57,22 +64,24 @@ class RpcEventLogFetcher:
 
 
 class RpcHeadBlockFetcher:
-    def __init__(self, rpc_url: str) -> None:
+    def __init__(self, rpc_url: str, *, headers: Mapping[str, str] | None = None) -> None:
         self.rpc_url = rpc_url
+        self.headers = headers
 
     def head_block(self) -> int:
-        raw = rpc_request(self.rpc_url, "eth_blockNumber", [])
+        raw = rpc_request(self.rpc_url, "eth_blockNumber", [], headers=self.headers)
         if not isinstance(raw, str) or not raw.startswith("0x"):
             raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
         return int(raw, 16)
 
 
 class RpcBlockHashFetcher:
-    def __init__(self, rpc_url: str) -> None:
+    def __init__(self, rpc_url: str, *, headers: Mapping[str, str] | None = None) -> None:
         self.rpc_url = rpc_url
+        self.headers = headers
 
     def block_hash(self, block_number: int) -> bytes | None:
-        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False])
+        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False], headers=self.headers)
         if not isinstance(raw, dict):
             return None
         return _hex_to_bytes(raw.get("hash"), 32)

@@ -20,7 +20,7 @@ from services.resolution.deferred_reconciler import reconcile_deferred_resolutio
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
 from utils.logging import log_timed_phase
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import PUBLIC_ETH_RPC_URL
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -37,6 +37,12 @@ DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", 
 DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "50000"))
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "200"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
+
+# HyperSync (Envio) JSON-RPC endpoint for mainnet — the indexer's RPC backend.
+# HyperSync serves eth_blockNumber/eth_getBlockByNumber/eth_getLogs at $0; it is
+# validated to track head with zero lag and return canonical block hashes at the
+# head-confirmation_depth reorg zone (see EVENT_INDEXER_RPC_COST_VERDICT.md).
+DEFAULT_HYPERRPC_URL = os.getenv("PSAT_INDEXER_HYPERRPC_URL", "https://eth.rpc.hypersync.xyz")
 
 # Solmate RolesAuthority canCall: the role events to index at the authority so
 # SolmateRolesAuthorityAdapter can fold them. Enrolled directly off the canCall
@@ -211,9 +217,12 @@ def scan_enrolled_events(
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> ScanSummary:
-    rows = session.execute(
+    all_rows = session.execute(
         select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
     ).all()
+    # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
+    # never emit logs, so scanning it just burns one RPC round-trip every pass.
+    rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
     inserted = 0
     windows_scanned = 0
     caught_up_cursors = 0
@@ -532,9 +541,49 @@ def run_event_log_indexer_loop(
         stop_event.wait(interval)
 
 
-def main() -> None:
+def resolve_indexer_rpc() -> tuple[str, dict[str, str] | None]:
+    """Resolve the indexer's RPC endpoint and auth headers — HyperSync-only.
+
+    A metered fallback (eRPC/Alchemy) is deliberately NOT in this chain: the
+    indexer polls every ``PSAT_EVENT_INDEXER_INTERVAL_S`` against ~N converged
+    cursors, and an accidental fall-through to Alchemy is what blew the RPC spend
+    cap (see EVENT_INDEXER_RPC_COST_VERDICT.md). Resolution order:
+
+      1. ``PSAT_INDEXER_RPC_URL`` — explicit operator override (any provider).
+      2. HyperRPC + ``Authorization: Bearer $ENVIO_API_TOKEN`` — the prod default.
+      3. the free public node — only when neither is configured; logged loudly.
+
+    Alchemy/eRPC is never returned here by design.
+    """
+    explicit = (os.getenv("PSAT_INDEXER_RPC_URL") or "").strip()
+    if explicit:
+        return explicit, None
+    token = (os.getenv("ENVIO_API_TOKEN") or "").strip()
+    if token:
+        return DEFAULT_HYPERRPC_URL, {"Authorization": f"Bearer {token}"}
+    logger.warning(
+        "event indexer: no PSAT_INDEXER_RPC_URL and no ENVIO_API_TOKEN — using the free "
+        "public node %s. Backfills will be slow and capped; set ENVIO_API_TOKEN to use "
+        "HyperSync. Alchemy/eRPC is never used here by design.",
+        PUBLIC_ETH_RPC_URL,
+    )
+    return PUBLIC_ETH_RPC_URL, None
+
+
+def build_indexer_fetchers(
+    rpc_url: str, auth_headers: Mapping[str, str] | None
+) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
+    """Construct the per-chain RPC fetchers, all sharing one endpoint + auth."""
     from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
 
+    return (
+        {1: RpcEventLogFetcher(rpc_url, headers=auth_headers)},
+        {1: RpcHeadBlockFetcher(rpc_url, headers=auth_headers)},
+        {1: RpcBlockHashFetcher(rpc_url, headers=auth_headers)},
+    )
+
+
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -549,10 +598,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
-    fetchers = {1: RpcEventLogFetcher(rpc_url)}
-    head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
-    block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}
+    rpc_url, auth_headers = resolve_indexer_rpc()
+    logger.info(
+        "event indexer RPC backend: %s (auth=%s)",
+        "hypersync"
+        if rpc_url == DEFAULT_HYPERRPC_URL
+        else ("public-node" if rpc_url == PUBLIC_ETH_RPC_URL else "explicit"),
+        "bearer" if auth_headers else "none",
+    )
+    fetchers, head_fetchers, block_hash_fetchers = build_indexer_fetchers(rpc_url, auth_headers)
     run_event_log_indexer_loop(
         fetchers=fetchers,
         head_fetchers=head_fetchers,
