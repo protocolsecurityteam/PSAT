@@ -1,106 +1,68 @@
 """Multi-chain resolution for discovered contracts.
 
-After the inventory pipeline builds contracts, some entries have
-``chains=["unknown"]``.  This module probes ``eth_getCode`` via JSON-RPC
-batch requests to Alchemy endpoints to determine where each contract
-is actually deployed.
+Discovery sources surface candidate addresses. This module probes
+``eth_getCode`` via JSON-RPC batch requests to the configured eRPC
+endpoint and materializes one database row per chain where deployed code
+exists.
 
-Requires ``ETH_RPC`` to be set to an Alchemy URL
-(``https://<network>.g.alchemy.com/v2/<key>``).  The API key is
-extracted and used to derive per-chain endpoints so all chains can be
-probed **in parallel** (~1-2 seconds for hundreds of addresses across
-10+ chains).
+Requires ``ERPC_BASE_URL`` to be configured. Each chain is resolved by
+its explicit chain id into ``{ERPC_BASE_URL}/main/evm/{chain_id}`` so all
+chains can be probed **in parallel** (~1-2 seconds for hundreds of
+addresses across 10+ chains).
 
 Strategy
 --------
-1. Extract the Alchemy API key from ``ETH_RPC``.
-2. **Phase 1** -- probe every unknown address on every known chain in
-   parallel using JSON-RPC batch requests.
-3. **Phase 2** -- for addresses that matched nothing in phase 1, probe
-   the remaining supported chains (also in parallel).
+1. Resolve each supported chain to its configured eRPC URL.
+2. Probe every candidate address on every supported chain in parallel.
+3. Return only positive deployed-code matches. RPC failures are hard
+   failures; callers should not write guessed or unknown-chain rows.
 """
 
 from __future__ import annotations
 
 import contextvars
-import json
-import os
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import canonical_chain_list
+from utils.rpc import erpc_url_for_chain_id, rpc_batch_request_with_status
 
-from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
-from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
-
-# Alchemy network slugs matching CHAIN_IDS keys.
-_ALCHEMY_CHAIN_SLUGS: dict[str, str] = {
-    "ethereum": "eth-mainnet",
-    "arbitrum": "arb-mainnet",
-    "optimism": "opt-mainnet",
-    "polygon": "polygon-mainnet",
-    "base": "base-mainnet",
-    "avalanche": "avax-mainnet",
-    "bsc": "bnb-mainnet",
-    "linea": "linea-mainnet",
-    "scroll": "scroll-mainnet",
-    "zksync": "zksync-mainnet",
-    "blast": "blast-mainnet",
-}
+from .inventory_domain import CHAIN_IDS, _debug_log
+from .static_dependencies import has_deployed_code, normalize_address
 
 # Max addresses per JSON-RPC batch request.
 _BATCH_RPC_SIZE = 100
 
-# Fallback: rate-limited individual calls if batch is rejected.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-_RPC_RATE_LIMIT = int(os.getenv("RPC_RATE_LIMIT", "15"))
-_FALLBACK_WORKERS = 4
 
 
-def _get_alchemy_key() -> str:
-    """Extract the Alchemy API key from ETH_RPC."""
+def _chain_id_for_probe(chain_name: str) -> int | None:
+    chain_id = CHAIN_IDS.get(chain_name)
+    return chain_id if isinstance(chain_id, int) and chain_id > 0 else None
+
+
+def _erpc_url_for_chain(chain_name: str) -> str:
+    """Build the configured eRPC URL for a known discovery chain."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    rpc = os.getenv("ETH_RPC", "")
-    # Key is the last path segment: https://<slug>.g.alchemy.com/v2/<key>
-    key = rpc.rstrip("/").rsplit("/", 1)[-1] if "/v2/" in rpc else ""
-    if not key:
-        raise RuntimeError(
-            "Chain resolution requires ETH_RPC set to an Alchemy URL (https://<network>.g.alchemy.com/v2/<key>)"
-        )
-    return key
-
-
-def _alchemy_rpc(chain_name: str, api_key: str) -> str | None:
-    """Build an Alchemy RPC URL for a given chain."""
-    slug = _ALCHEMY_CHAIN_SLUGS.get(chain_name)
-    if not slug:
-        return None
-    return f"https://{slug}.g.alchemy.com/v2/{api_key}"
-
-
-def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:
-    """Fetch code for a single address with rate limiting -- returns (addr, bytecode_hex)."""
-    from .static_dependencies import get_code
-
-    limiter.wait()
-    try:
-        return addr, get_code(rpc_url, addr)
-    except RuntimeError:
-        return addr, "0x"
+    chain_id = _chain_id_for_probe(chain_name)
+    if chain_id is None:
+        raise RuntimeError(f"No chain id configured for chain {chain_name}")
+    rpc_url = erpc_url_for_chain_id(chain_id)
+    if not rpc_url:
+        raise RuntimeError(f"Chain resolution requires ERPC_BASE_URL; no eRPC URL for {chain_name} ({chain_id})")
+    return rpc_url
 
 
 def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
     """Batch-fetch eth_getCode for many addresses in a single HTTP request.
 
     Returns ``{address: bytecode_hex}`` for each address.  Splits into
-    sub-batches of ``_BATCH_RPC_SIZE`` to stay within RPC limits.
-    Falls back to rate-limited concurrent individual calls if the RPC
-    rejects batching.
+    sub-batches of ``_BATCH_RPC_SIZE`` to stay within RPC limits. Any
+    transport error, batch-level error, item-level error, or omitted result
+    raises instead of guessing.
     """
     if not addresses:
         return {}
@@ -108,53 +70,17 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
     results: dict[str, str] = {}
     for i in range(0, len(addresses), _BATCH_RPC_SIZE):
         batch = addresses[i : i + _BATCH_RPC_SIZE]
-        payload = json.dumps(
-            [
-                {"jsonrpc": "2.0", "id": idx, "method": "eth_getCode", "params": [addr, "latest"]}
-                for idx, addr in enumerate(batch)
-            ]
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            rpc_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "getContractAddresses/1.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=max(RPC_TIMEOUT_SECONDS, 30)) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
-            body = None
+        calls = [("eth_getCode", [addr, "latest"]) for addr in batch]
+        raw_results = rpc_batch_request_with_status(rpc_url, calls)
+        if len(raw_results) != len(batch):
+            raise RuntimeError(f"RPC batch returned {len(raw_results)} result(s) for {len(batch)} call(s) on {rpc_url}")
 
-        # A successful batch returns a JSON list.  If we got a dict instead
-        # (e.g. RPC error like "too many calls in batch") or an HTTP error,
-        # fall back to rate-limited concurrent individual calls.
-        if not isinstance(body, list):
-            limiter = RateLimiter(_RPC_RATE_LIMIT)
-            with ThreadPoolExecutor(max_workers=_FALLBACK_WORKERS) as executor:
-                # Per-submission context copy so trace_id/job_id contextvars
-                # bound by the calling worker survive into the fallback fan-out.
-                futures = []
-                for addr in batch:
-                    ctx = contextvars.copy_context()
-                    futures.append(executor.submit(ctx.run, _individual_get_code, rpc_url, addr, limiter))
-                for future in futures:
-                    addr, code = future.result()
-                    results[addr] = code
-            continue
-
-        for item in body:
-            idx = item.get("id")
-            if idx is not None and 0 <= idx < len(batch):
-                code = item.get("result") or "0x"
-                results[batch[idx]] = code if isinstance(code, str) and code.startswith("0x") else "0x"
-        # Fill in any missing addresses (e.g. from errors in individual items).
-        for addr in batch:
-            if addr not in results:
-                results[addr] = "0x"
+        for addr, (code, had_error) in zip(batch, raw_results):
+            if had_error:
+                raise RuntimeError(f"RPC batch item error for {addr} on {rpc_url}")
+            if not isinstance(code, str) or not code.startswith("0x"):
+                raise RuntimeError(f"RPC batch returned invalid eth_getCode result for {rpc_url}: {code!r}")
+            results[addr] = "0x" if code == "0x0" else code
 
     return results
 
@@ -162,175 +88,104 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
 def _probe_chain_batch(
     addresses: list[str],
     chain_name: str,
-    api_key: str,
     debug: bool = False,
 ) -> set[str]:
-    """Probe all *addresses* on a single chain via Alchemy JSON-RPC batch."""
-    rpc_url = _alchemy_rpc(chain_name, api_key)
-    if not rpc_url:
-        _debug_log(debug, f"  {chain_name}: no Alchemy slug configured, skipping")
-        return set()
-
-    try:
-        code_map = _batch_get_code(rpc_url, addresses)
-        return {addr for addr, code in code_map.items() if has_deployed_code(code)}
-    except Exception as exc:
-        _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
-        return set()
+    """Probe all *addresses* on a single chain via eRPC JSON-RPC batch."""
+    rpc_url = _erpc_url_for_chain(chain_name)
+    code_map = _batch_get_code(rpc_url, addresses)
+    return {addr for addr, code in code_map.items() if has_deployed_code(code)}
 
 
 def _probe_chains(
     addresses: list[str],
     chains: list[str],
-    api_key: str,
     matched: dict[str, list[str]],
     debug: bool = False,
 ) -> None:
-    """Probe multiple chains in parallel using Alchemy batch endpoints."""
+    """Probe multiple chains in parallel using eRPC batch endpoints."""
     with ThreadPoolExecutor(max_workers=min(len(chains), 10)) as executor:
         # Per-chain context copy preserves the caller's trace context inside
         # each per-chain batch RPC call.
         future_to_chain = {}
         for chain_name in chains:
             ctx = contextvars.copy_context()
-            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, api_key, debug)] = (
-                chain_name
-            )
+            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, debug)] = chain_name
         for future in as_completed(future_to_chain):
             chain_name = future_to_chain[future]
-            try:
-                hits = future.result()
-                for addr in hits:
-                    matched[addr].append(chain_name)
-                _debug_log(debug, f"  {chain_name}: {len(hits)} hit(s)")
-            except Exception as exc:
-                _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
+            hits = future.result()
+            for addr in hits:
+                matched[addr].append(chain_name)
+            _debug_log(debug, f"  {chain_name}: {len(hits)} hit(s)")
 
 
-def _primary_chain(contract: dict[str, Any]) -> str:
-    """Return the first chain from a contract's chains list, or 'unknown'."""
-    chains = contract.get("chains", [])
-    return (canonical_chain(chains[0]) if chains else None) or "unknown"
+def _normalize_probe_address(raw: Any) -> str:
+    if not isinstance(raw, str):
+        raise ValueError(f"Expected address string, got {type(raw).__name__}")
+    address = normalize_address(raw)
+    if not address.startswith("0x") or len(address) != 42:
+        raise ValueError(f"Invalid address for chain probe: {raw!r}")
+    try:
+        int(address[2:], 16)
+    except ValueError as exc:
+        raise ValueError(f"Invalid address for chain probe: {raw!r}") from exc
+    return address
 
 
-def resolve_unknown_chains(
-    contracts: list[dict[str, Any]],
-    debug: bool = False,
-) -> list[dict[str, Any]]:
-    """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode`` across chains.
-
-    Mutates the contract dicts in-place (updates ``chains`` field) and
-    returns the same list.
-    """
-    if not contracts:
-        return contracts
-
-    unknowns = [c for c in contracts if _primary_chain(c) == "unknown"]
-    if not unknowns:
-        _debug_log(debug, "Chain resolution: no unknown-chain contracts to resolve")
-        return contracts
-
-    api_key = _get_alchemy_key()
-
-    # Warn about chains in CHAIN_IDS that have no Alchemy slug configured.
-    uncovered = sorted(ch for ch in CHAIN_IDS if ch not in _ALCHEMY_CHAIN_SLUGS)
-    if uncovered:
-        _debug_log(debug, f"WARNING: no Alchemy slug for chain(s): {uncovered} -- these will be skipped")
-
-    # Determine which chains this protocol is known to use -- probe these first.
-    known_chains: list[str] = []
-    seen: set[str] = set()
-    for c in contracts:
-        for ch in canonical_chain_list(c.get("chains", [])) or []:
-            if ch not in seen and ch != "unknown" and ch in CHAIN_IDS:
-                known_chains.append(ch)
-                seen.add(ch)
-
-    if not known_chains:
-        known_chains = list(CHAIN_IDS.keys())
-
-    remaining_chains = [ch for ch in CHAIN_IDS if ch not in seen]
-
-    _debug_log(
-        debug,
-        f"Chain resolution: {len(unknowns)} unknown contract(s), "
-        f"probing {len(known_chains)} known chain(s): {known_chains}",
-    )
-
-    # address -> list of chains where it has code
-    matched: dict[str, list[str]] = {c["address"]: [] for c in unknowns}
-    all_addrs = list(matched.keys())
-
-    # Phase 1: probe ALL unknowns on ALL known chains in parallel.
-    _probe_chains(all_addrs, known_chains, api_key, matched, debug)
-
-    # Phase 2: for addresses that matched NOTHING on known chains, probe the
-    # remaining chains in parallel.
-    unresolved = [addr for addr, chains in matched.items() if not chains]
-    if unresolved and remaining_chains:
-        _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
-        _probe_chains(unresolved, remaining_chains, api_key, matched, debug)
-
-    # Apply results.
-    resolved_count = 0
-    for contract in unknowns:
-        chains = matched.get(contract["address"], [])
-        if chains:
-            contract["chains"] = canonical_chain_list(chains)
-            resolved_count += 1
-            _debug_log(debug, f"  {contract['address']}: resolved to {chains}")
-
-    _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
-    return contracts
-
-
-def validate_claimed_chains(
-    contracts: list[dict[str, Any]],
+def resolve_address_chains(
+    addresses: list[str],
     *,
-    source_names: tuple[str, ...] = ("exa_deep_research",),
+    debug: bool = False,
+) -> dict[str, list[str]]:
+    """Probe every supported chain and return deployed-code matches per address.
+
+    Returns ``{address: [chain, ...]}``. Addresses with no deployed code on any
+    supported chain are present with an empty list so callers can intentionally
+    avoid writing unknown-chain rows.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in addresses:
+        address = _normalize_probe_address(raw)
+        if address not in seen:
+            seen.add(address)
+            normalized.append(address)
+
+    if not normalized:
+        return {}
+
+    chains = list(CHAIN_IDS.keys())
+    uncovered = sorted(ch for ch in chains if _chain_id_for_probe(ch) is None)
+    if uncovered:
+        raise RuntimeError(f"No chain id configured for chain(s): {uncovered}")
+
+    matched: dict[str, list[str]] = {address: [] for address in normalized}
+    _debug_log(debug, f"Chain materialization: probing {len(normalized)} address(es) across {len(chains)} chain(s)")
+    _probe_chains(normalized, chains, matched, debug)
+
+    return {
+        address: sorted(canonical_chain_list(chains) or [], key=lambda chain: list(CHAIN_IDS).index(chain))
+        for address, chains in matched.items()
+    }
+
+
+def expand_entries_by_resolved_chains(
+    entries: list[dict[str, Any]],
+    *,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Verify high-risk AI-supplied chain claims with ``eth_getCode``.
+    """Expand discovery write entries into one DB row per resolved chain."""
+    addresses = [str(entry.get("address") or "") for entry in entries]
+    chain_map = resolve_address_chains(addresses, debug=debug)
+    expanded: list[dict[str, Any]] = []
 
-    If a claimed chain has no code, probe the remaining supported chains and
-    either correct to the detected chain(s) or mark it unknown.
-    """
-    targets: list[tuple[dict[str, Any], str, list[str]]] = []
-    for contract in contracts:
-        sources = set(contract.get("source") or [])
-        if sources.isdisjoint(source_names):
-            continue
-        address = str(contract.get("address") or "").lower()
-        chains = canonical_chain_list(contract.get("chains")) or []
-        claimed = [chain for chain in chains if chain and chain != "unknown" and chain in CHAIN_IDS]
-        if address and claimed:
-            targets.append((contract, address, claimed))
+    for entry in entries:
+        address = _normalize_probe_address(entry.get("address"))
+        for chain in chain_map.get(address, []):
+            materialized = dict(entry)
+            materialized["address"] = address
+            materialized["chain"] = chain
+            materialized["chains"] = [chain]
+            expanded.append(materialized)
 
-    if not targets:
-        return contracts
-
-    api_key = _get_alchemy_key()
-
-    for contract, address, claimed in targets:
-        matched: dict[str, list[str]] = {address: []}
-        _probe_chains([address], claimed, api_key, matched, debug)
-        if matched[address]:
-            contract["chains"] = canonical_chain_list(matched[address])
-            continue
-
-        remaining = [chain for chain in CHAIN_IDS if chain not in set(claimed)]
-        if remaining:
-            _probe_chains([address], remaining, api_key, matched, debug)
-        if matched[address]:
-            corrected = canonical_chain_list(matched[address]) or ["unknown"]
-            contract["chains"] = corrected
-            _debug_log(debug, f"  {address}: corrected claimed chain {claimed} -> {corrected}")
-        else:
-            contract["chains"] = ["unknown"]
-            contract["chain_sanity"] = {
-                "status": "unresolved_no_code_on_claimed_or_supported_chains",
-                "claimed_chains": claimed,
-            }
-            _debug_log(debug, f"  {address}: no code on claimed chain(s) {claimed}; marked unknown")
-
-    return contracts
+    _debug_log(debug, f"Chain materialization: expanded {len(entries)} entry/entries to {len(expanded)} chain row(s)")
+    return expanded

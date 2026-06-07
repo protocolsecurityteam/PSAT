@@ -36,10 +36,11 @@ from services.artifacts import (
     make_job_stage_context,
     make_stage_artifact,
 )
-from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
+from services.discovery.audit_reports import merge_audit_reports
+from services.discovery.chain_resolver import expand_entries_by_resolved_chains
 from services.discovery.deployer import _batch_get_creators
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources
-from services.discovery.inventory import merge_inventory, search_protocol_inventory
+from services.discovery.inventory import merge_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
@@ -49,22 +50,16 @@ from workers.base import BaseWorker, JobHandledDirectly
 logger = logging.getLogger("workers.discovery")
 
 
-def _request_chain_id(request: dict) -> int | None:
-    raw = request.get("chain_id")
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _contract_from_inventory_entry(entry: dict, request: dict, default_chain: str | None) -> ContractSchema | None:
+def _contract_from_inventory_entry(entry: dict) -> ContractSchema | None:
     address = entry.get("address")
     if not isinstance(address, str) or not address:
         return None
     entry_chains = entry.get("chains")
-    entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
-    chain_name = entry_chain if isinstance(entry_chain, str) and entry_chain else default_chain
-    chain_id = chain_id_for_chain_name(chain_name) or _request_chain_id(request) or 1
+    if not isinstance(entry_chains, list) or not entry_chains or not isinstance(entry_chains[0], str):
+        return None
+    chain_id = chain_id_for_chain_name(entry_chains[0])
+    if chain_id is None:
+        return None
     name = entry.get("name") if isinstance(entry.get("name"), str) else None
     return make_contract(
         address=address,
@@ -74,12 +69,12 @@ def _contract_from_inventory_entry(entry: dict, request: dict, default_chain: st
     )
 
 
-def _contracts_from_inventory(inventory: dict, request: dict, default_chain: str | None) -> list[ContractSchema]:
+def _contracts_from_inventory(inventory: dict) -> list[ContractSchema]:
     contracts: list[ContractSchema] = []
     for entry in inventory.get("contracts", []):
         if not isinstance(entry, dict):
             continue
-        contract = _contract_from_inventory_entry(entry, request, default_chain)
+        contract = _contract_from_inventory_entry(entry)
         if contract is not None:
             contracts.append(contract)
     return contracts
@@ -249,25 +244,13 @@ class DiscoveryWorker(BaseWorker):
         # dependency two-pass for BoringVault-class components, and SPA-bait overrides.
         from services.discovery.run_discovery import run_discovery
 
-        try:
-            with log_timed_phase(logger, "unified_discovery") as ph:
-                unified = run_discovery(company, chain=chain)
-                inventory = unified["addresses"]
-                audit_result_raw: dict | None = unified["audits"]
-                discovery_meta = unified["meta"]
-                ph["contracts"] = len(inventory) if hasattr(inventory, "__len__") else None
-                ph["audits"] = len(audit_result_raw) if isinstance(audit_result_raw, (list, dict)) else None
-        except Exception as exc:
-            record_degraded(
-                phase="unified_discovery",
-                exc=exc,
-                context={"company": company, "chain": chain},
-                include_traceback=True,
-            )
-            logger.warning("Job %s: unified discovery failed, falling back to legacy search: %s", job.id, exc)
-            inventory = search_protocol_inventory(company, chain=chain)
-            audit_result_raw = None
-            discovery_meta = {"fallback": True, "error": str(exc)}
+        with log_timed_phase(logger, "unified_discovery") as ph:
+            unified = run_discovery(company, chain=chain)
+            inventory = unified["addresses"]
+            audit_result_raw: dict = unified["audits"]
+            discovery_meta = unified["meta"]
+            ph["contracts"] = len(inventory) if hasattr(inventory, "__len__") else None
+            ph["audits"] = len(audit_result_raw) if isinstance(audit_result_raw, (list, dict)) else None
 
         # Merge with previous inventory if available
         if prev_inventory and isinstance(prev_inventory, dict):
@@ -301,12 +284,6 @@ class DiscoveryWorker(BaseWorker):
 
         audit_result: dict | None = None
         try:
-            if audit_result_raw is None:
-                # Legacy fallback path (unified discovery failed above)
-                audit_result_raw = search_audit_reports(
-                    company,
-                    official_domain=inventory.get("official_domain"),
-                )
             audit_result = audit_result_raw
             if prev_audits:
                 audit_result = merge_audit_reports(prev_audits, audit_result)
@@ -343,10 +320,10 @@ class DiscoveryWorker(BaseWorker):
         bulk_entries: list[dict] = []
         for entry in discovered:
             entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
-            entry_sources = entry.get("source") or ["inventory"]
-            if not isinstance(entry_sources, list):
-                entry_sources = [str(entry_sources)]
+            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else None
+            entry_sources = entry.get("source")
+            if not isinstance(entry_sources, list) or not entry_sources:
+                raise ValueError(f"Discovered contract entry missing explicit source: {entry!r}")
             bulk_entries.append(
                 {
                     "address": str(entry["address"]),
@@ -360,6 +337,7 @@ class DiscoveryWorker(BaseWorker):
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
         # into roughly one round-trip.
+        bulk_entries = expand_entries_by_resolved_chains(bulk_entries)
         bulk_upsert_discovered_contracts(session, protocol_id=protocol_row.id, entries=bulk_entries)
         session.commit()
 
@@ -370,7 +348,7 @@ class DiscoveryWorker(BaseWorker):
             "discovered_count": len(discovered),
         }
         artifact_data = {
-            "contracts": _contracts_from_inventory(inventory, request, chain),
+            "contracts": _contracts_from_inventory(inventory),
             "inventory": inventory,
             "metadata": discovery_meta,
             "summary": summary,
@@ -467,7 +445,7 @@ class DiscoveryWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "analyze_limit": request.get("analyze_limit", 5),
-                "chain_id": request.get("chain_id") or 1,
+                "chain_id": request.get("chain_id"),
                 "wait": request.get("wait", 10),
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,

@@ -3,7 +3,7 @@
 Pipeline:
 
     Stage 0 — Solodit: seed canonical entries from Cyfrin's aggregator.
-    Stage 1 — Tavily broad + LLM follow-up query + LLM classify.
+    Stage 1 — search backend broad query + LLM follow-up query + LLM classify.
     Stage 2 — fetch confirmed pages (GitHub API or HTML) + LLM extract.
     Stage 3 — follow links discovered in Stage 2 (one level).
     Stage 3.5 — curated auditor-portfolio crawl.
@@ -31,7 +31,7 @@ import requests as _requests
 
 from .. import solodit as _solodit
 from ..audit_reports_llm import classify_search_results, generate_followup_query
-from ..inventory_domain import _debug_log, _tavily_search
+from ..inventory_domain import SearchFn, _debug_log
 from ._dedup import (
     _collapse_by_filename,
     _collapse_same_audit_mirrors,
@@ -177,9 +177,9 @@ def _build_fallback_entry(
     pdf_url: str | None = None,
 ) -> dict[str, Any]:
     """Build a report entry from Stage 1 metadata when extraction fails."""
-    tavily_match = next((r for r in all_results if r.get("url") == url), None)
-    tavily_title = (tavily_match.get("title") or "").strip() if tavily_match else ""
-    title = str(classification.get("title") or "").strip() or tavily_title or f"{company} Audit Report"
+    search_match = next((r for r in all_results if r.get("url") == url), None)
+    search_title = (search_match.get("title") or "").strip() if search_match else ""
+    title = str(classification.get("title") or "").strip() or search_title or f"{company} Audit Report"
     normalized_url = github_blob_to_raw(url)
     normalized_pdf_url = github_blob_to_raw(pdf_url) if pdf_url else None
     return {
@@ -216,6 +216,9 @@ _AUDITOR_PORTFOLIO_REPOS: tuple[tuple[str, str], ...] = (
 
 def search_audit_reports(
     company: str,
+    *,
+    search_fn: SearchFn,
+    seed_results: list[dict[str, Any]] | None = None,
     official_domain: str | None = None,
     max_queries: int = 2,
     debug: bool = False,
@@ -267,9 +270,9 @@ def search_audit_reports(
         notes.append(f"Solodit: {len(solodit_results)} audit(s)")
         _debug_log(debug, f"Solodit seeded {len(solodit_results)} audit(s)")
 
-    # --- Stage 1a: Tavily broad search + LLM follow-up query ---
+    # --- Stage 1a: broad search + LLM follow-up query ---
 
-    broad_results = _tavily_search(
+    broad_results = search_fn(
         f'"{clean_company}" smart contract security audit report',
         max_results=10,
         queries_used=queries_used,
@@ -280,7 +283,7 @@ def search_audit_reports(
     followup_query = generate_followup_query(broad_results, clean_company, debug=debug)
     followup_results: list[dict[str, Any]] = []
     if followup_query:
-        followup_results = _tavily_search(
+        followup_results = search_fn(
             followup_query,
             max_results=10,
             queries_used=queries_used,
@@ -298,7 +301,29 @@ def search_audit_reports(
     # Still runs on empty input (returns []); Solodit-seeded reports then
     # flow straight into validate+cluster at the end.
     classified = classify_search_results(all_results, clean_company, debug=debug)
-    notes.append(f"LLM classified {len(classified)} result(s) as audit reports")
+    llm_classified_count = len(classified)
+    seed_count = 0
+    if seed_results:
+        seen_seed_urls = {str(item.get("url") or "").strip() for item in classified}
+        for seed in seed_results:
+            url = str(seed.get("url") or "").strip()
+            if not url or url in seen_seed_urls:
+                continue
+            classified.append(
+                {
+                    "url": url,
+                    "title": seed.get("title"),
+                    "auditor": None,
+                    "date": None,
+                    "type": None,
+                    "confidence": 1.0,
+                }
+            )
+            seen_seed_urls.add(url)
+            seed_count += 1
+    notes.append(f"LLM classified {llm_classified_count} result(s) as audit reports")
+    if seed_count:
+        notes.append(f"Deep Research audit seeds: {seed_count}")
     if not classified and all_results:
         notes.append("No results classified as audit reports")
 
@@ -548,7 +573,7 @@ def search_audit_reports(
             )
 
     notes.append(f"Extracted {len(reports)} audit report(s)")
-    notes.append(f"Tavily queries used: {queries_used[0]}/{max_queries}")
+    notes.append(f"Search queries used: {queries_used[0]}/{max_queries}")
 
     _debug_log(
         debug,

@@ -27,7 +27,7 @@ def _normalize_url(url: str) -> str:
 
 
 def _dedupe_results_by_url(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate Tavily results by URL, keeping the first occurrence."""
+    """Deduplicate search results by URL, keeping the first occurrence."""
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for r in results:

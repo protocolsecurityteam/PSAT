@@ -2,7 +2,7 @@
 
 from .activity import enrich_with_activity
 from .audit_reports import merge_audit_reports, search_audit_reports
-from .chain_resolver import resolve_unknown_chains
+from .chain_resolver import expand_entries_by_resolved_chains, resolve_address_chains
 from .classifier import classify_contracts
 from .dependency_graph_builder import build_dependency_visualization
 from .deployer import expand_from_deployers
@@ -19,7 +19,7 @@ __all__ = [
     "enrich_dependency_metadata",
     "enrich_with_activity",
     "expand_from_deployers",
-    "resolve_unknown_chains",
+    "expand_entries_by_resolved_chains",
     "fetch",
     "find_dependencies",
     "find_dynamic_dependencies",
@@ -29,5 +29,6 @@ __all__ = [
     "scaffold",
     "search_audit_reports",
     "search_protocol_inventory",
+    "resolve_address_chains",
     "build_dependency_visualization",
 ]

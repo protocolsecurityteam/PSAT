@@ -40,7 +40,9 @@ files on disk, but the DB is the authoritative store.
 Common env vars:
 
 - `ETHERSCAN_API_KEY`
-- `ETH_RPC` — Ethereum JSON-RPC endpoint
+- `ERPC_BASE_URL` — eRPC base URL for chain-aware RPC routing
+- `ERPC_SECRET` — optional eRPC secret header value
+- `ETH_RPC` — optional legacy/single-chain RPC override
 - `ENVIO_API_TOKEN` — for HyperSync policy backfill
 - `DATABASE_URL` — PostgreSQL connection string
 - `TAVILY_API_KEY`

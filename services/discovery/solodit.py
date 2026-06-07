@@ -22,7 +22,7 @@ without auth. This module is a thin client around that endpoint:
 
 The output shape mirrors what ``audit_reports.search_audit_reports``
 expects, so callers can drop Solodit's results straight into the same
-report list that Tavily/GitHub-crawled entries land in. The downstream
+report list that search/GitHub-crawled entries land in. The downstream
 LLM validate-and-cluster pass handles cross-source mirror dedup.
 """
 

@@ -7,9 +7,9 @@ Target recall: ~75% audit URLs, ~82% address URLs, plus dependency
 audits for protocols with third-party components. Target cost:
 ~$1.40 per protocol cold, ~$0.05 cached re-run.
 
-Output shape mirrors the legacy `search_audit_reports()` and
-`search_protocol_inventory()` return dicts so the existing workers
-(`workers/discovery.py`) can persist without schema changes.
+Output shape keeps the existing `search_audit_reports()` and
+`search_protocol_inventory()` return dicts so workers can persist without
+schema changes.
 """
 
 from __future__ import annotations
@@ -24,10 +24,9 @@ import yaml
 
 from services.discovery import audit_reports as audit_reports_mod
 from services.discovery import inventory as inventory_mod
-from services.discovery import inventory_domain as inventory_domain_mod
 from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
-from services.discovery.chain_resolver import validate_claimed_chains
+from services.discovery.inventory_domain import SearchFn
 from utils import exa, llm
 from utils.chains import canonical_chain
 
@@ -123,72 +122,28 @@ class _Budget:
             raise RuntimeError(f"cost circuit breaker tripped at ${self.estimated_cost_usd:.2f}")
 
 
-def _make_search_fn(mode: str, budget: _Budget, research_seeds: list[dict] | None = None):
-    """Backend-agnostic _tavily_search replacement routed to Exa."""
-    call_count = [0]
+def _make_exa_search_fn(mode: str, budget: _Budget) -> SearchFn:
+    """Return a discovery search function routed through Exa."""
 
     def fn(
         query: str,
         max_results: int,
         queries_used: list[int],
         max_queries: int,
-        errors: list[dict],
+        errors: list[dict[str, Any]],
         debug: bool = False,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         if queries_used[0] >= max_queries:
             return []
         queries_used[0] += 1
-        call_count[0] += 1
         try:
-            if mode == "research_plus" and call_count[0] == 1 and research_seeds is not None:
-                return research_seeds[:max_results]
-            budget.charge_search(mode if mode != "research_plus" else "auto")
-            effective_mode = "auto" if mode == "research_plus" else mode
-            return exa.search(query, max_results=max_results, mode=effective_mode)
+            budget.charge_search(mode)
+            return exa.search(query, max_results=max_results, mode=mode)
         except Exception as exc:
             errors.append({"provider": "exa", "error": str(exc), "query": query[:120]})
             return []
 
     return fn
-
-
-def _patch_search(fn):
-    audit_reports_mod._tavily_search = fn  # type: ignore[attr-defined]
-    inventory_mod._tavily_search = fn  # type: ignore[attr-defined]
-    inventory_domain_mod._tavily_search = fn  # type: ignore[attr-defined]
-
-
-def _restore_search(original):
-    audit_reports_mod._tavily_search = original  # type: ignore[attr-defined]
-    inventory_mod._tavily_search = original  # type: ignore[attr-defined]
-    inventory_domain_mod._tavily_search = original  # type: ignore[attr-defined]
-
-
-def _patch_classify_with_seeds(research_seeds: list[dict]):
-    """Bypass stage 1b classifier for Deep Research seeds."""
-    original = audit_reports_mod.classify_search_results  # type: ignore[attr-defined]
-
-    def wrapped(results, company, debug=False):
-        classified = original(results, company, debug=debug)
-        seen = {c.get("url", "").strip() for c in classified}
-        for cit in research_seeds:
-            url = cit.get("url", "").strip()
-            if url and url not in seen:
-                classified.append(
-                    {
-                        "url": url,
-                        "title": cit.get("title"),
-                        "auditor": None,
-                        "date": None,
-                        "type": None,
-                        "confidence": 1.0,
-                    }
-                )
-                seen.add(url)
-        return classified
-
-    audit_reports_mod.classify_search_results = wrapped  # type: ignore[attr-defined]
-    return original
 
 
 def _audit_research_instructions(protocol: str) -> str:
@@ -467,9 +422,6 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     started_at = time.monotonic()
 
     # ---- Audits ----
-    original_search = inventory_domain_mod._tavily_search  # type: ignore[attr-defined]
-    original_classify = audit_reports_mod.classify_search_results  # type: ignore[attr-defined]
-
     # 1a. Deep Research for audit seeds
     audit_seeds: list[dict] = []
     audit_seed_metadata: dict[str, dict[str, Any]] = {}
@@ -496,34 +448,27 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     except Exception as exc:
         logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
 
-    # 1b. Full pipeline: exa/deep-lite search + research_plus classifier bypass
-    _patch_search(_make_search_fn("deep-lite", budget, research_seeds=audit_seeds))
-    _patch_classify_with_seeds(audit_seeds)
-    try:
-        audit_result = audit_reports_mod.search_audit_reports(
-            protocol,
-            official_domain=official_domain,
-            max_queries=4,
-            debug=False,
-        )
-    finally:
-        _restore_search(original_search)
-        audit_reports_mod.classify_search_results = original_classify  # type: ignore[attr-defined]
+    # 1b. Full pipeline: Exa/deep-lite search + explicit Deep Research seeds.
+    audit_result = audit_reports_mod.search_audit_reports(
+        protocol,
+        search_fn=_make_exa_search_fn("deep-lite", budget),
+        seed_results=audit_seeds,
+        official_domain=official_domain,
+        max_queries=4,
+        debug=False,
+    )
     _merge_ai_audit_metadata(audit_result, audit_seed_metadata)
 
     # ---- Addresses ----
-    _patch_search(_make_search_fn("auto", budget))  # exa/regular
-    try:
-        inventory_result = inventory_mod.search_protocol_inventory(
-            protocol,
-            chain=chain,
-            limit=500,
-            max_queries=4,
-            run_deployer=True,
-            debug=False,
-        )
-    finally:
-        _restore_search(original_search)
+    inventory_result = inventory_mod.search_protocol_inventory(
+        protocol,
+        search_fn=_make_exa_search_fn("auto", budget),
+        chain=chain,
+        limit=500,
+        max_queries=4,
+        run_deployer=True,
+        debug=False,
+    )
 
     # Attach address-side Deep Research output as additional evidence.
     try:
@@ -545,15 +490,6 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
             )
     except Exception as exc:
         logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
-
-    try:
-        inventory_result["contracts"] = validate_claimed_chains(
-            inventory_result.get("contracts", []),
-            source_names=("exa_deep_research",),
-            debug=False,
-        )
-    except Exception as exc:
-        logger.warning("claimed-chain sanity check failed for %s: %s", protocol, exc)
 
     # ---- Dependency two-pass (conditional) ----
     dependency_pass_triggered = _needs_dependency_pass(

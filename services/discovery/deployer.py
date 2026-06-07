@@ -1,10 +1,10 @@
 """Deployer-based contract discovery.
 
-Given a set of known contract addresses (e.g. from the Tavily pipeline), this
+Given a set of known contract addresses (e.g. from the inventory pipeline), this
 module identifies the deployer wallets via Etherscan's ``getcontractcreation``
 API, fetches every contract each deployer has ever created, optionally resolves
 contract names, and returns entries in the standard inventory entry format so
-they can be merged with Tavily-sourced entries in ``_build_contracts()``.
+they can be merged with search-sourced entries in ``_build_contracts()``.
 
 Deployer filtering
 ------------------
@@ -185,7 +185,7 @@ def expand_from_deployers(
        (``kind="deployer_expansion"``, ``chain="unknown"``).
 
     Addresses already present in *seed_addresses* are still emitted so that
-    ``_build_contracts()`` can corroborate them with Tavily evidence.
+    ``_build_contracts()`` can corroborate them with inventory evidence.
     """
     if not seed_addresses:
         return []

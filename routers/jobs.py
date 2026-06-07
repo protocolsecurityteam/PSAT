@@ -36,9 +36,9 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
     if request.address and not request.address.startswith("0x"):
         raise HTTPException(status_code=400, detail="Address must start with 0x")
     with deps.SessionLocal() as session:
-        # Workers read ``request["rpc_url"]`` as a per-job override of
-        # ``ETH_RPC`` — the value is stored verbatim here and sanitized
-        # by ``Job.to_dict`` at output.
+        # Workers read ``request["rpc_url"]`` as a per-job RPC override; the
+        # value is stored verbatim here and sanitized by ``Job.to_dict`` at
+        # output.
         req_dict = request.model_dump()
         if request.dapp_urls:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)

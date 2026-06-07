@@ -25,6 +25,7 @@ from db.queue import (
 )
 from services.artifacts import CRAWLER_ARTIFACT, make_job_stage_context, make_stage_artifact
 from services.crawlers.dapp.crawl import crawl_dapp
+from services.discovery.chain_resolver import expand_entries_by_resolved_chains
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
@@ -42,17 +43,13 @@ class DAppCrawlWorker(BaseWorker):
         if not urls:
             raise ValueError("dapp_crawl job missing dapp_urls in request")
 
-        chain_id = request.get("chain_id") or 1
-        chain_id_to_name = {
-            1: "ethereum",
-            10: "optimism",
-            56: "bsc",
-            137: "polygon",
-            8453: "base",
-            42161: "arbitrum",
-            43114: "avalanche",
-            534352: "scroll",
-        }
+        raw_chain_id = request.get("chain_id")
+        if raw_chain_id is None:
+            raise ValueError("dapp_crawl job missing chain_id in request")
+        try:
+            chain_id = int(raw_chain_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"dapp_crawl job has invalid chain_id: {raw_chain_id!r}") from exc
         wait = request.get("wait") or 10
 
         # Derive / create Protocol row from URL hostname if no company context exists
@@ -64,8 +61,8 @@ class DAppCrawlWorker(BaseWorker):
         # Route through the resolver so dapp-crawl jobs that started from a
         # hostname spelling ("ether.fi") collapse onto the same canonical
         # row as discovery jobs that started from the github-org spelling
-        # ("etherfi"). Returns None for unknown hostnames; the fallback
-        # name-keyed lookup handles those.
+        # ("etherfi"). Returns None for unknown hostnames; the name-keyed
+        # lookup handles those.
         resolved = resolve_protocol(protocol_name)
         canonical_slug = pick_family_slug(resolved)
         protocol_row = get_or_create_protocol(
@@ -122,7 +119,6 @@ class DAppCrawlWorker(BaseWorker):
 
         # Write ALL discovered addresses to contracts table
         protocol_id = protocol_row.id
-        default_chain = request.get("chain") or chain_id_to_name.get(chain_id)
         # Build per-address context from address_details
         detail_by_addr: dict[str, dict] = {}
         for detail in result.get("address_details", []):
@@ -134,7 +130,7 @@ class DAppCrawlWorker(BaseWorker):
         for addr in addresses:
             normalized = addr.lower()
             info = detail_by_addr.get(normalized, {})
-            addr_chain = info.get("chain") or default_chain
+            addr_chain = info.get("chain")
             source_urls = info.get("source_urls", [])
             bulk_entries.append(
                 {
@@ -144,6 +140,7 @@ class DAppCrawlWorker(BaseWorker):
                     "discovery_url": source_urls[0] if source_urls else None,
                 }
             )
+        bulk_entries = expand_entries_by_resolved_chains(bulk_entries)
         bulk_upsert_discovered_contracts(session, protocol_id=protocol_id, entries=bulk_entries)
         session.commit()
         record_stage_metric("contracts_found", len(addresses))

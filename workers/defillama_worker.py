@@ -27,6 +27,7 @@ from db.queue import (
 )
 from services.artifacts import CRAWLER_ARTIFACT, make_job_stage_context, make_stage_artifact
 from services.crawlers.defillama.scan import scan_protocol
+from services.discovery.chain_resolver import expand_entries_by_resolved_chains
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
@@ -108,6 +109,7 @@ class DefiLlamaWorker(BaseWorker):
                     "new_sources": ["defillama"],
                 }
             )
+        bulk_entries = expand_entries_by_resolved_chains(bulk_entries)
         bulk_upsert_discovered_contracts(session, protocol_id=protocol_id, entries=bulk_entries)
         session.commit()
         record_stage_metric("contracts_found", len(addresses))

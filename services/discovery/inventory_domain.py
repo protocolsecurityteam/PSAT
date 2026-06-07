@@ -3,7 +3,7 @@
 This module provides the infrastructure layer for the inventory discovery pipeline:
   - Shared constants: regex patterns, blockchain explorer mappings, trust lists
   - Utility helpers: domain matching, chain inference, address extraction, page fetching
-  - Tavily search with query budget management
+  - Explicit search backend integration with query budget management
   - LLM-based official domain identification and page selection
 """
 
@@ -14,12 +14,12 @@ import re
 import sys
 from collections import defaultdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import requests as _requests
 
-from utils import llm, tavily
+from utils import llm
 
 from .static_dependencies import normalize_address as _normalize_address
 
@@ -73,6 +73,20 @@ CHAIN_IDS: dict[str, int] = {
     "zksync": 324,
     "blast": 81457,
 }
+
+
+class SearchFn(Protocol):
+    """Search callable used by discovery functions."""
+
+    def __call__(
+        self,
+        query: str,
+        max_results: int,
+        queries_used: list[int],
+        max_queries: int,
+        errors: list[dict[str, Any]],
+        debug: bool = False,
+    ) -> list[dict[str, Any]]: ...
 
 
 class RateLimiter:
@@ -188,42 +202,6 @@ def _maybe_domain(value: str) -> str | None:
     if " " in clean or not DOMAIN_RE.match(clean) or _is_explorer_domain(clean):
         return None
     return clean
-
-
-def _tavily_search(
-    query: str,
-    max_results: int,
-    queries_used: list[int],
-    max_queries: int,
-    errors: list[dict],
-    debug: bool = False,
-) -> list[dict]:
-    """Run a single Tavily search, respecting query budget.
-
-    Always uses include_raw_content=False — page content is fetched directly
-    via HTTP where needed, avoiding Tavily's per-result content charges.
-    """
-    if queries_used[0] >= max_queries:
-        _debug_log(debug, f"Skipping Tavily query (budget exhausted): {query!r}")
-        return []
-    queries_used[0] += 1
-    _debug_log(
-        debug,
-        f"Tavily query {queries_used[0]}/{max_queries}: {query!r} (max_results={max_results})",
-    )
-    try:
-        results = tavily.search(
-            query,
-            max_results=max_results,
-            topic="general",
-            include_raw_content=False,
-        )
-        _debug_log(debug, f"Tavily returned {len(results)} result(s)")
-        return results
-    except (tavily.TavilyError, _requests.RequestException) as exc:
-        errors.append(tavily.error_from_exception(exc))
-        _debug_log(debug, f"Tavily query failed: {exc!r}")
-        return []
 
 
 def _llm_select_domain(
@@ -388,6 +366,7 @@ def _discover_contract_inventory_pages(
     queries_used: list[int],
     max_queries: int,
     errors: list[dict],
+    search_fn: SearchFn,
     extra_domains: list[str] | None = None,
     debug: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -398,7 +377,7 @@ def _discover_contract_inventory_pages(
     site_results: list[dict[str, Any]] = []
     for d in all_domains:
         site_results.extend(
-            _tavily_search(
+            search_fn(
                 f"site:{d} {company} contract addresses deployments smart contracts",
                 max_results=12,
                 queries_used=queries_used,

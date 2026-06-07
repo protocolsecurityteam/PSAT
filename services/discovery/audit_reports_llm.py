@@ -1,6 +1,6 @@
 """LLM-based classification and extraction for audit report discovery.
 
-Stage 1 — classify_search_results: given Tavily search results, determine which
+Stage 1 — classify_search_results: given search results, determine which
 are actual third-party audit reports and extract basic metadata.
 
 Stage 2 — extract_report_details: given a fetched page's text, extract structured
@@ -230,7 +230,7 @@ def classify_search_results(
     company: str,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Stage 1: Classify Tavily results as audit/not-audit.
+    """Stage 1: Classify search results as audit/not-audit.
 
     Returns list of ``{url, is_audit, auditor, type, confidence}`` dicts for
     results classified as audits with confidence >= 0.5.

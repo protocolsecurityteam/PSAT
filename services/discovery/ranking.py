@@ -11,7 +11,7 @@ the single place those decisions live now.
 Layers:
 
 1. **Initial confidence** — assigned at discovery time.
-   - Inventory entries: ``score_inventory_evidence`` reads Tavily-derived
+   - Inventory entries: ``score_inventory_evidence`` reads search-derived
      evidence (table/link/text/deployer/explorer) and produces 0.35-0.99.
    - DApp / DefiLlama rows: no evidence to score, so they store
      ``confidence=NULL`` and the selector applies a source-specific
@@ -43,7 +43,7 @@ from .activity import enrich_with_activity
 # Minimum confidence for a contract to be queued for analysis. Applied
 # by the selection stage to every discovery source uniformly — the
 # threshold exists to cut rows that exist only as weak rumors (a one-off
-# Tavily mention with no corroboration). DApp/DefiLlama rows default
+# search result mention with no corroboration). DApp/DefiLlama rows default
 # above this floor via ``default_confidence_for_source``, so they all
 # clear it unless a test explicitly overrides confidence.
 MIN_CONFIDENCE_THRESHOLD = 0.3
@@ -102,7 +102,6 @@ DEFAULT_CONFIDENCE_BY_SOURCE: dict[str, float] = {
     "defillama": 0.7,
     "inventory": 0.5,
     "ai_inventory": 0.5,
-    "tavily_ai_inventory": 0.5,
     "deployer_expansion": 0.4,
 }
 DEFAULT_CONFIDENCE_FALLBACK = 0.5

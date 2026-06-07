@@ -1,7 +1,7 @@
 """Orchestrator for protocol contract inventory discovery.
 
 Given a company/protocol name or domain, this module:
-  1. Identifies the official domain via Tavily search + LLM  (inventory_domain.py)
+  1. Identifies the official domain via explicit search + LLM (inventory_domain.py)
   2. Selects pages likely to contain contract inventories     (inventory_domain.py)
   3. Extracts contract entries from those pages               (inventory_extract.py)
   4. Scores, deduplicates, and ranks the results
@@ -14,16 +14,15 @@ from typing import Any
 
 from utils.chains import canonical_chain, canonical_chain_list
 
-from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
 from .deployer import expand_from_deployers
 from .inventory_domain import (
     CHAIN_SORT_ORDER,
+    SearchFn,
     _debug_log,
     _discover_contract_inventory_pages,
     _domain_candidates_from_results,
     _llm_select_domain,
     _maybe_domain,
-    _tavily_search,
 )
 from .inventory_extract import extract_inventory_entries_from_pages
 from .ranking import score_inventory_evidence
@@ -262,6 +261,8 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
 
 def search_protocol_inventory(
     company: str,
+    *,
+    search_fn: SearchFn,
     chain: str | None = None,
     limit: int = 500,
     max_queries: int = 4,
@@ -289,13 +290,13 @@ def search_protocol_inventory(
         ),
     )
 
-    # Always run broad Tavily + LLM domain selection. A domain-shaped input
-    # (e.g. ``"ether.fi"``) is kept as a fallback hint, but we prefer the
+    # Always run broad search + LLM domain selection. A domain-shaped input
+    # (e.g. ``"ether.fi"``) is kept as an input hint, but we prefer the
     # LLM's choice so companion docs/github hosts (``etherfi.gitbook.io``,
     # ``github.com/etherfi-protocol``) can become the primary when they're
     # the real contract-inventory source.
     hint_domain = _maybe_domain(clean_company)
-    broad_results = _tavily_search(
+    broad_results = search_fn(
         f'"{clean_company}" protocol smart contract addresses deployments docs',
         max_results=10,
         queries_used=queries_used,
@@ -328,7 +329,7 @@ def search_protocol_inventory(
 
     if not official_domain:
         notes.append("Could not identify an official domain")
-        notes.append(f"Tavily queries used: {queries_used[0]}/{max_queries}")
+        notes.append(f"Search queries used: {queries_used[0]}/{max_queries}")
         return {
             "company": clean_company,
             "chain": requested_chain or "any",
@@ -349,6 +350,7 @@ def search_protocol_inventory(
         queries_used,
         max_queries,
         errors,
+        search_fn,
         extra_domains=extra_domains if "extra_domains" in locals() else None,
         debug=debug,
     )
@@ -363,11 +365,11 @@ def search_protocol_inventory(
 
     if selected_urls:
         notes.append(f"Selected pages: {len(selected_urls)}")
-    tavily_entries = extract_inventory_entries_from_pages(selected_urls, requested_chain, debug=debug)
+    page_entries = extract_inventory_entries_from_pages(selected_urls, requested_chain, debug=debug)
 
     deployer_entries: list[dict[str, Any]] = []
-    if run_deployer and tavily_entries:
-        seed_addresses = sorted({e["address"] for e in tavily_entries})
+    if run_deployer and page_entries:
+        seed_addresses = sorted({e["address"] for e in page_entries})
         _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
         try:
             deployer_entries = expand_from_deployers(seed_addresses, debug=debug)
@@ -376,31 +378,8 @@ def search_protocol_inventory(
             _debug_log(debug, f"Deployer expansion failed: {exc!r}")
             notes.append(f"Deployer expansion failed: {exc}")
 
-    entries = tavily_entries + deployer_entries
+    entries = page_entries + deployer_entries
     contracts, sources_map = _build_contracts(entries, limit=limit)
-
-    # Resolve unknown chains before activity ranking (activity needs correct chain_id).
-    def _primary_chain(c: dict[str, Any]) -> str:
-        chains = c.get("chains", [])
-        return (canonical_chain(chains[0]) if chains else None) or "unknown"
-
-    unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
-    if unknown_count:
-        _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
-        try:
-            contracts = resolve_unknown_chains(contracts, debug=debug)
-            resolved = unknown_count - sum(1 for c in contracts if _primary_chain(c) == "unknown")
-            notes.append(f"Chain resolution: resolved {resolved}/{unknown_count} unknown chain(s)")
-        except Exception as exc:
-            _debug_log(debug, f"Chain resolution failed: {exc!r}")
-            notes.append(f"Chain resolution failed: {exc}")
-
-    if any("exa_deep_research" in (c.get("source") or []) for c in contracts):
-        try:
-            contracts = validate_claimed_chains(contracts, source_names=("exa_deep_research",), debug=debug)
-        except Exception as exc:
-            _debug_log(debug, f"Claimed-chain sanity check failed: {exc!r}")
-            notes.append(f"Claimed-chain sanity check failed: {exc}")
 
     # Activity ranking intentionally does NOT run here. The worker
     # pipeline runs the single authoritative ranking in the selection
@@ -414,7 +393,7 @@ def search_protocol_inventory(
 
     if not contracts:
         notes.append("No inventory contracts extracted from selected pages")
-    notes.append(f"Tavily queries used: {queries_used[0]}/{max_queries}")
+    notes.append(f"Search queries used: {queries_used[0]}/{max_queries}")
     _debug_log(
         debug,
         (
