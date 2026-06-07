@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from .adapters import AdapterRegistry, EvaluationContext
-from .capabilities import CapabilityExpr
+from .capabilities import CapabilityExpr, CapKind, MembershipQuality
 
 
 def probe_membership(
@@ -135,9 +135,9 @@ def probe_signature(
     # signature must recover to.
     isolated_tree = make_leaf_node(leaf)  # type: ignore[arg-type]
     cap = evaluate_tree_with_registry(isolated_tree, registry, ctx)
-    if cap.kind == "signature_witness" and cap.signer is not None:
+    if cap.kind == CapKind.SIGNATURE_WITNESS and cap.signer is not None:
         answer = _resolve_in_capability(cap.signer, recovered_signer)
-        answer["capability_kind"] = "signature_witness"
+        answer["capability_kind"] = CapKind.SIGNATURE_WITNESS
         answer["signer_capability_kind"] = cap.signer.kind
         answer["leaf_kind"] = leaf_kind
         answer["authority_role"] = role
@@ -170,19 +170,19 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
     for a candidate ``member``."""
     member_lower = member.lower()
 
-    if cap.kind == "finite_set":
+    if cap.kind == CapKind.FINITE_SET:
         members = cap.members or []
         in_set = member_lower in {m.lower() for m in members}
         quality = cap.membership_quality
-        if quality == "exact":
+        if quality == MembershipQuality.EXACT:
             return {"result": "yes" if in_set else "no", "reason": "finite_set_exact"}
-        if quality == "lower_bound":
+        if quality == MembershipQuality.LOWER_BOUND:
             # Listed members are KNOWN to hold; absence means we
             # haven't observed them — could still hold.
             if in_set:
                 return {"result": "yes", "reason": "finite_set_lower_bound"}
             return {"result": "unknown", "reason": "lower_bound_absent"}
-        if quality == "upper_bound":
+        if quality == MembershipQuality.UPPER_BOUND:
             # Listed members ARE all that could hold; absence is a
             # definitive no, but presence isn't a definitive yes
             # (current state may have evicted them).
@@ -191,7 +191,7 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
             return {"result": "unknown", "reason": "upper_bound_present"}
         return {"result": "unknown", "reason": "unknown_quality"}
 
-    if cap.kind == "threshold_group":
+    if cap.kind == CapKind.THRESHOLD_GROUP:
         threshold = cap.threshold or (0, [])
         signers = threshold[1]
         if member_lower in {m.lower() for m in signers}:
@@ -201,13 +201,13 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
             return {"result": "yes", "reason": "threshold_group_signer"}
         return {"result": "no", "reason": "threshold_group_non_signer"}
 
-    if cap.kind == "cofinite_blacklist":
+    if cap.kind == CapKind.COFINITE_BLACKLIST:
         blacklist = cap.blacklist or []
         if member_lower in {m.lower() for m in blacklist}:
             return {"result": "no", "reason": "cofinite_blacklisted"}
         return {"result": "yes", "reason": "cofinite_not_blacklisted"}
 
-    if cap.kind == "external_check_only":
+    if cap.kind == CapKind.EXTERNAL_CHECK_ONLY:
         # The adapter can't enumerate; the caller needs to invoke
         # the probe interface (e.g. authority check / isValidSignature) at
         # the chain level. Surface the probe descriptor so the
@@ -220,24 +220,24 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
             "probe_selector": getattr(check, "target_call_selector", None) if check else None,
         }
 
-    if cap.kind == "signature_witness":
+    if cap.kind == CapKind.SIGNATURE_WITNESS:
         return {"result": "unknown", "reason": "signature_witness"}
 
-    if cap.kind == "unsupported":
+    if cap.kind == CapKind.UNSUPPORTED:
         return {
             "result": "unknown",
             "reason": "capability_unsupported",
             "capability_unsupported_reason": cap.unsupported_reason,
         }
 
-    if cap.kind in ("AND", "OR"):
+    if cap.kind in (CapKind.AND, CapKind.OR):
         # Compose results of children. AND: every child says yes →
         # yes; any child says no → no; otherwise unknown. OR: any
         # child says yes → yes; every child says no → no; otherwise
         # unknown.
         child_results = [_resolve_in_capability(c, member) for c in cap.children]
         statuses = [r["result"] for r in child_results]
-        if cap.kind == "AND":
+        if cap.kind == CapKind.AND:
             if all(s == "yes" for s in statuses):
                 return {"result": "yes", "reason": "and_all_yes"}
             if any(s == "no" for s in statuses):
@@ -250,7 +250,7 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
             return {"result": "no", "reason": "or_all_no"}
         return {"result": "unknown", "reason": "or_some_unknown"}
 
-    if cap.kind == "conditional_universal":
+    if cap.kind == CapKind.CONDITIONAL_UNIVERSAL:
         return {"result": "yes", "reason": "conditional_universal"}
 
     return {"result": "unknown", "reason": "unrecognized_capability"}

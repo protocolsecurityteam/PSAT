@@ -2,52 +2,27 @@
 
 from __future__ import annotations
 
-from typing_extensions import NotRequired, TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from schemas.common import (
     Address,
-    ChainId,
     Contract,
     JsonObject,
-    ServiceBoundaryMetadata,
     StageArtifact,
-    StageContext,
 )
-
-UpgradeEventType: TypeAlias = str
-UpgradeEvent: TypeAlias = JsonObject
-ImplementationRecord: TypeAlias = JsonObject
-ProxyUpgradeHistory: TypeAlias = JsonObject
-DiscoveryContractCandidate: TypeAlias = JsonObject
-DiscoveryInventory: TypeAlias = JsonObject
 
 
 class UpgradeHistoryOutput(TypedDict):
     schema_version: str
     contract: NotRequired[Contract]
     target_address: Address
-    proxies: dict[str, ProxyUpgradeHistory]
+    proxies: dict[str, JsonObject]
     total_upgrades: int
-
-
-class DiscoveryInput(TypedDict, total=False):
-    context: StageContext
-    metadata: ServiceBoundaryMetadata
-    address: Address | None
-    company: str | None
-    name: str | None
-    chain: str | None
-    chain_id: ChainId | None
-    rpc_url: str | None
-    dapp_urls: list[str] | None
-    defillama_protocol: str | None
-    analyze_limit: int
-    force: bool
 
 
 class DiscoveryPayload(TypedDict):
     contracts: list[Contract]
-    inventory: NotRequired[DiscoveryInventory]
+    inventory: NotRequired[JsonObject]
     metadata: NotRequired[JsonObject]
     audit_reports: NotRequired[JsonObject]
     summary: NotRequired[JsonObject]
@@ -71,15 +46,8 @@ SelectionArtifact = StageArtifact[SelectionPayload]
 
 
 __all__ = [
-    "DiscoveryContractCandidate",
-    "DiscoveryInput",
-    "DiscoveryInventory",
     "DiscoveryArtifact",
     "DiscoveryPayload",
-    "ImplementationRecord",
-    "ProxyUpgradeHistory",
-    "UpgradeEvent",
-    "UpgradeEventType",
     "SelectionArtifact",
     "SelectionPayload",
     "UpgradeHistoryOutput",

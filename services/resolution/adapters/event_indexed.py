@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, cast
 
-from ..capabilities import CapabilityExpr, ExternalCheck
+from ..capabilities import CapabilityExpr, Confidence, ExternalCheck, MembershipQuality
 from . import EnumerationResult, EvaluationContext
 
 
@@ -88,7 +88,7 @@ class EventIndexedAdapter:
 
         key_sources = _contextual_key_sources(descriptor.get("key_sources") or [], ctx)
         merged: list[str] = []
-        worst_confidence = "enumerable"
+        worst_confidence = Confidence.ENUMERABLE
         last_block: int | None = None
         for event_address, event_hints in grouped_hints.items():
             first_hint = event_hints[0]
@@ -103,12 +103,12 @@ class EventIndexedAdapter:
                 )
             except Exception:
                 return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
-            if result.confidence == "partial" and result.partial_reason in {
+            if result.confidence == Confidence.PARTIAL and result.partial_reason in {
                 "event_history_fold_unavailable",
                 "unresolved_event_key",
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
-            if result.confidence == "partial" and result.partial_reason == "no_index_cursor":
+            if result.confidence == Confidence.PARTIAL and result.partial_reason == "no_index_cursor":
                 try:
                     fallback = _hypersync_fallback_result(
                         hints=event_hints,
@@ -118,17 +118,17 @@ class EventIndexedAdapter:
                     )
                 except Exception:
                     return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
-                if fallback.confidence == "partial" and fallback.partial_reason == "no_hypersync_token":
+                if fallback.confidence == Confidence.PARTIAL and fallback.partial_reason == "no_hypersync_token":
                     return self._external_check(descriptor, first_hint, ctx, ["no_index_cursor", "no_hypersync_token"])
                 result = fallback
-                if result.confidence == "partial" and result.partial_reason in {
+                if result.confidence == Confidence.PARTIAL and result.partial_reason in {
                     "event_history_fold_unavailable",
                     "unresolved_event_key",
                 }:
                     return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
             merged.extend(result.members)
-            if result.confidence == "partial" and worst_confidence == "enumerable":
-                worst_confidence = "partial"
+            if result.confidence == Confidence.PARTIAL and worst_confidence == Confidence.ENUMERABLE:
+                worst_confidence = Confidence.PARTIAL
             if result.last_indexed_block is not None:
                 last_block = (
                     result.last_indexed_block if last_block is None else min(last_block, result.last_indexed_block)
@@ -136,8 +136,10 @@ class EventIndexedAdapter:
 
         return CapabilityExpr.finite_set(
             merged,
-            quality="exact" if worst_confidence == "enumerable" else "lower_bound",
-            confidence=worst_confidence,  # type: ignore[arg-type]
+            quality=MembershipQuality.EXACT
+            if worst_confidence == Confidence.ENUMERABLE
+            else MembershipQuality.LOWER_BOUND,
+            confidence=worst_confidence,
             last_indexed_block=last_block,
         )
 
@@ -219,8 +221,8 @@ class EventIndexedAdapter:
         is_complete = scan["status"] == "complete"
         return CapabilityExpr.finite_set(
             keys,
-            quality="exact" if is_complete else "lower_bound",
-            confidence="enumerable" if is_complete else "partial",
+            quality=MembershipQuality.EXACT if is_complete else MembershipQuality.LOWER_BOUND,
+            confidence=Confidence.ENUMERABLE if is_complete else Confidence.PARTIAL,
             last_indexed_block=scan["last_block_scanned"] or None,
         )
 
@@ -302,12 +304,20 @@ def _fold_event_history(
             block=block,
         )
     if len(event_hints) != 1:
-        return EnumerationResult(members=[], confidence="partial", partial_reason="event_history_fold_unavailable")
+        return EnumerationResult(
+            members=[],
+            confidence=Confidence.PARTIAL,
+            partial_reason="event_history_fold_unavailable",
+        )
 
     hint = event_hints[0]
     fold_writes = getattr(repo, "fold_event_writes", None)
     if not callable(fold_writes):
-        return EnumerationResult(members=[], confidence="partial", partial_reason="event_history_fold_unavailable")
+        return EnumerationResult(
+            members=[],
+            confidence=Confidence.PARTIAL,
+            partial_reason="event_history_fold_unavailable",
+        )
     typed_fold_writes = cast(Callable[..., EnumerationResult], fold_writes)
     return typed_fold_writes(
         chain_id=chain_id,

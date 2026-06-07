@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import IndexedEventCursor, IndexedEventLog
-from services.resolution.adapters import EnumerationResult
+from services.resolution.adapters import Confidence, EnumerationResult
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
@@ -33,11 +33,11 @@ class PostgresEventLogRepo:
     ) -> EnumerationResult:
         member_key = _caller_key_index(key_sources)
         if member_key is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         key_filters = _constant_key_filters(key_sources, member_key)
         if key_filters is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         q = (
             select(IndexedEventLog)
@@ -72,13 +72,13 @@ class PostgresEventLogRepo:
         if cursor_block is None or not complete:
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
-                confidence="partial",
+                confidence=Confidence.PARTIAL,
                 partial_reason="no_index_cursor",
                 last_indexed_block=None,
             )
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
-            confidence="enumerable",
+            confidence=Confidence.ENUMERABLE,
             last_indexed_block=cursor_block,
         )
 
@@ -93,15 +93,15 @@ class PostgresEventLogRepo:
     ) -> EnumerationResult:
         member_key = _caller_key_index(key_sources)
         if member_key is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         key_filters = _constant_key_filters(key_sources, member_key)
         if key_filters is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         hints_by_topic = _event_hints_by_topic(event_hints)
         if not hints_by_topic:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         topic0s = sorted(hints_by_topic)
         q = (
@@ -143,14 +143,14 @@ class PostgresEventLogRepo:
         if len(complete_blocks) != len(topic0s):
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
-                confidence="partial",
+                confidence=Confidence.PARTIAL,
                 partial_reason="no_index_cursor",
                 last_indexed_block=last_indexed_block,
             )
 
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
-            confidence="enumerable",
+            confidence=Confidence.ENUMERABLE,
             last_indexed_block=last_indexed_block,
         )
 

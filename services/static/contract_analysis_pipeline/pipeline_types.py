@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict
 
 from typing_extensions import NotRequired
@@ -21,19 +22,23 @@ if TYPE_CHECKING:
 
     from .analysis_types import ContractAnalysis
 
-OperandSource = Literal[
-    "msg_sender",
-    "tx_origin",
-    "parameter",
-    "state_variable",
-    "constant",
-    "view_call",
-    "external_call",
-    "computed",
-    "block_context",
-    "signature_recovery",
-    "top",
-]
+
+class SourceKind(str, Enum):
+    MSG_SENDER = "msg_sender"
+    TX_ORIGIN = "tx_origin"
+    PARAMETER = "parameter"
+    STATE_VARIABLE = "state_variable"
+    CONSTANT = "constant"
+    VIEW_CALL = "view_call"
+    EXTERNAL_CALL = "external_call"
+    COMPUTED = "computed"
+    BLOCK_CONTEXT = "block_context"
+    SIGNATURE_RECOVERY = "signature_recovery"
+    SELF_ADDRESS = "self_address"
+    TOP = "top"
+
+
+OperandSource = SourceKind
 
 
 class Operand(TypedDict):
@@ -294,25 +299,12 @@ class RevertGate:
     unsupported_reason: str | None = None
 
 
-SOURCE_KINDS = (
-    "msg_sender",
-    "tx_origin",
-    "parameter",
-    "state_variable",
-    "constant",
-    "view_call",
-    "external_call",
-    "computed",
-    "block_context",
-    "signature_recovery",
-    "self_address",
-    "top",
-)
+SOURCE_KINDS: frozenset[SourceKind] = frozenset(SourceKind)
 
 
 @dataclass(frozen=True)
 class Source:
-    kind: str
+    kind: SourceKind
     parameter_index: int | None = None
     parameter_name: str | None = None
     state_variable_name: str | None = None
@@ -329,7 +321,7 @@ class Source:
     def __post_init__(self) -> None:
         if self.kind not in SOURCE_KINDS:
             raise ValueError(f"unknown source kind {self.kind!r}")
-        if self.kind == "top" and (
+        if self.kind == SourceKind.TOP and (
             self.parameter_index is not None
             or self.parameter_name is not None
             or self.state_variable_name is not None
@@ -343,12 +335,12 @@ class Source:
             or self.block_context_kind is not None
             or self.member_path
         ):
-            raise ValueError("Source(kind='top') must be the bare sentinel — no metadata fields")
+            raise ValueError("Source(kind='top') must be the bare sentinel - no metadata fields")
 
 
 SourceSet: TypeAlias = frozenset[Source]
 EMPTY: SourceSet = frozenset()
-_TOP_SOURCE = Source(kind="top")
+_TOP_SOURCE = Source(kind=SourceKind.TOP)
 TOP: SourceSet = frozenset({_TOP_SOURCE})
 
 
@@ -407,6 +399,7 @@ __all__ = [
     "SetKind",
     "SinkRecord",
     "Source",
+    "SourceKind",
     "SourceSet",
     "StaticAnalysisArtifact",
     "StaticAnalysisPayload",

@@ -59,9 +59,9 @@ __all__ = [
 def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     """``a AND b`` — every caller in both. Total over all kinds."""
     # unsupported absorbs.
-    if a.kind == "unsupported":
+    if a.kind == CapKind.UNSUPPORTED:
         return CapabilityExpr.unsupported(f"intersect_with_unsupported_{a.unsupported_reason}")
-    if b.kind == "unsupported":
+    if b.kind == CapKind.UNSUPPORTED:
         return CapabilityExpr.unsupported(f"intersect_with_unsupported_{b.unsupported_reason}")
 
     # X ∩ conditional_universal(c) — preserve X with c appended. conditional_universal
@@ -69,9 +69,9 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     # so this holds for either subject. Handled BEFORE the cross-subject divert so a
     # bound check AND-ed with a root side-condition stays the bound check rather than
     # collapsing to a public path. (Preserves test_intersect_finite_with_conditional_universal_keeps_set.)
-    if a.kind == "conditional_universal":
+    if a.kind == CapKind.CONDITIONAL_UNIVERSAL:
         return _attach_conditions(b, a.conditions)
-    if b.kind == "conditional_universal":
+    if b.kind == CapKind.CONDITIONAL_UNIVERSAL:
         return _attach_conditions(a, b.conditions)
 
     # Cross-dimension AND (root caller ∩ bound intermediate). The bound side is a
@@ -84,22 +84,22 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         return _intersect_cross_subject(a, b)
 
     # finite_set ∩ finite_set
-    if a.kind == "finite_set" and b.kind == "finite_set":
+    if a.kind == CapKind.FINITE_SET and b.kind == CapKind.FINITE_SET:
         return _intersect_finite(a, b)
 
     # finite_set ∩ cofinite_blacklist (and reverse)
-    if a.kind == "finite_set" and b.kind == "cofinite_blacklist":
+    if a.kind == CapKind.FINITE_SET and b.kind == CapKind.COFINITE_BLACKLIST:
         return _intersect_finite_blacklist(a, b)
-    if a.kind == "cofinite_blacklist" and b.kind == "finite_set":
+    if a.kind == CapKind.COFINITE_BLACKLIST and b.kind == CapKind.FINITE_SET:
         return _intersect_finite_blacklist(b, a)
 
     # cofinite_blacklist ∩ cofinite_blacklist
-    if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
+    if a.kind == CapKind.COFINITE_BLACKLIST and b.kind == CapKind.COFINITE_BLACKLIST:
         # Anyone not in (a.blacklist ∪ b.blacklist).
         return CapabilityExpr.cofinite_blacklist(_canon_addresses((a.blacklist or []) + (b.blacklist or [])))
 
     # threshold_group ∩ X — defer to structural AND.
-    if a.kind == "threshold_group" or b.kind == "threshold_group":
+    if a.kind == CapKind.THRESHOLD_GROUP or b.kind == CapKind.THRESHOLD_GROUP:
         return CapabilityExpr.structural_and([a, b])
 
     # signature_witness / external_check_only — structural AND.
@@ -108,9 +108,9 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
 
 def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     """``a OR b`` — caller in either. Total."""
-    if a.kind == "unsupported":
+    if a.kind == CapKind.UNSUPPORTED:
         return CapabilityExpr.structural_or([a, b])
-    if b.kind == "unsupported":
+    if b.kind == CapKind.UNSUPPORTED:
         return CapabilityExpr.structural_or([a, b])
 
     # Cross-dimension OR: a bound-subject alternative (e.g. an inlined downstream
@@ -121,10 +121,10 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if a.subject != b.subject:
         return CapabilityExpr.structural_or([a, b])
 
-    if a.kind == "finite_set" and b.kind == "finite_set":
+    if a.kind == CapKind.FINITE_SET and b.kind == CapKind.FINITE_SET:
         return _union_finite(a, b)
 
-    if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
+    if a.kind == CapKind.COFINITE_BLACKLIST and b.kind == CapKind.COFINITE_BLACKLIST:
         # Anyone not in (a.blacklist ∩ b.blacklist).
         ab = set((a.blacklist or []))
         bb = set((b.blacklist or []))
@@ -132,12 +132,16 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
 
     # finite_set ∪ cofinite_blacklist: cofinite minus members already in
     # finite_set (those are still in finite_set, so allowed).
-    if a.kind == "finite_set" and b.kind == "cofinite_blacklist":
+    if a.kind == CapKind.FINITE_SET and b.kind == CapKind.COFINITE_BLACKLIST:
         return _union_finite_blacklist(a, b)
-    if a.kind == "cofinite_blacklist" and b.kind == "finite_set":
+    if a.kind == CapKind.COFINITE_BLACKLIST and b.kind == CapKind.FINITE_SET:
         return _union_finite_blacklist(b, a)
 
-    if a.kind == "conditional_universal" and b.kind == "conditional_universal" and a.conditions == b.conditions:
+    if (
+        a.kind == CapKind.CONDITIONAL_UNIVERSAL
+        and b.kind == CapKind.CONDITIONAL_UNIVERSAL
+        and a.conditions == b.conditions
+    ):
         return a
 
     # X ∪ conditional_universal — structural OR (anyone, with c) is
@@ -148,8 +152,8 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
 def negate(a: CapabilityExpr) -> CapabilityExpr:
     """``NOT a`` — used when a leaf has operator=falsy / op=ne and the
     underlying capability needs inversion. Total."""
-    if a.kind == "finite_set":
-        if a.membership_quality != "exact":
+    if a.kind == CapKind.FINITE_SET:
+        if a.membership_quality != MembershipQuality.EXACT:
             return CapabilityExpr.unsupported("negate_partial_set")
         return CapabilityExpr.cofinite_blacklist(
             list(a.members or []),
@@ -157,31 +161,31 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             conditions=a.conditions,
             subject=a.subject,
         )
-    if a.kind == "cofinite_blacklist":
+    if a.kind == CapKind.COFINITE_BLACKLIST:
         return CapabilityExpr.finite_set(
             list(a.blacklist or []),
-            quality="exact",
+            quality=MembershipQuality.EXACT,
             confidence=a.confidence,
             conditions=a.conditions,
             subject=a.subject,
         )
-    if a.kind == "conditional_universal":
+    if a.kind == CapKind.CONDITIONAL_UNIVERSAL:
         # Negation of "anyone if C" is "no one if C" — empty set with
         # the condition negated. Concretely: empty set if C, full
         # set if NOT C. We emit unsupported because the negation of
         # a condition isn't always representable as a typed
         # condition (e.g., negation of a business invariant).
         return CapabilityExpr.unsupported("negate_conditional_universal")
-    if a.kind in ("threshold_group", "signature_witness", "external_check_only"):
+    if a.kind in (CapKind.THRESHOLD_GROUP, CapKind.SIGNATURE_WITNESS, CapKind.EXTERNAL_CHECK_ONLY):
         return CapabilityExpr.unsupported(f"negate_unsupported_capability_{a.kind}")
-    if a.kind == "unsupported":
+    if a.kind == CapKind.UNSUPPORTED:
         return CapabilityExpr.unsupported(f"negate_of_{a.unsupported_reason}")
-    if a.kind in ("AND", "OR"):
+    if a.kind in (CapKind.AND, CapKind.OR):
         # De Morgan: NOT(AND) = OR(NOT each); NOT(OR) = AND(NOT each).
         # But each child's negate may produce unsupported; that's
         # propagated.
         flipped = [negate(c) for c in a.children]
-        if a.kind == "AND":
+        if a.kind == CapKind.AND:
             return CapabilityExpr.structural_or(flipped)
         return CapabilityExpr.structural_and(flipped)
     return CapabilityExpr.unsupported(f"negate_unknown_kind_{a.kind}")
@@ -270,11 +274,11 @@ def _intersect_quality(qa: MembershipQuality, qb: MembershipQuality) -> Membersh
     upper ∩ upper   = structural (lose the upper bound)
     mixed lower/upper → structural
     """
-    if qa == qb == "exact":
-        return "exact"
-    if {qa, qb} <= {"exact", "lower_bound"}:
-        return "lower_bound"
-    if qa == qb == "upper_bound":
+    if qa == qb == MembershipQuality.EXACT:
+        return MembershipQuality.EXACT
+    if {qa, qb} <= {MembershipQuality.EXACT, MembershipQuality.LOWER_BOUND}:
+        return MembershipQuality.LOWER_BOUND
+    if qa == qb == MembershipQuality.UPPER_BOUND:
         return None  # signal: defer to structural
     return None
 
@@ -287,18 +291,22 @@ def _union_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQu
     upper ∪ upper     = upper_bound (possible-in-either)
     mixed lower/upper → structural
     """
-    if qa == qb == "exact":
-        return "exact"
-    if {qa, qb} <= {"exact", "lower_bound"}:
-        return "lower_bound"
-    if qa == qb == "upper_bound":
-        return "upper_bound"
+    if qa == qb == MembershipQuality.EXACT:
+        return MembershipQuality.EXACT
+    if {qa, qb} <= {MembershipQuality.EXACT, MembershipQuality.LOWER_BOUND}:
+        return MembershipQuality.LOWER_BOUND
+    if qa == qb == MembershipQuality.UPPER_BOUND:
+        return MembershipQuality.UPPER_BOUND
     return None
 
 
 def _meet_confidence(a: Confidence, b: Confidence) -> Confidence:
     """Confidence lattice meet (least-confident wins)."""
-    order = {"enumerable": 2, "partial": 1, "check_only": 0}
+    order = {
+        Confidence.ENUMERABLE: 2,
+        Confidence.PARTIAL: 1,
+        Confidence.CHECK_ONLY: 0,
+    }
     if order[a] <= order[b]:
         return a
     return b

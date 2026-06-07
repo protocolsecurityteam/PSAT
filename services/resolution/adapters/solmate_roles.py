@@ -24,7 +24,7 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
-from ..capabilities import CapabilityExpr, Condition, ExternalCheck
+from ..capabilities import CapabilityExpr, Condition, Confidence, ExternalCheck, MembershipQuality
 from . import EvaluationContext
 
 
@@ -186,8 +186,8 @@ class SolmateRolesAuthorityAdapter:
             return _check_only(authority, descriptor, ["authority_unconfirmed_no_role_events"])
         return CapabilityExpr.finite_set(
             sorted(members),
-            quality="exact",
-            confidence="enumerable",
+            quality=MembershipQuality.EXACT,
+            confidence=Confidence.ENUMERABLE,
             last_indexed_block=last_block,
             trace=trace,
         )

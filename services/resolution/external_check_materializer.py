@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import IndexedEventLog
-from services.resolution.capabilities import CapabilityExpr
+from services.resolution.capabilities import CapabilityExpr, Confidence, MembershipQuality
 from services.resolution.repos.event_logs_pg import _word_to_address
 from utils.rpc import rpc_batch_request_with_status
 
@@ -104,8 +104,8 @@ def materialize_external_check_from_events(
         return None
     return CapabilityExpr.finite_set(
         allowed,
-        quality="lower_bound",
-        confidence="partial",
+        quality=MembershipQuality.LOWER_BOUND,
+        confidence=Confidence.PARTIAL,
         trace=[
             {
                 "step": "external_check_materialized",

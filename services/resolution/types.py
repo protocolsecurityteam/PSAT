@@ -114,8 +114,8 @@ class CapabilityExpr:
     conditions: list[Condition] = field(default_factory=list)
     unsupported_reason: str | None = None
     children: list["CapabilityExpr"] = field(default_factory=list)
-    membership_quality: MembershipQuality = "exact"
-    confidence: CapabilityConfidence = "enumerable"
+    membership_quality: MembershipQuality = MembershipQuality.EXACT
+    confidence: CapabilityConfidence = CapabilityConfidence.ENUMERABLE
     last_indexed_block: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
     subject: CapabilitySubject = "root"
@@ -125,15 +125,15 @@ class CapabilityExpr:
         cls,
         members: list[str],
         *,
-        quality: MembershipQuality = "exact",
-        confidence: CapabilityConfidence = "enumerable",
+        quality: MembershipQuality = MembershipQuality.EXACT,
+        confidence: CapabilityConfidence = CapabilityConfidence.ENUMERABLE,
         conditions: list[Condition] | None = None,
         last_indexed_block: int | None = None,
         trace: list[dict[str, Any]] | None = None,
         subject: CapabilitySubject = "root",
     ) -> "CapabilityExpr":
         return cls(
-            kind="finite_set",
+            kind=CapKind.FINITE_SET,
             members=_canon_addresses(members),
             membership_quality=quality,
             confidence=confidence,
@@ -149,11 +149,11 @@ class CapabilityExpr:
         m: int,
         signers: list[str],
         *,
-        confidence: CapabilityConfidence = "enumerable",
+        confidence: CapabilityConfidence = CapabilityConfidence.ENUMERABLE,
         conditions: list[Condition] | None = None,
     ) -> "CapabilityExpr":
         return cls(
-            kind="threshold_group",
+            kind=CapKind.THRESHOLD_GROUP,
             threshold=(m, _canon_addresses(signers)),
             confidence=confidence,
             conditions=list(conditions or []),
@@ -164,12 +164,12 @@ class CapabilityExpr:
         cls,
         blacklist: list[str],
         *,
-        confidence: CapabilityConfidence = "enumerable",
+        confidence: CapabilityConfidence = CapabilityConfidence.ENUMERABLE,
         conditions: list[Condition] | None = None,
         subject: CapabilitySubject = "root",
     ) -> "CapabilityExpr":
         return cls(
-            kind="cofinite_blacklist",
+            kind=CapKind.COFINITE_BLACKLIST,
             blacklist=_canon_addresses(blacklist),
             confidence=confidence,
             conditions=list(conditions or []),
@@ -184,10 +184,10 @@ class CapabilityExpr:
         conditions: list[Condition] | None = None,
     ) -> "CapabilityExpr":
         return cls(
-            kind="signature_witness",
+            kind=CapKind.SIGNATURE_WITNESS,
             signer=signer,
             conditions=list(conditions or []),
-            confidence="check_only",
+            confidence=CapabilityConfidence.CHECK_ONLY,
         )
 
     @classmethod
@@ -198,35 +198,35 @@ class CapabilityExpr:
         conditions: list[Condition] | None = None,
     ) -> "CapabilityExpr":
         return cls(
-            kind="external_check_only",
+            kind=CapKind.EXTERNAL_CHECK_ONLY,
             check=check,
-            confidence="check_only",
+            confidence=CapabilityConfidence.CHECK_ONLY,
             conditions=list(conditions or []),
         )
 
     @classmethod
     def conditional_universal(cls, condition: Condition) -> "CapabilityExpr":
         return cls(
-            kind="conditional_universal",
+            kind=CapKind.CONDITIONAL_UNIVERSAL,
             conditions=[condition],
-            confidence="enumerable",
+            confidence=CapabilityConfidence.ENUMERABLE,
         )
 
     @classmethod
     def unsupported(cls, reason: str) -> "CapabilityExpr":
-        return cls(kind="unsupported", unsupported_reason=reason, confidence="check_only")
+        return cls(kind=CapKind.UNSUPPORTED, unsupported_reason=reason, confidence=CapabilityConfidence.CHECK_ONLY)
 
     @classmethod
     def structural_and(cls, children: list["CapabilityExpr"]) -> "CapabilityExpr":
         if len(children) == 1:
             return children[0]
-        return cls(kind="AND", children=list(children))
+        return cls(kind=CapKind.AND, children=list(children))
 
     @classmethod
     def structural_or(cls, children: list["CapabilityExpr"]) -> "CapabilityExpr":
         if len(children) == 1:
             return children[0]
-        return cls(kind="OR", children=list(children))
+        return cls(kind=CapKind.OR, children=list(children))
 
 
 class Trit(Enum):
@@ -238,7 +238,7 @@ class Trit(Enum):
 @dataclass(frozen=True)
 class AdapterEnumerationResult:
     members: list[str] = field(default_factory=list)
-    confidence: CapabilityConfidence = "enumerable"
+    confidence: CapabilityConfidence = CapabilityConfidence.ENUMERABLE
     partial_reason: str | None = None
     last_indexed_block: int | None = None
 
@@ -402,8 +402,8 @@ class _NullPredicateEvaluatorAdapter:
     def enumerate(self, descriptor: PredicateSetDescriptor, contract_address: Address | None) -> CapabilityExpr:
         return CapabilityExpr.finite_set(
             [],
-            quality="lower_bound",
-            confidence="partial",
+            quality=MembershipQuality.LOWER_BOUND,
+            confidence=CapabilityConfidence.PARTIAL,
         )
 
 

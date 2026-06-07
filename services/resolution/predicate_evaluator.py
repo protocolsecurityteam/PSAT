@@ -40,8 +40,11 @@ from services.static.contract_analysis_pipeline.pipeline_types import (
 
 from .capabilities import (
     CapabilityExpr,
+    CapKind,
     Condition,
+    Confidence,
     ExternalCheck,
+    MembershipQuality,
     intersect,
     negate,
     union,
@@ -92,8 +95,8 @@ def _adapter_declined_external_set(cap: "CapabilityExpr") -> bool:
     """True when an ``external_set`` adapter produced no concrete answer — unsupported,
     a query-only external check, or the empty non-exact placeholder of the null adapter.
     An *exact* empty set is a real ``nobody`` and is NOT a decline."""
-    return cap.kind in {"unsupported", "external_check_only"} or (
-        cap.kind == "finite_set" and not cap.members and cap.membership_quality != "exact"
+    return cap.kind in {CapKind.UNSUPPORTED, CapKind.EXTERNAL_CHECK_ONLY} or (
+        cap.kind == CapKind.FINITE_SET and not cap.members and cap.membership_quality != MembershipQuality.EXACT
     )
 
 
@@ -110,7 +113,7 @@ def _adapter_deferred_pending_index(cap: "CapabilityExpr") -> bool:
     materializer: that live probe is a non-self-healing heuristic that drops the marker
     and freezes the cold result (the Veda RolesAuthority cold-start race)."""
     return (
-        cap.kind == "external_check_only"
+        cap.kind == CapKind.EXTERNAL_CHECK_ONLY
         and cap.check is not None
         and bool((cap.check.extra or {}).get("deferred_pending_index"))
     )
@@ -279,7 +282,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 # ``finite_set([], exact)`` case where a genuinely-
                 # business predicate could silently lose its
                 # description; gating on ``cap.members`` fixes it.
-                if cap.kind == "finite_set" and cap.members:
+                if cap.kind == CapKind.FINITE_SET and cap.members:
                     return cap
         cond = _condition_from_leaf(leaf)
         return CapabilityExpr.conditional_universal(cond)
@@ -364,7 +367,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     cap = inlined
                 else:
                     cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
-                    if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
+                    if cap.kind == CapKind.UNSUPPORTED and cap.unsupported_reason == "no_adapter":
                         cap = _external_check_from_descriptor(leaf, descriptor, ctx)
                     cap = _tag_caller_subject(cap, ctx)
             if operator == "falsy":
@@ -389,9 +392,9 @@ def _side_condition_capability(tree: PredicateTree) -> CapabilityExpr | None:
     if conditions is None:
         return None
     return CapabilityExpr(
-        kind="conditional_universal",
+        kind=CapKind.CONDITIONAL_UNIVERSAL,
         conditions=conditions,
-        confidence="enumerable",
+        confidence=Confidence.ENUMERABLE,
     )
 
 
@@ -535,11 +538,11 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         return None
     addr = "0x" + raw[-40:].lower()
     if _is_zero_address(addr) or addr == _BURN_ADDRESS:
-        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+        return CapabilityExpr.finite_set([], quality=MembershipQuality.EXACT, confidence=Confidence.ENUMERABLE)
     return CapabilityExpr.finite_set(
         [addr],
-        quality="exact",
-        confidence="enumerable",
+        quality=MembershipQuality.EXACT,
+        confidence=Confidence.ENUMERABLE,
         trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
     )
 
@@ -620,7 +623,7 @@ def _resolve_equality_principal(
         val = op.get("constant_value")
         if isinstance(val, str) and val.startswith("0x") and len(val) == 42:
             if _is_zero_address(val):
-                return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+                return CapabilityExpr.finite_set([], quality=MembershipQuality.EXACT, confidence=Confidence.ENUMERABLE)
             return CapabilityExpr.finite_set([val])
         return CapabilityExpr.unsupported(f"equality_constant_non_address_{val}")
 
@@ -630,11 +633,15 @@ def _resolve_equality_principal(
             value = ctx.state_var_values[sv_name]
             if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
                 if _is_zero_address(value):
-                    return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+                    return CapabilityExpr.finite_set(
+                        [],
+                        quality=MembershipQuality.EXACT,
+                        confidence=Confidence.ENUMERABLE,
+                    )
                 return CapabilityExpr.finite_set(
                     [value],
-                    quality="exact",
-                    confidence="enumerable",
+                    quality=MembershipQuality.EXACT,
+                    confidence=Confidence.ENUMERABLE,
                 )
         # state_var_values miss. For a bare (non-struct-member) variable the
         # equality ``msg.sender == X`` names X as the sole authorized caller,
@@ -675,14 +682,18 @@ def _resolve_equality_principal(
         # value). UI surfaces this as 'guarded but unresolved'.
         return CapabilityExpr.finite_set(
             [],
-            quality="lower_bound",
-            confidence="partial",
+            quality=MembershipQuality.LOWER_BOUND,
+            confidence=Confidence.PARTIAL,
         )
 
     if src == "self_address":
         value = ctx.contract_address if ctx is not None else None
         if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
-            return CapabilityExpr.finite_set([value.lower()], quality="exact", confidence="enumerable")
+            return CapabilityExpr.finite_set(
+                [value.lower()],
+                quality=MembershipQuality.EXACT,
+                confidence=Confidence.ENUMERABLE,
+            )
         return CapabilityExpr.unsupported("self_address_without_contract")
 
     if src == "view_call":
@@ -723,8 +734,8 @@ def _resolve_equality_principal(
                 return live
         return CapabilityExpr.finite_set(
             [],
-            quality="lower_bound",
-            confidence="partial",
+            quality=MembershipQuality.LOWER_BOUND,
+            confidence=Confidence.PARTIAL,
         )
 
     if src == "parameter":
@@ -1047,7 +1058,7 @@ def _resolve_contextual_equality(
         return CapabilityExpr.conditional_universal(
             Condition(kind="business", description="resolved call-frame equality")
         )
-    return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+    return CapabilityExpr.finite_set([], quality=MembershipQuality.EXACT, confidence=Confidence.ENUMERABLE)
 
 
 def _resolve_operand_static_value(operand: dict[str, Any], ctx: EvaluationContext | None) -> str | None:
@@ -1307,13 +1318,13 @@ def _maybe_inline_cross_contract_call(
 
 
 def _inline_result_needs_materialization(cap: CapabilityExpr) -> bool:
-    if cap.kind == "finite_set":
-        return not cap.members and cap.membership_quality != "exact"
-    if cap.kind in {"external_check_only", "unsupported"}:
+    if cap.kind == CapKind.FINITE_SET:
+        return not cap.members and cap.membership_quality != MembershipQuality.EXACT
+    if cap.kind in {CapKind.EXTERNAL_CHECK_ONLY, CapKind.UNSUPPORTED}:
         return True
-    if cap.kind == "conditional_universal":
+    if cap.kind == CapKind.CONDITIONAL_UNIVERSAL:
         return _conditional_result_needs_materialization(cap)
-    if cap.kind == "OR":
+    if cap.kind == CapKind.OR:
         return _or_result_needs_materialization(cap)
     return False
 
@@ -1329,16 +1340,16 @@ def _conditional_result_needs_materialization(cap: CapabilityExpr) -> bool:
 def _or_result_needs_materialization(cap: CapabilityExpr) -> bool:
     saw_materializable = False
     for child in cap.children:
-        if child.kind == "finite_set":
+        if child.kind == CapKind.FINITE_SET:
             if child.members:
                 return False
-            if child.membership_quality != "exact":
+            if child.membership_quality != MembershipQuality.EXACT:
                 saw_materializable = True
             continue
-        if child.kind in {"external_check_only", "unsupported"}:
+        if child.kind in {CapKind.EXTERNAL_CHECK_ONLY, CapKind.UNSUPPORTED}:
             saw_materializable = True
             continue
-        if child.kind == "conditional_universal" and _conditional_result_needs_materialization(child):
+        if child.kind == CapKind.CONDITIONAL_UNIVERSAL and _conditional_result_needs_materialization(child):
             saw_materializable = True
             continue
         return False
@@ -1690,16 +1701,20 @@ def _resolve_signer_from_leaf(
             value = ctx.state_var_values[sv_name]
             if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
                 if _is_zero_address(value):
-                    return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+                    return CapabilityExpr.finite_set(
+                        [],
+                        quality=MembershipQuality.EXACT,
+                        confidence=Confidence.ENUMERABLE,
+                    )
                 return CapabilityExpr.finite_set(
                     [value],
-                    quality="exact",
-                    confidence="enumerable",
+                    quality=MembershipQuality.EXACT,
+                    confidence=Confidence.ENUMERABLE,
                 )
         return CapabilityExpr.finite_set(
             [],
-            quality="lower_bound",
-            confidence="partial",
+            quality=MembershipQuality.LOWER_BOUND,
+            confidence=Confidence.PARTIAL,
         )
     if op["source"] == "constant":
         val = op.get("constant_value")

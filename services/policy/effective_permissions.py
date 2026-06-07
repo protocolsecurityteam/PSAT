@@ -16,7 +16,7 @@ from eth_utils.crypto import keccak
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from schemas.common import make_contract
+from schemas.common import PrincipalType, make_contract
 from schemas.control_tracking import ControlSnapshot
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.policy.types import (
@@ -193,7 +193,7 @@ def _known_principals(*snapshots: Mapping[str, Any] | None) -> dict[str, Resolve
 
 def _principal_for_address(address: str, known: dict[str, ResolvedPrincipal]) -> ResolvedPrincipal:
     normalized = address.lower()
-    return known.get(normalized) or _resolved_principal(normalized, "unknown", {})
+    return known.get(normalized) or _resolved_principal(normalized, PrincipalType.UNKNOWN, {})
 
 
 def _controller_lookup(snapshot: Mapping[str, Any] | None) -> dict[str, list[tuple[str, dict[str, Any]]]]:

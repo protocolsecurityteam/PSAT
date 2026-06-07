@@ -29,7 +29,7 @@ from typing import Any, Iterable
 
 from eth_utils.crypto import keccak
 
-from .pipeline_types import EMPTY, TOP, ProvenanceMap, Source, SourceSet, is_top, source_union
+from .pipeline_types import EMPTY, TOP, ProvenanceMap, Source, SourceKind, SourceSet, is_top, source_union
 
 # Slither IR types — imported lazily where they aren't part of the
 # module's public surface so this file remains importable in test
@@ -203,7 +203,7 @@ class ProvenanceEngine:
                 frozenset(
                     {
                         Source(
-                            kind="parameter",
+                            kind=SourceKind.PARAMETER,
                             parameter_index=idx,
                             parameter_name=getattr(param, "name", None),
                         )
@@ -228,7 +228,7 @@ class ProvenanceEngine:
                     frozenset(
                         {
                             Source(
-                                kind="parameter",
+                                kind=SourceKind.PARAMETER,
                                 parameter_index=idx,
                                 parameter_name=getattr(param, "name", None),
                             )
@@ -367,7 +367,7 @@ class ProvenanceEngine:
             frozenset(
                 {
                     Source(
-                        kind="computed",
+                        kind=SourceKind.COMPUTED,
                         computed_kind=str(getattr(ir, "type", "binary")),
                         callee_args_digest=_digest(operand_sources),
                     )
@@ -385,7 +385,7 @@ class ProvenanceEngine:
             frozenset(
                 {
                     Source(
-                        kind="computed",
+                        kind=SourceKind.COMPUTED,
                         computed_kind=str(getattr(ir, "type", "unary")),
                         callee_args_digest=_digest(operand_sources),
                     )
@@ -422,7 +422,7 @@ class ProvenanceEngine:
         wrapper = frozenset(
             {
                 Source(
-                    kind="computed",
+                    kind=SourceKind.COMPUTED,
                     computed_kind="length",
                     callee_args_digest=_digest(sources),
                 )
@@ -452,12 +452,12 @@ class ProvenanceEngine:
         projected_sources = frozenset(
             replace(source, member_path=source.member_path + (field_name,))
             for source in base_sources
-            if source.kind == "state_variable"
+            if source.kind == SourceKind.STATE_VARIABLE
         )
         wrapper = frozenset(
             {
                 Source(
-                    kind="computed",
+                    kind=SourceKind.COMPUTED,
                     computed_kind=f"member.{field_name}",
                     callee_args_digest=_digest(base_sources),
                 )
@@ -475,7 +475,7 @@ class ProvenanceEngine:
             result = frozenset(
                 {
                     Source(
-                        kind="signature_recovery",
+                        kind=SourceKind.SIGNATURE_RECOVERY,
                         callee="ecrecover",
                         callee_args_digest=_digest(args_union),
                     )
@@ -489,7 +489,7 @@ class ProvenanceEngine:
         result = frozenset(
             {
                 Source(
-                    kind="computed",
+                    kind=SourceKind.COMPUTED,
                     computed_kind=callee_name or "solidity_call",
                     callee_args_digest=_digest(args_union),
                 )
@@ -509,7 +509,7 @@ class ProvenanceEngine:
         result = frozenset(
             {
                 Source(
-                    kind="external_call",
+                    kind=SourceKind.EXTERNAL_CALL,
                     callee=callee_name,
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
@@ -550,7 +550,7 @@ class ProvenanceEngine:
         result = frozenset(
             {
                 Source(
-                    kind="external_call",
+                    kind=SourceKind.EXTERNAL_CALL,
                     callee=kind,  # "call" / "staticcall" / "delegatecall"
                     callee_args_digest=_digest(union(dest_sources, args_union)),
                 )
@@ -587,7 +587,7 @@ class ProvenanceEngine:
         callee_name = getattr(callee, "full_name", None) or getattr(callee, "name", None)
         # Cycle / depth guard.
         call_tag = Source(
-            kind="view_call",
+            kind=SourceKind.VIEW_CALL,
             callee=callee_name,
             callee_signature=callee_name,
             callee_selector=_selector_for_signature(callee_name),
@@ -598,7 +598,7 @@ class ProvenanceEngine:
             tag = frozenset(
                 {
                     Source(
-                        kind="view_call",
+                        kind=SourceKind.VIEW_CALL,
                         callee=callee_name,
                         callee_args_digest=_digest(args_union),
                         callee_signature=callee_name,
@@ -641,7 +641,7 @@ class ProvenanceEngine:
         result = frozenset(
             {
                 Source(
-                    kind="computed",
+                    kind=SourceKind.COMPUTED,
                     computed_kind="new",
                     callee_args_digest=_digest(args_union),
                 )
@@ -653,7 +653,8 @@ class ProvenanceEngine:
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
         return self.provenance.set(
-            self._var_name(ir.lvalue), frozenset({Source(kind="computed", computed_kind="send_transfer")})
+            self._var_name(ir.lvalue),
+            frozenset({Source(kind=SourceKind.COMPUTED, computed_kind="send_transfer")}),
         )
 
     # ------------------------------------------------------------------
@@ -678,7 +679,7 @@ class ProvenanceEngine:
             result: SourceSet = frozenset(
                 {
                     Source(
-                        kind="constant",
+                        kind=SourceKind.CONSTANT,
                         constant_value=str(value.value),
                         value_type=_solidity_type_name(value),
                     )
@@ -690,7 +691,7 @@ class ProvenanceEngine:
             result = frozenset(
                 {
                     Source(
-                        kind="state_variable",
+                        kind=SourceKind.STATE_VARIABLE,
                         state_variable_name=value.name,
                     )
                 }
@@ -735,14 +736,14 @@ class ProvenanceEngine:
         """
         name = getattr(var, "name", "")
         if name == "msg.sender":
-            return frozenset({Source(kind="msg_sender")})
+            return frozenset({Source(kind=SourceKind.MSG_SENDER)})
         if name == "tx.origin":
-            return frozenset({Source(kind="tx_origin")})
+            return frozenset({Source(kind=SourceKind.TX_ORIGIN)})
         if name == "this":
             # Self-address — the contract's own address, structurally
             # an authority operand for self-call gates like
             # ``require(msg.sender == address(this))``.
-            return frozenset({Source(kind="self_address")})
+            return frozenset({Source(kind=SourceKind.SELF_ADDRESS)})
         if name in (
             "block.timestamp",
             "block.number",
@@ -757,13 +758,13 @@ class ProvenanceEngine:
             return frozenset(
                 {
                     Source(
-                        kind="block_context",
+                        kind=SourceKind.BLOCK_CONTEXT,
                         block_context_kind=name.split(".", 1)[-1] if "." in name else name,
                     )
                 }
             )
         if name in ("msg.value", "msg.data", "msg.sig", "msg.gas"):
-            return frozenset({Source(kind="computed", computed_kind=name)})
+            return frozenset({Source(kind=SourceKind.COMPUTED, computed_kind=name)})
         return TOP  # unknown Solidity keyword — be safe
 
     def _union_of_args(self, args: Iterable[Any]) -> SourceSet:

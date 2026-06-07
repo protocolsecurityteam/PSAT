@@ -12,7 +12,7 @@ import os
 import time
 from typing import Any
 
-from services.resolution.adapters import EnumerationResult
+from services.resolution.adapters import Confidence, EnumerationResult
 
 from .event_logs_pg import (
     _caller_key_index,
@@ -59,7 +59,7 @@ class HyperSyncEventLogRepo:
     ) -> EnumerationResult:
         del chain_id
         if not self.bearer_token:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="no_hypersync_token")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="no_hypersync_token")
         return asyncio.run(
             self._fold_event_writes_async(
                 event_address=event_address,
@@ -83,7 +83,7 @@ class HyperSyncEventLogRepo:
     ) -> EnumerationResult:
         del chain_id
         if not self.bearer_token:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="no_hypersync_token")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="no_hypersync_token")
         return asyncio.run(
             self._fold_event_history_async(
                 event_address=event_address,
@@ -106,10 +106,10 @@ class HyperSyncEventLogRepo:
     ) -> EnumerationResult:
         member_key = _caller_key_index(key_sources)
         if member_key is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
         key_filters = _constant_key_filters(key_sources, member_key)
         if key_filters is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         try:
             import hypersync  # type: ignore
@@ -118,7 +118,7 @@ class HyperSyncEventLogRepo:
         except Exception as exc:
             return EnumerationResult(
                 members=[],
-                confidence="partial",
+                confidence=Confidence.PARTIAL,
                 partial_reason=f"hypersync_error:{type(exc).__name__}",
             )
         current_from = self.from_block
@@ -154,7 +154,7 @@ class HyperSyncEventLogRepo:
             except Exception as exc:
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
-                    confidence="partial",
+                    confidence=Confidence.PARTIAL,
                     partial_reason=f"hypersync_error:{type(exc).__name__}",
                     last_indexed_block=last_block or None,
                 )
@@ -185,7 +185,7 @@ class HyperSyncEventLogRepo:
 
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
-            confidence="partial" if partial_reason else "enumerable",
+            confidence=Confidence.PARTIAL if partial_reason else Confidence.ENUMERABLE,
             partial_reason=partial_reason,
             last_indexed_block=last_block or None,
         )
@@ -200,14 +200,14 @@ class HyperSyncEventLogRepo:
     ) -> EnumerationResult:
         member_key = _caller_key_index(key_sources)
         if member_key is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
         key_filters = _constant_key_filters(key_sources, member_key)
         if key_filters is None:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         hints_by_topic = _event_hints_by_topic(event_hints)
         if not hints_by_topic:
-            return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
+            return EnumerationResult(members=[], confidence=Confidence.PARTIAL, partial_reason="unresolved_event_key")
 
         try:
             import hypersync  # type: ignore
@@ -216,7 +216,7 @@ class HyperSyncEventLogRepo:
         except Exception as exc:
             return EnumerationResult(
                 members=[],
-                confidence="partial",
+                confidence=Confidence.PARTIAL,
                 partial_reason=f"hypersync_error:{type(exc).__name__}",
             )
 
@@ -254,7 +254,7 @@ class HyperSyncEventLogRepo:
             except Exception as exc:
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
-                    confidence="partial",
+                    confidence=Confidence.PARTIAL,
                     partial_reason=f"hypersync_error:{type(exc).__name__}",
                     last_indexed_block=last_block or None,
                 )
@@ -292,7 +292,7 @@ class HyperSyncEventLogRepo:
 
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
-            confidence="partial" if partial_reason else "enumerable",
+            confidence=Confidence.PARTIAL if partial_reason else Confidence.ENUMERABLE,
             partial_reason=partial_reason,
             last_indexed_block=last_block or None,
         )

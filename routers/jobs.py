@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
-from schemas.stage_errors import StageError, StageErrors
+from schemas.stage_errors import StageError, StageErrors, StageErrorSeverity
 from services.discovery.ranking import not_superseded_impl_clause
 
 from . import deps
@@ -317,7 +317,7 @@ def retry_job(job_id: str) -> dict[str, Any]:
             prior.append(
                 StageError(
                     stage=job.stage.value,
-                    severity="degraded",
+                    severity=StageErrorSeverity.DEGRADED,
                     exc_type="schema.CorruptPriorArtifact",
                     message="Prior stage_errors body did not validate; raw payload preserved in context.",
                     phase="corrupt_prior",
@@ -332,7 +332,7 @@ def retry_job(job_id: str) -> dict[str, Any]:
         prior.append(
             StageError(
                 stage=job.stage.value,
-                severity="degraded",
+                severity=StageErrorSeverity.DEGRADED,
                 exc_type="manual.OperatorRetry",
                 message="Operator-initiated retry of failed_terminal job",
                 phase="manual_retry",

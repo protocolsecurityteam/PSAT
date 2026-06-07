@@ -73,6 +73,7 @@ except Exception:  # pragma: no cover
 # cache is a pure perf optimization).
 import contextvars as _contextvars  # noqa: E402
 
+from .pipeline_types import SourceKind
 from .predicate_types import (
     AuthorityRole,
     Confidence,
@@ -362,9 +363,9 @@ def _operand_value_provenance(value: Any, prov: ProvenanceMap) -> Any:
     if base != name and base in prov.sources:
         return prov.sources[base]
     if name == "msg.sender":
-        return frozenset({Source(kind="msg_sender")})
+        return frozenset({Source(kind=SourceKind.MSG_SENDER)})
     if name == "tx.origin":
-        return frozenset({Source(kind="tx_origin")})
+        return frozenset({Source(kind=SourceKind.TX_ORIGIN)})
     return EMPTY
 
 
@@ -1434,7 +1435,7 @@ def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
     present."""
     sources = _sources_for_value(value, prov)
     if not sources:
-        op: Operand = {"source": "constant", "constant_value": str(value) if value is not None else ""}
+        op: Operand = {"source": SourceKind.CONSTANT, "constant_value": str(value) if value is not None else ""}
         _attach_value_type(op, value)
         return op
     view_call = _derived_view_call_source(sources)
@@ -1614,7 +1615,7 @@ def _sources_for_value(value: Any, prov: ProvenanceMap) -> SourceSet:
         return frozenset(
             {
                 Source(
-                    kind="constant",
+                    kind=SourceKind.CONSTANT,
                     constant_value=str(value.value),
                     value_type=_value_type_name(value),
                 )
@@ -1623,7 +1624,7 @@ def _sources_for_value(value: Any, prov: ProvenanceMap) -> SourceSet:
     if isinstance(value, SolidityVariable):
         return _classify_solidity_variable(value)
     if isinstance(value, StateVariable):
-        return frozenset({Source(kind="state_variable", state_variable_name=value.name)})
+        return frozenset({Source(kind=SourceKind.STATE_VARIABLE, state_variable_name=value.name)})
     name = getattr(value, "name", None)
     if name is None:
         return EMPTY
@@ -1636,9 +1637,9 @@ def _classify_solidity_variable(var: Any) -> SourceSet:
     operands without needing the engine instance."""
     name = getattr(var, "name", "")
     if name == "msg.sender":
-        return frozenset({Source(kind="msg_sender")})
+        return frozenset({Source(kind=SourceKind.MSG_SENDER)})
     if name == "tx.origin":
-        return frozenset({Source(kind="tx_origin")})
+        return frozenset({Source(kind=SourceKind.TX_ORIGIN)})
     if name in (
         "block.timestamp",
         "block.number",
@@ -1653,13 +1654,13 @@ def _classify_solidity_variable(var: Any) -> SourceSet:
         return frozenset(
             {
                 Source(
-                    kind="block_context",
+                    kind=SourceKind.BLOCK_CONTEXT,
                     block_context_kind=name.split(".", 1)[-1] if "." in name else name,
                 )
             }
         )
     if name in ("msg.value", "msg.data", "msg.sig", "msg.gas"):
-        return frozenset({Source(kind="computed", computed_kind=name)})
+        return frozenset({Source(kind=SourceKind.COMPUTED, computed_kind=name)})
     return TOP
 
 

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Literal
+from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -26,7 +27,10 @@ _MAX_MESSAGE_BYTES = 4 * 1024
 _MAX_CONTEXT_BYTES = 4 * 1024
 _TRUNCATED_SENTINEL = {"_truncated": True}
 
-Severity = Literal["error", "degraded"]
+
+class StageErrorSeverity(str, Enum):
+    ERROR = "error"
+    DEGRADED = "degraded"
 
 
 def _truncate_text(value: str, limit: int) -> str:
@@ -41,7 +45,7 @@ class StageError(BaseModel):
     """One failure observation within a job run."""
 
     stage: str
-    severity: Severity
+    severity: StageErrorSeverity
     exc_type: str
     message: str
     traceback: str | None = None
@@ -84,7 +88,7 @@ class StageErrors(BaseModel):
 
 
 __all__ = [
-    "Severity",
+    "StageErrorSeverity",
     "StageError",
     "StageErrors",
 ]

@@ -32,7 +32,7 @@ from db.queue import (
     store_artifact,
     update_job_detail,
 )
-from schemas.stage_errors import StageError, StageErrors
+from schemas.stage_errors import StageError, StageErrors, StageErrorSeverity
 from utils.logging import bind_trace_context, configure_logging, degraded_errors_var, stage_metrics_var
 from utils.memory import (
     cgroup_memory_current_bytes,
@@ -544,7 +544,7 @@ class BaseWorker:
                     degraded_accumulator.append(
                         StageError(
                             stage=self.stage.value,
-                            severity="error",
+                            severity=StageErrorSeverity.ERROR,
                             exc_type=exc_type_str,
                             message=exc_message,
                             traceback=error,
@@ -1038,7 +1038,7 @@ class BaseWorker:
                 merged.append(
                     StageError(
                         stage=self.stage.value,
-                        severity="degraded",
+                        severity=StageErrorSeverity.DEGRADED,
                         exc_type="schema.CorruptPriorArtifact",
                         message="Prior stage_errors body did not validate; raw payload preserved in context.",
                         phase="corrupt_prior",

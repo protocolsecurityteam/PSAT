@@ -3,34 +3,57 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from enum import Enum
 from typing import Any, Generic, TypeVar
 
 from typing_extensions import NotRequired, TypedDict
 
 Address = str
-AbiSignature = str
 BlockNumber = int
 ChainId = int
-ChainName = str
-FunctionSelector = str
 HexString = str
-StorageSlot = str
 TxHash = str
 
-ContractId = str
-ArtifactKind = str
-
-JsonScalar = str | int | float | bool | None
-JsonArray = list[Any]
 JsonObject = dict[str, Any]
-JsonValue = JsonScalar | JsonArray | JsonObject
 
-PipelineStage = str
-OnChainPrincipalType = str
-PrincipalType = str
-CapabilityKind = str
-CapabilityMembershipQuality = str
-CapabilityConfidence = str
+
+class PrincipalType(str, Enum):
+    UNKNOWN = "unknown"
+    ZERO = "zero"
+    EOA = "eoa"
+    CONTRACT = "contract"
+    SAFE = "safe"
+    TIMELOCK = "timelock"
+    PROXY_ADMIN = "proxy_admin"
+
+
+OnChainPrincipalType = PrincipalType
+
+
+class CapabilityKind(str, Enum):
+    FINITE_SET = "finite_set"
+    THRESHOLD_GROUP = "threshold_group"
+    COFINITE_BLACKLIST = "cofinite_blacklist"
+    SIGNATURE_WITNESS = "signature_witness"
+    EXTERNAL_CHECK_ONLY = "external_check_only"
+    CONDITIONAL_UNIVERSAL = "conditional_universal"
+    UNSUPPORTED = "unsupported"
+    AND = "AND"
+    OR = "OR"
+
+
+class CapabilityMembershipQuality(str, Enum):
+    EXACT = "exact"
+    LOWER_BOUND = "lower_bound"
+    UPPER_BOUND = "upper_bound"
+
+
+class CapabilityConfidence(str, Enum):
+    ENUMERABLE = "enumerable"
+    PARTIAL = "partial"
+    CHECK_ONLY = "check_only"
+
+
 CapabilitySubject = str
 
 StagePayloadT = TypeVar("StagePayloadT")
@@ -39,8 +62,8 @@ StagePayloadT = TypeVar("StagePayloadT")
 class Contract(TypedDict):
     address: Address
     chain_id: ChainId
-    name: str | None
-    label: str | None
+    name: str | None  # contract name like "UniswapV2Pair"
+    label: str | None  # human-friendly label like "Uniswap V2 USDC/ETH Pair"
     is_proxy: bool
     proxy_address: Address | None
     implementation_addresses: list[Address]
@@ -52,7 +75,7 @@ class Contract(TypedDict):
 
 class StageContext(TypedDict):
     schema_version: str
-    stage: PipelineStage
+    stage: str
     chain_id: ChainId
     run_id: NotRequired[str | None]
     job_id: NotRequired[str | None]
@@ -73,8 +96,8 @@ class ContractStageRequest(TypedDict, Generic[StagePayloadT]):
 
 
 class StageArtifact(TypedDict, Generic[StagePayloadT]):
-    kind: ArtifactKind
-    stage: PipelineStage
+    kind: str
+    stage: str
     schema_version: str
     context: StageContext
     data: StagePayloadT
@@ -93,8 +116,8 @@ class Principal(TypedDict):
 
 class FunctionSurface(TypedDict):
     function: str
-    abi_signature: AbiSignature
-    selector: FunctionSelector
+    abi_signature: str
+    selector: str
     effect_targets: list[str]
     effect_labels: list[str]
     action_summary: str
@@ -142,7 +165,7 @@ class ServiceBoundaryMetadata(TypedDict, total=False):
     schema_version: str
     job_id: str
     run_name: str
-    stage: PipelineStage
+    stage: str
     company: str | None
     artifacts: dict[str, ArtifactReference]
     errors: list[JsonObject]
@@ -201,14 +224,14 @@ def make_contract(
     }
 
 
-def contract_key(contract: Contract) -> ContractId:
+def contract_key(contract: Contract) -> str:
     return f"{contract['chain_id']}:{contract['address'].lower()}"
 
 
 def make_stage_context(
     *,
     schema_version: str,
-    stage: PipelineStage,
+    stage: str,
     chain_id: ChainId,
     run_id: str | None = None,
     job_id: str | None = None,
@@ -244,10 +267,8 @@ def make_stage_context(
 
 
 __all__ = [
-    "AbiSignature",
     "Address",
     "ArtifactReference",
-    "ArtifactKind",
     "BlockNumber",
     "Capability",
     "CapabilityConfidence",
@@ -255,28 +276,20 @@ __all__ = [
     "CapabilityMembershipQuality",
     "CapabilitySubject",
     "ChainId",
-    "ChainName",
     "Contract",
-    "ContractId",
     "contract_key",
     "ContractStageRequest",
     "FunctionSurface",
-    "FunctionSelector",
     "HexString",
-    "JsonArray",
     "JsonObject",
-    "JsonScalar",
-    "JsonValue",
     "make_contract",
     "make_stage_context",
     "OnChainPrincipalType",
-    "PipelineStage",
     "Principal",
     "PrincipalType",
     "ServiceBoundaryMetadata",
     "SourceBundle",
     "StageArtifact",
     "StageContext",
-    "StorageSlot",
     "TxHash",
 ]

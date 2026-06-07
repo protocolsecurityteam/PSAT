@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing_extensions import NotRequired, TypedDict
 
-from schemas.common import Address, Contract, JsonObject, PrincipalType
+from schemas.common import Address, Contract, JsonObject
 
-GovernancePrincipalType = PrincipalType
 FunctionPrincipalPayload = JsonObject
 GovernanceFunctionController = JsonObject
 GovernanceAuthorityRole = JsonObject
@@ -43,5 +42,4 @@ __all__ = [
     "GovernanceFunctionController",
     "GovernanceFunctionEntry",
     "GovernancePrincipal",
-    "GovernancePrincipalType",
 ]

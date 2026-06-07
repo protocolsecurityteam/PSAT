@@ -13,9 +13,7 @@ TokenBalanceEntry = JsonObject
 ContractControlGraphNode = JsonObject
 ContractControlGraphEdge = JsonObject
 ContractControlGraph = JsonObject
-GovernanceOtherCaller = JsonObject
 GovernanceContract = JsonObject
-GovernanceHierarchyContract = JsonObject
 GovernanceHierarchyEntry = JsonObject
 GovernanceFundFlow = JsonObject
 
@@ -54,9 +52,7 @@ __all__ = [
     "ContractControlGraphNode",
     "GovernanceContract",
     "GovernanceFundFlow",
-    "GovernanceHierarchyContract",
     "GovernanceHierarchyEntry",
-    "GovernanceOtherCaller",
     "GovernanceView",
     "TokenBalanceEntry",
 ]

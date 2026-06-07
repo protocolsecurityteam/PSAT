@@ -63,7 +63,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
-    from schemas.stage_errors import StageError
+    from schemas.stage_errors import StageError, StageErrorSeverity
 
 trace_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_trace_id", default=None)
 job_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_job_id", default=None)
@@ -278,7 +278,7 @@ def record_degraded(
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__) if include_traceback else None
     error = StageError(
         stage=stage_var.get() or "?",
-        severity="degraded",
+        severity=StageErrorSeverity.DEGRADED,
         exc_type=f"{type(exc).__module__}.{type(exc).__name__}",
         message=sanitize_string(str(exc)),
         traceback=sanitize_string("".join(tb)) if tb else None,
