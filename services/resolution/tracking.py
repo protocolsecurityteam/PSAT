@@ -45,6 +45,15 @@ _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
 # PSAT_CLASSIFY_BATCH=0 to force sequential.
 _CLASSIFY_BATCH_ENABLED = os.getenv("PSAT_CLASSIFY_BATCH", "1").lower() in ("1", "true", "yes")
 
+# Collapse the 6 classify probes (and the per-contract snapshot getters) into ONE billable eth_call via
+# Multicall3 aggregate3. Both fall back to the existing JSON-RPC-batch / per-controller path on any anomaly
+# (provider rejects Multicall3, chain lacks it, malformed response), so resolution results are byte-identical
+# whether on or off — proven by the parity tests in test_classify_batch_parity / test_control_tracker.
+# Default OFF: enabled in prod via env (fly.toml) so a fresh checkout / the offline suite never routes these
+# reads through Multicall3 (those tests stub the per-call wire, not Multicall3's eth_call). Flip to "1" to enable.
+_CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "0").lower() in ("1", "true", "yes")
+_SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "0").lower() in ("1", "true", "yes")
+
 
 def type_authority_contract(rpc_url: str, address: str, block_tag: str = "latest") -> dict[str, object]:
     """Compatibility hook for old callers/tests.
@@ -281,6 +290,35 @@ def _batch_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
     return decoded
 
 
+def _multicall_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
+    """The 6 classify probes as ONE Multicall3 aggregate3 call. These are caller-independent view getters,
+    so routing them through Multicall3 (which becomes msg.sender) returns identical values. A reverting probe
+    → ``success=False`` → ``_PROBE_ERROR``, the same sentinel a JSON-RPC per-call error yields. Raises on
+    transport/malformed response so ``_probe_classify`` can fall back to the JSON-RPC batch."""
+    from utils.rpc import multicall3_aggregate3
+
+    calls = [(address, _selector(sig)) for sig, _abi in _CLASSIFY_PROBE_SIGS]
+    raw_results = multicall3_aggregate3(rpc_url, calls, block_tag)
+    decoded: list[object] = []
+    for (success, raw), (_sig, abi_type) in zip(raw_results, _CLASSIFY_PROBE_SIGS):
+        if not success:
+            decoded.append(_PROBE_ERROR)
+            continue
+        decoded.append(_decode_probe_result(raw, abi_type))
+    return decoded
+
+
+def _probe_classify(rpc_url: str, address: str, block_tag: str) -> list[object]:
+    """Multicall3 the classify probes when enabled, falling back to the JSON-RPC array batch (identical
+    decode) on any failure. The downstream all-``_PROBE_ERROR`` → sequential safety net is unchanged."""
+    if _CLASSIFY_MULTICALL_ENABLED:
+        try:
+            return _multicall_probe(rpc_url, address, block_tag)
+        except Exception:
+            pass
+    return _batch_probe(rpc_url, address, block_tag)
+
+
 def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) -> tuple[str, dict[str, object], bool]:
     """Same contract as ``_classify_uncached`` but batches the 6 probes upfront, saving 5 RTT in the common generic-
     contract case."""
@@ -310,7 +348,7 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
                 details.update(partial)
                 return kind, details, False
 
-    probes = _batch_probe(rpc_url, normalized, block_tag)
+    probes = _probe_classify(rpc_url, normalized, block_tag)
     # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
     # accuracy.
     if all(p is _PROBE_ERROR for p in probes):
@@ -458,6 +496,18 @@ def _current_block_number(rpc_url: str) -> int:
     return int(raw, 16)
 
 
+def _getter_target(source: str, read_spec: ControllerReadSpec | None) -> str:
+    """Getter base name ``_read_polling_source`` reads a controller through: ``source`` unless a
+    ``getter_call`` read_spec overrides the target. Shared with the snapshot Multicall3 prewarm so the two
+    can never compute a different selector for the same controller."""
+    target = source
+    if isinstance(read_spec, dict) and read_spec.get("strategy") == "getter_call":
+        read_target = read_spec.get("target")
+        if isinstance(read_target, str) and read_target:
+            target = read_target
+    return target
+
+
 def _read_polling_source(
     rpc_url: str,
     contract_address: str,
@@ -465,14 +515,58 @@ def _read_polling_source(
     controller_kind: str,
     block_tag: str = "latest",
     read_spec: ControllerReadSpec | None = None,
+    *,
+    prewarm: dict[tuple[str, str], str] | None = None,
 ) -> str:
-    target = source
-    if isinstance(read_spec, dict) and read_spec.get("strategy") == "getter_call":
-        read_target = read_spec.get("target")
-        if isinstance(read_target, str) and read_target:
-            target = read_target
-    raw = _eth_call_raw(rpc_url, contract_address, f"{target}()", block_tag)
+    signature = f"{_getter_target(source, read_spec)}()"
+    if prewarm is not None:
+        # The snapshot pre-read the same getter at the same block_tag in one Multicall3. Only SUCCESSFUL
+        # reads are cached, so a reverting getter is absent here and falls through to the live read (and the
+        # impl getter_fallback) exactly as before — accuracy-neutral, just one fewer billable eth_call.
+        cached = prewarm.get((contract_address.lower(), _selector(signature)))
+        if cached is not None:
+            return _decode_controller_value(cached, controller_kind, read_spec)
+    raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag)
     return _decode_controller_value(raw, controller_kind, read_spec)
+
+
+def _prewarm_snapshot_getters(rpc_url: str, plan: ControlTrackingPlan, block_tag: str) -> dict[tuple[str, str], str]:
+    """Pre-read every tracked controller's ``{target}()`` getter on the contract in ONE Multicall3, at the
+    same ``block_tag`` the per-controller path uses.
+
+    Returns ``{(contract_addr_lower, selector): raw}`` for SUCCESSFUL reads only — reverting getters are
+    omitted so ``_read_polling_source`` falls through to the live read + impl ``getter_fallback`` unchanged.
+    Best-effort: any failure (Multicall3 absent/rejected, transport error) returns ``{}`` (no prewarm),
+    preserving exact per-controller behavior. These are caller-independent authority view getters."""
+    contract_address = plan["contract_address"]
+    selectors: list[str] = []
+    seen: set[str] = set()
+    for controller in plan.get("tracked_controllers", []):
+        read_spec = controller.get("read_spec")
+        # Mirror _compute_controller's skip: primitive-scalar state vars are never read on-chain.
+        if controller.get("kind") == "state_variable" and is_primitive_scalar_read_spec(read_spec):
+            continue
+        try:
+            sel = _selector(f"{_getter_target(controller['source'], read_spec)}()")
+        except Exception:
+            continue
+        if sel not in seen:
+            seen.add(sel)
+            selectors.append(sel)
+    if not selectors:
+        return {}
+    from utils.rpc import multicall3_aggregate3
+
+    try:
+        results = multicall3_aggregate3(rpc_url, [(contract_address, sel) for sel in selectors], block_tag)
+    except Exception:
+        return {}
+    key_addr = contract_address.lower()
+    prewarm: dict[tuple[str, str], str] = {}
+    for sel, (success, raw) in zip(selectors, results):
+        if success and isinstance(raw, str) and raw.startswith("0x"):
+            prewarm[(key_addr, sel)] = raw
+    return prewarm
 
 
 def build_control_snapshot(
@@ -511,6 +605,9 @@ def build_control_snapshot(
     block_number = (
         _call_with_heartbeat(lambda: _current_block_number(rpc_url)) if block_tag == "latest" else int(block_tag, 16)
     )
+    # One Multicall3 of all controller getters up front; _read_polling_source consumes it (successful reads
+    # only). Empty {} when disabled or on any failure → per-controller reads, identical results.
+    prewarm = _prewarm_snapshot_getters(rpc_url, plan, block_tag) if _SNAPSHOT_MULTICALL_ENABLED else {}
     controller_values: dict[str, Any] = {}
 
     def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
@@ -532,7 +629,9 @@ def build_control_snapshot(
         spec = read_spec if isinstance(read_spec, dict) else None
 
         def _read_entry(read_address: str, observed_via: str) -> dict[str, Any]:
-            value = _read_polling_source(rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec)
+            value = _read_polling_source(
+                rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec, prewarm=prewarm
+            )
             if controller["kind"] == "role_identifier":
                 return {
                     "source": source,

@@ -652,6 +652,67 @@ def rpc_batch_request_with_status(
     return results
 
 
+# Multicall3 is deployed at the same address on every chain PSAT supports.
+MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+# Default sub-calls per aggregate3 eth_call. Each aggregate3 is ONE billable
+# eth_call regardless of width; the cap only bounds per-call gas so a huge fan-out
+# can't trip a node's eth_call gas ceiling (it would revert the whole batch).
+_MULTICALL3_CHUNK = int(os.getenv("PSAT_MULTICALL3_CHUNK", "100"))
+
+
+def multicall3_aggregate3(
+    rpc_url: str,
+    calls: list[tuple[str, str]],
+    block_tag: str = "latest",
+    *,
+    chunk_size: int | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> list[tuple[bool, str]]:
+    """Collapse N read-only ``eth_call``s into one billable call (per chunk) via Multicall3 ``aggregate3``.
+
+    ``calls`` is ``[(target_address, calldata_hex), ...]``. Returns ``[(success, return_data_hex), ...]``
+    aligned 1:1 with ``calls`` — ``success=False`` (``allowFailure=true``) for a reverting sub-call, so the
+    caller maps it exactly as it would a per-call revert. ``return_data_hex`` is the raw return bytes of the
+    sub-call, byte-identical to what a direct ``eth_call`` at the same block would yield.
+
+    Raises ``RuntimeError`` on transport failure or a malformed / wrong-length response, so callers can fall
+    back to per-call reads with **identical** decode semantics. JSON-RPC array batching does NOT reduce
+    upstream call count (each sub-call is billed); aggregate3 does (one eth_call).
+
+    Only valid for caller-independent ``view``/``pure`` reads: Multicall3 becomes ``msg.sender``, so never
+    route a call whose result depends on the caller through this.
+    """
+    if not calls:
+        return []
+    from eth_abi.abi import decode as _abi_decode
+    from eth_abi.abi import encode as _abi_encode
+
+    # Derived (not hard-coded) so a typo can never mint wrong calldata: aggregate3((address,bool,bytes)[]).
+    agg3_selector = selector("aggregate3((address,bool,bytes)[])")
+    size = chunk_size or _MULTICALL3_CHUNK
+    results: list[tuple[bool, str]] = []
+    for start in range(0, len(calls), size):
+        chunk = calls[start : start + size]
+        encoded_calls = [
+            (target, True, bytes.fromhex((calldata[2:] if calldata.startswith("0x") else calldata)))
+            for target, calldata in chunk
+        ]
+        data = agg3_selector + _abi_encode(["(address,bool,bytes)[]"], [encoded_calls]).hex()
+        raw = rpc_request(
+            rpc_url,
+            "eth_call",
+            [{"to": MULTICALL3_ADDRESS, "data": data}, block_tag],
+            headers=headers,
+        )
+        if not isinstance(raw, str) or not raw.startswith("0x"):
+            raise RuntimeError(f"multicall3 aggregate3: non-hex result {raw!r}")
+        decoded = _abi_decode(["(bool,bytes)[]"], bytes.fromhex(raw[2:]))[0]
+        if len(decoded) != len(chunk):
+            raise RuntimeError(f"multicall3 aggregate3: got {len(decoded)} results, expected {len(chunk)}")
+        results.extend((bool(success), "0x" + return_data.hex()) for success, return_data in decoded)
+    return results
+
+
 def parse_address_result(raw: Any) -> str | None:
     """Extract a valid address from a raw ``eth_getStorageAt`` / ``eth_call`` result.
 

@@ -64,6 +64,17 @@ def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
         counters[key] = counters.get(key, 0) + n
 
 
+def _pass_live_read_memo(outer_ctx: Any) -> dict[Any, Any] | None:
+    """The contract-scoped ``meta['live_read_memo']`` (wired by the capability resolver), or None when absent
+    — leaving unit evaluations and the pure-week-4 path un-memoized. Scoped to the contract's resolution
+    frame, so it is discarded when the pass ends; never a cross-run/persistent cache."""
+    meta = getattr(outer_ctx, "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    memo = meta.get("live_read_memo")
+    return memo if isinstance(memo, dict) else None
+
+
 def _frame_is_inlined(ctx: "EvaluationContext") -> bool:
     """True when we're resolving inside an inlined cross-contract call — the frame's
     ``msg.sender`` has been bound to a concrete intermediate contract (the caller of
@@ -613,6 +624,20 @@ _SLOT_KEYWORD_TO_GETTER = (
 _AUTHORITY_GETTER_BASENAMES = frozenset({"owner", "governor", "authority"})
 
 
+def _live_authority_result(result_addr: str, selector: str, contract: str) -> CapabilityExpr:
+    """Build the finite_set a successful live authority read yields — identical whether the address came from
+    a fresh eth_call or the pass memo. ``""`` (zero / renounced) → empty exact set; an address → singleton,
+    matching the original inline construction (including the trace for the non-empty case)."""
+    if not result_addr:
+        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+    return CapabilityExpr.finite_set(
+        [result_addr],
+        quality="exact",
+        confidence="enumerable",
+        trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
+    )
+
+
 def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None) -> CapabilityExpr | None:
     """Resolve ``msg.sender == X`` by reading ``X`` live when the static
     ``state_var_values`` feed didn't carry it.
@@ -641,6 +666,17 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         return None
     if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
         return None
+    # Pass-scoped dedup: owner()/governor()/<stateVar>() reads are deterministic at a fixed block, so N
+    # functions gating on the same getter need ONE read, not N. Only SUCCESSFUL reads are memoized — a revert
+    # or transient RPC error is never cached, so each gated function still reads/retries independently (no
+    # poisoning). Result is byte-identical to the un-memoized path.
+    memo = _pass_live_read_memo(outer)
+    block_repr = block if isinstance(block, int) else "latest"
+    memo_key = ("live_authority", rpc_url, contract.lower(), selector, block_repr)
+    if memo is not None and memo_key in memo:
+        _bump_resolve_counter(outer, "live_getter_memo_hits")
+        return _live_authority_result(memo[memo_key], selector, contract)
+
     _bump_resolve_counter(outer, "live_getter_calls")
     try:
         from utils.rpc import rpc_request
@@ -657,14 +693,10 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return None
     addr = "0x" + raw[-40:].lower()
-    if _is_zero_address(addr) or addr == _BURN_ADDRESS:
-        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
-    return CapabilityExpr.finite_set(
-        [addr],
-        quality="exact",
-        confidence="enumerable",
-        trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
-    )
+    result_addr = "" if (_is_zero_address(addr) or addr == _BURN_ADDRESS) else addr
+    if memo is not None:
+        memo[memo_key] = result_addr
+    return _live_authority_result(result_addr, selector, contract)
 
 
 def _public_getter_selector_for_internal_accessor(signature: str | None) -> str | None:
@@ -1545,11 +1577,13 @@ def _normalize_operand_for_call_arg(
     if source in _CALLER_SOURCES:
         return {"source": "root_caller"}
     if source == "external_call":
+        outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
         constant = _resolve_static_external_call_operand(
             operand,
             callee_contract_address=callee_contract_address,
             rpc_url=rpc_url,
             block=block,
+            memo=_pass_live_read_memo(outer),
         )
         if constant is not None:
             return constant
@@ -1586,6 +1620,7 @@ def _resolve_static_external_call_operand(
     callee_contract_address: str | None,
     rpc_url: str | None,
     block: int | None,
+    memo: dict[Any, Any] | None = None,
 ) -> dict[str, Any] | None:
     signature = operand.get("callee_signature")
     selector = operand.get("callee_selector")
@@ -1598,6 +1633,11 @@ def _resolve_static_external_call_operand(
     if not rpc_url:
         return None
     block_tag = hex(block) if isinstance(block, int) else "latest"
+    # Pass-scoped dedup of this nullary callee getter (deterministic at a fixed block). Successful reads only:
+    # a revert/transient error is never cached, so behavior is byte-identical to the un-memoized path.
+    memo_key = ("ext_operand", rpc_url, callee_contract_address.lower(), selector, block_tag)
+    if memo is not None and memo_key in memo:
+        return {"source": "constant", "constant_value": memo[memo_key]}
     try:
         from utils.rpc import rpc_request
 
@@ -1611,7 +1651,10 @@ def _resolve_static_external_call_operand(
         return None
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return None
-    return {"source": "constant", "constant_value": "0x" + raw[-64:].lower()}
+    constant_value = "0x" + raw[-64:].lower()
+    if memo is not None:
+        memo[memo_key] = constant_value
+    return {"source": "constant", "constant_value": constant_value}
 
 
 def _normalize_tree_for_frame(tree: PredicateTree, frame: Any) -> PredicateTree:

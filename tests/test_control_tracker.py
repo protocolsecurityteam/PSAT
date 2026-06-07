@@ -790,6 +790,152 @@ def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
     assert cvs["state_variable:registered"]["resolved_type"] == "unknown"
 
 
+# ---------------------------------------------------------------------------
+# Multicall3 snapshot-getter prewarm parity: PSAT_SNAPSHOT_MULTICALL on/off must
+# produce identical controller_values. With prewarm ON, every {target}() getter
+# is pre-read in ONE aggregate3 (utils.rpc.rpc_request) and _read_polling_source
+# consumes the cached raw; OFF, each is read per-controller via tracking._rpc_request.
+# Both wires return the same bytes, so the snapshot is byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def _multi_controller_plan(target: str) -> ControlTrackingPlan:
+    def _sv(source: str) -> TrackedController:
+        return {
+            "controller_id": f"state_variable:{source}",
+            "label": source,
+            "source": source,
+            "kind": "state_variable",
+            "read_spec": None,
+            "tracking_mode": "state_only",
+            "event_watch": None,
+            "polling_fallback": {
+                "contract_address": target,
+                "polling_sources": [source],
+                "cadence": "state_only",
+                "notes": [],
+            },
+            "notes": [],
+        }
+
+    return {
+        "schema_version": "0.1",
+        "contract_address": target,
+        "contract_name": "MockMultiController",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [_sv("registry"), _sv("owner"), _sv("guardian")],
+    }
+
+
+def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
+    from eth_abi.abi import decode, encode
+
+    import utils.rpc as rpc_mod
+
+    target = "0x1111111111111111111111111111111111111111"
+    getters = {
+        selector("registry()"): "0x" + "00" * 12 + "22" * 20,
+        selector("owner()"): "0x" + "00" * 12 + "33" * 20,
+        selector("guardian()"): "0x" + "00" * 12 + "44" * 20,
+    }
+    plan = _multi_controller_plan(target)
+
+    # Per-controller wire (used when prewarm is OFF; also serves eth_blockNumber always).
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            return getters.get(params[0]["data"], "0x" + "00" * 32)
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+    monkeypatch.setattr(
+        "services.resolution.tracking.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+
+    # Multicall3 prewarm wire (used when prewarm is ON) — same getter values.
+    mc_calls = {"n": 0}
+
+    def fake_multicall_rpc(_rpc_url, method, params, **_kw):
+        assert method == "eth_call"
+        call = params[0]
+        assert call["to"].lower() == rpc_mod.MULTICALL3_ADDRESS.lower()
+        mc_calls["n"] += 1
+        sub_calls = decode(["(address,bool,bytes)[]"], bytes.fromhex(call["data"][10:]))[0]
+        out = []
+        for tgt, _allow, calldata in sub_calls:
+            assert tgt.lower() == target.lower()
+            val = getters.get("0x" + calldata.hex()[:8], "0x" + "00" * 32)
+            out.append((True, bytes.fromhex(val[2:])))
+        return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
+
+    monkeypatch.setattr(rpc_mod, "rpc_request", fake_multicall_rpc)
+
+    monkeypatch.setattr("services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED", False)
+    off = build_control_snapshot(plan, "https://rpc.example")
+
+    monkeypatch.setattr("services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED", True)
+    on = build_control_snapshot(plan, "https://rpc.example")
+
+    def _canon(snapshot):
+        return dict(sorted(snapshot["controller_values"].items()))
+
+    assert _canon(off) == _canon(on), "prewarm ON must produce identical controller_values"
+    assert mc_calls["n"] == 1, "prewarm issues exactly one aggregate3 for all getters"
+    assert on["controller_values"]["state_variable:owner"]["value"] == "0x" + "33" * 20
+
+
+def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
+    """A getter that reverts is absent from the prewarm (success-only), so the controller falls
+    through to the live per-controller read + impl fallback exactly as without prewarm."""
+    from eth_abi.abi import decode, encode
+
+    import utils.rpc as rpc_mod
+
+    target = "0x1111111111111111111111111111111111111111"
+    plan = _multi_controller_plan(target)
+    good = {selector("owner()"): "0x" + "00" * 12 + "33" * 20}
+
+    per_call = {"n": 0}
+
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            per_call["n"] += 1
+            data = params[0]["data"]
+            if data in good:
+                return good[data]
+            raise RuntimeError("execution reverted")  # registry()/guardian() revert
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+    monkeypatch.setattr(
+        "services.resolution.tracking.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+
+    def fake_multicall_rpc(_rpc_url, _method, params, **_kw):
+        sub_calls = decode(["(address,bool,bytes)[]"], bytes.fromhex(params[0]["data"][10:]))[0]
+        out = []
+        for _tgt, _allow, calldata in sub_calls:
+            val = good.get("0x" + calldata.hex()[:8])
+            out.append((True, bytes.fromhex(val[2:])) if val else (False, b""))  # reverts → success=False
+        return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
+
+    monkeypatch.setattr(rpc_mod, "rpc_request", fake_multicall_rpc)
+    monkeypatch.setattr("services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED", True)
+
+    cvs = build_control_snapshot(plan, "https://rpc.example")["controller_values"]
+    # owner served from prewarm (decoded to its address); registry/guardian reverted in prewarm → read
+    # live → recorded null.
+    assert cvs["state_variable:owner"]["value"] == "0x" + "33" * 20
+    assert cvs["state_variable:registry"]["value"] is None
+    assert cvs["state_variable:registry"]["observed_via"] == "eth_call_error"
+    assert per_call["n"] >= 2, "reverting getters fell through to the live per-controller path"
+
+
 @pytest.mark.parametrize(
     "read_spec, expected",
     [

@@ -27,6 +27,14 @@ kill_timeout = 30
   # ~13 min). Cache misses still fall through to a live call that is persisted.
   PSAT_EXA_CACHE = "1"
   PSAT_TAVILY_CACHE = "1"
+  # Multicall3 (aggregate3) collapses resolution read fan-out into one billable eth_call: the 6-probe address
+  # classify, the per-contract control-snapshot getters, and the per-candidate external-check probes. Default
+  # OFF in code (keeps the offline suite hermetic — it stubs the per-call wire, not Multicall3); enabled here
+  # so prod gets the Alchemy-CU savings. Each falls back to the existing per-call path on any anomaly, so
+  # results are byte-identical. Flip any to "0" as a kill switch.
+  PSAT_CLASSIFY_MULTICALL = "1"
+  PSAT_SNAPSHOT_MULTICALL = "1"
+  PSAT_EXTERNAL_CHECK_MULTICALL = "1"
 
 # One-shot schema migration in a temporary machine. Runs once per
 # deploy, before any long-lived machine boots — so the four process

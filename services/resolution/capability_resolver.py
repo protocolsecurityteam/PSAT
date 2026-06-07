@@ -348,6 +348,11 @@ def resolve_contract_capabilities(
     per_function_ms: list[tuple[str, int]] = []
     kind_counts: dict[str, int] = {}
     resolve_counters: dict[str, Any] = {}
+    # Contract-scoped memo (shared into every function's ctx.meta below, like resolve_counters) of live
+    # nullary getter reads. Lets owner()/governor()/external-getter values that miss the persisted feed be
+    # read once per resolution pass instead of once per gated function. Discarded with this frame — it is a
+    # within-pass dedup, never a cross-run/persistent cache, so it cannot serve stale data across runs.
+    live_read_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
@@ -366,7 +371,7 @@ def resolve_contract_capabilities(
                     fn_signature if isinstance(fn_signature, str) else None, canonical_signatures
                 ),
             ),
-            meta={"resolve_counters": resolve_counters},
+            meta={"resolve_counters": resolve_counters, "live_read_memo": live_read_memo},
         )
         fn_started = time.monotonic()
         cap = evaluate_tree_with_registry(tree, registry, ctx)

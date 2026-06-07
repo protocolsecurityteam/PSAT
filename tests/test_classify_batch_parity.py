@@ -467,3 +467,157 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
     assert kind == "contract"
     assert had_error is True, "the one errored probe still propagates"
     assert sequential_called["count"] == 0, "no fallback should fire on partial failure"
+
+
+# ---------------------------------------------------------------------------
+# Multicall3 classify path (PSAT_CLASSIFY_MULTICALL) — must be byte-identical to
+# the sequential / JSON-RPC-batch paths. The probes are caller-independent view
+# getters, so routing them through Multicall3 (which becomes msg.sender) cannot
+# change a value; a reverting probe → success=False → _PROBE_ERROR, exactly the
+# sentinel a per-call JSON-RPC error yields. Wire is stubbed at
+# utils.rpc.rpc_request (the aggregate3 eth_call) so the REAL _multicall_probe +
+# multicall3_aggregate3 run hermetically.
+# ---------------------------------------------------------------------------
+
+
+def _run_multicall(
+    monkeypatch,
+    probe_map,
+    *,
+    code="0x60",
+    get_code_raises=False,
+    type_authority_raises=False,
+    revert_sigs: frozenset[str] | set[str] = frozenset(),
+):
+    """Drive _classify_uncached_batched through the real Multicall3 probe path.
+
+    Absent probes are modeled as success/empty ("0x") — matching how the sequential and
+    JSON-RPC-batch mocks model an absent function — so (kind, details, cacheable) are directly
+    comparable. ``revert_sigs`` forces specific probe selectors to report success=False (revert).
+    """
+    import utils.rpc as rpc_mod
+
+    revert_selectors = {tracking._selector(sig) for sig in revert_sigs}
+    sel_to_sig = {tracking._selector(sig): sig for sig, _abi in tracking._CLASSIFY_PROBE_SIGS}
+
+    def _fake_get_code(_rpc_url, _addr, _block):
+        if get_code_raises:
+            raise RuntimeError("getCode failed")
+        return code
+
+    def _fake_type_authority(*_a, **_kw):
+        if type_authority_raises:
+            raise RuntimeError("type_authority blew up")
+        return {}
+
+    def _fake_rpc_request(_rpc_url, method, params, **_kw):
+        assert method == "eth_call"
+        call = params[0]
+        assert call["to"].lower() == rpc_mod.MULTICALL3_ADDRESS.lower()
+        from eth_abi.abi import decode, encode
+
+        sub_calls = decode(["(address,bool,bytes)[]"], bytes.fromhex(call["data"][10:]))[0]
+        out = []
+        for _target, _allow, calldata in sub_calls:
+            sel = "0x" + calldata.hex()[:8]
+            if sel in revert_selectors:
+                out.append((False, b""))
+                continue
+            sig = sel_to_sig.get(sel)
+            raw = probe_map.get(sig, "0x") if sig else "0x"
+            ok = isinstance(raw, str) and raw.startswith("0x") and len(raw) > 2
+            raw_bytes = bytes.fromhex(raw[2:]) if ok else b""
+            out.append((True, raw_bytes))
+        return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
+
+    monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
+    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
+    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
+    monkeypatch.setattr(rpc_mod, "rpc_request", _fake_rpc_request)
+    return _classify_uncached_batched("https://rpc.example", "0x" + "ab" * 20, "latest")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["safe", "timelock_min_delay", "timelock_fallback_delay", "proxy_admin", "contract_no_probes"],
+)
+def test_multicall_matches_sequential(monkeypatch, scenario):
+    """Every classification branch resolves identically via Multicall3 and the sequential path."""
+    probe_map = _probe_responses_for(scenario)
+    _mock_sequential(monkeypatch, probe_map)
+    seq = _classify_uncached("https://rpc.example", "0x" + "ab" * 20, "latest")
+    mc = _run_multicall(monkeypatch, probe_map)
+    assert seq == mc
+
+
+def test_multicall_eoa_short_circuits_without_aggregate3(monkeypatch):
+    """No code → 'eoa' before any probe; the aggregate3 wire must never be hit."""
+    import utils.rpc as rpc_mod
+
+    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
+    monkeypatch.setattr(tracking, "_get_code", lambda *_a: "0x")
+    monkeypatch.setattr(
+        rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("aggregate3 should not run"))
+    )
+    kind, _details, had_error = _classify_uncached_batched("https://rpc", "0x" + "ab" * 20, "latest")
+    assert kind == "eoa"
+    assert had_error is False
+
+
+def test_multicall_revert_maps_to_probe_error(monkeypatch):
+    """A reverting probe (success=False) must set had_error=True (so the result is not cached),
+    exactly as a (None, True) slot does on the JSON-RPC-batch path — Safe still classifies."""
+    mc = _run_multicall(monkeypatch, _probe_responses_for("safe"), revert_sigs={"getMinDelay()"})
+    assert mc[0] == "safe"
+    assert mc[1]["owners"] == [ADDR_OWNER.lower()]
+    assert mc[2] is True
+
+
+def test_multicall_failure_falls_back_to_batch(monkeypatch):
+    """If the aggregate3 eth_call raises (chain lacks Multicall3 / provider rejects it),
+    _probe_classify falls back to the JSON-RPC batch, which classifies correctly. No accuracy loss."""
+    import utils.rpc as rpc_mod
+
+    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
+    monkeypatch.setattr(tracking, "_get_code", lambda *_a: "0x60")
+    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
+    monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))
+
+    def _safe_batch(_rpc_url, _calls):
+        return [
+            (_abi_encode_address_array([ADDR_OWNER]), False),
+            (_abi_encode_uint256(1), False),
+            ("0x", False),
+            ("0x", False),
+            ("0x", False),
+            ("0x", False),
+        ]
+
+    monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _safe_batch)
+    kind, details, had_error = _classify_uncached_batched("https://rpc", "0x" + "ab" * 20, "latest")
+    assert kind == "safe"
+    assert details["owners"] == [ADDR_OWNER.lower()]
+    assert had_error is False, "fallback to the batch path succeeded → cacheable"
+
+
+def test_probe_classify_dispatch_on_flag(monkeypatch):
+    """_probe_classify routes to Multicall3 when the flag is on, to the JSON-RPC batch when off."""
+    seen = {"mc": 0, "batch": 0}
+    monkeypatch.setattr(
+        tracking,
+        "_multicall_probe",
+        lambda *a, **k: (seen.__setitem__("mc", seen["mc"] + 1), [tracking._PROBE_ERROR])[1],
+    )
+    monkeypatch.setattr(
+        tracking,
+        "_batch_probe",
+        lambda *a, **k: (seen.__setitem__("batch", seen["batch"] + 1), [tracking._PROBE_ERROR])[1],
+    )
+
+    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
+    tracking._probe_classify("https://rpc", "0xab", "latest")
+    assert seen == {"mc": 1, "batch": 0}
+
+    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", False)
+    tracking._probe_classify("https://rpc", "0xab", "latest")
+    assert seen == {"mc": 1, "batch": 1}

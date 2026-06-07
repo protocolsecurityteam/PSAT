@@ -19,11 +19,37 @@ from sqlalchemy.orm import Session
 from db.models import IndexedEventLog
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.repos.event_logs_pg import _word_to_address
-from utils.rpc import rpc_batch_request_with_status
+from utils.rpc import multicall3_aggregate3, rpc_batch_request_with_status
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
 _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
+
+# Collapse the per-candidate checker probes (canCall/isAllowed/…) into one billable eth_call via Multicall3.
+# The checker takes the candidate as an explicit argument — the enumerable caller dimension — so it is
+# caller-independent and safe to route through Multicall3 (which becomes msg.sender). Falls back to the
+# JSON-RPC array batch (identical decode) on any failure. Default OFF: enabled in prod via env (fly.toml) so
+# the offline suite (which stubs the per-call wire, not Multicall3's eth_call) stays hermetic. Flip to "1".
+_EXTERNAL_CHECK_MULTICALL_ENABLED = os.getenv("PSAT_EXTERNAL_CHECK_MULTICALL", "0").lower() in ("1", "true", "yes")
+
+
+def _eval_candidate_calls(
+    rpc_url: str,
+    mc_calls: list[tuple[str, str]],
+    batch_calls: list[tuple[str, list[Any]]],
+    block_tag: str,
+) -> list[tuple[Any, bool]]:
+    """Probe every candidate's checker call. One Multicall3 aggregate3 (per chunk) when enabled, else/on any
+    failure the JSON-RPC array batch. Both return ``[(raw, had_error)]`` with identical decode semantics: a
+    reverting probe → ``had_error=True`` (skipped); a successful probe → its raw bytes for ``_decode_bool``."""
+    if _EXTERNAL_CHECK_MULTICALL_ENABLED:
+        try:
+            mc = multicall3_aggregate3(rpc_url, mc_calls, block_tag)
+            return [(raw if success else None, not success) for success, raw in mc]
+        except Exception:
+            pass
+    return rpc_batch_request_with_status(rpc_url, batch_calls)
+
 
 # Event words are 32 bytes; ``_word_to_address`` takes the low 20. A non-address
 # field carrying a small integer (a uint8 role, a bool, an array length, a small
@@ -84,16 +110,19 @@ def materialize_external_check_from_events(
         return None
 
     calls: list[tuple[str, list[Any]]] = []
+    mc_calls: list[tuple[str, str]] = []
     ordered_candidates: list[str] = []
+    block_tag = hex(block) if isinstance(block, int) else "latest"
     for candidate in candidates:
         encoded_args = list(encoded_static_args)
         encoded_args[caller_index] = _encode_address(candidate)
         data = checker_selector + "".join(arg or "" for arg in encoded_args)
         call: dict[str, str] = {"to": checker_address, "data": data}
-        calls.append(("eth_call", [call, hex(block) if isinstance(block, int) else "latest"]))
+        calls.append(("eth_call", [call, block_tag]))
+        mc_calls.append((checker_address, data))
         ordered_candidates.append(candidate)
 
-    results = rpc_batch_request_with_status(rpc_url, calls)
+    results = _eval_candidate_calls(rpc_url, mc_calls, calls, block_tag)
     allowed: list[str] = []
     for candidate, (raw, had_error) in zip(ordered_candidates, results, strict=False):
         if had_error:
