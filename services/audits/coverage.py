@@ -902,15 +902,18 @@ def _match_to_row_kwargs(match: CoverageMatch) -> dict:
 
 # --- Bytecode anchor ----------------------------------------------------
 
-# Env-keyed so prod + tests can point at different RPC providers. Default
-# matches policy_worker / protocol_monitor conventions.
-_DEFAULT_RPC_URL: Final[str] = "https://ethereum-rpc.publicnode.com"
-
 
 def _rpc_url() -> str:
-    import os
+    """eRPC route for bytecode-anchor reads.
 
-    return os.environ.get("ETH_RPC") or _DEFAULT_RPC_URL
+    Coverage anchors are ethereum-deployed, so this resolves the mainnet eRPC
+    route — same as policy_worker / protocol_monitor, which also go through
+    ``default_rpc_url``. Raises when eRPC is unconfigured; the caller catches
+    that and records "drift unknown" rather than hitting a direct provider.
+    """
+    from utils.rpc import require_rpc_url
+
+    return require_rpc_url(chain_id=1)
 
 
 def _fetch_bytecode_keccak(address: str) -> str | None:

@@ -19,7 +19,7 @@ def _job(**overrides):
         "id": "job-1",
         "address": "0x1111111111111111111111111111111111111111",
         "name": "HiddenThing",
-        "request": {"rpc_url": "https://rpc.example"},
+        "request": {"rpc_url": "http://127.0.0.1:8545"},
     }
     payload.update(overrides)
     return SimpleNamespace(**payload)
@@ -69,7 +69,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
         {
             "address": "0x2222222222222222222222222222222222222222",
             "name": "HiddenThing: (impl)",
-            "rpc_url": "https://rpc.example",
+            "rpc_url": "http://127.0.0.1:8545",
             "parent_job_id": "job-1",
             "root_job_id": "job-1",
             "proxy_address": "0x1111111111111111111111111111111111111111",

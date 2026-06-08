@@ -156,7 +156,9 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("ETH_RPC") or "https://ethereum-rpc.publicnode.com"
+    from utils.rpc import require_rpc_url
+
+    rpc_url = require_rpc_url(chain="ethereum")
     run_enrollment_reconciler_loop(rpc_url, stop_event=stop_event)
 
 

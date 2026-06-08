@@ -539,7 +539,7 @@ def test_check_proxy_cache_no_rpc_url(db_session):
     db_session.add(contract)
     db_session.flush()
 
-    # Clear ETH_RPC env var to ensure no fallback
+    # Clear the RPC env (eRPC route) to ensure no fallback resolves
     import os
 
     old_rpc = os.environ.pop("ETH_RPC", None)

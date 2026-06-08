@@ -2,21 +2,18 @@
 
 After the inventory pipeline builds contracts, some entries have
 ``chains=["unknown"]``.  This module probes ``eth_getCode`` via JSON-RPC
-batch requests to Alchemy endpoints to determine where each contract
-is actually deployed.
+batch requests through the eRPC proxy (one per-chain route) to determine
+where each contract is actually deployed.
 
-Requires ``ETH_RPC`` to be set to an Alchemy URL
-(``https://<network>.g.alchemy.com/v2/<key>``).  The API key is
-extracted and used to derive per-chain endpoints so all chains can be
-probed **in parallel** (~1-2 seconds for hundreds of addresses across
-10+ chains).
+Routes through eRPC (``ERPC_BASE_URL``) like every other read, so all chains
+can be probed **in parallel** (~1-2 seconds for hundreds of addresses across
+10+ chains) with no direct-provider dependency.
 
 Strategy
 --------
-1. Extract the Alchemy API key from ``ETH_RPC``.
-2. **Phase 1** -- probe every unknown address on every known chain in
+1. **Phase 1** -- probe every unknown address on every known chain in
    parallel using JSON-RPC batch requests.
-3. **Phase 2** -- for addresses that matched nothing in phase 1, probe
+2. **Phase 2** -- for addresses that matched nothing in phase 1, probe
    the remaining supported chains (also in parallel).
 """
 
@@ -34,24 +31,10 @@ from typing import Any
 from dotenv import load_dotenv
 
 from utils.chains import canonical_chain, canonical_chain_list
+from utils.rpc import erpc_url_for_chain_id, rpc_headers
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
 from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
-
-# Alchemy network slugs matching CHAIN_IDS keys.
-_ALCHEMY_CHAIN_SLUGS: dict[str, str] = {
-    "ethereum": "eth-mainnet",
-    "arbitrum": "arb-mainnet",
-    "optimism": "opt-mainnet",
-    "polygon": "polygon-mainnet",
-    "base": "base-mainnet",
-    "avalanche": "avax-mainnet",
-    "bsc": "bnb-mainnet",
-    "linea": "linea-mainnet",
-    "scroll": "scroll-mainnet",
-    "zksync": "zksync-mainnet",
-    "blast": "blast-mainnet",
-}
 
 # Max addresses per JSON-RPC batch request.
 _BATCH_RPC_SIZE = 100
@@ -62,25 +45,11 @@ _RPC_RATE_LIMIT = int(os.getenv("RPC_RATE_LIMIT", "15"))
 _FALLBACK_WORKERS = 4
 
 
-def _get_alchemy_key() -> str:
-    """Extract the Alchemy API key from ETH_RPC."""
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    rpc = os.getenv("ETH_RPC", "")
-    # Key is the last path segment: https://<slug>.g.alchemy.com/v2/<key>
-    key = rpc.rstrip("/").rsplit("/", 1)[-1] if "/v2/" in rpc else ""
-    if not key:
-        raise RuntimeError(
-            "Chain resolution requires ETH_RPC set to an Alchemy URL (https://<network>.g.alchemy.com/v2/<key>)"
-        )
-    return key
-
-
-def _alchemy_rpc(chain_name: str, api_key: str) -> str | None:
-    """Build an Alchemy RPC URL for a given chain."""
-    slug = _ALCHEMY_CHAIN_SLUGS.get(chain_name)
-    if not slug:
-        return None
-    return f"https://{slug}.g.alchemy.com/v2/{api_key}"
+def _erpc_url_for_chain(chain_name: str) -> str | None:
+    """eRPC route for a chain name, or None when the chain isn't mapped or
+    ``ERPC_BASE_URL`` is unset."""
+    chain_id = CHAIN_IDS.get(chain_name)
+    return erpc_url_for_chain_id(chain_id) if chain_id else None
 
 
 def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:
@@ -117,11 +86,10 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
         request = urllib.request.Request(
             rpc_url,
             data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "getContractAddresses/1.0",
-            },
+            headers=rpc_headers(
+                rpc_url,
+                {"Accept": "application/json", "User-Agent": "getContractAddresses/1.0"},
+            ),
         )
         try:
             with urllib.request.urlopen(request, timeout=max(RPC_TIMEOUT_SECONDS, 30)) as response:
@@ -162,13 +130,12 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
 def _probe_chain_batch(
     addresses: list[str],
     chain_name: str,
-    api_key: str,
     debug: bool = False,
 ) -> set[str]:
-    """Probe all *addresses* on a single chain via Alchemy JSON-RPC batch."""
-    rpc_url = _alchemy_rpc(chain_name, api_key)
+    """Probe all *addresses* on a single chain via the eRPC JSON-RPC batch route."""
+    rpc_url = _erpc_url_for_chain(chain_name)
     if not rpc_url:
-        _debug_log(debug, f"  {chain_name}: no Alchemy slug configured, skipping")
+        _debug_log(debug, f"  {chain_name}: no eRPC route configured, skipping")
         return set()
 
     try:
@@ -182,20 +149,17 @@ def _probe_chain_batch(
 def _probe_chains(
     addresses: list[str],
     chains: list[str],
-    api_key: str,
     matched: dict[str, list[str]],
     debug: bool = False,
 ) -> None:
-    """Probe multiple chains in parallel using Alchemy batch endpoints."""
+    """Probe multiple chains in parallel using eRPC batch routes."""
     with ThreadPoolExecutor(max_workers=min(len(chains), 10)) as executor:
         # Per-chain context copy preserves the caller's trace context inside
         # each per-chain batch RPC call.
         future_to_chain = {}
         for chain_name in chains:
             ctx = contextvars.copy_context()
-            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, api_key, debug)] = (
-                chain_name
-            )
+            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, debug)] = chain_name
         for future in as_completed(future_to_chain):
             chain_name = future_to_chain[future]
             try:
@@ -230,13 +194,6 @@ def resolve_unknown_chains(
         _debug_log(debug, "Chain resolution: no unknown-chain contracts to resolve")
         return contracts
 
-    api_key = _get_alchemy_key()
-
-    # Warn about chains in CHAIN_IDS that have no Alchemy slug configured.
-    uncovered = sorted(ch for ch in CHAIN_IDS if ch not in _ALCHEMY_CHAIN_SLUGS)
-    if uncovered:
-        _debug_log(debug, f"WARNING: no Alchemy slug for chain(s): {uncovered} -- these will be skipped")
-
     # Determine which chains this protocol is known to use -- probe these first.
     known_chains: list[str] = []
     seen: set[str] = set()
@@ -262,14 +219,14 @@ def resolve_unknown_chains(
     all_addrs = list(matched.keys())
 
     # Phase 1: probe ALL unknowns on ALL known chains in parallel.
-    _probe_chains(all_addrs, known_chains, api_key, matched, debug)
+    _probe_chains(all_addrs, known_chains, matched, debug)
 
     # Phase 2: for addresses that matched NOTHING on known chains, probe the
     # remaining chains in parallel.
     unresolved = [addr for addr, chains in matched.items() if not chains]
     if unresolved and remaining_chains:
         _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
-        _probe_chains(unresolved, remaining_chains, api_key, matched, debug)
+        _probe_chains(unresolved, remaining_chains, matched, debug)
 
     # Apply results.
     resolved_count = 0
@@ -309,18 +266,16 @@ def validate_claimed_chains(
     if not targets:
         return contracts
 
-    api_key = _get_alchemy_key()
-
     for contract, address, claimed in targets:
         matched: dict[str, list[str]] = {address: []}
-        _probe_chains([address], claimed, api_key, matched, debug)
+        _probe_chains([address], claimed, matched, debug)
         if matched[address]:
             contract["chains"] = canonical_chain_list(matched[address])
             continue
 
         remaining = [chain for chain in CHAIN_IDS if chain not in set(claimed)]
         if remaining:
-            _probe_chains([address], remaining, api_key, matched, debug)
+            _probe_chains([address], remaining, matched, debug)
         if matched[address]:
             corrected = canonical_chain_list(matched[address]) or ["unknown"]
             contract["chains"] = corrected

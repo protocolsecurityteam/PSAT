@@ -262,10 +262,10 @@ def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str
     tx_hash = item.get("txHash")
     if isinstance(tx_hash, str) and tx_hash.startswith("0x"):
         try:
-            from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url, rpc_request
+            from utils.rpc import default_rpc_url, rpc_request
 
-            url = rpc_url or default_rpc_url(chain_id=chain_id) or PUBLIC_ETH_RPC_URL
-            tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash])
+            url = rpc_url or default_rpc_url(chain_id=chain_id)
+            tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash]) if url else None
             block = tx.get("blockNumber") if isinstance(tx, dict) else None
             if isinstance(block, str) and block.startswith("0x"):
                 return int(block, 16)

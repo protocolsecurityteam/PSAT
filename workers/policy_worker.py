@@ -34,12 +34,11 @@ from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.policy_worker")
 
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
 
@@ -88,14 +87,10 @@ def _rpc_url_for_job(job: Job) -> str:
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     chain = request.get("chain")
-    return (
-        default_rpc_url(
-            explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-            chain_id=request.get("chain_id"),
-            chain=chain if isinstance(chain, str) else None,
-            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
-        )
-        or DEFAULT_RPC_URL
+    return require_rpc_url(
+        explicit_rpc_url=explicit if isinstance(explicit, str) else None,
+        chain_id=request.get("chain_id"),
+        chain=chain if isinstance(chain, str) else None,
     )
 
 

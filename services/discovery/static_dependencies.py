@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -127,9 +126,11 @@ def discover_dependencies(
 def find_dependencies(address: str, rpc_url: str | None = None, code_cache: dict[str, str] | None = None) -> dict:
     """Resolve an RPC endpoint and return discovered static contract dependencies."""
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    effective_rpc = rpc_url or os.getenv("ETH_RPC")
+    from utils.rpc import default_rpc_url
+
+    effective_rpc = rpc_url or default_rpc_url(chain_id=1)
     if not effective_rpc:
-        raise RuntimeError("No RPC URL provided and ETH_RPC not set")
+        raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")
 
     address = normalize_address(address)
     deps = discover_dependencies(effective_rpc, address, code_cache=code_cache)

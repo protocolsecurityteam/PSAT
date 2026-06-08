@@ -20,7 +20,7 @@ from services.resolution.deferred_reconciler import reconcile_deferred_resolutio
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
 from utils.logging import log_timed_phase
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import require_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -604,7 +604,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
+    # PSAT_INDEXER_RPC_URL is the deliberate dedicated lane so the serial
+    # indexer doesn't starve on the shared eRPC proxy under job load; eRPC is
+    # the default when it's unset.
+    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or require_rpc_url(chain_id=1)
     fetchers = {1: RpcEventLogFetcher(rpc_url)}
     head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
     block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}
