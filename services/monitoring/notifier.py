@@ -18,6 +18,7 @@ from db.models import (
     ProxyUpgradeEvent,
 )
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def _format_embed(event: ProxyUpgradeEvent) -> dict:
     label = proxy.label or proxy.proxy_address
     fields = [
         {"name": "Proxy", "value": f"`{proxy.proxy_address}`", "inline": True},
-        {"name": "Chain", "value": proxy.chain, "inline": True},
+        {"name": "Chain ID", "value": str(proxy.chain_id), "inline": True},
         {"name": "Event", "value": event.event_type, "inline": True},
         {"name": "New Implementation", "value": f"`{event.new_implementation}`", "inline": False},
     ]
@@ -334,7 +335,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
 
     fields = [
         {"name": "Contract", "value": f"`{mc.address}`", "inline": True},
-        {"name": "Chain", "value": mc.chain, "inline": True},
+        {"name": "Chain ID", "value": str(mc.chain_id), "inline": True},
         {"name": "Event", "value": event.event_type, "inline": True},
     ]
     if contract_name:
@@ -555,10 +556,15 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
 
     contract_name = None
     if job.address:
+        job_chain_id = require_supported_chain_id(
+            chain_id=job.chain_id,
+            context=f"notification contract lookup for job {job.id}",
+        )
         contract_row = session.execute(
             select(Contract)
             .where(
                 Contract.address == job.address.lower(),
+                Contract.chain_id == job_chain_id,
             )
             .limit(1)
         ).scalar_one_or_none()

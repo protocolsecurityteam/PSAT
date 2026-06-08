@@ -158,7 +158,6 @@ _SECRET_VALUE_KEYS = frozenset(
         "rpc_url",
         "rpc",
         "eth_rpc",
-        "dynamic_rpc",
         "discord_webhook_url",
         "webhook_url",
     }

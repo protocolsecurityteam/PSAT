@@ -28,7 +28,7 @@ export function DependencyGraphModal({ machine, onClose }) {
       setError(null);
       setGraphData(null);
       setGraphNote(null);
-      const ids = [machine.job_id, machine.impl_job_id, machine.address]
+      const ids = [machine.analysis_job_id, machine.implementation_analysis_job_id, machine.address]
         .filter(Boolean)
         .filter((id, index, arr) => arr.indexOf(id) === index);
       let sawArtifact = false;
@@ -105,14 +105,18 @@ export function DependencyGraphModal({ machine, onClose }) {
           <div>
             <div className="ps-dependency-modal-eyebrow">Dependency Graph</div>
             <h2>{machine.name || shortAddr(machine.address)}</h2>
-            <a
-              className="ps-dependency-modal-sub ps-scanner-link"
-              href={blockExplorerAddressUrl(machine.address, machine.chain)}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {machine.address}
-            </a>
+            {blockExplorerAddressUrl(machine.address, machine.chain_id) ? (
+              <a
+                className="ps-dependency-modal-sub ps-scanner-link"
+                href={blockExplorerAddressUrl(machine.address, machine.chain_id)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {machine.address}
+              </a>
+            ) : (
+              <div className="ps-dependency-modal-sub">{machine.address}</div>
+            )}
           </div>
           <button type="button" className="ps-modal-close" onClick={onClose} aria-label="Close dependency graph">
             x
@@ -124,7 +128,7 @@ export function DependencyGraphModal({ machine, onClose }) {
           {!loading && graphData && (
             <>
               {graphNote && <div className="ps-dependency-note">{graphNote}</div>}
-              <DependencyGraphTab data={graphData} runName={null} chain={machine.chain} />
+              <DependencyGraphTab data={graphData} runName={null} chainId={machine.chain_id} />
             </>
           )}
         </div>

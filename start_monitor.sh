@@ -31,13 +31,23 @@ trap cleanup EXIT INT TERM
 
 PY=(uv run --no-sync python)
 
-"${PY[@]}" -m workers.protocol_monitor &
+missing=()
+[ -z "$ERPC_BASE_URL" ] && missing+=("ERPC_BASE_URL")
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "ERROR: Missing required monitor environment variables:"
+  for var in "${missing[@]}"; do
+    echo "  - $var"
+  done
+  exit 1
+fi
+
+"${PY[@]}" -m workers.protocol_monitor --all-supported-chains &
 PIDS+=($!)
-"${PY[@]}" -m workers.protocol_monitor --poll &
+"${PY[@]}" -m workers.protocol_monitor --poll --all-supported-chains &
 PIDS+=($!)
 "${PY[@]}" -m workers.protocol_monitor --tvl &
 PIDS+=($!)
-"${PY[@]}" -m workers.protocol_monitor --reconcile &
+"${PY[@]}" -m workers.protocol_monitor --reconcile --all-supported-chains &
 PIDS+=($!)
 
 echo "Monitors started: ${PIDS[*]}"

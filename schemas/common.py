@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
 from typing_extensions import NotRequired, TypedDict
+
+logger = logging.getLogger(__name__)
 
 Address = str
 BlockNumber = int
@@ -76,13 +79,12 @@ class Contract(TypedDict):
 class StageContext(TypedDict):
     schema_version: str
     stage: str
-    chain_id: ChainId
+    chain_id: NotRequired[ChainId]
     run_id: NotRequired[str | None]
     job_id: NotRequired[str | None]
     company: NotRequired[str | None]
     protocol_id: NotRequired[int | None]
     block_number: NotRequired[BlockNumber | None]
-    rpc_url: NotRequired[str | None]
     artifact_root: NotRequired[str | None]
     requested_at: NotRequired[str | None]
 
@@ -175,13 +177,13 @@ def _address_list(value: Iterable[Address | None] | Address | None) -> list[Addr
     if value is None:
         return []
     if isinstance(value, str):
-        return [value.lower()] if value else []
+        return [_normalize_contract_address(value, context="contract address list")] if value else []
     out: list[Address] = []
     seen: set[Address] = set()
     for item in value:
-        if not isinstance(item, str) or not item:
+        if item is None or item == "":
             continue
-        address = item.lower()
+        address = _normalize_contract_address(item, context="contract address list")
         if address in seen:
             continue
         seen.add(address)
@@ -189,10 +191,22 @@ def _address_list(value: Iterable[Address | None] | Address | None) -> list[Addr
     return out
 
 
+def _normalize_contract_address(value: Address | None, *, context: str) -> Address:
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) != 42:
+        logger.error("%s requires 20-byte 0x address, got %r", context, value)
+        raise ValueError(f"{context} requires 20-byte 0x address, got {value!r}")
+    try:
+        bytes.fromhex(value[2:])
+    except ValueError as exc:
+        logger.error("%s received malformed address hex: %r", context, value)
+        raise ValueError(f"{context} received malformed address hex: {value!r}") from exc
+    return value.lower()
+
+
 def make_contract(
     *,
     address: Address,
-    chain_id: ChainId | str | None = 1,
+    chain_id: ChainId | str,
     name: str | None = None,
     label: str | None = None,
     is_proxy: bool = False,
@@ -204,21 +218,27 @@ def make_contract(
     proxy_type: str | None = None,
 ) -> Contract:
     try:
-        normalized_chain_id = int(chain_id or 1)
-    except (TypeError, ValueError):
-        normalized_chain_id = 1
+        from utils.rpc import require_supported_chain_id
+
+        normalized_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"contract {address}")
+    except RuntimeError as exc:
+        logger.error("contract requires supported chain_id for address=%r: %s", address, exc)
+        raise ValueError(str(exc)) from exc
+    normalized_address = _normalize_contract_address(address, context="contract")
     return {
-        "address": address.lower(),
+        "address": normalized_address,
         "chain_id": normalized_chain_id,
         "name": name,
         "label": label,
         "is_proxy": is_proxy,
-        "proxy_address": proxy_address.lower() if isinstance(proxy_address, str) and proxy_address else None,
+        "proxy_address": _normalize_contract_address(proxy_address, context="contract proxy_address")
+        if proxy_address
+        else None,
         "implementation_addresses": _address_list(implementation_addresses),
         "admin_addresses": _address_list(admin_addresses),
         "beacon_addresses": _address_list(beacon_addresses),
-        "deployer_address": deployer_address.lower()
-        if isinstance(deployer_address, str) and deployer_address
+        "deployer_address": _normalize_contract_address(deployer_address, context="contract deployer_address")
+        if deployer_address
         else None,
         "proxy_type": proxy_type,
     }
@@ -232,21 +252,27 @@ def make_stage_context(
     *,
     schema_version: str,
     stage: str,
-    chain_id: ChainId,
+    chain_id: ChainId | None = None,
     run_id: str | None = None,
     job_id: str | None = None,
     company: str | None = None,
     protocol_id: int | None = None,
     block_number: BlockNumber | None = None,
-    rpc_url: str | None = None,
     artifact_root: str | None = None,
     requested_at: str | None = None,
 ) -> StageContext:
     context: StageContext = {
         "schema_version": schema_version,
         "stage": stage,
-        "chain_id": int(chain_id),
     }
+    if chain_id is not None:
+        try:
+            from utils.rpc import require_supported_chain_id
+
+            context["chain_id"] = require_supported_chain_id(chain_id=chain_id, context=f"stage context {stage}")
+        except RuntimeError as exc:
+            logger.error("stage context %s requires supported chain_id=%r: %s", stage, chain_id, exc)
+            raise ValueError(str(exc)) from exc
     if run_id is not None:
         context["run_id"] = run_id
     if job_id is not None:
@@ -257,8 +283,6 @@ def make_stage_context(
         context["protocol_id"] = protocol_id
     if block_number is not None:
         context["block_number"] = block_number
-    if rpc_url is not None:
-        context["rpc_url"] = rpc_url
     if artifact_root is not None:
         context["artifact_root"] = artifact_root
     if requested_at is not None:

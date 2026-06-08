@@ -46,6 +46,7 @@ class _EquivalenceInputs:
     audit_report_id: int
     contract_id: int
     contract_address: Address | None
+    contract_chain_id: int | None
     reviewed_commits: tuple[str, ...]
     scope_contracts: tuple[str, ...]
     source_repo: str | None
@@ -70,7 +71,7 @@ class VerifiedSource:
 
 
 @dataclass(frozen=True)
-class EtherscanFetch:
+class SourceFetch:
     source: VerifiedSource | None
     status: str
     detail: str
@@ -87,7 +88,7 @@ class GithubHashResult:
 class EquivalenceMatch:
     commit: str
     scope_name: str
-    etherscan_path: str
+    source_path: str
     source_sha256: str
 
 
@@ -160,13 +161,13 @@ __all__ = [
     "CoverageMatch",
     "EquivalenceMatch",
     "EquivalenceOutcome",
-    "EtherscanFetch",
     "ExtractionOutcome",
     "GithubFetch",
     "GithubHashResult",
     "ImplWindow",
     "ScopeExtractionOutcome",
     "ScopeSection",
+    "SourceFetch",
     "VerifiedSource",
     "_EquivalenceInputs",
 ]

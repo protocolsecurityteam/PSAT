@@ -59,6 +59,7 @@ from sqlalchemy import Text, cast, func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, EffectiveFunction, IndexedEventCursor, Job, JobStage, JobStatus
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +113,16 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
     return row is not None
 
 
-def _address_has_active_job(session: Session, address: str | None, *, exclude_job_id: Any) -> bool:
+def _address_has_active_job(session: Session, address: str | None, *, chain_id: int, exclude_job_id: Any) -> bool:
     """True iff a non-terminal job (queued/processing) already exists for
-    ``address`` other than ``exclude_job_id`` — so the reconciler does not pile
-    a second re-analysis on top of one already in flight."""
+    ``address`` on ``chain_id`` other than ``exclude_job_id`` — so the reconciler
+    does not pile a second re-analysis on top of one already in flight."""
     if not address:
         return False
     row = session.execute(
         select(Job.id)
         .where(func.lower(Job.address) == address.lower())
+        .where(Job.chain_id == chain_id)
         .where(Job.id != exclude_job_id)
         .where(Job.status.in_((JobStatus.queued, JobStatus.processing)))
         .limit(1)
@@ -128,7 +130,7 @@ def _address_has_active_job(session: Session, address: str | None, *, exclude_jo
     return row is not None
 
 
-def reconcile_deferred_resolutions(session: Session, *, chain_id: int = 1, limit: int = 200) -> int:
+def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: int = 200) -> int:
     """One reconciliation pass.
 
     Re-enqueue the policy stage of every completed job whose index-cold
@@ -139,16 +141,22 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int = 1, limit
     drive a single pass. Commits only when it re-enqueued at least one job;
     otherwise it rolls back so the read-only pass leaves no open transaction.
     """
+    chain_id = require_supported_chain_id(chain_id=chain_id, context="deferred resolution reconciliation")
     # Cheap pre-filter: only effective_functions whose serialized capability
     # tree mentions the marker. The JSONB→text cast LIKE catches the marker even
     # when the deferred leaf is nested inside an AND/OR; the precise per-leaf
     # walk happens in Python below.
     rows = session.execute(
         select(Job.id, Job.address, EffectiveFunction.capability_expr)
-        .join(Contract, Contract.job_id == Job.id)
+        .join(
+            Contract,
+            (func.lower(Contract.address) == func.lower(Job.address)) & (Contract.chain_id == Job.chain_id),
+        )
         .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
         .where(Job.status == JobStatus.completed)
         .where(Job.stage == JobStage.done)
+        .where(Job.chain_id == chain_id)
+        .where(Contract.chain_id == chain_id)
         .where(EffectiveFunction.capability_expr.isnot(None))
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
@@ -175,7 +183,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int = 1, limit
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
             continue
-        if _address_has_active_job(session, job.address, exclude_job_id=job.id):
+        if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
         # Reset to the policy stage so the production pipeline re-resolves and
         # re-persists everything against the now-warm index. Clear the lease /

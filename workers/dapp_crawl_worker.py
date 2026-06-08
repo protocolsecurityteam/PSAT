@@ -28,6 +28,7 @@ from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.chain_resolver import expand_entries_by_resolved_chains
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.logging import log_timed_phase, record_stage_metric
+from utils.rpc import require_supported_chain_id
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.dapp_crawl")
@@ -43,13 +44,7 @@ class DAppCrawlWorker(BaseWorker):
         if not urls:
             raise ValueError("dapp_crawl job missing dapp_urls in request")
 
-        raw_chain_id = request.get("chain_id")
-        if raw_chain_id is None:
-            raise ValueError("dapp_crawl job missing chain_id in request")
-        try:
-            chain_id = int(raw_chain_id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"dapp_crawl job has invalid chain_id: {raw_chain_id!r}") from exc
+        chain_id = require_supported_chain_id(chain_id=job.chain_id, context=f"dapp_crawl job {job.id}")
         wait = request.get("wait") or 10
 
         # Derive / create Protocol row from URL hostname if no company context exists
@@ -130,12 +125,11 @@ class DAppCrawlWorker(BaseWorker):
         for addr in addresses:
             normalized = addr.lower()
             info = detail_by_addr.get(normalized, {})
-            addr_chain = info.get("chain")
             source_urls = info.get("source_urls", [])
             bulk_entries.append(
                 {
                     "address": normalized,
-                    "chain": addr_chain,
+                    "chain_id": chain_id,
                     "new_sources": ["dapp_crawl"],
                     "discovery_url": source_urls[0] if source_urls else None,
                 }

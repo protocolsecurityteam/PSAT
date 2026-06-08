@@ -1,9 +1,9 @@
 """Cross-job, cross-process materialization cache.
 
-A row per ``(chain, bytecode_keccak)`` holding the static analysis +
+A row per ``(chain_id, bytecode_keccak)`` holding the static analysis +
 tracking-plan bundle so two impl jobs requesting the same contract pay
 the expensive forge+Slither cost exactly once. Concurrent requests are
-serialized via ``pg_advisory_xact_lock(hashtext(chain || ':' || keccak))``:
+serialized via ``pg_advisory_xact_lock(hashtext(chain_id || ':' || keccak))``:
 the lock winner runs the builder; the loser blocks on the lock, finds
 ``status='ready'`` on its second read, and returns the cached bundle
 without rebuilding.
@@ -11,11 +11,6 @@ without rebuilding.
 The module is deliberately small and stateless — every entry point opens
 its own short-lived session so the caller doesn't have to share its DB
 connection with potentially blocking advisory locks.
-
-The "default chain" used when callers don't pass one is "ethereum",
-matching how ``Job.request['chain']`` is populated by the API. NULL
-chains were considered but lose information when an operator inspects
-the table.
 
 Bundle storage: the ``analysis`` and ``tracking_plan`` payloads can be
 multi-megabyte JSON blobs (a Compound-v3-class contract analysis is
@@ -33,12 +28,10 @@ columns are then the source of truth. When storage is unconfigured
 (local dev, offline tests without minio) writes fall back to inline
 JSONB and blob_key is NULL.
 
-Reads are always handled by ``hydrate_analysis`` / ``hydrate_tracking_plan``
-which try the blob first and transparently fall back to inline JSONB.
-That fallback is what lets pre-migration rows keep working while the
-backfill (``scripts/backfill_contract_materializations_to_blob.py``)
-catches up — and what insulates the pipeline from a transient Tigris
-outage when the inline copy still exists.
+Reads are always handled by ``hydrate_analysis`` / ``hydrate_tracking_plan``.
+When a blob key is present, the blob is authoritative and read failures are
+surfaced to the caller. Inline JSONB is used only for rows that have no blob
+key.
 """
 
 from __future__ import annotations
@@ -62,10 +55,9 @@ from db.storage import (
     _key_prefix,
     get_storage_client,
 )
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_CHAIN = "ethereum"
 
 
 def _builder_staleness_s() -> float:
@@ -107,43 +99,67 @@ def is_enabled() -> bool:
     return os.getenv("PSAT_CONTRACT_MATERIALIZATIONS", "1").lower() in ("1", "true", "yes")
 
 
-def _normalize(chain: str | None, address: str, bytecode_keccak: str) -> tuple[str, str, str]:
+def _normalize_bytecode_keccak(bytecode_keccak: str) -> str:
+    if not isinstance(bytecode_keccak, str):
+        raise ValueError(f"bytecode_keccak must be a string, got {type(bytecode_keccak).__name__}")
+    normalized = bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower()
+    if len(normalized) != 66:
+        raise ValueError(f"bytecode_keccak must be 32 bytes, got {bytecode_keccak!r}")
+    try:
+        bytes.fromhex(normalized[2:])
+    except ValueError as exc:
+        raise ValueError(f"bytecode_keccak must be hex, got {bytecode_keccak!r}") from exc
+    return normalized
+
+
+def _normalize_chain_id(chain_id: int, *, context: str) -> int:
+    try:
+        return require_supported_chain_id(chain_id=chain_id, context=context)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _normalize(chain_id: int, address: str, bytecode_keccak: str) -> tuple[int, str, str]:
+    normalized_chain_id = _normalize_chain_id(
+        chain_id,
+        context=f"contract materialization identity for {address}",
+    )
     return (
-        (chain or DEFAULT_CHAIN).lower(),
+        normalized_chain_id,
         address.lower(),
-        bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower(),
+        _normalize_bytecode_keccak(bytecode_keccak),
     )
 
 
-def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
+def _blob_key(chain_id_norm: int, keccak_norm: str, kind: str) -> str:
     """Deterministic blob key for an analysis/tracking_plan payload.
 
     ``kind`` is the payload name without extension (``"analysis"`` or
     ``"tracking_plan"``). Includes the PR-preview prefix from
     ``ARTIFACT_STORAGE_PREFIX`` so previews scope cleanly under one
-    bucket. Path separators around chain and keccak make S3-console
+    bucket. Path separators around chain_id and keccak make S3-console
     browsing usable.
     """
-    return f"{_key_prefix()}contract_materializations/{chain_norm}/{keccak_norm}/{kind}.json"
+    return f"{_key_prefix()}contract_materializations/{chain_id_norm}/{keccak_norm}/{kind}.json"
 
 
 def find_by_keccak(
     session: Session,
     *,
-    chain: str | None,
+    chain_id: int,
     bytecode_keccak: str,
 ) -> ContractMaterialization | None:
-    """Return the row for ``(chain, bytecode_keccak)`` if status='ready'.
+    """Return the row for ``(chain_id, bytecode_keccak)`` if status='ready'.
 
     ``status='pending'`` rows are NOT returned — a pending row means a
     builder is still in flight; the caller should take the advisory
     lock and re-read inside it.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
-    keccak_norm = bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower()
+    chain_id_norm = _normalize_chain_id(chain_id, context="contract materialization lookup")
+    keccak_norm = _normalize_bytecode_keccak(bytecode_keccak)
     row = session.execute(
         select(ContractMaterialization).where(
-            ContractMaterialization.chain == chain_norm,
+            ContractMaterialization.chain_id == chain_id_norm,
             ContractMaterialization.bytecode_keccak == keccak_norm,
             ContractMaterialization.status == "ready",
         )
@@ -154,20 +170,19 @@ def find_by_keccak(
 def find_by_address(
     session: Session,
     *,
-    chain: str | None,
+    chain_id: int,
     address: str,
 ) -> ContractMaterialization | None:
-    """Return the row for ``(chain, address)`` if status='ready'.
+    """Return the row for ``(chain_id, address)`` if status='ready'.
 
-    Address-keyed lookup is the legacy entry path — same-bytecode-different-address
-    contracts share one row keyed by keccak, but a known address still
-    resolves to that row via the unique index.
+    Same-bytecode-different-address contracts share one row keyed by keccak,
+    but a known address still resolves to that row via the unique index.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_id_norm = _normalize_chain_id(chain_id, context=f"contract materialization lookup for {address}")
     addr_norm = address.lower()
     row = session.execute(
         select(ContractMaterialization).where(
-            ContractMaterialization.chain == chain_norm,
+            ContractMaterialization.chain_id == chain_id_norm,
             ContractMaterialization.address == addr_norm,
             ContractMaterialization.status == "ready",
         )
@@ -181,12 +196,9 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     Resolution order:
       1. If ``blob_key_attr`` is set and storage is configured, GET the
          blob and parse JSON.
-      2. On a transient blob fetch error, fall through to inline JSONB
-         when present — better to serve possibly-stale data than to
-         crash the pipeline. ``StorageKeyMissing`` is treated the same
-         (the row says we have a key but the bucket disagrees, so we
-         either had a wipe or the write never landed).
-      3. If neither a blob nor inline JSONB is available, return None.
+      2. If the blob is unreadable, malformed, or storage is unconfigured,
+         log and raise. Blob-backed rows must not silently serve inline data.
+      3. If no blob key exists, return inline JSONB if present.
 
     Callers that need to mutate the returned dict should ``copy.deepcopy``
     it themselves — the inline JSONB read returns the ORM-cached dict
@@ -197,51 +209,39 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
 
     if blob_key:
         client = get_storage_client()
-        if client is not None:
-            try:
-                body = client.get(blob_key)
-                parsed = json.loads(body.decode("utf-8"))
-                if isinstance(parsed, dict):
-                    return parsed
-                # The serializer always emits JSON objects for these
-                # payloads; a non-dict is corruption, not a normal case.
-                logger.warning(
-                    "contract_materializations: blob %s decoded to %s, expected dict",
-                    blob_key,
-                    type(parsed).__name__,
-                )
-            except (StorageError, StorageKeyMissing, ValueError) as exc:
-                if inline is not None:
-                    logger.warning(
-                        "contract_materializations: blob fetch for %s failed (%s); using inline JSONB",
-                        blob_key,
-                        exc,
-                    )
-                else:
-                    logger.error(
-                        "contract_materializations: blob %s unreadable (%s) and no inline fallback",
-                        blob_key,
-                        exc,
-                    )
-                    return None
-        else:
-            # blob_key set but storage unconfigured (e.g. test env that
-            # turned ARTIFACT_STORAGE_* off after the row was written) —
-            # silently fall through to inline if present, else None.
-            if inline is None:
-                logger.warning(
-                    "contract_materializations: blob_key %s but storage unconfigured; no inline fallback",
-                    blob_key,
-                )
+        if client is None:
+            logger.error("contract_materializations: blob_key %s but storage is unconfigured", blob_key)
+            raise RuntimeError(f"contract materialization storage is unconfigured for {blob_key}")
+        try:
+            body = client.get(blob_key)
+            parsed = json.loads(body.decode("utf-8"))
+        except (StorageError, StorageKeyMissing, ValueError) as exc:
+            logger.error(
+                "contract_materializations: blob %s unreadable; failing hydration: %s",
+                blob_key,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"contract materialization blob {blob_key} is unreadable") from exc
+        if not isinstance(parsed, dict):
+            logger.error(
+                "contract_materializations: blob %s decoded to %s, expected dict",
+                blob_key,
+                type(parsed).__name__,
+            )
+            raise RuntimeError(f"contract materialization blob {blob_key} decoded to non-dict payload")
+        return parsed
 
     return inline
 
 
 def hydrate_analysis(row: ContractMaterialization) -> dict | None:
-    """Load the row's ``analysis`` payload, transparently picking the
-    blob path when ``analysis_blob_key`` is set and falling back to the
-    inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (a corner case for ``status != 'ready'`` rows)."""
+    """Load the row's ``analysis`` payload.
+
+    Blob-backed rows must hydrate from storage; inline JSONB is used only when
+    no ``analysis_blob_key`` exists. ``None`` means the row genuinely has no
+    analysis (a corner case for ``status != 'ready'`` rows).
+    """
     return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
 
 
@@ -253,24 +253,22 @@ def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
 def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     """Load the row's predicate-tree artifact (semantic source of truth
     for revert/auth guards). Returns None if the cache row predates the
-    predicate-pipeline migration (pre-c1d2e3f4a5b6) so callers can fall
-    back to rebuilding the artifact from the analysis dict if they need
-    mapping-writer enumeration."""
+    predicate-pipeline migration (pre-c1d2e3f4a5b6)."""
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
 
 
-def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
+def _advisory_lock(session: Session, chain_id_norm: int, keccak_norm: str) -> None:
     """Take ``pg_advisory_xact_lock`` for the dedup key.
 
     ``hashtext`` is built into Postgres and returns a 32-bit signed int —
     fine for the advisory-lock space which is a 64-bit int. Using the
-    composite ``chain || ':' || keccak`` rather than just keccak keeps
+    composite ``chain_id || ':' || keccak`` rather than just keccak keeps
     chains independent so an Ethereum and a Base contract sharing keccak
     don't serialize on the same lock unnecessarily.
     """
     session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-        {"key": f"{chain_norm}:{keccak_norm}"},
+        {"key": f"{chain_id_norm}:{keccak_norm}"},
     )
 
 
@@ -284,7 +282,7 @@ def _put_blob(client, blob_key: str, payload: dict) -> None:
 
 def materialize_or_wait(
     *,
-    chain: str | None,
+    chain_id: int,
     address: str,
     bytecode_keccak: str,
     builder: Callable[[], Mapping[str, Any]],
@@ -332,7 +330,7 @@ def materialize_or_wait(
     row — better to leave nothing committed than a row pointing at a
     blob key the bucket doesn't have.
     """
-    chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
+    chain_id_norm, addr_norm, keccak_norm = _normalize(chain_id, address, bytecode_keccak)
     staleness_s = _builder_staleness_s()
     poll_interval_s = _wait_poll_interval_s()
 
@@ -343,10 +341,10 @@ def materialize_or_wait(
     wait_deadline = time.monotonic() + staleness_s
     while True:
         with SessionLocal() as session:
-            _advisory_lock(session, chain_norm, keccak_norm)
+            _advisory_lock(session, chain_id_norm, keccak_norm)
             row = session.execute(
                 select(ContractMaterialization).where(
-                    ContractMaterialization.chain == chain_norm,
+                    ContractMaterialization.chain_id == chain_id_norm,
                     ContractMaterialization.bytecode_keccak == keccak_norm,
                 )
             ).scalar_one_or_none()
@@ -367,7 +365,7 @@ def materialize_or_wait(
                 # Fall through: take over (insert/update our claim).
                 logger.info(
                     "contract_materializations: taking over stale building row for %s:%s (age=%.1fs)",
-                    chain_norm,
+                    chain_id_norm,
                     keccak_norm,
                     age_s,
                 )
@@ -375,7 +373,7 @@ def materialize_or_wait(
             # Claim: upsert ``status='building'`` and record our start time.
             now_dt = datetime.now(timezone.utc)
             claim_stmt = pg_insert(ContractMaterialization).values(
-                chain=chain_norm,
+                chain_id=chain_id_norm,
                 bytecode_keccak=keccak_norm,
                 address=addr_norm,
                 status="building",
@@ -403,7 +401,7 @@ def materialize_or_wait(
         err = f"{type(exc).__name__}: {exc}"[:4000]
         with SessionLocal() as session:
             stmt = pg_insert(ContractMaterialization).values(
-                chain=chain_norm,
+                chain_id=chain_id_norm,
                 bytecode_keccak=keccak_norm,
                 address=addr_norm,
                 status="failed",
@@ -440,21 +438,21 @@ def materialize_or_wait(
         # On failure, propagate without writing a row — the next caller
         # retries the build cleanly.
         if analysis_inline is not None:
-            analysis_blob_key = _blob_key(chain_norm, keccak_norm, "analysis")
+            analysis_blob_key = _blob_key(chain_id_norm, keccak_norm, "analysis")
             _put_blob(client, analysis_blob_key, analysis_inline)
             analysis_inline = None
         if tracking_plan_inline is not None:
-            tracking_plan_blob_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
+            tracking_plan_blob_key = _blob_key(chain_id_norm, keccak_norm, "tracking_plan")
             _put_blob(client, tracking_plan_blob_key, tracking_plan_inline)
             tracking_plan_inline = None
         if predicate_trees_inline is not None:
-            predicate_trees_blob_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
+            predicate_trees_blob_key = _blob_key(chain_id_norm, keccak_norm, "predicate_trees")
             _put_blob(client, predicate_trees_blob_key, predicate_trees_inline)
             predicate_trees_inline = None
 
     # ── Phase 3: write under a short-lived lock ────────────────────
     with SessionLocal() as session:
-        _advisory_lock(session, chain_norm, keccak_norm)
+        _advisory_lock(session, chain_id_norm, keccak_norm)
 
         # Recheck: a stale-takeover caller may have raced past phase 1
         # with us and committed first. Their bundle is keccak-equivalent
@@ -462,7 +460,7 @@ def materialize_or_wait(
         # discard ours.
         existing = session.execute(
             select(ContractMaterialization).where(
-                ContractMaterialization.chain == chain_norm,
+                ContractMaterialization.chain_id == chain_id_norm,
                 ContractMaterialization.bytecode_keccak == keccak_norm,
             )
         ).scalar_one_or_none()
@@ -471,7 +469,7 @@ def materialize_or_wait(
             return existing
 
         stmt = pg_insert(ContractMaterialization).values(
-            chain=chain_norm,
+            chain_id=chain_id_norm,
             bytecode_keccak=keccak_norm,
             address=addr_norm,
             contract_name=bundle.get("contract_name"),
@@ -512,7 +510,7 @@ def materialize_or_wait(
 
         ready = session.execute(
             select(ContractMaterialization).where(
-                ContractMaterialization.chain == chain_norm,
+                ContractMaterialization.chain_id == chain_id_norm,
                 ContractMaterialization.bytecode_keccak == keccak_norm,
             )
         ).scalar_one()

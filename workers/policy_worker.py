@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
-    Contract,
     EffectiveFunction,
     Job,
     JobStage,
@@ -23,7 +22,7 @@ from db.models import (
 )
 from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import get_artifact, store_artifact
+from db.queue import get_artifact, require_contract_for_job, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from services.artifacts import (
     POLICY_ARTIFACT,
@@ -41,14 +40,20 @@ from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import default_rpc_url, require_configured_erpc_url, require_supported_chain_id
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.policy_worker")
 
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
-CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
+
+
+def _resolve_job_chain_id(job: Job) -> int:
+    chain_id = require_supported_chain_id(
+        chain_id=job.chain_id,
+        context=f"policy job {job.id}",
+    )
+    return chain_id
 
 
 def _log_policy_phase(phase: str, t0: float, durations_ms: dict[str, int], **fields: Any) -> None:
@@ -70,40 +75,38 @@ def _log_policy_phase(phase: str, t0: float, durations_ms: dict[str, int], **fie
 
 def _make_principal_type_resolver(
     classify_cache: dict[str, tuple[str, dict[str, object]]],
-    rpc_url: str | None,
+    rpc_url: str,
+    chain_id: int,
 ) -> Callable[[str], tuple[str | None, dict[str, object] | None]]:
     """Build an ``address -> (resolved_type, details)`` classifier for the FP
     writer. Reuses the resolution stage's classify cache, falling back to a
     live (process-cached) ``classify_resolved_address`` probe for misses — the
     same path ``build_principal_labels`` uses, so FunctionPrincipal rows carry
     the same Safe/Timelock/EOA typing as principal labels."""
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="policy principal type resolver")
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context="policy principal type resolver",
+        chain_id=effective_chain_id,
+    )
     cache_lc = {k.lower(): v for k, v in classify_cache.items()}
 
     def _resolve(address: str) -> tuple[str | None, dict[str, object] | None]:
         cached = cache_lc.get((address or "").lower())
         if cached:
             return cached[0], cached[1]
-        if not rpc_url:
-            return None, None
-        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address)
+        resolved_type, details, _cacheable = classify_resolved_address_with_status(
+            rpc_url,
+            address,
+            chain_id=effective_chain_id,
+        )
         return resolved_type, details
 
     return _resolve
 
 
 def _rpc_url_for_job(job: Job) -> str:
-    request = job.request if isinstance(job.request, dict) else {}
-    explicit = request.get("rpc_url")
-    chain = request.get("chain")
-    return (
-        default_rpc_url(
-            explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-            chain_id=request.get("chain_id"),
-            chain=chain if isinstance(chain, str) else None,
-            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
-        )
-        or DEFAULT_RPC_URL
-    )
+    return default_rpc_url(chain_id=job.chain_id)
 
 
 def _root_artifacts(
@@ -118,17 +121,17 @@ def _root_artifacts(
     }
 
 
-def _load_nested_artifacts(session: Session, job_id) -> dict[str, LoadedArtifacts]:
+def _load_nested_artifacts(session: Session, job_id, *, chain_id: int) -> dict[str, LoadedArtifacts]:
     """Hydrate ``recursive.*`` artifacts written by the resolution stage.
 
     Resolution writes only the runtime-state slices (snapshot,
     effective_permissions) to ``recursive.*`` rows. The static slices
     (analysis, tracking_plan) live in ``contract_materializations``
-    (content-addressed by ``(chain, bytecode_keccak)``); we hydrate them
+    (content-addressed by ``(chain_id, bytecode_keccak)``); we hydrate them
     here per-address so the rest of policy still sees a full
-    ``LoadedArtifacts`` bundle. A bundle missing analysis/snapshot is
-    dropped — ``_resolve_authority`` and the post-policy
-    ``resolve_control_graph`` refresh both require both fields.
+    ``LoadedArtifacts`` bundle. A bundle missing analysis or tracking data is a
+    pipeline inconsistency and fails the policy stage; broken materialization
+    rows should not be hidden by silently dropping nested contracts.
     """
     import copy
 
@@ -155,21 +158,22 @@ def _load_nested_artifacts(session: Session, job_id) -> dict[str, LoadedArtifact
         bundles.setdefault(address, {})[kind] = payload
 
     # Hydrate analysis + tracking_plan from contract_materializations.
-    # Address-keyed lookup matches the chain default the resolution
-    # writer uses; on a row miss we drop the bundle below since the
-    # downstream consumers can't operate without analysis.
-    chain = os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
     for address, bundle in bundles.items():
-        try:
-            mrow = cm.find_by_address(session, chain=chain, address=address)
-        except Exception:
-            mrow = None
+        mrow = cm.find_by_address(session, chain_id=chain_id, address=address)
         if mrow is None:
-            continue
-        if mrow.analysis:
-            bundle["analysis"] = copy.deepcopy(mrow.analysis)
-        if mrow.tracking_plan:
-            bundle["tracking_plan"] = copy.deepcopy(mrow.tracking_plan)
+            logger.error(
+                "policy nested artifact hydration missing materialization for %s chain_id=%s",
+                address,
+                chain_id,
+            )
+            raise RuntimeError(f"missing contract materialization for nested address={address} chain_id={chain_id}")
+        analysis = cm.hydrate_analysis(mrow)
+        tracking_plan = cm.hydrate_tracking_plan(mrow)
+        if not analysis or not tracking_plan:
+            logger.error("policy nested artifact hydration incomplete for %s chain_id=%s", address, chain_id)
+            raise RuntimeError(f"incomplete contract materialization for nested address={address} chain_id={chain_id}")
+        bundle["analysis"] = copy.deepcopy(analysis)
+        bundle["tracking_plan"] = copy.deepcopy(tracking_plan)
 
     # Only keep bundles that have the minimum fields resolve_control_graph needs.
     return {
@@ -184,66 +188,31 @@ def _resolve_semantic_capabilities(
     *,
     contract_address: str,
     job_id: Any,
-    chain: str | None = None,
-) -> dict[str, dict[str, Any]] | None:
+    chain_id: int,
+) -> dict[str, dict[str, Any]]:
     """Run the semantic capability resolver for ``contract_address`` against
     the in-progress job. Returns ``{function_signature: capability_dict}``
-    or None on miss / failure.
+    or fails the policy stage on miss / resolver failure.
 
-    ``chain`` (e.g. ``"ethereum"``) plumbs through to the resolver's
-    ``_load_state_var_values`` so the controller-value lookup is
-    scoped by ``(job_id, chain)`` per Wave 4 C.1. The resolver also
-    derives this from ``job.request['chain']`` when None is passed,
-    so passing it here is belt-and-suspenders."""
-    try:
-        from services.resolution.capability_resolver import resolve_contract_capabilities
-    except Exception as exc:  # pragma: no cover — import-error handled defensively
-        record_degraded(
-            phase="semantic_capability_resolution",
-            exc=exc,
-            context={"address": contract_address, "job_id": str(job_id)},
-        )
-        logger.warning(
-            "semantic capability resolver unavailable for %s: %s",
-            contract_address,
-            exc,
-            extra={"exc_type": type(exc).__name__},
-        )
-        return None
+    ``chain_id`` scopes the resolver's controller-value lookup to the
+    same chain as the in-progress job."""
+    from services.resolution.capability_resolver import resolve_contract_capabilities
 
-    try:
-        result = resolve_contract_capabilities(
-            session,
-            address=contract_address,
-            job_id=job_id,
-            chain=chain,
-        )
-        if result is None:
-            exc = RuntimeError("semantic capability resolver produced no output")
-            record_degraded(
-                phase="semantic_capability_resolution",
-                exc=exc,
-                context={"address": contract_address, "job_id": str(job_id), "chain": chain},
-            )
-            logger.warning(
-                "semantic capability resolver produced no output for %s",
-                contract_address,
-                extra={"chain": chain},
-            )
-        return result
-    except Exception as exc:
-        record_degraded(
-            phase="semantic_capability_resolution",
-            exc=exc,
-            context={"address": contract_address, "job_id": str(job_id), "chain": chain},
-        )
-        logger.warning(
-            "semantic capability resolution skipped for %s: %s",
+    result = resolve_contract_capabilities(
+        session,
+        address=contract_address,
+        job_id=job_id,
+        chain_id=chain_id,
+    )
+    if result is None:
+        logger.error(
+            "semantic capability resolver produced no output for %s chain_id=%s job_id=%s",
             contract_address,
-            exc,
-            extra={"exc_type": type(exc).__name__},
+            chain_id,
+            job_id,
         )
-        return None
+        raise RuntimeError(f"semantic capability resolver produced no output for {contract_address}")
+    return result
 
 
 def _safe_address_lookup_from_graph(
@@ -301,12 +270,22 @@ class PolicyWorker(BaseWorker):
     next_stage = JobStage.coverage
 
     def process(self, session: Session, job: Job) -> None:
+        job_address = job.address
+        if not job_address:
+            raise RuntimeError(f"policy job {job.id} requires address")
+        job_address = job_address.lower()
         logger.info(
             "Policy stage started for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
+        chain_id = _resolve_job_chain_id(job)
+        request = job.request if isinstance(job.request, dict) else {}
+        if job.chain_id != chain_id:
+            job.chain_id = chain_id
+            session.commit()
+            request = job.request if isinstance(job.request, dict) else {}
         rpc_url = _rpc_url_for_job(job)
         durations_ms: dict[str, int] = {}
 
@@ -330,12 +309,13 @@ class PolicyWorker(BaseWorker):
                 exc=exc,
                 context={"job_id": str(job.id), "missing_artifacts": sorted(missing_semantic_inputs)},
             )
-            logger.warning(
+            logger.error(
                 "Policy stage missing semantic inputs for job %s: %s",
                 job.id,
                 ", ".join(sorted(missing_semantic_inputs)),
                 extra={"missing_artifacts": sorted(missing_semantic_inputs)},
             )
+            raise RuntimeError(f"policy stage missing semantic inputs for job {job.id}") from exc
         tracking_plan = get_artifact_field(session, job.id, "control_tracking_plan")
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
@@ -351,7 +331,7 @@ class PolicyWorker(BaseWorker):
         if not isinstance(control_snapshot, dict):
             raise RuntimeError("resolution_artifact missing control_snapshot")
 
-        nested_artifacts = _load_nested_artifacts(session, job.id)
+        nested_artifacts = _load_nested_artifacts(session, job.id, chain_id=chain_id)
 
         # Determine nested controller context for effective-permission enrichment.
         authority_snapshot: dict | None = None
@@ -372,7 +352,7 @@ class PolicyWorker(BaseWorker):
             logger.info(
                 "Policy stage authority resolution for job %s address=%s status=%s",
                 job.id,
-                job.address or "0x0",
+                job_address,
                 principal_resolution.get("status", "unknown"),
             )
 
@@ -385,13 +365,12 @@ class PolicyWorker(BaseWorker):
         # ``Job.status==completed`` filter skips the in-progress job.
         capability_resolver_output: dict[str, dict[str, Any]] | None = None
         if isinstance(predicate_trees, dict) and job.address:
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             cap_t0 = time.monotonic()
             capability_resolver_output = _resolve_semantic_capabilities(
                 session,
-                contract_address=(job.address or "").lower(),
+                contract_address=job_address,
                 job_id=job.id,
-                chain=job_chain if isinstance(job_chain, str) else None,
+                chain_id=chain_id,
             )
             _log_policy_phase(
                 "semantic_capabilities",
@@ -427,8 +406,8 @@ class PolicyWorker(BaseWorker):
         deployment_address = normalize_deployment(
             (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
         )
-        contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-        if contract_row and isinstance(ep_data, dict):
+        contract_row = require_contract_for_job(session, job, context=f"policy effective function write for {job.id}")
+        if isinstance(ep_data, dict):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
@@ -439,7 +418,7 @@ class PolicyWorker(BaseWorker):
                 function_records=ep_data.get("functions", []),
                 capability_by_function=capability_resolver_output,
                 safe_address_lookup=safe_lookup or None,
-                resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
+                resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url, chain_id),
                 deployment_address=deployment_address,
             )
             session.commit()
@@ -449,53 +428,25 @@ class PolicyWorker(BaseWorker):
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         principal_history: dict | None = None
         if contract_row and isinstance(predicate_trees, dict):
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            chain_id = CHAIN_IDS.get(str(job_chain or "ethereum").lower(), 1)
             ph_t0 = time.monotonic()
-            try:
-                state_var_values = _load_state_var_values(
-                    session,
-                    contract_row.address,
-                    job_id=job.id,
-                    chain=job_chain if isinstance(job_chain, str) else None,
-                )
-                principal_history = build_principal_history(
-                    contract_address=contract_row.address,
-                    chain_id=chain_id,
-                    predicate_trees=predicate_trees,
-                    state_var_values=state_var_values,
-                )
-            except Exception as exc:
-                record_degraded(
-                    phase="principal_history",
-                    exc=exc,
-                    context={"job_id": str(job.id), "address": contract_row.address},
-                )
-                logger.warning(
-                    "principal history skipped for job %s address=%s: %s",
-                    job.id,
-                    contract_row.address,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
-                principal_history = {
-                    "schema_version": "principal_history.v1",
-                    "contract_address": contract_row.address.lower(),
-                    "chain_id": chain_id,
-                    "status": "error",
-                    "reason": str(exc),
-                    "sources": [],
-                    "role_membership": [],
-                    "capability_roles": [],
-                    "function_permissions": [],
-                    "public_capabilities": [],
-                }
+            state_var_values = _load_state_var_values(
+                session,
+                contract_row.address,
+                job_id=job.id,
+                chain_id=chain_id,
+            )
+            principal_history = build_principal_history(
+                contract_address=contract_row.address,
+                chain_id=chain_id,
+                predicate_trees=predicate_trees,
+                state_var_values=state_var_values,
+            )
             _log_policy_phase("principal_history", ph_t0, durations_ms)
 
         logger.info(
             "Policy stage effective permissions complete for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
 
@@ -514,6 +465,7 @@ class PolicyWorker(BaseWorker):
         refreshed_graph, refreshed_nested = resolve_control_graph(
             root_artifacts=root_bundle,
             rpc_url=rpc_url,
+            chain_id=chain_id,
             max_depth=RECURSION_MAX_DEPTH,
             workspace_prefix="recursive",
             nested_artifacts_override=nested_artifacts,
@@ -597,7 +549,7 @@ class PolicyWorker(BaseWorker):
         logger.info(
             "Policy stage principal labels complete for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
 
@@ -623,7 +575,6 @@ class PolicyWorker(BaseWorker):
                 stage="policy",
                 schema_version="policy.v1",
                 block_number=control_snapshot.get("block_number") if isinstance(control_snapshot, dict) else None,
-                rpc_url=rpc_url,
             ),
             contract=make_job_contract(session, job, contract_row),
             data=policy_payload,
@@ -639,7 +590,7 @@ class PolicyWorker(BaseWorker):
         logger.info(
             "Policy stage complete for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
 
@@ -653,7 +604,7 @@ class PolicyWorker(BaseWorker):
                     session,
                     job.protocol_id,
                     rpc_url,
-                    chain="ethereum",
+                    chain_id=chain_id,
                     exclude_job_id=job.id,
                 )
                 record_stage_metric("enrolled", bool(enrolled))
@@ -700,12 +651,13 @@ class PolicyWorker(BaseWorker):
                     exc=exc,
                     context={"protocol_id": job.protocol_id},
                 )
-                logger.warning(
+                logger.error(
                     "Auto-enrollment failed for protocol %s: %s",
                     job.protocol_id,
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
+                raise RuntimeError(f"auto-enrollment failed for protocol {job.protocol_id}") from exc
             _log_policy_phase("auto_enrollment", enroll_t0, durations_ms)
 
         # Send completion webhook for re-analysis jobs
@@ -761,10 +713,20 @@ class PolicyWorker(BaseWorker):
         request = job.request if isinstance(job.request, dict) else {}
         parent_job_id = request.get("parent_job_id")
         company = job.company
+        chain_id = _resolve_job_chain_id(job)
 
-        # Collect analyses of all completed sibling contracts
+        # Collect analyses of completed sibling contracts on the same chain.
+        # The cross-contract helper is keyed by address because controller
+        # values only carry addresses; constraining the sibling set keeps that
+        # map from mixing same-address deployments across chains.
         completed_jobs = (
-            session.execute(select(Job).where(Job.status == JobStatus.completed, Job.address.isnot(None)))
+            session.execute(
+                select(Job).where(
+                    Job.status == JobStatus.completed,
+                    Job.address.isnot(None),
+                    Job.chain_id == chain_id,
+                )
+            )
             .scalars()
             .all()
         )
@@ -838,21 +800,18 @@ class PolicyWorker(BaseWorker):
                 enriched,
             )
             # Update the effective_functions table with new labels
-            contract_row = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
-            ).scalar_one_or_none()
-            if contract_row:
-                for fn_sig, new_labels in enriched.items():
-                    ef = session.execute(
-                        select(EffectiveFunction).where(
-                            EffectiveFunction.contract_id == contract_row.id,
-                            EffectiveFunction.abi_signature == fn_sig,
-                        )
-                    ).scalar_one_or_none()
-                    if ef:
-                        existing = set(ef.effect_labels or [])
-                        ef.effect_labels = sorted(existing | set(new_labels))
-                session.commit()
+            contract_row = require_contract_for_job(session, job, context=f"policy enrichment write for {job.id}")
+            for fn_sig, new_labels in enriched.items():
+                ef = session.execute(
+                    select(EffectiveFunction).where(
+                        EffectiveFunction.contract_id == contract_row.id,
+                        EffectiveFunction.abi_signature == fn_sig,
+                    )
+                ).scalar_one_or_none()
+                if ef:
+                    existing = set(ef.effect_labels or [])
+                    ef.effect_labels = sorted(existing | set(new_labels))
+            session.commit()
         return enriched
 
     def _resolve_authority(

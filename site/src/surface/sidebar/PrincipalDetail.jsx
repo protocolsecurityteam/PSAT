@@ -8,7 +8,7 @@ import { EVENT_ACCENTS, EVENT_LABELS, TYPE_META } from "../meta.js";
 export function PrincipalDetail({ principal, machines, onNavigate, onFocusContract, addressLabels, refreshAddressLabels }) {
   const [focusIdx, setFocusIdx] = useState(0);
   // Recent on-chain activity for safes/timelocks. Sourced from
-  // /api/monitored-events keyed by address — the unified watcher writes
+  // /api/monitored-events keyed by address+chain_id — the unified watcher writes
   // a MonitoredEvent row for every CallScheduled/CallExecuted, signer
   // change, and Safe-tx execution it sees. Lazy-loaded only when a
   // safe or timelock is selected so we don't hit the endpoint for
@@ -17,10 +17,11 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
   const [activityError, setActivityError] = useState(null);
   const principalAddress = principal?.address?.toLowerCase();
   const principalType = principal?.type;
+  const principalChainId = principal?.chain_id ?? null;
   const wantsActivity = principalType === "safe" || principalType === "timelock";
 
   useEffect(() => {
-    if (!wantsActivity || !principalAddress) {
+    if (!wantsActivity || !principalAddress || !principalChainId) {
       setActivity(null);
       setActivityError(null);
       return;
@@ -28,11 +29,11 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
     let cancelled = false;
     setActivity(null);
     setActivityError(null);
-    api(`/api/monitored-events?address=${encodeURIComponent(principalAddress)}&limit=15`)
+    api(`/api/monitored-events?address=${encodeURIComponent(principalAddress)}&chain_id=${encodeURIComponent(principalChainId)}&limit=15`)
       .then((rows) => { if (!cancelled) setActivity(Array.isArray(rows) ? rows : []); })
       .catch((e) => { if (!cancelled) setActivityError(e.message || String(e)); });
     return () => { cancelled = true; };
-  }, [wantsActivity, principalAddress]);
+  }, [wantsActivity, principalAddress, principalChainId]);
 
   if (!principal) return null;
   const type = TYPE_META[principal.type] || TYPE_META.unknown;

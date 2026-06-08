@@ -17,6 +17,13 @@ import { MinimizedAlertEditors } from "./MinimizedAlertEditors.jsx";
 import { MonitorAlertEditor } from "./MonitorAlertEditor.jsx";
 import { MonitorAlertFilters } from "./MonitorAlertFilters.jsx";
 
+function identityKey(address, chainId) {
+  const addr = String(address || "").toLowerCase();
+  const parsedChainId = Number.parseInt(chainId, 10);
+  if (!addr || !Number.isInteger(parsedChainId) || parsedChainId <= 0) return null;
+  return `${parsedChainId}:${addr}`;
+}
+
 export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine }) {
   const protocolId = companyData?.protocol_id;
   const [contracts, setContracts] = useState([]);
@@ -32,24 +39,29 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
   const [monitorStatusFilter, setMonitorStatusFilter] = useState("active");
   const [monitorWebhookFilter, setMonitorWebhookFilter] = useState("any");
 
-  const machineByAddress = useMemo(() => {
+  const machineByIdentity = useMemo(() => {
     const map = new Map();
     for (const machine of machines || []) {
-      const address = machine.address?.toLowerCase();
-      if (address) map.set(address, machine);
+      const key = identityKey(machine.address, machine.chain_id);
+      if (key) map.set(key, machine);
       const implementation = machine.implementation?.toLowerCase();
-      if (implementation && !map.has(implementation)) {
-        map.set(implementation, { ...machine, name: `${machine.name || shortAddr(machine.address)} impl`, address: machine.implementation });
+      const implementationKey = identityKey(implementation, machine.chain_id);
+      if (implementationKey && !map.has(implementationKey)) {
+        map.set(implementationKey, {
+          ...machine,
+          name: `${machine.name || shortAddr(machine.address)} impl`,
+          address: machine.implementation,
+        });
       }
     }
     return map;
   }, [machines]);
 
-  const contractByAddress = useMemo(() => {
+  const contractByIdentity = useMemo(() => {
     const map = new Map();
     for (const contract of contracts) {
-      const address = contract.address?.toLowerCase();
-      if (address) map.set(address, contract);
+      const key = identityKey(contract.address, contract.chain_id);
+      if (key) map.set(key, contract);
     }
     return map;
   }, [contracts]);
@@ -88,19 +100,19 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
 
   const monitoredAlerts = [...contracts]
     .sort((a, b) => {
-      const aMachine = machineByAddress.get(a.address?.toLowerCase());
-      const bMachine = machineByAddress.get(b.address?.toLowerCase());
+      const aMachine = machineByIdentity.get(identityKey(a.address, a.chain_id));
+      const bMachine = machineByIdentity.get(identityKey(b.address, b.chain_id));
       return String(aMachine?.name || a.address).localeCompare(String(bMachine?.name || b.address));
     });
   const activeAlerts = monitoredAlerts.filter((contract) => contract.is_active);
   const inactiveAlerts = monitoredAlerts.filter((contract) => !contract.is_active);
   const filteredMonitorAlerts = monitoredAlerts.filter((contract) => {
-    const machine = machineByAddress.get(contract.address?.toLowerCase());
+    const machine = machineByIdentity.get(identityKey(contract.address, contract.chain_id));
     const query = monitorQuery.trim().toLowerCase();
     const haystack = [
       machine?.name,
       contract.address,
-      contract.chain,
+      contract.chain_id,
       contract.contract_type,
     ].filter(Boolean).join(" ").toLowerCase();
     const statusMatches = (
@@ -121,8 +133,9 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
     );
     return statusMatches && alertsMatch && webhookMatches && (!query || haystack.includes(query));
   });
-  const focusedAlert = selectedMachine?.address
-    ? activeAlerts.find((contract) => contract.address?.toLowerCase() === selectedMachine.address.toLowerCase()) || null
+  const selectedMachineKey = identityKey(selectedMachine?.address, selectedMachine?.chain_id);
+  const focusedAlert = selectedMachineKey
+    ? activeAlerts.find((contract) => identityKey(contract.address, contract.chain_id) === selectedMachineKey) || null
     : null;
   const activeEditor = (
     editorSessions.find((session) => session.key === activeEditorKey && !session.minimized) ||
@@ -132,11 +145,16 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
   const minimizedEditors = editorSessions.filter((session) => session.minimized);
 
   function openAlertEditor(machine = null, existingContract = null) {
-    const target = machine || (existingContract?.address ? machineByAddress.get(existingContract.address.toLowerCase()) : null) || null;
-    const matchedContract = target?.address ? contractByAddress.get(target.address.toLowerCase()) : null;
+    const existingKey = identityKey(existingContract?.address, existingContract?.chain_id);
+    const target = machine || (existingKey ? machineByIdentity.get(existingKey) : null) || null;
+    const targetKey = identityKey(target?.address, target?.chain_id);
+    const matchedContract = targetKey ? contractByIdentity.get(targetKey) : null;
     const address = target?.address || existingContract?.address;
-    const key = address?.toLowerCase();
-    if (!key) return;
+    const key = targetKey || existingKey || identityKey(address, existingContract?.chain_id);
+    if (!key) {
+      setError("Missing chain id for alert target.");
+      return;
+    }
     const nextSession = {
       key,
       machine: target,
@@ -206,8 +224,14 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
 
   async function saveAlert(draft) {
     if (!draft.address) return;
-    const machine = machineByAddress.get(draft.address.toLowerCase());
-    const existingContract = contractByAddress.get(draft.address.toLowerCase());
+    const draftChainId = Number.parseInt(draft.chain_id, 10);
+    if (!Number.isInteger(draftChainId) || draftChainId <= 0) {
+      setError("Missing chain id for alert target.");
+      return;
+    }
+    const draftKey = identityKey(draft.address, draftChainId);
+    const machine = draftKey ? machineByIdentity.get(draftKey) : null;
+    const existingContract = draftKey ? contractByIdentity.get(draftKey) : null;
     const groupKeys = draft.groupKeys?.length ? draft.groupKeys : ["upgrades"];
     setSavingAlert(true);
     setError(null);
@@ -217,7 +241,7 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           address: draft.address,
-          chain: machine?.chain || existingContract?.chain || draft.chain || "ethereum",
+          chain_id: draftChainId,
           contract_type: existingContract?.contract_type || contractTypeForMachine(machine),
           monitoring_config: configFromGroupKeys(groupKeys),
           needs_polling: needsPollingFromGroupKeys(groupKeys),
@@ -238,7 +262,7 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
         });
       }
 
-      closeAlertEditor(draft.key || draft.address.toLowerCase());
+      closeAlertEditor(draft.key || draftKey);
       await refresh({ quiet: true });
     } catch (err) {
       setError(err?.message || String(err));
@@ -288,7 +312,7 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
           />
           <AlertsTable
             alerts={filteredMonitorAlerts}
-            machineByAddress={machineByAddress}
+            machineByIdentity={machineByIdentity}
             subscriptions={subscriptions}
             busyId={busyId}
             emptyLabel="No monitored alerts match these filters."

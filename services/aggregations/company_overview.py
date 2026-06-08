@@ -6,12 +6,10 @@ called by the router.
 
 Stages (each returns plain Python data, not ORM rows that pin a session):
 
-1. ``resolve_company_jobs`` — protocol lookup with legacy-company fallback
-   that walks ``parent_job_id`` chains for older jobs that don't carry a
-   protocol_id.
-2. ``prefetch_contracts`` — batch fetch ``Contract`` rows by ``job_id``,
-   with an address+chain fallback for jobs whose Contract row was
-   reassigned by ``copy_static_cache`` to a newer job.
+1. ``resolve_company_jobs`` — protocol lookup keyed by ``Protocol`` plus
+   canonical ``Contract.protocol_id`` ownership.
+2. ``prefetch_contracts`` — batch fetch canonical ``Contract`` rows by each
+   job's ``(address, chain_id)`` identity.
 3. ``resolve_implementation_contracts`` — for proxy contracts in the
    inventory, locate the impl Contract row keyed by impl address.
 4. ``build_governance_view`` — merges the above with prefetched child
@@ -62,9 +60,11 @@ from schemas.common import make_contract
 from schemas.governance_schemas import GovernanceControlDetail, GovernanceFunctionEntry, GovernancePrincipal
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
-from utils.rpc import chain_id_for_chain_name
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger("services.aggregations.company_overview")
+
+ImplJobKey = tuple[str, int]
 
 
 @contextmanager
@@ -95,16 +95,23 @@ def _contract_ref_from_row(
     contract_row: Contract | None,
     *,
     address: str | None,
+    chain_id: int | None = None,
     label: str | None = None,
 ) -> ContractSchema:
     if contract_row is None:
-        return make_contract(address=address or "", name=None, label=label)
+        if chain_id is None:
+            raise RuntimeError(f"address-only company overview contract requires chain_id: {address}")
+        if not address:
+            raise RuntimeError("address-only company overview contract requires address")
+        return make_contract(address=address, chain_id=chain_id, name=None, label=label)
     implementations = [
         item for item in [contract_row.implementation, *(contract_row.secondary_implementations or [])] if item
     ]
+    if contract_row.chain_id is None:
+        raise RuntimeError(f"contract {contract_row.id} requires chain_id for company overview")
     return make_contract(
         address=contract_row.address,
-        chain_id=chain_id_for_chain_name(contract_row.chain) or 1,
+        chain_id=contract_row.chain_id,
         name=contract_row.contract_name,
         label=label,
         is_proxy=bool(contract_row.is_proxy),
@@ -117,7 +124,7 @@ def _contract_ref_from_row(
     )
 
 
-def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
+def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol, list[Job]]:
     """Find the protocol row + jobs that belong to ``name``.
 
     Modern data: ``Protocol`` row exists, every job carries ``protocol_id``,
@@ -132,122 +139,103 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
     Contract.protocol_id keeps the surface page consistent with what the
     discovery-source gate already enforces for ownership.
 
-    Legacy fallback: no Protocol row but a Job has ``company == name``;
-    we walk ``request.parent_job_id`` chains across all completed jobs to
-    backfill the company graph.
+    Missing protocol rows are hard failures. The company surface is multichain
+    by construction only when ownership comes from ``Protocol`` and
+    ``Contract.protocol_id`` rather than historical job ancestry.
     """
     protocol_row = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
 
-    if protocol_row:
-        # Join Jobs to Contracts on the natural key. The address column on
-        # contracts is already stored lowercased (see db/queue.py); jobs
-        # store the address as-provided, so lowercase the job side for the
-        # join. Chain is not part of the join — a Contract row keyed by
-        # (address, chain) belongs to the protocol regardless of which
-        # chain the job ran on, and adding chain to the join would drop
-        # legitimate rows when chain is NULL on one side.
-        company_jobs = (
-            session.execute(
-                select(Job)
-                .join(Contract, Contract.address == func.lower(Job.address))
-                .where(
-                    Contract.protocol_id == protocol_row.id,
-                    Job.status == JobStatus.completed,
-                    Job.address.isnot(None),
-                )
+    if protocol_row is None:
+        logger.error("Company overview requires Protocol row: company=%s", name)
+        raise CompanyNotFound(name)
+
+    # Join Jobs to Contracts on the natural key. The address column on
+    # contracts is already stored lowercased (see db/queue.py); jobs
+    # store the address as-provided, so lowercase the job side for the join.
+    company_jobs = (
+        session.execute(
+            select(Job)
+            .join(
+                Contract,
+                and_(
+                    Contract.address == func.lower(Job.address),
+                    Contract.chain_id == Job.chain_id,
+                ),
             )
-            .scalars()
-            .all()
+            .where(
+                Contract.protocol_id == protocol_row.id,
+                Job.status == JobStatus.completed,
+                Job.address.isnot(None),
+            )
         )
-        return protocol_row, list(company_jobs)
-
-    company_job = session.execute(
-        select(Job).where(Job.company == name).order_by(Job.updated_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    if company_job is None:
-        return None, []
-
-    company_job_id = str(company_job.id)
-    all_completed = session.execute(select(Job).where(Job.status == JobStatus.completed)).scalars().all()
-    jobs_by_id = {str(j.id): j for j in all_completed}
-    jobs_by_id[company_job_id] = company_job
-
-    def belongs_to_company(job: Job) -> bool:
-        seen: set[str] = set()
-        current: Job | None = job
-        while current is not None:
-            if current.company == name:
-                return True
-            request = current.request if isinstance(current.request, dict) else {}
-            parent_id = request.get("parent_job_id")
-            if not isinstance(parent_id, str) or parent_id in seen:
-                return False
-            seen.add(parent_id)
-            current = jobs_by_id.get(parent_id)
-        return False
-
-    return None, [j for j in all_completed if j.address and belongs_to_company(j)]
+        .scalars()
+        .all()
+    )
+    return protocol_row, list(company_jobs)
 
 
 def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]:
-    """Return ``{job_id: Contract}``, with address/chain fallback.
-
-    Jobs whose Contract row was reassigned to a newer job by
-    ``copy_static_cache`` are matched by ``(address, chain)``.
-    """
-    company_job_ids = [j.id for j in jobs]
+    """Return ``{job_id: Contract}`` using each job's canonical ``(address, chain_id)``."""
     contracts_by_job_id: dict[Any, Contract] = {}
-    if company_job_ids:
-        for c in session.execute(
-            select(Contract).where(Contract.job_id.in_(company_job_ids)).options(selectinload(Contract.summary))
-        ).scalars():
-            contracts_by_job_id[c.job_id] = c
 
-    unresolved_addrs_by_chain: dict[str | None, set[str]] = {}
+    addresses: set[str] = set()
+    chain_ids: set[int] = set()
     for j in jobs:
-        if contracts_by_job_id.get(j.id) is not None or not j.address:
+        if not j.address:
             continue
-        req = j.request if isinstance(j.request, dict) else {}
-        unresolved_addrs_by_chain.setdefault(req.get("chain"), set()).add(j.address.lower())
-    contracts_by_addr_chain: dict[tuple[str, str | None], Contract] = {}
-    all_unresolved_addrs = {a for addrs in unresolved_addrs_by_chain.values() for a in addrs}
-    if all_unresolved_addrs:
-        for c in session.execute(
-            select(Contract)
-            .where(Contract.address.in_(list(all_unresolved_addrs)))
-            .options(selectinload(Contract.summary))
-        ).scalars():
-            addr_lc = (c.address or "").lower()
-            for chain_key, addrs in unresolved_addrs_by_chain.items():
-                if addr_lc in addrs and (chain_key is None or c.chain == chain_key):
-                    contracts_by_addr_chain[(addr_lc, chain_key)] = c
+        addresses.add(j.address.lower())
+        chain_ids.add(
+            require_supported_chain_id(
+                chain_id=j.chain_id,
+                context=f"company overview contract lookup for job {j.id}",
+            )
+        )
+    if not addresses:
+        return contracts_by_job_id
 
-    # Combine — fallback contracts get keyed by job_id too so the rest of
-    # the pipeline can pretend it always had a job_id match.
-    out = dict(contracts_by_job_id)
+    contracts_by_addr_chain_id: dict[ImplJobKey, Contract] = {}
+    for c in session.execute(
+        select(Contract)
+        .where(Contract.address.in_(list(addresses)), Contract.chain_id.in_(list(chain_ids)))
+        .options(selectinload(Contract.summary))
+    ).scalars():
+        contracts_by_addr_chain_id[
+            (
+                c.address.lower(),
+                require_supported_chain_id(chain_id=c.chain_id, context=f"company overview contract row {c.id}"),
+            )
+        ] = c
+
     for j in jobs:
-        if out.get(j.id) is not None or not j.address:
+        if not j.address:
             continue
-        req = j.request if isinstance(j.request, dict) else {}
-        fallback = contracts_by_addr_chain.get((j.address.lower(), req.get("chain")))
-        if fallback is not None:
-            # Don't overwrite the source-of-truth dict when another job's row
-            # legitimately points at this Contract; key by the job_id we want
-            # the resolver to find under.
-            out[j.id] = fallback
-    return out
+        key = (
+            j.address.lower(),
+            require_supported_chain_id(chain_id=j.chain_id, context=f"company overview contract lookup for job {j.id}"),
+        )
+        contract = contracts_by_addr_chain_id.get(key)
+        if contract is None:
+            logger.error(
+                "company overview missing Contract row for job_id=%s chain_id=%s address=%s",
+                j.id,
+                j.chain_id,
+                j.address,
+            )
+            raise RuntimeError(f"company overview missing Contract row for job {j.id}")
+        contracts_by_job_id[j.id] = contract
+    return contracts_by_job_id
 
 
 def resolve_implementation_contracts(
     session: Session, jobs: list[Job], contracts_by_job_id: dict[Any, Contract]
-) -> tuple[dict[str, Job], dict[Any, Contract]]:
+) -> tuple[dict[ImplJobKey, Job], dict[Any, Contract]]:
     """Return ``(impl_job_by_addr, contracts_by_job_id)`` with impls resolved.
 
     Mutates the contracts_by_job_id dict to also include impl-contract rows
     keyed by their own job_id, so downstream code can look up impl
     contracts directly.
     """
-    impl_addrs_needed: set[str] = set()
+    impl_keys_needed: set[ImplJobKey] = set()
     proxy_addrs: set[str] = set()
     for j in jobs:
         cr = contracts_by_job_id.get(j.id)
@@ -260,22 +248,38 @@ def resolve_implementation_contracts(
         # resolved + attached so the proxy node absorbs every logic contract.
         for impl in [cr.implementation, *(cr.secondary_implementations or [])]:
             if impl:
-                impl_addrs_needed.add(impl.lower())
+                impl_keys_needed.add(
+                    (
+                        impl.lower(),
+                        require_supported_chain_id(
+                            chain_id=cr.chain_id,
+                            context=f"company overview implementation lookup for contract {cr.id}",
+                        ),
+                    )
+                )
 
-    impl_job_by_addr: dict[str, Job] = {}
-    if impl_addrs_needed:
+    impl_job_by_addr: dict[ImplJobKey, Job] = {}
+    if impl_keys_needed:
         # Deterministic pick: newest completed job per impl address, preferring
         # the one linked to a proxy we're rendering (request.proxy_address points
         # back at a proxy in this set). Without the ORDER BY a re-analysis that
         # left >1 completed impl job for an address attached arbitrarily (1C).
-        candidates: dict[str, list[Job]] = {}
+        needed_addrs = {address for address, _chain_id in impl_keys_needed}
+        needed_chain_ids = {chain_id for _address, chain_id in impl_keys_needed}
+        candidates: dict[ImplJobKey, list[Job]] = {}
+        stmt = select(Job).where(Job.address.in_(list(needed_addrs)), Job.status == JobStatus.completed)
+        stmt = stmt.where(Job.chain_id.in_(list(needed_chain_ids)))
         for ij in session.execute(
-            select(Job)
-            .where(Job.address.in_(list(impl_addrs_needed)), Job.status == JobStatus.completed)
-            .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
+            stmt.order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
         ).scalars():
-            key = (ij.address or "").lower()
-            if key:
+            key = (
+                (ij.address or "").lower(),
+                require_supported_chain_id(
+                    chain_id=ij.chain_id,
+                    context=f"company overview implementation job {ij.id}",
+                ),
+            )
+            if key in impl_keys_needed:
                 candidates.setdefault(key, []).append(ij)
         for key, addr_jobs in candidates.items():
             linked = [
@@ -285,19 +289,16 @@ def resolve_implementation_contracts(
             ]
             impl_job_by_addr[key] = (linked or addr_jobs)[0]
 
-    impl_job_ids_needed = [ij.id for ij in impl_job_by_addr.values()]
-    if impl_job_ids_needed:
-        for c in session.execute(
-            select(Contract).where(Contract.job_id.in_(impl_job_ids_needed)).options(selectinload(Contract.summary))
-        ).scalars():
-            contracts_by_job_id[c.job_id] = c
+    impl_jobs = list({ij.id: ij for ij in impl_job_by_addr.values()}.values())
+    if impl_jobs:
+        contracts_by_job_id.update(prefetch_contracts(session, impl_jobs))
 
     return impl_job_by_addr, contracts_by_job_id
 
 
 def _secondary_impl_contracts(
     contract_row: Contract | None,
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_addr: dict[ImplJobKey, Job],
     contracts_by_job_id: dict[Any, Contract],
 ) -> list[Contract]:
     """Resolved Contract rows for a proxy's secondary implementations (the
@@ -313,7 +314,7 @@ def _secondary_impl_contracts(
         return []
     out: list[Contract] = []
     for saddr in contract_row.secondary_implementations:
-        impl_job = impl_job_by_addr.get((saddr or "").lower())
+        impl_job = impl_job_by_addr.get(((saddr or "").lower(), contract_row.chain_id))
         sc = contracts_by_job_id.get(impl_job.id) if impl_job else None
         if sc is not None:
             out.append(sc)
@@ -1000,7 +1001,7 @@ def build_governance_view(
     session: Session,
     jobs: list[Job],
     contracts_by_job_id: dict[Any, Contract],
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_addr: dict[ImplJobKey, Job],
 ) -> GovernanceView:
     """Build the contracts list + ownership hierarchy + fund flows + principals."""
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
@@ -1027,7 +1028,11 @@ def build_governance_view(
         secondaries = _secondary_impl_contracts(cr, impl_job_by_addr, contracts_by_job_id)
         if not secondaries:
             continue
-        impl_job = impl_job_by_addr.get((cr.implementation or "").lower()) if cr and cr.implementation else None
+        impl_job = (
+            impl_job_by_addr.get((cr.implementation.lower(), cr.chain_id))
+            if cr and cr.implementation
+            else None
+        )
         primary_impl = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = primary_impl.id if primary_impl else (cr.id if cr else None)
         if primary_cid is None:
@@ -1062,8 +1067,12 @@ def build_governance_view(
         proxy_type = contract_row.proxy_type if contract_row else None
         impl_addr = contract_row.implementation if contract_row else None
 
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
-        impl_job_id = str(impl_job.id) if impl_job else None
+        impl_job = (
+            impl_job_by_addr.get((impl_addr.lower(), contract_row.chain_id))
+            if impl_addr and contract_row
+            else None
+        )
+        implementation_analysis_job_id = str(impl_job.id) if impl_job else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
         # Split-proxy secondary logic contracts (admin-impl set). Their
@@ -1173,12 +1182,17 @@ def build_governance_view(
                     total_usd += usd
 
         entry: GovernanceContract = {
-            "contract": _contract_ref_from_row(contract_row, address=job.address, label=contract_name),
+            "contract": _contract_ref_from_row(
+                contract_row,
+                address=job.address,
+                chain_id=job.chain_id,
+                label=contract_name,
+            ),
             "address": job.address,
             "name": contract_name,
             "contract_id": contract_row.id if contract_row else None,
-            "job_id": str(job.id),
-            "impl_job_id": impl_job_id,
+            "analysis_job_id": str(job.id),
+            "implementation_analysis_job_id": implementation_analysis_job_id,
             "is_proxy": is_proxy,
             "proxy_type": proxy_type,
             "implementation": impl_addr,
@@ -1191,7 +1205,7 @@ def build_governance_view(
             "control_model": control_model,
             "risk_level": summary_row.risk_level if summary_row else None,
             "source_verified": summary_row.source_verified if summary_row else None,
-            "chain": contract_row.chain if contract_row else None,
+            "chain_id": contract_row.chain_id if contract_row else None,
             "upgrade_count": upgrade_count,
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
@@ -1488,6 +1502,11 @@ def _build_flows_and_principals(
 ) -> tuple[list[GovernanceFundFlow], list[GovernancePrincipal]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
     contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
+    chain_id_by_contract_addr = {
+        c["address"].lower(): int(c["chain_id"])
+        for c in contracts
+        if c.get("address") and c.get("chain_id") is not None
+    }
     flow_seen: set[tuple[str, str]] = set()
     fund_flows: list[GovernanceFundFlow] = []
 
@@ -1510,7 +1529,7 @@ def _build_flows_and_principals(
     def _lookup_contract_for(entry: GovernanceContract) -> Contract | None:
         import uuid as _uuid
 
-        lookup_job_id = entry.get("impl_job_id") or entry["job_id"]
+        lookup_job_id = entry.get("implementation_analysis_job_id") or entry["analysis_job_id"]
         try:
             key_id = _uuid.UUID(lookup_job_id) if isinstance(lookup_job_id, str) else lookup_job_id
         except (TypeError, ValueError):
@@ -1624,8 +1643,7 @@ def _build_flows_and_principals(
                 # principal's intrinsic config — ControllerValue rows
                 # describe the relationship FROM a consumer, not the
                 # Safe's own threshold, so prior code that only merged
-                # CV details missed the threshold and fell back to
-                # len(owners).
+                # CV details missed the threshold and derived len(owners).
                 details: dict[str, Any] = dict(lookup_meta.get("details") or {})
                 if isinstance(cgn.details, dict):
                     details.update(cgn.details)
@@ -1705,6 +1723,17 @@ def _build_flows_and_principals(
                 principal_map[pa]["controls"].append(target)
             add_flow(pa, target, "principal")
 
+    for principal in principal_map.values():
+        chain_ids = sorted(
+            {
+                chain_id_by_contract_addr[controlled.lower()]
+                for controlled in principal.get("controls", [])
+                if isinstance(controlled, str) and controlled.lower() in chain_id_by_contract_addr
+            }
+        )
+        principal["chain_ids"] = chain_ids
+        principal["chain_id"] = chain_ids[0] if len(chain_ids) == 1 else None
+
     return fund_flows, list(principal_map.values())
 
 
@@ -1756,7 +1785,11 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
             continue
         contract_row = contracts_by_job_id.get(job.id)
         impl_addr = contract_row.implementation if (contract_row and contract_row.is_proxy) else None
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
+        impl_job = (
+            impl_job_by_addr.get((impl_addr.lower(), contract_row.chain_id))
+            if impl_addr and contract_row
+            else None
+        )
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
         cids = [primary_cid] if primary_cid is not None else []
@@ -1827,53 +1860,48 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     return out
 
 
-def _all_addresses_count(session: Session, protocol_row: Protocol | None, jobs: list[Job]) -> int:
-    if protocol_row:
-        return int(
-            session.execute(
-                select(func.count()).select_from(Contract).where(Contract.protocol_id == protocol_row.id)
-            ).scalar_one()
-        )
-    fallback_job_ids = [j.id for j in jobs]
-    if not fallback_job_ids:
-        return 0
+def _all_addresses_count(session: Session, protocol_row: Protocol) -> int:
     return int(
         session.execute(
-            select(func.count()).select_from(Contract).where(Contract.job_id.in_(fallback_job_ids))
+            select(func.count()).select_from(Contract).where(Contract.protocol_id == protocol_row.id)
         ).scalar_one()
     )
 
 
-def all_addresses_for_protocol(
-    session: Session, protocol_row: Protocol | None, jobs: list[Job]
-) -> list[dict[str, Any]]:
-    if protocol_row:
-        all_contract_rows = (
-            session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
-        )
-    else:
-        fallback_job_ids = [j.id for j in jobs]
-        if fallback_job_ids:
-            all_contract_rows = list(
-                session.execute(select(Contract).where(Contract.job_id.in_(fallback_job_ids))).scalars()
-            )
-        else:
-            all_contract_rows = []
+def all_addresses_for_protocol(session: Session, protocol_row: Protocol) -> list[dict[str, Any]]:
+    all_contract_rows = session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
 
     # Prefetch impl-name lookup so proxy rows can expose the implementation
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
     # template name.
     impl_name_by_addr = {
-        (c.address or "").lower(): c.contract_name for c in all_contract_rows if c.address and c.contract_name
+        (
+            (c.address or "").lower(),
+            require_supported_chain_id(chain_id=c.chain_id, context=f"all addresses contract row {c.id}"),
+        ): c.contract_name
+        for c in all_contract_rows
+        if c.address and c.contract_name
     }
-    job_ids = {cr.job_id for cr in all_contract_rows if cr.job_id is not None}
-    completed_job_ids: set = set()
-    if job_ids:
-        completed_job_ids = set(
-            session.execute(select(Job.id).where(Job.id.in_(job_ids), Job.status == JobStatus.completed))
-            .scalars()
-            .all()
-        )
+    completed_job_keys: set[ImplJobKey] = set()
+    contract_addrs = {(cr.address or "").lower() for cr in all_contract_rows if cr.address}
+    contract_chain_ids = {
+        require_supported_chain_id(chain_id=cr.chain_id, context=f"all addresses contract row {cr.id}")
+        for cr in all_contract_rows
+    }
+    if contract_addrs and contract_chain_ids:
+        completed_job_keys = {
+            (
+                str(addr).lower(),
+                require_supported_chain_id(chain_id=job_chain_id, context="all addresses completed job lookup"),
+            )
+            for addr, job_chain_id in session.execute(
+                select(func.lower(Job.address), Job.chain_id).where(
+                    func.lower(Job.address).in_(list(contract_addrs)),
+                    Job.chain_id.in_(list(contract_chain_ids)),
+                    Job.status == JobStatus.completed,
+                )
+            )
+        }
 
     return sorted(
         [
@@ -1882,14 +1910,30 @@ def all_addresses_for_protocol(
                 "name": cr.contract_name,
                 "source_verified": cr.source_verified,
                 "is_proxy": cr.is_proxy,
-                "analyzed": cr.job_id is not None and cr.job_id in completed_job_ids,
+                "analyzed": (
+                    (
+                        (cr.address or "").lower(),
+                        require_supported_chain_id(chain_id=cr.chain_id, context=f"all addresses contract row {cr.id}"),
+                    )
+                    in completed_job_keys
+                ),
                 "discovery_sources": list(cr.discovery_sources or []),
                 "discovery_url": cr.discovery_url,
-                "chain": cr.chain,
+                "chain_id": cr.chain_id,
                 "rank_score": (float(cr.rank_score) if cr.rank_score is not None else None),
                 "implementation_address": cr.implementation if cr.is_proxy else None,
                 "implementation_name": (
-                    impl_name_by_addr.get((cr.implementation or "").lower()) if cr.is_proxy else None
+                    impl_name_by_addr.get(
+                        (
+                            (cr.implementation or "").lower(),
+                            require_supported_chain_id(
+                                chain_id=cr.chain_id,
+                                context=f"all addresses contract row {cr.id}",
+                            ),
+                        )
+                    )
+                    if cr.is_proxy
+                    else None
                 ),
             }
             for cr in all_contract_rows
@@ -1898,9 +1942,7 @@ def all_addresses_for_protocol(
     )
 
 
-def _latest_tvl(session: Session, protocol_row: Protocol | None) -> dict[str, Any] | None:
-    if protocol_row is None:
-        return None
+def _latest_tvl(session: Session, protocol_row: Protocol) -> dict[str, Any] | None:
     latest_tvl = session.execute(
         select(TvlSnapshot)
         .where(TvlSnapshot.protocol_id == protocol_row.id)
@@ -1920,13 +1962,13 @@ def _latest_tvl(session: Session, protocol_row: Protocol | None) -> dict[str, An
 def assemble_company_payload(
     session: Session,
     name: str,
-    protocol_row: Protocol | None,
+    protocol_row: Protocol,
     jobs: list[Job],
     governance: GovernanceView,
 ) -> dict[str, Any]:
     return {
         "company": name,
-        "protocol_id": protocol_row.id if protocol_row else None,
+        "protocol_id": protocol_row.id,
         "contract_count": len(governance.contracts),
         "tvl": _latest_tvl(session, protocol_row),
         "contracts": governance.contracts,
@@ -1936,7 +1978,7 @@ def assemble_company_payload(
         # Just the count here — the full inventory (~167 KB for ether.fi) is
         # served by /api/company/{name}/addresses and fetched lazily by
         # AddressesModal when the user opens it.
-        "all_addresses_count": _all_addresses_count(session, protocol_row, jobs),
+        "all_addresses_count": _all_addresses_count(session, protocol_row),
     }
 
 
@@ -1976,7 +2018,7 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     return payload
 
 
-def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, str]:
+def controllers_for_protocol(session: Session, protocol_id: int, *, chain_id: int) -> dict[str, str]:
     """Map ``principal_address_lc -> MonitoredContract.contract_type`` for every
     principal that holds governing authority over at least one contract in the
     protocol — its **primary controllers union its privileged co-controllers**.
@@ -2004,10 +2046,22 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, st
     protocol = session.get(Protocol, protocol_id)
     if protocol is None:
         return {}
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"controllers for protocol {protocol_id}",
+    )
     _protocol_row, jobs = resolve_company_jobs(session, protocol.name)
     if not jobs:
         return {}
     contracts_by_job_id = prefetch_contracts(session, jobs)
+    jobs = [
+        job
+        for job in jobs
+        if (contracts_by_job_id[job.id].chain_id if contracts_by_job_id.get(job.id) is not None else job.chain_id)
+        == effective_chain_id
+    ]
+    if not jobs:
+        return {}
     impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
 

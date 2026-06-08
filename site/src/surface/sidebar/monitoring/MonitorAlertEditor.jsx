@@ -35,6 +35,7 @@ export function MonitorAlertEditor({
   const selectedContract = initialContract || null;
   const selectedMachine = initialMachine || null;
   const contractLabel = selectedMachine?.name || shortAddr(address);
+  const targetChainId = selectedContract?.chain_id ?? selectedMachine?.chain_id ?? null;
 
   return (
     <div className="ps-monitor-editor" role="dialog" aria-modal="false">
@@ -45,7 +46,7 @@ export function MonitorAlertEditor({
           onSave({
             key: sessionKey,
             address,
-            chain: selectedMachine?.chain || selectedContract?.chain || "ethereum",
+            chain_id: targetChainId,
             groupKeys,
             webhookMode,
             webhookUrl,

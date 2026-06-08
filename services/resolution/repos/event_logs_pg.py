@@ -67,8 +67,8 @@ class PostgresEventLogRepo:
         # Trust the durable index only once its historical backfill has reached
         # head. Cursors are seeded at the event address's deploy block, so a
         # positive ``last_indexed_block`` no longer implies "fully indexed" — gate
-        # on ``backfill_complete`` so a cold/mid-backfill cursor defers to the
-        # adapter's inline fallback instead of folding a partial history.
+        # on ``backfill_complete`` so a cold/mid-backfill cursor is deferred
+        # instead of folding a partial history.
         if cursor_block is None or not complete:
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),

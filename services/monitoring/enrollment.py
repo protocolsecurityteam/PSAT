@@ -23,7 +23,7 @@ from db.models import (
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
-from utils.rpc import rpc_request
+from utils.rpc import require_configured_erpc_url, require_supported_chain_id, rpc_request
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def maybe_enroll_protocol(
     session: Session,
     protocol_id: int,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain_id: int,
     exclude_job_id: Any = None,
 ) -> bool:
     """Low-latency enrollment hint — fires from PolicyWorker.process()
@@ -58,6 +58,12 @@ def maybe_enroll_protocol(
     ``services/monitoring/reconciler.py`` is the convergence backstop
     for anything this fast-path misses.
     """
+    chain_id = require_supported_chain_id(chain_id=chain_id, context=f"protocol {protocol_id} enrollment hint")
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"protocol {protocol_id} enrollment hint",
+        chain_id=chain_id,
+    )
     completed = (
         session.execute(
             select(Job).where(
@@ -77,7 +83,7 @@ def maybe_enroll_protocol(
     # primary-controller pass (it runs build_governance_view per call). The
     # reconciler converges controllers on its cadence; manual re-enroll runs
     # them on demand.
-    enroll_protocol_contracts(session, protocol_id, rpc_url, chain, exclude_job_id, enroll_controllers=False)
+    enroll_protocol_contracts(session, protocol_id, rpc_url, chain_id, exclude_job_id, enroll_controllers=False)
     return True
 
 
@@ -85,13 +91,13 @@ def enroll_protocol_contracts(
     session: Session,
     protocol_id: int,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain_id: int,
     calling_job_id: Any = None,
     enroll_controllers: bool = True,
 ) -> list[MonitoredContract]:
     """Create MonitoredContract rows for all contracts in a protocol.
 
-    Performs upsert (ON CONFLICT address+chain DO UPDATE) so this is
+    Performs upsert (ON CONFLICT address+chain_id DO UPDATE) so this is
     idempotent. Also creates WatchedProxy rows for proxy contracts and
     enrolls the protocol's controllers — primary + privileged co-controllers
     (safes, timelocks, proxy admins).
@@ -109,6 +115,13 @@ def enroll_protocol_contracts(
 
     Returns list of created/updated MonitoredContract rows.
     """
+    chain_id = require_supported_chain_id(chain_id=chain_id, context=f"enrollment for protocol {protocol_id}")
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"enrollment for protocol {protocol_id}",
+        chain_id=chain_id,
+    )
+
     # Only enroll contracts that have a completed job — not the entire
     # inventory which may include hundreds of unanalyzed addresses.
     analyzed_addrs = set(
@@ -118,19 +131,25 @@ def enroll_protocol_contracts(
                 Job.protocol_id == protocol_id,
                 Job.status == JobStatus.completed,
                 Job.address.isnot(None),
+                Job.chain_id == chain_id,
             )
         ).all()
     )
     # The calling job is still processing — include its address too.
     if calling_job_id is not None:
         calling_job = session.get(Job, calling_job_id)
-        if calling_job and calling_job.address:
+        if calling_job and calling_job.address and calling_job.chain_id == chain_id:
             analyzed_addrs.add(calling_job.address)
 
+    analyzed_addrs_lc = {a.lower() for a in analyzed_addrs if a}
     contracts = [
         c
-        for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
-        if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
+        for c in session.execute(
+            select(Contract).where(Contract.protocol_id == protocol_id, Contract.chain_id == chain_id)
+        )
+        .scalars()
+        .all()
+        if c.address.lower() in analyzed_addrs_lc
     ]
 
     if not contracts:
@@ -152,17 +171,20 @@ def enroll_protocol_contracts(
 
     # Get current block number for last_scanned_block
     try:
-        result = rpc_request(rpc_url, "eth_blockNumber", [])
+        result = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
         current_block = int(result, 16)
-    except Exception:
-        logger.warning("Could not get current block, defaulting to 0")
-        current_block = 0
+    except Exception as exc:
+        logger.error(
+            "Could not get current block for protocol enrollment chain_id=%s: %s",
+            chain_id,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(f"protocol enrollment requires current block for chain_id={chain_id}") from exc
 
     enrolled: list[MonitoredContract] = []
 
     for contract in contracts:
-        contract_chain = contract.chain or chain
-
         # Load summary
         summary = session.execute(
             select(ContractSummary).where(ContractSummary.contract_id == contract.id)
@@ -199,7 +221,7 @@ def enroll_protocol_contracts(
         existing = session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.address == contract.address.lower(),
-                MonitoredContract.chain == contract_chain,
+                MonitoredContract.chain_id == chain_id,
             )
         ).scalar_one_or_none()
 
@@ -220,7 +242,7 @@ def enroll_protocol_contracts(
             mc = MonitoredContract(
                 id=uuid.uuid4(),
                 address=contract.address.lower(),
-                chain=contract_chain,
+                chain_id=chain_id,
                 protocol_id=protocol_id,
                 contract_id=contract.id,
                 contract_type=contract_type,
@@ -251,7 +273,7 @@ def enroll_protocol_contracts(
     # re-includes existing controller rows from the DB, so skipping this pass
     # never deactivates controllers a prior reconciler enrolled.
     if enroll_controllers:
-        _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
+        _enroll_controller_addresses(session, contracts, protocol_id, chain_id, current_block)
         # Flush so controller rows are visible to the stale-detection query below.
         session.flush()
 
@@ -273,6 +295,7 @@ def enroll_protocol_contracts(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
                 MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
+                MonitoredContract.chain_id == chain_id,
             )
         )
         .scalars()
@@ -283,6 +306,7 @@ def enroll_protocol_contracts(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
+                MonitoredContract.chain_id == chain_id,
                 MonitoredContract.address.notin_(enrolled_addrs),
             )
         )
@@ -350,29 +374,34 @@ def _load_tracking_plan_artifacts(
         ``tracked_controllers`` directly so it can read each entry's
         ``read_spec`` / ``polling_fallback`` without losing context.
 
-    Returns ``([], None)`` when the materialization row is missing /
-    the status isn't ready / a blob fetch fails. The watcher still has
-    the hand-rolled topic registry as a baseline for events and the
-    vendored proxy/safe/timelock templates as a baseline for polling.
+    Missing materialization rows, blob read failures, and malformed plans are
+    enrollment failures. Monitoring should not silently replace analysis-derived
+    tracking with generic templates.
     """
+    if contract.chain_id is None:
+        logger.error("Tracking plan hydration requires chain_id for contract %s", contract.address)
+        raise RuntimeError(f"tracking_plan hydration requires chain_id for contract {contract.id}")
+    row = find_by_address(session, chain_id=contract.chain_id, address=contract.address)
+    if row is None:
+        logger.error(
+            "Tracking plan hydration missing materialization for %s chain_id=%s",
+            contract.address,
+            contract.chain_id,
+        )
+        raise RuntimeError(f"tracking_plan materialization missing for contract {contract.id}")
     try:
-        row = find_by_address(session, chain=contract.chain or "ethereum", address=contract.address)
-        if row is None:
-            return [], None
         plan = hydrate_tracking_plan(row)
         topics = extract_governance_topics(plan)
-        return topics, plan
     except Exception as exc:
-        # A blob-fetch hiccup or schema drift in tracking_plan shouldn't
-        # block enrollment — the hand-rolled registry still catches the
-        # OZ/Safe/Timelock baseline.
-        logger.warning(
-            "Failed to load tracking_plan for %s: %s",
+        logger.error(
+            "Tracking plan hydration failed for %s chain_id=%s: %s",
             contract.address,
+            contract.chain_id,
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return [], None
+        raise RuntimeError(f"tracking_plan hydration failed for contract {contract.id}") from exc
+    return topics, plan
 
 
 def _build_monitoring_config(
@@ -506,10 +535,13 @@ def _bridge_to_watched_proxy(
     current_block: int,
 ) -> None:
     """Create or link a WatchedProxy row for backward compatibility."""
+    if contract.chain_id is None:
+        logger.error("Watched proxy bridge requires chain_id for contract %s", contract.address)
+        raise RuntimeError(f"watched proxy bridge requires chain_id for contract {contract.id}")
     existing_wp = session.execute(
         select(WatchedProxy).where(
             WatchedProxy.proxy_address == contract.address.lower(),
-            WatchedProxy.chain == (contract.chain or "ethereum"),
+            WatchedProxy.chain_id == contract.chain_id,
         )
     ).scalar_one_or_none()
 
@@ -526,7 +558,7 @@ def _bridge_to_watched_proxy(
         wp = WatchedProxy(
             id=uuid.uuid4(),
             proxy_address=contract.address.lower(),
-            chain=contract.chain or "ethereum",
+            chain_id=contract.chain_id,
             label=contract.contract_name,
             proxy_type=contract.proxy_type,
             last_known_implementation=contract.implementation,
@@ -549,7 +581,7 @@ def _enroll_controller_addresses(
     session: Session,
     contracts: Sequence[Contract],
     protocol_id: int,
-    chain: str,
+    chain_id: int,
     current_block: int,
 ) -> None:
     """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
@@ -586,7 +618,7 @@ def _enroll_controller_addresses(
     from services.aggregations.company_overview import controllers_for_protocol
 
     enrolled_contract_addrs = {c.address.lower() for c in contracts}
-    controllers = controllers_for_protocol(session, protocol_id)
+    controllers = controllers_for_protocol(session, protocol_id, chain_id=chain_id)
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).
     for addr, monitored_type in controllers.items():
@@ -595,7 +627,7 @@ def _enroll_controller_addresses(
         existing = session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.address == addr,
-                MonitoredContract.chain == chain,
+                MonitoredContract.chain_id == chain_id,
             )
         ).scalar_one_or_none()
         if existing:
@@ -619,7 +651,7 @@ def _enroll_controller_addresses(
                 MonitoredContract(
                     id=uuid.uuid4(),
                     address=addr,
-                    chain=chain,
+                    chain_id=chain_id,
                     protocol_id=protocol_id,
                     contract_type=monitored_type,
                     monitoring_config=config,
@@ -644,6 +676,7 @@ def _enroll_controller_addresses(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
                 MonitoredContract.contract_type.in_(_CONTROLLER_MONITORED_TYPES),
+                MonitoredContract.chain_id == chain_id,
                 MonitoredContract.is_active.is_(True),
             )
         )

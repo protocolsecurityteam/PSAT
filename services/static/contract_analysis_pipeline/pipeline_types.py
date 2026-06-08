@@ -230,7 +230,6 @@ class EffectsArtifact(TypedDict):
 
 class StaticAnalysisRequest(TypedDict):
     source_bundle: SourceBundle
-    rpc_url: NotRequired[str | None]
 
 
 class StaticAnalysisPayload(TypedDict):

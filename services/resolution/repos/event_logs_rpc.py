@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.resolution.types import FetchedEventLog
-from utils.rpc import rpc_request
+from utils.rpc import require_configured_erpc_url, require_supported_chain_id, rpc_request
 
 MAX_BLOCK_RANGE = 10_000
+logger = logging.getLogger(__name__)
 
 
 class RpcEventLogFetcher:
-    def __init__(self, rpc_url: str, *, max_block_range: int = MAX_BLOCK_RANGE) -> None:
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_url: str, *, chain_id: int, max_block_range: int = MAX_BLOCK_RANGE) -> None:
+        self.chain_id = require_supported_chain_id(chain_id=chain_id, context="event log fetcher")
+        self.rpc_url = require_configured_erpc_url(
+            rpc_url,
+            context="event log fetcher",
+            chain_id=self.chain_id,
+        )
         self.max_block_range = max_block_range
 
     def fetch_logs(
@@ -35,36 +42,78 @@ class RpcEventLogFetcher:
                     "toBlock": hex(end),
                 }
             ]
-            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
-            if isinstance(raw_logs, list):
-                for raw in raw_logs:
-                    decoded = _decode_log(raw)
-                    if decoded is not None:
-                        out.append(decoded)
+            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
+            if not isinstance(raw_logs, list):
+                logger.error(
+                    "eth_getLogs returned invalid payload address=%s topic0=%s blocks=%d-%d: %r",
+                    event_address,
+                    topic0,
+                    start,
+                    end,
+                    raw_logs,
+                )
+                raise RuntimeError(f"eth_getLogs returned invalid payload for {event_address} topic0={topic0}")
+            for raw in raw_logs:
+                decoded = _decode_log(raw)
+                if decoded is None:
+                    logger.error(
+                        "eth_getLogs returned malformed log address=%s topic0=%s blocks=%d-%d: %r",
+                        event_address,
+                        topic0,
+                        start,
+                        end,
+                        raw,
+                    )
+                    raise RuntimeError(f"eth_getLogs returned malformed log for {event_address} topic0={topic0}")
+                out.append(decoded)
             start = end + 1
         return out
 
 
 class RpcHeadBlockFetcher:
-    def __init__(self, rpc_url: str) -> None:
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_url: str, *, chain_id: int) -> None:
+        self.chain_id = require_supported_chain_id(chain_id=chain_id, context="event head block fetcher")
+        self.rpc_url = require_configured_erpc_url(
+            rpc_url,
+            context="event head block fetcher",
+            chain_id=self.chain_id,
+        )
 
     def head_block(self) -> int:
-        raw = rpc_request(self.rpc_url, "eth_blockNumber", [])
+        raw = rpc_request(self.rpc_url, "eth_blockNumber", [], chain_id=self.chain_id)
         if not isinstance(raw, str) or not raw.startswith("0x"):
+            logger.error("eth_blockNumber returned invalid payload: %r", raw)
             raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
-        return int(raw, 16)
+        try:
+            return int(raw, 16)
+        except ValueError as exc:
+            logger.error("eth_blockNumber returned malformed hex: %r", raw)
+            raise RuntimeError(f"Unexpected malformed eth_blockNumber result: {raw!r}") from exc
 
 
 class RpcBlockHashFetcher:
-    def __init__(self, rpc_url: str) -> None:
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_url: str, *, chain_id: int) -> None:
+        self.chain_id = require_supported_chain_id(chain_id=chain_id, context="event block hash fetcher")
+        self.rpc_url = require_configured_erpc_url(
+            rpc_url,
+            context="event block hash fetcher",
+            chain_id=self.chain_id,
+        )
 
     def block_hash(self, block_number: int) -> bytes | None:
-        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False])
+        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False], chain_id=self.chain_id)
         if not isinstance(raw, dict):
-            return None
-        return _hex_to_bytes(raw.get("hash"), 32)
+            logger.error("eth_getBlockByNumber returned invalid payload for block=%d: %r", block_number, raw)
+            raise RuntimeError(f"eth_getBlockByNumber returned invalid payload for block={block_number}")
+        block_hash = _hex_to_bytes(raw.get("hash"), 32)
+        if block_hash is None:
+            logger.error(
+                "eth_getBlockByNumber returned malformed hash for block=%d: %r",
+                block_number,
+                raw.get("hash"),
+            )
+            raise RuntimeError(f"eth_getBlockByNumber returned malformed hash for block={block_number}")
+        return block_hash
 
 
 def _decode_log(raw: Any) -> FetchedEventLog | None:
@@ -72,6 +121,8 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         return None
     topics = raw.get("topics")
     if not isinstance(topics, list) or not topics:
+        return None
+    if any(not isinstance(topic, str) or not topic.startswith("0x") or len(topic) != 66 for topic in topics):
         return None
     tx_hash = _hex_to_bytes(raw.get("transactionHash"), 32)
     block_hash = _hex_to_bytes(raw.get("blockHash"), 32)
@@ -83,6 +134,9 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         transaction_index = _hex_int(raw.get("transactionIndex"))
     except (TypeError, ValueError):
         return None
+    data_words = _split_data_words(raw.get("data"))
+    if data_words is None:
+        return None
     return FetchedEventLog(
         tx_hash=tx_hash,
         log_index=log_index,
@@ -90,7 +144,7 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         block_hash=block_hash,
         transaction_index=transaction_index,
         topics=[str(t).lower() for t in topics],
-        data_words=_split_data_words(raw.get("data")),
+        data_words=data_words,
     )
 
 
@@ -112,10 +166,14 @@ def _hex_to_bytes(raw: Any, size: int) -> bytes | None:
         return None
 
 
-def _split_data_words(raw: Any) -> list[str]:
+def _split_data_words(raw: Any) -> list[str] | None:
     if not isinstance(raw, str) or not raw.startswith("0x"):
-        return []
+        return None
     body = raw[2:]
     if len(body) % 64 != 0:
-        return []
+        return None
+    try:
+        bytes.fromhex(body)
+    except ValueError:
+        return None
     return ["0x" + body[i : i + 64].lower() for i in range(0, len(body), 64)]

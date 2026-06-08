@@ -1,9 +1,9 @@
-"""Cross-process cache for mapping_enumerator hypersync scans.
+"""Cross-process cache for mapping_enumerator event-log scans.
 
-A row per ``(chain, address, specs_hash)`` holding the
+A row per ``(chain_id, address, specs_hash)`` holding the
 ``EnumerationResult`` from ``services.resolution.mapping_enumerator``.
 Workers running the resolution and policy stages on the same job no
-longer re-pay the 60s hypersync pagination — they hit this row instead.
+longer re-pay the bounded event-log scan — they hit this row instead.
 
 The module is deliberately small and stateless — every entry point
 opens its own short-lived ``SessionLocal()`` so callers (the
@@ -30,10 +30,15 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import MappingEnumerationCache, SessionLocal
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHAIN = "ethereum"
+def _normalize_chain_id(chain_id: int) -> int:
+    try:
+        return require_supported_chain_id(chain_id=chain_id, context="mapping enumeration cache")
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _ttl_seconds() -> float:
@@ -105,14 +110,14 @@ def specs_fingerprint(
 
 def find_fresh(
     *,
-    chain: str | None,
+    chain_id: int,
     address: str,
     specs_hash: str,
     ttl_s: float | None = None,
 ) -> dict[str, Any] | None:
     """Return the cached EnumerationResult if a row exists and is fresher
     than the TTL; ``None`` otherwise. The caller treats ``None`` as a
-    miss and runs the actual hypersync scan.
+    miss and runs the actual event-log scan.
 
     A stale row is intentionally *not* returned as a degraded fallback —
     the caller may want partial data, but baking that into the cache
@@ -120,7 +125,7 @@ def find_fresh(
     "stale-OK" mode, expose it via a separate ``find_any`` rather than
     re-purposing this entry point.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_id_norm = _normalize_chain_id(chain_id)
     addr_norm = address.lower()
     eff_ttl = _ttl_seconds() if ttl_s is None else ttl_s
 
@@ -128,7 +133,7 @@ def find_fresh(
     try:
         row = session.execute(
             select(MappingEnumerationCache).where(
-                MappingEnumerationCache.chain == chain_norm,
+                MappingEnumerationCache.chain_id == chain_id_norm,
                 MappingEnumerationCache.address == addr_norm,
                 MappingEnumerationCache.specs_hash == specs_hash,
             )
@@ -154,7 +159,7 @@ def find_fresh(
 
 def upsert(
     *,
-    chain: str | None,
+    chain_id: int,
     address: str,
     specs_hash: str,
     result: dict[str, Any],
@@ -165,13 +170,13 @@ def upsert(
     pure optimization; a write failure must not break the resolution
     pipeline that just produced a valid enumeration.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_id_norm = _normalize_chain_id(chain_id)
     addr_norm = address.lower()
 
     session = SessionLocal()
     try:
         stmt = pg_insert(MappingEnumerationCache).values(
-            chain=chain_norm,
+            chain_id=chain_id_norm,
             address=addr_norm,
             specs_hash=specs_hash,
             principals=result["principals"],
@@ -196,8 +201,8 @@ def upsert(
         session.commit()
     except Exception as exc:
         logger.warning(
-            "mapping_enumeration_cache: upsert failed for chain=%s address=%s: %s",
-            chain_norm,
+            "mapping_enumeration_cache: upsert failed for chain_id=%s address=%s: %s",
+            chain_id_norm,
             addr_norm,
             exc,
         )

@@ -19,13 +19,18 @@ Both shapes return ``(names, scope_entries, raw_response, model)``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Final
 
+from utils.rpc import require_supported_chain_id
+
 from ._errors import LLMUnavailableError
 from ._locate import ScopeSection
+
+logger = logging.getLogger(__name__)
 
 PROMPT_VERSION: Final[str] = "scope-v3"
 
@@ -90,7 +95,7 @@ explicit Ethereum-style address listed next to it. Each entry:
       "name": "<ContractName>",
       "address": "0x<40 hex chars lowercase>",
       "commit": "<7-40 hex chars lowercase>" | null,
-      "chain": "ethereum" | "optimism" | "arbitrum" | "base" | ... | null
+      "chain_id": <numeric EVM chain id> | null
     }}
 
 Rules:
@@ -101,9 +106,8 @@ contract (e.g. in a "commit" column of the scope table, or in a single \
 "reviewed at commit abc1234" line that applies to all entries), put it \
 in ``commit``. Otherwise set commit to null.
 - If the scope section indicates a chain for the entry (e.g. "Ethereum \
-mainnet", "Arbitrum", "Scroll"), normalize to a short lowercase \
-identifier. Default to null when unspecified — the matcher assumes \
-ethereum.
+mainnet", "Arbitrum", "Scroll"), emit the numeric EVM chain_id. Default \
+to null when unspecified; never guess a chain id from the address alone.
 - If no addresses are present in the scope section, return an empty \
 array for ``scope_entries``. This is the normal case for audits whose \
 scope is prose or a flat name list.
@@ -258,13 +262,22 @@ def _parse_scope_entry(raw: Any) -> dict[str, Any] | None:
         commit_clean = commit_raw.strip().lower()
         if _COMMIT_RE.match(commit_clean):
             commit = commit_clean
-    chain_raw = raw.get("chain")
-    chain = None
-    if isinstance(chain_raw, str):
-        chain_clean = chain_raw.strip().lower()
-        if chain_clean:
-            chain = chain_clean
-    return {"name": name, "address": address, "commit": commit, "chain": chain}
+    chain_id = None
+    if raw.get("chain_id") is not None:
+        chain_id = require_supported_chain_id(
+            chain_id=raw.get("chain_id"),
+            context=f"audit scope entry {name} {address}",
+        )
+    elif isinstance(raw.get("chain"), str) and raw["chain"].strip():
+        raw_chain_label = raw["chain"].strip().lower()
+        logger.error("Audit scope entry returned legacy chain label instead of chain_id: %r", raw_chain_label)
+        raise RuntimeError(f"Audit scope entry requires chain_id, got legacy chain label {raw_chain_label!r}")
+    return {
+        "name": name,
+        "address": address,
+        "commit": commit,
+        "chain_id": chain_id,
+    }
 
 
 def _dedupe_names(raw_list: Any) -> list[str]:
@@ -356,7 +369,7 @@ def extract_scope_with_llm(
 
     Returns ``(names, scope_entries, classified_commits, raw_response, model)``.
 
-    - ``scope_entries`` — list of ``{name, address, commit, chain}`` dicts
+    - ``scope_entries`` — list of ``{name, address, commit, chain_id}`` dicts
       for audits whose scope section had an explicit address column;
       empty list for legacy prose-style scope sections (Phase F).
     - ``classified_commits`` — list of ``{sha, label, context}`` where

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from sqlalchemy import func, select
@@ -20,6 +19,7 @@ from db.models import (
 )
 from db.queue import create_job
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
+from utils.rpc import default_rpc_url, require_supported_chain_id
 
 # Must match _OWNER_CONTROLLER_IDS in unified_watcher.py.
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
@@ -116,39 +116,36 @@ def maybe_queue_reanalysis(
 
     Checks:
     1. Event type is in the trigger set.
-    2. No queued or processing job already exists for this address+chain.
+    2. No queued or processing job already exists for this address+chain_id.
 
-    The job starts at the ``discovery`` stage so the caching system can
-    copy static artifacts (source files, contract_analysis, etc.) and the
-    static worker can detect implementation changes via
-    ``_check_proxy_cache``.
+    The job starts at the ``discovery`` stage so verified source is fetched
+    and the static worker re-checks the current chain-scoped implementation.
 
     Returns the created :class:`Job`, or ``None`` if skipped.
     """
     if not should_trigger_reanalysis(event_type, data):
         return None
 
-    # Deduplicate: skip if a job is already in-flight for this address+chain.
-    in_flight_candidates = (
+    # Deduplicate: skip if a job is already in-flight for this address+chain_id.
+    in_flight = (
         session.execute(
             select(Job).where(
                 func.lower(Job.address) == mc.address.lower(),
+                Job.chain_id == mc.chain_id,
                 Job.status.in_([JobStatus.queued, JobStatus.processing]),
             )
         )
         .scalars()
-        .all()
+        .first()
     )
-    for candidate in in_flight_candidates:
-        req = candidate.request if isinstance(candidate.request, dict) else {}
-        if req.get("chain", "ethereum") == mc.chain:
-            logger.info(
-                "Skipping re-analysis for %s: job %s already in-flight (stage=%s)",
-                mc.address,
-                candidate.id,
-                candidate.stage.value,
-            )
-            return None
+    if in_flight is not None:
+        logger.info(
+            "Skipping re-analysis for %s: job %s already in-flight (stage=%s)",
+            mc.address,
+            in_flight.id,
+            in_flight.stage.value,
+        )
+        return None
 
     # Determine a human-readable trigger label
     if event_type == "state_changed_poll":
@@ -156,13 +153,13 @@ def maybe_queue_reanalysis(
     else:
         trigger = event_type
 
-    rpc_url = os.environ.get("ETH_RPC", "https://ethereum-rpc.publicnode.com")
+    chain_id = require_supported_chain_id(chain_id=mc.chain_id, context=f"re-analysis for {mc.address}")
+    default_rpc_url(chain_id=chain_id)
 
     request_dict: dict = {
         "address": mc.address,
-        "chain": mc.chain,
+        "chain_id": chain_id,
         "name": f"Re-analysis ({trigger})",
-        "rpc_url": rpc_url,
         "reanalysis_trigger": trigger,
     }
     if mc.protocol_id:
@@ -245,14 +242,19 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
     if not snapshot:
         return []
 
-    address = (job.address or "").lower()
-    chain = request.get("chain", "ethereum")
+    if not job.address:
+        raise RuntimeError(f"reanalysis diff for job {job.id} requires address")
+    address = job.address.lower()
+    chain_id = require_supported_chain_id(
+        chain_id=job.chain_id,
+        context=f"reanalysis diff for job {job.id}",
+    )
 
     contract = (
         session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == address,
-                Contract.chain == chain,
+                Contract.chain_id == chain_id,
             )
         )
         .scalars()

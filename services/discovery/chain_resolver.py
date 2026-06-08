@@ -21,101 +21,82 @@ Strategy
 from __future__ import annotations
 
 import contextvars
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.chains import canonical_chain_list
-from utils.rpc import erpc_url_for_chain_id, rpc_batch_request_with_status
+from utils.rpc import default_rpc_url, get_code_batch, require_supported_chain_id, supported_chain_ids
 
-from .inventory_domain import CHAIN_IDS, _debug_log
+from .inventory_domain import _debug_log
 from .static_dependencies import has_deployed_code, normalize_address
 
-# Max addresses per JSON-RPC batch request.
-_BATCH_RPC_SIZE = 100
+logger = logging.getLogger(__name__)
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
-def _chain_id_for_probe(chain_name: str) -> int | None:
-    chain_id = CHAIN_IDS.get(chain_name)
-    return chain_id if isinstance(chain_id, int) and chain_id > 0 else None
+def _probe_chain_ids() -> list[int]:
+    try:
+        return sorted(supported_chain_ids())
+    except RuntimeError as exc:
+        logger.error("Chain materialization failed to load supported chain ids: %s", exc)
+        raise
 
 
-def _erpc_url_for_chain(chain_name: str) -> str:
-    """Build the configured eRPC URL for a known discovery chain."""
+def _erpc_url_for_chain_id(chain_id: int) -> str:
+    """Build the configured eRPC URL for a known discovery chain id."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    chain_id = _chain_id_for_probe(chain_name)
-    if chain_id is None:
-        raise RuntimeError(f"No chain id configured for chain {chain_name}")
-    rpc_url = erpc_url_for_chain_id(chain_id)
-    if not rpc_url:
-        raise RuntimeError(f"Chain resolution requires ERPC_BASE_URL; no eRPC URL for {chain_name} ({chain_id})")
-    return rpc_url
+    return default_rpc_url(chain_id=chain_id)
 
 
-def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
-    """Batch-fetch eth_getCode for many addresses in a single HTTP request.
+def _batch_get_code(rpc_url: str, addresses: list[str], *, chain_id: int) -> dict[str, str]:
+    """Batch-fetch eth_getCode for many addresses through the shared strict RPC path.
 
-    Returns ``{address: bytecode_hex}`` for each address.  Splits into
-    sub-batches of ``_BATCH_RPC_SIZE`` to stay within RPC limits. Any
-    transport error, batch-level error, item-level error, or omitted result
+    Returns ``{address: bytecode_hex}`` for each address. Any transport error,
+    batch-level error, item-level error, omitted result, or malformed bytecode
     raises instead of guessing.
     """
-    if not addresses:
-        return {}
-
-    results: dict[str, str] = {}
-    for i in range(0, len(addresses), _BATCH_RPC_SIZE):
-        batch = addresses[i : i + _BATCH_RPC_SIZE]
-        calls = [("eth_getCode", [addr, "latest"]) for addr in batch]
-        raw_results = rpc_batch_request_with_status(rpc_url, calls)
-        if len(raw_results) != len(batch):
-            raise RuntimeError(f"RPC batch returned {len(raw_results)} result(s) for {len(batch)} call(s) on {rpc_url}")
-
-        for addr, (code, had_error) in zip(batch, raw_results):
-            if had_error:
-                raise RuntimeError(f"RPC batch item error for {addr} on {rpc_url}")
-            if not isinstance(code, str) or not code.startswith("0x"):
-                raise RuntimeError(f"RPC batch returned invalid eth_getCode result for {rpc_url}: {code!r}")
-            results[addr] = "0x" if code == "0x0" else code
-
-    return results
+    return get_code_batch(rpc_url, addresses, chain_id=chain_id)
 
 
 def _probe_chain_batch(
     addresses: list[str],
-    chain_name: str,
+    chain_id: int,
     debug: bool = False,
 ) -> set[str]:
     """Probe all *addresses* on a single chain via eRPC JSON-RPC batch."""
-    rpc_url = _erpc_url_for_chain(chain_name)
-    code_map = _batch_get_code(rpc_url, addresses)
+    rpc_url = _erpc_url_for_chain_id(chain_id)
+    code_map = _batch_get_code(rpc_url, addresses, chain_id=chain_id)
     return {addr for addr, code in code_map.items() if has_deployed_code(code)}
 
 
 def _probe_chains(
     addresses: list[str],
-    chains: list[str],
-    matched: dict[str, list[str]],
+    chain_ids: list[int],
+    matched: dict[str, list[int]],
     debug: bool = False,
 ) -> None:
     """Probe multiple chains in parallel using eRPC batch endpoints."""
-    with ThreadPoolExecutor(max_workers=min(len(chains), 10)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(chain_ids), 10)) as executor:
         # Per-chain context copy preserves the caller's trace context inside
         # each per-chain batch RPC call.
         future_to_chain = {}
-        for chain_name in chains:
+        for chain_id in chain_ids:
             ctx = contextvars.copy_context()
-            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_name, debug)] = chain_name
+            future_to_chain[executor.submit(ctx.run, _probe_chain_batch, addresses, chain_id, debug)] = chain_id
         for future in as_completed(future_to_chain):
-            chain_name = future_to_chain[future]
-            hits = future.result()
+            chain_id = future_to_chain[future]
+            try:
+                hits = future.result()
+            except Exception as exc:
+                logger.exception("Chain materialization probe failed for chain_id=%s", chain_id)
+                raise RuntimeError(f"Chain materialization probe failed for chain_id={chain_id}") from exc
             for addr in hits:
-                matched[addr].append(chain_name)
-            _debug_log(debug, f"  {chain_name}: {len(hits)} hit(s)")
+                matched[addr].append(chain_id)
+            _debug_log(debug, f"  chain_id={chain_id}: {len(hits)} hit(s)")
 
 
 def _normalize_probe_address(raw: Any) -> str:
@@ -131,14 +112,14 @@ def _normalize_probe_address(raw: Any) -> str:
     return address
 
 
-def resolve_address_chains(
+def resolve_address_chain_ids(
     addresses: list[str],
     *,
     debug: bool = False,
-) -> dict[str, list[str]]:
-    """Probe every supported chain and return deployed-code matches per address.
+) -> dict[str, list[int]]:
+    """Probe every supported chain id and return deployed-code matches per address.
 
-    Returns ``{address: [chain, ...]}``. Addresses with no deployed code on any
+    Returns ``{address: [chain_id, ...]}``. Addresses with no deployed code on any
     supported chain are present with an empty list so callers can intentionally
     avoid writing unknown-chain rows.
     """
@@ -153,19 +134,16 @@ def resolve_address_chains(
     if not normalized:
         return {}
 
-    chains = list(CHAIN_IDS.keys())
-    uncovered = sorted(ch for ch in chains if _chain_id_for_probe(ch) is None)
-    if uncovered:
-        raise RuntimeError(f"No chain id configured for chain(s): {uncovered}")
+    chain_ids = _probe_chain_ids()
+    if not chain_ids:
+        raise RuntimeError("No supported chain ids configured for chain resolution")
 
-    matched: dict[str, list[str]] = {address: [] for address in normalized}
-    _debug_log(debug, f"Chain materialization: probing {len(normalized)} address(es) across {len(chains)} chain(s)")
-    _probe_chains(normalized, chains, matched, debug)
+    matched: dict[str, list[int]] = {address: [] for address in normalized}
+    _debug_log(debug, f"Chain materialization: probing {len(normalized)} address(es) across {len(chain_ids)} chain(s)")
+    _probe_chains(normalized, chain_ids, matched, debug)
 
-    return {
-        address: sorted(canonical_chain_list(chains) or [], key=lambda chain: list(CHAIN_IDS).index(chain))
-        for address, chains in matched.items()
-    }
+    chain_order = {chain_id: idx for idx, chain_id in enumerate(chain_ids)}
+    return {address: sorted(ids, key=lambda chain_id: chain_order[chain_id]) for address, ids in matched.items()}
 
 
 def expand_entries_by_resolved_chains(
@@ -173,18 +151,83 @@ def expand_entries_by_resolved_chains(
     *,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Expand discovery write entries into one DB row per resolved chain."""
-    addresses = [str(entry.get("address") or "") for entry in entries]
-    chain_map = resolve_address_chains(addresses, debug=debug)
+    """Expand discovery write entries into one DB row per verified chain.
+
+    Entries with explicit ``chain_id`` evidence are verified only on that chain.
+    Entries without chain evidence are probed across all supported chains.
+    """
+    unknown_chain_addresses: list[str] = []
+    explicit_by_chain: dict[int, list[str]] = {}
+    explicit_entry_chains: dict[int, int] = {}
+    normalized_by_entry: dict[int, str] = {}
+    seen_unknown: set[str] = set()
+    seen_explicit_by_chain: dict[int, set[str]] = {}
+
+    for idx, entry in enumerate(entries):
+        address = _normalize_probe_address(entry.get("address"))
+        normalized_by_entry[idx] = address
+        raw_chain_id = entry.get("chain_id")
+        if raw_chain_id is None:
+            if address not in seen_unknown:
+                seen_unknown.add(address)
+                unknown_chain_addresses.append(address)
+            continue
+
+        chain_id = require_supported_chain_id(
+            chain_id=raw_chain_id,
+            context=f"chain materialization for {address}",
+        )
+        explicit_entry_chains[idx] = chain_id
+        seen_for_chain = seen_explicit_by_chain.setdefault(chain_id, set())
+        if address not in seen_for_chain:
+            seen_for_chain.add(address)
+            explicit_by_chain.setdefault(chain_id, []).append(address)
+
+    chain_map = resolve_address_chain_ids(unknown_chain_addresses, debug=debug) if unknown_chain_addresses else {}
+    explicit_hits_by_chain: dict[int, set[str]] = {}
+    for chain_id, addresses in explicit_by_chain.items():
+        try:
+            explicit_hits_by_chain[chain_id] = _probe_chain_batch(addresses, chain_id, debug=debug)
+        except Exception as exc:
+            logger.exception("Explicit chain materialization probe failed for chain_id=%s", chain_id)
+            raise RuntimeError(f"Explicit chain materialization probe failed for chain_id={chain_id}") from exc
+
     expanded: list[dict[str, Any]] = []
 
-    for entry in entries:
-        address = _normalize_probe_address(entry.get("address"))
-        for chain in chain_map.get(address, []):
+    for idx, entry in enumerate(entries):
+        address = normalized_by_entry[idx]
+        explicit_chain_id = explicit_entry_chains.get(idx)
+        if explicit_chain_id is not None:
+            if address not in explicit_hits_by_chain.get(explicit_chain_id, set()):
+                logger.error(
+                    "Chain materialization found no deployed code for explicit address=%s chain_id=%s",
+                    address,
+                    explicit_chain_id,
+                )
+                raise RuntimeError(
+                    f"Chain materialization found no deployed code for explicit address={address} "
+                    f"chain_id={explicit_chain_id}"
+                )
+            chain_ids = [explicit_chain_id]
+        else:
+            chain_ids = chain_map.get(address, [])
+            if not chain_ids:
+                logger.error(
+                    "Chain materialization found no deployed code on supported chains for address=%s",
+                    address,
+                )
+                raise RuntimeError(
+                    "Chain materialization found no deployed code on supported chains "
+                    f"for address={address}"
+                )
+
+        for chain_id in chain_ids:
             materialized = dict(entry)
             materialized["address"] = address
-            materialized["chain"] = chain
-            materialized["chains"] = [chain]
+            materialized["chain_id"] = chain_id
+            materialized.pop("chain", None)
+            materialized.pop("chains", None)
+            materialized.pop("chain_ids", None)
             expanded.append(materialized)
 
     _debug_log(debug, f"Chain materialization: expanded {len(entries)} entry/entries to {len(expanded)} chain row(s)")

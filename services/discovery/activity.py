@@ -1,18 +1,16 @@
 """On-chain activity scoring for contract inventory ranking.
 
-Fetches the most recent transaction timestamp from Etherscan for each
-discovered contract and computes a half-life decay score.  Contracts that
-are actively used rank higher, ensuring the analysis pipeline targets the
-most relevant addresses first.
+Activity ranking requires address-level transaction history. PSAT now runs in
+eRPC-only mode for on-chain calls, and plain JSON-RPC does not expose an
+address transaction index. Until an eRPC-backed indexer exists, this stage
+fails explicitly instead of querying an explorer or assigning guessed activity.
 
 Scoring
 -------
 - ``activity_score = 1 / (1 + days_since_last_tx / HALF_LIFE)``
   with HALF_LIFE = 30 days.  A contract active today scores ~1.0;
   one inactive for 30 days scores 0.5; one inactive for a year scores ~0.08.
-- When activity data is unavailable (unsupported chain, Etherscan error),
-  the contract receives a neutral score of 0.5 so it is neither penalised
-  nor boosted.
+- Missing or invalid chain ids raise instead of receiving a guessed score.
 
 Blended ranking
 ---------------
@@ -24,17 +22,20 @@ activity dominate the ordering so the most-used contracts surface first.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from utils import etherscan
+from utils.rpc import require_supported_chain_id
 
-from .inventory_domain import CHAIN_IDS, CHAIN_SORT_ORDER, _debug_log
+from .inventory_domain import _debug_log
+
+logger = logging.getLogger(__name__)
 
 # Half-life in days for the activity decay function.
 _HALF_LIFE_DAYS = 30
 
-# Score assigned when activity data is unavailable (e.g. unsupported chain).
+# Score assigned when activity data is unavailable from a supported source.
 _NEUTRAL_SCORE = 0.5
 
 # Blended ranking weights.
@@ -49,37 +50,25 @@ _W_ACTIVITY = 0.65
 
 def _fetch_last_active_ts(
     address: str,
-    chain_id: int = 1,
+    chain_id: int,
     debug: bool = False,
 ) -> float | None:
-    """Return the Unix timestamp of the most recent transaction, or None."""
-    try:
-        data = etherscan.get(
-            "account",
-            "txlist",
-            chain_id=chain_id,
-            address=address,
-            startblock=0,
-            endblock=99999999,
-            page=1,
-            offset=1,
-            sort="desc",
-        )
-        results = data.get("result", [])
-        if isinstance(results, list) and results:
-            ts = results[0].get("timeStamp")
-            if ts:
-                return float(ts)
-    except Exception as exc:
-        _debug_log(debug, f"Activity fetch failed for {address}: {exc}")
-    return None
+    """Return the Unix timestamp of the most recent transaction, or fail."""
+    resolved_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"activity scoring for {address}")
+    message = (
+        f"activity scoring for {address} on chain_id={resolved_chain_id} requires an eRPC-backed "
+        "address transaction index; explorer txlist is disabled"
+    )
+    logger.error("%s", message)
+    _debug_log(debug, message)
+    raise RuntimeError(message)
 
 
 def _activity_score(last_active_ts: float | None) -> float:
     """Compute an activity score in [0, 1] using half-life decay.
 
-    Returns ``_NEUTRAL_SCORE`` when the timestamp is unknown so that
-    contracts on unsupported chains are neither penalised nor boosted.
+    Returns ``_NEUTRAL_SCORE`` when the timestamp is unknown on a supported
+    chain.
     """
     if last_active_ts is None:
         return _NEUTRAL_SCORE
@@ -88,10 +77,20 @@ def _activity_score(last_active_ts: float | None) -> float:
     return 1.0 / (1.0 + days_since / _HALF_LIFE_DAYS)
 
 
-def _primary_chain(contract: dict[str, Any]) -> str:
-    """Return the first chain from a contract's chains list, or 'unknown'."""
-    chains = contract.get("chains", [])
-    return chains[0] if chains else "unknown"
+def _blended_score(confidence: float, activity_score: float) -> float:
+    return confidence * _W_CONFIDENCE + activity_score * _W_ACTIVITY
+
+
+def _primary_chain_id(contract: dict[str, Any]) -> int:
+    """Return the explicit chain id used for activity scoring."""
+    raw_chain_id = contract.get("chain_id")
+    try:
+        return require_supported_chain_id(
+            chain_id=raw_chain_id,
+            context=f"activity scoring for {contract.get('address')}",
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Activity scoring requires supported chain_id for {contract.get('address')}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +107,9 @@ def enrich_with_activity(
     Mutates the contract dicts in-place (adds ``activity`` and ``rank_score``
     keys) and returns the list sorted by ``rank_score`` descending.
 
-    Rate-limited centrally by ``utils.etherscan``.
+    Requires an eRPC-backed address transaction index. Without one, this
+    function raises instead of querying an explorer or assigning guessed
+    activity.
     """
     if not contracts:
         return contracts
@@ -117,8 +118,7 @@ def enrich_with_activity(
 
     for contract in contracts:
         address = contract["address"]
-        chain = _primary_chain(contract)
-        chain_id = CHAIN_IDS.get(chain, CHAIN_IDS["ethereum"])
+        chain_id = _primary_chain_id(contract)
 
         last_ts = _fetch_last_active_ts(address, chain_id=chain_id, debug=debug)
         score = _activity_score(last_ts)
@@ -131,10 +131,7 @@ def enrich_with_activity(
         }
 
         confidence = contract.get("confidence", 0.5)
-        contract["rank_score"] = round(
-            confidence * _W_CONFIDENCE + score * _W_ACTIVITY,
-            4,
-        )
+        contract["rank_score"] = round(_blended_score(confidence, score), 4)
 
     _debug_log(debug, "Activity enrichment complete")
 
@@ -144,7 +141,7 @@ def enrich_with_activity(
             -c.get("confidence", 0),
             c.get("name") is None,
             str(c.get("name") or ""),
-            CHAIN_SORT_ORDER.get(_primary_chain(c), 50),
+            _primary_chain_id(c),
             c["address"],
         ),
     )

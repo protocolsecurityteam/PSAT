@@ -76,10 +76,18 @@ def _system_prompt(session, ctx: AgentContext) -> str:
     ]
     if ctx.selected_address:
         try:
-            sel = contract_brief(session, ctx.selected_address, ctx.selected_chain)
+            sel = contract_brief(session, ctx.selected_address, chain_id=ctx.selected_chain_id)
+            if sel.get("error"):
+                raise RuntimeError(str(sel["error"]))
             parts.append("CURRENTLY SELECTED CONTRACT (auto-context):\n" + json.dumps(sel, indent=2))
         except Exception as exc:
-            logger.warning("system prompt selected-contract lookup failed: %s", exc)
+            logger.error(
+                "system prompt selected-contract lookup failed for address=%s chain_id=%s: %s",
+                ctx.selected_address,
+                ctx.selected_chain_id,
+                exc,
+            )
+            raise RuntimeError("system prompt selected-contract lookup failed") from exc
     return "\n\n".join(parts)
 
 

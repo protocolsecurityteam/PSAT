@@ -31,7 +31,6 @@ missing=()
 [ -z "$DATABASE_URL" ]      && missing+=("DATABASE_URL")
 [ -z "$ETHERSCAN_API_KEY" ] && missing+=("ETHERSCAN_API_KEY")
 [ -z "$ERPC_BASE_URL" ]     && missing+=("ERPC_BASE_URL")
-[ -z "$ENVIO_API_TOKEN" ]   && missing+=("ENVIO_API_TOKEN")
 [ -z "$TAVILY_API_KEY" ]    && missing+=("TAVILY_API_KEY")
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -182,16 +181,16 @@ BROWSER_PID=$!
 
 # Start protocol monitor (unified event scanner + storage poller)
 echo "Starting protocol monitor..."
-uv run python -m workers.protocol_monitor >>"$LOG_FILE" 2>&1 &
+uv run python -m workers.protocol_monitor --all-supported-chains >>"$LOG_FILE" 2>&1 &
 PROXY_SCANNER_PID=$!
-uv run python -m workers.protocol_monitor --poll >>"$LOG_FILE" 2>&1 &
+uv run python -m workers.protocol_monitor --poll --all-supported-chains >>"$LOG_FILE" 2>&1 &
 PROXY_POLLER_PID=$!
 uv run python -m workers.protocol_monitor --tvl >>"$LOG_FILE" 2>&1 &
 TVL_TRACKER_PID=$!
 # Enrollment reconciler (mirrors start_monitor.sh) — converges monitored_contracts,
 # notably the controller Safes/Timelocks the per-job enroll hint skips; without it
 # they never land in monitoring locally. Idempotent upserts, safe as a co-process.
-uv run python -m workers.protocol_monitor --reconcile >>"$LOG_FILE" 2>&1 &
+uv run python -m workers.protocol_monitor --reconcile --all-supported-chains >>"$LOG_FILE" 2>&1 &
 RECONCILE_PID=$!
 
 echo ""

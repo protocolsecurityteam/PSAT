@@ -10,8 +10,7 @@ Pipeline:
     Dedup — URL key, then filename, then LLM validate-and-cluster
     (heuristic mirror collapse fallback).
 
-``search_audit_reports`` is the entry point. ``merge_audit_reports`` is
-append-only across successive discovery runs: reports are never removed.
+``search_audit_reports`` is the entry point for current-run audit discovery.
 
 Submodules:
     _urls          — URL/filename utilities, no external deps
@@ -608,57 +607,9 @@ def _empty_result(
     }
 
 
-# --- Append-only merge ----------------------------------------------------
-
-
-def _richness(report: dict[str, Any]) -> int:
-    """Count non-null detail fields as a richness score."""
-    return sum(1 for key in ("pdf_url", "date") if report.get(key))
-
-
-def merge_audit_reports(prev: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """Merge previous and new audit report results (append-only).
-
-    URL-keyed: overlap keeps the richer entry (prefer new on tie). Prev-only
-    reports survive unchanged; new-only reports get added.
-    """
-    prev_reports = {_normalize_url(r["url"]): r for r in prev.get("reports", []) if r.get("url")}
-    new_reports = {_normalize_url(r["url"]): r for r in new.get("reports", []) if r.get("url")}
-
-    merged: dict[str, dict[str, Any]] = {}
-    for url_key, report in new_reports.items():
-        if url_key in prev_reports:
-            if _richness(prev_reports[url_key]) > _richness(report):
-                merged[url_key] = prev_reports[url_key]
-            else:
-                merged[url_key] = report
-        else:
-            merged[url_key] = report
-
-    for url_key, report in prev_reports.items():
-        if url_key not in new_reports:
-            merged[url_key] = report
-
-    sorted_reports = sorted(
-        merged.values(),
-        key=lambda r: (r.get("date") or "", r.get("confidence") or 0),
-        reverse=True,
-    )
-
-    return {
-        "company": new.get("company", prev.get("company")),
-        "official_domain": new.get("official_domain") or prev.get("official_domain"),
-        "reports": sorted_reports,
-        "queries_used": new.get("queries_used"),
-        "errors": new.get("errors"),
-        "notes": new.get("notes"),
-    }
-
-
 __all__ = [
     # Orchestration
     "search_audit_reports",
-    "merge_audit_reports",
     # Report assembly
     "_build_report_entry",
     "_build_fallback_entry",

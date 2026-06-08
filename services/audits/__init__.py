@@ -44,7 +44,6 @@ from .source_equivalence import (
     extract_reviewed_commits,
     fetch_contract_source_files,
     fetch_db_source_files,
-    fetch_etherscan_source_files,
     fetch_github_source_hash,
 )
 from .text_extraction import (
@@ -101,6 +100,5 @@ __all__ = [
     "extract_reviewed_commits",
     "fetch_contract_source_files",
     "fetch_db_source_files",
-    "fetch_etherscan_source_files",
     "fetch_github_source_hash",
 ]

@@ -45,7 +45,7 @@ class JobStatus(str, enum.Enum):
     # only after retries are exhausted does the row move to ``failed_terminal``.
     failed = "failed"
     # Terminal failure: deterministic-from-the-start (e.g. ValueError on bad
-    # input, missing Etherscan source) or transient retries exhausted. The
+    # input, missing verified source) or transient retries exhausted. The
     # stale-job sweep never resurrects ``failed_terminal`` rows.
     failed_terminal = "failed_terminal"
 
@@ -67,6 +67,7 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     company: Mapped[str | None] = mapped_column(String, nullable=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), nullable=False, default=JobStatus.queued)
@@ -135,6 +136,7 @@ class Job(Base):
         return {
             "job_id": str(self.id),
             "address": self.address,
+            "chain_id": self.chain_id,
             "company": self.company,
             "name": self.name,
             "status": self.status.value,
@@ -172,9 +174,8 @@ class JobDependency(Base):
     depender_job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
     )
-    # ``provider_chain`` mirrors ``Job.request['chain']`` for the provider
-    # contract; nullable for legacy / mainnet-default rows.
-    provider_chain: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Provider contract chain id. Dependency edges are always chain-scoped.
+    provider_chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     provider_address: Mapped[str] = mapped_column(String(42), nullable=False)
     # Stage of the provider that A needs reached before unblocking. Stage
     # ordering follows the ``JobStage`` enum's natural order (discovery <
@@ -195,23 +196,23 @@ class JobDependency(Base):
     satisfied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        # An edge is uniquely identified by (depender, provider_chain,
+        # An edge is uniquely identified by (depender, provider_chain_id,
         # provider_address, required_stage). Duplicate inserts on
         # re-runs of the resolution stage are no-ops via
         # ON CONFLICT DO NOTHING.
         UniqueConstraint(
             "depender_job_id",
-            "provider_chain",
+            "provider_chain_id",
             "provider_address",
             "required_stage",
             name="uq_job_dep_edge",
         ),
         # Powers the satisfy-on-advance scan: one provider job's
-        # advance walks every pending row for (chain, address) +
+        # advance walks every pending row for (chain_id, address) +
         # required_stage<=completed.
         Index(
             "ix_job_dep_provider",
-            "provider_chain",
+            "provider_chain_id",
             "provider_address",
             "required_stage",
             "status",
@@ -267,7 +268,7 @@ class WatchedProxy(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     proxy_address: Mapped[str] = mapped_column(String(42), nullable=False)
-    chain: Mapped[str] = mapped_column(String, nullable=False, default="ethereum")
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str | None] = mapped_column(String, nullable=True)
     proxy_type: Mapped[str | None] = mapped_column(String, nullable=True)
     last_known_implementation: Mapped[str | None] = mapped_column(String(42), nullable=True)
@@ -282,7 +283,7 @@ class WatchedProxy(Base):
         "ProxySubscription", back_populates="watched_proxy", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (UniqueConstraint("proxy_address", "chain", name="uq_watched_proxy_address_chain"),)
+    __table_args__ = (UniqueConstraint("proxy_address", "chain_id", name="uq_watched_proxy_address_chain_id"),)
 
 
 class ProxySubscription(Base):
@@ -326,7 +327,7 @@ class Protocol(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    chains: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), server_default="{}")
+    chain_ids: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     contracts: Mapped[list["Contract"]] = relationship("Contract", back_populates="protocol")
@@ -512,7 +513,7 @@ class Contract(Base):
     )
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     source_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    chain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     compiler_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     language: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -545,7 +546,6 @@ class Contract(Base):
     # pipelines (e.g. shown on the docs page AND called by the DApp).
     discovery_sources: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
     discovery_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    chains: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     job: Mapped[Job] = relationship("Job")
@@ -584,7 +584,7 @@ class Contract(Base):
     __table_args__ = (
         Index("ix_contracts_job_id", "job_id"),
         Index("ix_contracts_protocol_id", "protocol_id"),
-        UniqueConstraint("address", "chain", name="uq_contract_address_chain"),
+        UniqueConstraint("address", "chain_id", name="uq_contract_address_chain_id"),
     )
 
 
@@ -819,7 +819,7 @@ class MonitoredContract(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
-    chain: Mapped[str] = mapped_column(String(100), nullable=False, default="ethereum")
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
@@ -850,7 +850,7 @@ class MonitoredContract(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("address", "chain", name="uq_monitored_contract_address_chain"),
+        UniqueConstraint("address", "chain_id", name="uq_monitored_contract_address_chain_id"),
         Index("ix_monitored_contracts_protocol_id", "protocol_id"),
     )
 
@@ -962,7 +962,7 @@ class TvlSnapshot(Base):
 class IndexedEventLog(Base):
     """Generic append-only log store for resolver enumeration hints.
 
-    Rows are keyed only by chain, emitting address, event topic, and
+    Rows are keyed only by chain_id, emitting address, event topic, and
     log identity. Descriptor-specific meaning (which topic maps to
     which semantic key) stays in ``enumeration_hint``.
     """
@@ -1044,10 +1044,11 @@ class WorkerHeartbeat(Base):
     )
 
 
-class EtherscanCache(Base):
-    """Persistent Etherscan response cache. Read/written by ``utils/etherscan.py``
-    via raw SQL; the model exists so the schema participates in
-    ``Base.metadata`` and ``alembic check`` doesn't flag the table as drift.
+class VerifiedSourceCache(Base):
+    """Persistent verified-source response cache.
+
+    The historical table name remains ``etherscan_cache`` for migration
+    compatibility; only ``utils.verified_source`` writes it now.
     """
 
     __tablename__ = "etherscan_cache"
@@ -1066,7 +1067,7 @@ class EtherscanCache(Base):
 class ContractMaterialization(Base):
     """Cross-job, cross-process materialization cache.
 
-    A row per ``(chain, bytecode_keccak)`` recording the static analysis
+    A row per ``(chain_id, bytecode_keccak)`` recording the static analysis
     + tracking_plan bundle so two impl jobs in the same protocol — or a
     same-protocol re-run on the next day — skip the expensive forge build
     + Slither pass. Read/written via ``db.contract_materializations`` with
@@ -1082,7 +1083,7 @@ class ContractMaterialization(Base):
 
     __tablename__ = "contract_materializations"
 
-    chain: Mapped[str] = mapped_column(String(100), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     bytecode_keccak: Mapped[str] = mapped_column(String(66), primary_key=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -1101,20 +1102,20 @@ class ContractMaterialization(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("chain", "address", name="uq_contract_materializations_chain_address"),
+        UniqueConstraint("chain_id", "address", name="uq_contract_materializations_chain_id_address"),
         Index("ix_contract_materializations_status", "status"),
     )
 
 
 class MappingEnumerationCache(Base):
-    """Cross-process cache for mapping_enumerator hypersync scans.
+    """Cross-process cache for mapping_enumerator event-log scans.
 
-    A row per ``(chain, address, specs_hash)`` holding the EnumerationResult
+    A row per ``(chain_id, address, specs_hash)`` holding the EnumerationResult
     from ``services.resolution.mapping_enumerator``. The single-job pipeline
     walks the recursive resolution graph in *both* the resolution and policy
     stages (``services/resolution/recursive.py``); without a cross-process
-    cache each stage re-runs the same hypersync pagination — for a 2017
-    contract that's two consecutive 60s timeouts per address. The
+    cache each stage re-runs the same event-log windowing — for a 2017
+    contract that can mean two consecutive timeout-bound scans per address. The
     pre-existing in-process module dict only covered same-process repeats,
     which collapsed when 9ce6fa3 split workers into separate OS processes.
 
@@ -1127,7 +1128,7 @@ class MappingEnumerationCache(Base):
 
     __tablename__ = "mapping_enumeration_cache"
 
-    chain: Mapped[str] = mapped_column(String(100), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     address: Mapped[str] = mapped_column(String(42), primary_key=True)
     specs_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     principals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)

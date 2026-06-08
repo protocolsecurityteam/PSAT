@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from utils.rpc import require_supported_chain_id
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("etherfi_clean_requeue")
 
@@ -55,6 +57,9 @@ SNAP_DIR = Path(__file__).resolve().parent / "baseline_snapshots"
 
 _P1 = "(SELECT id FROM contracts WHERE protocol_id=:pid)"
 _P1_ADDRS = "(SELECT lower(address) FROM contracts WHERE protocol_id=:pid)"
+_P1_ADDR_CHAINS = (
+    "SELECT lower(address) AS address, chain_id FROM contracts WHERE protocol_id=:pid AND chain_id IS NOT NULL"
+)
 
 # Anchor rows are audit-coverage-only *superseded* historical impls; the
 # production pipeline excludes them from analysis. The requeue MUST match or
@@ -84,19 +89,33 @@ WIPE: list[tuple[str, str]] = [
     ("upgrade_events", f"contract_id IN {_P1}"),
     ("audit_contract_coverage", f"contract_id IN {_P1}"),
     ("contract_summaries", f"contract_id IN {_P1}"),
-    ("contract_materializations", f"lower(address) IN {_P1_ADDRS}"),
+    (
+        "contract_materializations",
+        "EXISTS ("
+        f"SELECT 1 FROM ({_P1_ADDR_CHAINS}) p "
+        "WHERE p.address = lower(contract_materializations.address) "
+        "AND p.chain_id = contract_materializations.chain_id"
+        ")",
+    ),
     # jobs last — cascades artifacts/source_files/job_dependencies/dapp_interactions,
     # and SET NULLs contracts.job_id (→ requeue-ready).
-    ("jobs", f"protocol_id=:pid OR company=:company OR lower(address) IN {_P1_ADDRS}"),
+    (
+        "jobs",
+        "protocol_id=:pid OR company=:company OR EXISTS ("
+        f"SELECT 1 FROM ({_P1_ADDR_CHAINS}) p "
+        "WHERE p.address = lower(jobs.address) "
+        "AND p.chain_id = jobs.chain_id"
+        ")",
+    ),
 ]
 
-# Idempotent: keep one contract row per address (prefer explicit 'ethereum',
-# else lowest id). No-op once the known same-address dups are gone.
+# Idempotent: keep one contract row per address+chain_id. No-op once the
+# known same-deployment duplicates are gone.
 DEDUP_SQL = """
 DELETE FROM contracts WHERE id IN (
   SELECT id FROM (
     SELECT id, row_number() OVER (
-      PARTITION BY lower(address) ORDER BY (chain='ethereum') DESC NULLS LAST, id
+      PARTITION BY lower(address), chain_id ORDER BY id
     ) rn FROM contracts WHERE protocol_id=:pid
   ) t WHERE rn > 1
 )
@@ -215,18 +234,21 @@ def main() -> int:
     with SessionLocal() as s:
         rows = s.execute(
             text(
-                f"SELECT lower(address) address, chain, contract_name FROM contracts "
-                f"WHERE protocol_id=:pid AND {ANCHOR_EXCL} ORDER BY 1"
+                f"SELECT lower(address) address, chain_id, contract_name FROM contracts "
+                f"WHERE protocol_id=:pid AND {ANCHOR_EXCL} ORDER BY 1, 2"
             ),
             params,
         ).all()
-        for address, chain, contract_name in rows:
+        for address, chain_id, contract_name in rows:
+            effective_chain_id = require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"etherfi clean requeue {address}",
+            )
             req = {
                 "address": address,
                 "name": contract_name or address,
                 "company": COMPANY,
                 "protocol_id": PROTOCOL_ID,
-                "chain": chain,
                 "force": True,
                 "root_job_id": run_root,
                 "clean_requeue_trace": run_trace,
@@ -234,6 +256,7 @@ def main() -> int:
             s.add(
                 Job(
                     address=address,
+                    chain_id=effective_chain_id,
                     company=COMPANY,
                     name=req["name"],
                     status=JobStatus.queued,
@@ -258,6 +281,7 @@ def main() -> int:
         anchors_with_job = _scalar(
             s,
             "SELECT count(*) FROM jobs j JOIN contracts c ON lower(c.address)=lower(j.address) "
+            "AND j.chain_id = c.chain_id "
             "WHERE j.trace_id=:t AND 'upgrade_history' = ANY(c.discovery_sources)",
             {"t": run_trace},
         )

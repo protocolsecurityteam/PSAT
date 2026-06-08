@@ -17,6 +17,7 @@ from typing import Callable
 
 from services.crawlers.defillama.core_assets import build_address_to_chain_map, load_core_assets
 from services.crawlers.defillama.extract import extract_addresses_from_file, extract_protocol
+from utils.rpc import require_chain_id_for_evidence_label
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,20 @@ def clone_or_update_repo(repo_path: Path, progress: ProgressCallback | None = No
     if (repo_path / ".git").exists():
         logger.info("Updating existing repo at %s", repo_path)
         _emit_progress(progress, "Refreshing DefiLlama adapters repo")
-        subprocess.run(
-            ["git", "-C", str(repo_path), "pull", "--ff-only"],
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["git", "-C", str(repo_path), "pull", "--ff-only"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "DefiLlama adapter repo update failed at %s: %s",
+                repo_path,
+                (exc.stderr or exc.stdout or str(exc)).strip(),
+            )
+            raise RuntimeError(f"DefiLlama adapter repo update failed at {repo_path}") from exc
     else:
         logger.info("Cloning DefiLlama-Adapters (shallow)...")
         _emit_progress(progress, "Cloning DefiLlama adapters repo")
@@ -100,13 +111,13 @@ def scan_protocol(
     no_clone: bool = False,
     progress: ProgressCallback | None = None,
 ) -> dict:
-    """Scan a single protocol's adapters and return discovered addresses with chain context.
+    """Scan a single protocol's adapters and return discovered addresses with chain-id context.
 
     Returns:
         {
             "protocol": "aave",
             "addresses": ["0x...", ...],
-            "address_details": [{"address": "0x...", "chain": "ethereum", "source": "..."}],
+            "address_details": [{"address": "0x...", "chain_id": 1, "raw_chain_label": "ethereum", "source": "..."}],
             "scan_time": 1.2,
         }
     """
@@ -127,14 +138,9 @@ def scan_protocol(
     protocol_dirs = _discover_protocols(projects_dir)
     matching = _find_matching_protocol(protocol_name, protocol_dirs)
     if not matching:
-        logger.warning("Protocol '%s' not found in DefiLlama-Adapters", protocol_name)
+        logger.error("Protocol '%s' not found in DefiLlama-Adapters", protocol_name)
         _emit_progress(progress, f"No adapter match found for {protocol_name}")
-        return {
-            "protocol": protocol_name,
-            "addresses": [],
-            "address_details": [],
-            "scan_time": 0,
-        }
+        raise RuntimeError(f"Protocol {protocol_name!r} not found in DefiLlama-Adapters")
 
     start = time.time()
     proto_path = matching[0]
@@ -146,7 +152,9 @@ def scan_protocol(
         result = {
             "protocol": proto_path.stem,
             "files_scanned": 1,
-            "addresses": [{"address": a, "chain": None, "source": proto_path.name} for a in addrs],
+            "addresses": [
+                {"address": a, "chain_id": None, "raw_chain_label": None, "source": proto_path.name} for a in addrs
+            ],
         }
     else:
         _emit_progress(progress, f"Scanning {proto_path.name} adapter files")
@@ -154,8 +162,13 @@ def scan_protocol(
 
     # Enrich chain info from core assets
     for entry in result["addresses"]:
-        if not entry["chain"] and entry["address"] in addr_to_chain:
-            entry["chain"] = addr_to_chain[entry["address"]]
+        if entry.get("chain_id") is None and entry["address"] in addr_to_chain:
+            raw_chain_label = addr_to_chain[entry["address"]]
+            entry["raw_chain_label"] = raw_chain_label
+            entry["chain_id"] = require_chain_id_for_evidence_label(
+                raw_chain_label,
+                context=f"DefiLlama core assets {entry['address']}",
+            )
 
     elapsed = time.time() - start
     unique_addrs = sorted({e["address"] for e in result["addresses"]})
@@ -201,14 +214,21 @@ def scan_all_protocols(
             result = {
                 "protocol": proto_path.stem,
                 "files_scanned": 1,
-                "addresses": [{"address": a, "chain": None, "source": proto_path.name} for a in addrs],
+                "addresses": [
+                    {"address": a, "chain_id": None, "raw_chain_label": None, "source": proto_path.name} for a in addrs
+                ],
             }
         else:
             result = extract_protocol(proto_path)
 
         for entry in result["addresses"]:
-            if not entry["chain"] and entry["address"] in addr_to_chain:
-                entry["chain"] = addr_to_chain[entry["address"]]
+            if entry.get("chain_id") is None and entry["address"] in addr_to_chain:
+                raw_chain_label = addr_to_chain[entry["address"]]
+                entry["raw_chain_label"] = raw_chain_label
+                entry["chain_id"] = require_chain_id_for_evidence_label(
+                    raw_chain_label,
+                    context=f"DefiLlama core assets {entry['address']}",
+                )
             all_unique.add(entry["address"])
 
         if result["addresses"]:
@@ -219,17 +239,17 @@ def scan_all_protocols(
 
     elapsed = time.time() - start
 
-    chain_counts: dict[str, int] = {}
+    chain_id_counts: dict[str, int] = {}
     for proto in all_protocols:
         for entry in proto["addresses"]:
-            chain = entry.get("chain") or "unknown"
-            chain_counts[chain] = chain_counts.get(chain, 0) + 1
+            key = str(entry.get("chain_id") or "unknown")
+            chain_id_counts[key] = chain_id_counts.get(key, 0) + 1
 
     return {
         "scan_time": elapsed,
         "protocols_scanned": len(protocol_dirs),
         "protocols_with_addresses": len(all_protocols),
         "unique_addresses": len(all_unique),
-        "chain_summary": chain_counts,
+        "chain_id_summary": chain_id_counts,
         "protocols": all_protocols,
     }

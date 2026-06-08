@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import distinct, func, select, text
 
 from db.models import Job, JobStatus
+from utils.rpc import supported_chain_ids
 
 from . import deps
 from .spa import _site_index_response
@@ -80,10 +81,12 @@ def version() -> dict[str, str]:
 
 
 @router.get("/api/config")
-def config() -> dict[str, str]:
-    from utils.secrets import sanitize_url
-
-    return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
+def config() -> dict[str, Any]:
+    return {
+        "rpc_provider": "erpc",
+        "erpc_configured": bool(os.getenv("ERPC_BASE_URL")),
+        "supported_chain_ids": sorted(supported_chain_ids()),
+    }
 
 
 @router.get("/api/stats")
@@ -91,7 +94,13 @@ def pipeline_stats() -> dict[str, Any]:
     """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:
         unique_addresses = (
-            session.execute(select(func.count(distinct(Job.address))).where(Job.address.isnot(None))).scalar() or 0
+            session.execute(
+                select(func.count(distinct(func.concat(Job.chain_id, ":", func.lower(Job.address))))).where(
+                    Job.address.isnot(None),
+                    Job.chain_id.isnot(None),
+                )
+            ).scalar()
+            or 0
         )
         total_jobs = session.execute(select(func.count(Job.id))).scalar() or 0
         completed_jobs = (

@@ -2,7 +2,7 @@
 
 Combines two data sources:
 1. DefiLlama protocol TVL (one HTTP call per protocol, gives chain breakdown)
-2. On-chain per-contract balances via Etherscan (existing utils)
+2. On-chain per-contract native balances via eRPC
 
 Stores historical snapshots in the ``tvl_snapshots`` table and refreshes
 the ``contract_balances`` table with the latest values.
@@ -119,22 +119,13 @@ def refresh_contract_balances(
     Updates ``contract_balances`` rows (latest state) and returns a
     per-contract breakdown dict for the snapshot.
     """
-    from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances
-
+    from utils.onchain import get_eth_balance, get_eth_price, get_token_balances
+    from utils.rpc import require_supported_chain_id
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
         return {}
 
-    # Fetch ETH price once for all contracts
-    eth_price: float | None = None
-    try:
-        eth_price = get_eth_price()
-    except Exception as exc:
-        logger.warning(
-            "ETH price fetch failed: %s — ETH balances will not include USD values for %d contract(s)",
-            exc,
-            len(contracts),
-        )
+    eth_price_by_chain: dict[int, float | None] = {}
 
     breakdown: dict[str, dict] = {}
 
@@ -142,18 +133,33 @@ def refresh_contract_balances(
         address = contract.address
         contract_total = 0.0
         tokens: list[dict] = []
+        try:
+            chain_id = require_supported_chain_id(
+                chain_id=contract.chain_id,
+                context=f"TVL balance fetch for {address}",
+            )
+        except RuntimeError:
+            logger.error("TVL balance fetch requires chain_id for contract %s address=%s", contract.id, address)
+            raise
+        if chain_id not in eth_price_by_chain:
+            try:
+                eth_price_by_chain[chain_id] = get_eth_price(chain_id=chain_id)
+            except Exception as exc:
+                logger.error("ETH price fetch failed for chain_id=%s: %s", chain_id, exc)
+                raise
+        eth_price = eth_price_by_chain[chain_id]
 
         try:
-            eth_wei = get_eth_balance(address)
+            eth_wei = get_eth_balance(address, chain_id=chain_id)
         except Exception as exc:
-            logger.warning("ETH balance failed for %s: %s", address, exc)
-            eth_wei = 0
+            logger.error("ETH balance failed for %s: %s", address, exc)
+            raise
 
         try:
-            token_list = get_token_balances(address)
+            token_list = get_token_balances(address, chain_id=chain_id)
         except Exception as exc:
-            logger.warning("Token balance failed for %s: %s", address, exc)
-            token_list = []
+            logger.error("Token balance failed for %s: %s", address, exc)
+            raise
 
         # Clear old balances for this contract
         session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).delete()
@@ -219,7 +225,7 @@ def refresh_contract_balances(
 def _read_existing_balances(session: Session, protocol_id: int) -> dict[str, dict]:
     """Build a contract breakdown from existing ``contract_balances`` rows.
 
-    Used by the pipeline snapshot to avoid re-fetching from Etherscan —
+    Used by the pipeline snapshot to avoid re-fetching on-chain balances —
     the resolution stage already wrote these rows minutes earlier.
     """
     contracts = _get_protocol_addresses(session, protocol_id)
@@ -254,7 +260,7 @@ def take_tvl_snapshot(
     """Take a combined TVL snapshot for a protocol.
 
     1. Fetches DefiLlama TVL (non-fatal if unavailable).
-    2. Refreshes on-chain balances via Etherscan, or reads existing
+    2. Refreshes on-chain balances via eRPC-backed helpers, or reads existing
        ``contract_balances`` rows when *refresh_balances* is False
        (used by the pipeline where the resolution stage already
        fetched them).
@@ -345,12 +351,13 @@ def refresh_all_protocols(session: Session) -> int:
             if snapshot:
                 count += 1
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "TVL snapshot failed for protocol %s: %s",
                 protocol.name,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+            raise RuntimeError(f"TVL snapshot failed for protocol {protocol.id}") from exc
     return count
 
 
@@ -369,5 +376,6 @@ def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
                 if count:
                     logger.info("TVL refresh complete: %d protocol(s) snapshotted", count)
         except Exception as exc:
-            logger.warning("TVL refresh cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            logger.error("TVL refresh cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            raise RuntimeError("TVL refresh cycle failed") from exc
         time.sleep(interval)

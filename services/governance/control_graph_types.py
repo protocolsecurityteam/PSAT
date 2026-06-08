@@ -11,8 +11,8 @@ in two places, at two stages:
   per-function authority — e.g. a multisig that calls ``EtherFiTimelock.cancel``
   but appears nowhere in the storage-slot graph — is left ``unknown`` with no
   intrinsic config at all.
-* The **policy stage** writes ``function_principals.resolved_type`` with a
-  *live* ``classify_resolved_address`` fallback for cache misses, so the same
+* The **policy stage** writes ``function_principals.resolved_type`` with
+  ``classify_resolved_address`` for policy principals, so the same
   address comes out ``safe`` / ``timelock`` / ``proxy_admin`` — and that
   classifier returns the intrinsic config (``owners`` / ``threshold`` / delay)
   in the same call, stored on ``function_principals.details``.

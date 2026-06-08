@@ -26,8 +26,8 @@ Matching signals are layered, cheapest first:
     clearly outside.
   - ``'reviewed_commit'`` — source-equivalence proof (see
     ``services/audits/source_equivalence.py``). The audit PDF references
-    a commit whose source file is byte-identical to Etherscan's verified
-    source for the matched impl. Overrides temporal confidence with
+    a commit whose source file is byte-identical to the persisted source
+    for the matched impl. Overrides temporal confidence with
     high — this is definitive evidence the audit reviewed the deployed
     code. Opt-in via ``verify_source_equivalence=True`` because it
     costs ~2 HTTP requests per (scope-contract × reviewed-commit) pair.
@@ -43,10 +43,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final
+from typing import Final
 
-from sqlalchemy import case, func, or_, select
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -56,6 +56,7 @@ from db.models import (
     UpgradeEvent,
 )
 from services.audits.types import CoverageMatch, ImplWindow, _EquivalenceInputs
+from utils.rpc import default_rpc_url, require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -332,70 +333,46 @@ def _normalize_name(name: str | None) -> str:
     return (name or "").strip().lower()
 
 
-def _normalize_chain(chain: str | None) -> str:
-    normalized = (chain or "").strip().lower()
-    return normalized or "ethereum"
+def _scope_entry_chain_id(entry: dict) -> int | None:
+    if entry.get("chain_id") is not None:
+        return require_supported_chain_id(
+            chain_id=entry.get("chain_id"),
+            context=f"audit scope entry {entry.get('name') or entry.get('address')}",
+        )
+    if entry.get("raw_chain_label") or entry.get("chain"):
+        raw_chain_label = entry.get("raw_chain_label") or entry.get("chain")
+        logger.error("Audit scope entry uses legacy chain label instead of chain_id: %r", raw_chain_label)
+        raise RuntimeError(f"Audit scope entry requires chain_id, got legacy chain label {raw_chain_label!r}")
+    if not entry.get("chain_id"):
+        return None
 
 
-_AddressRowCache = dict[tuple[int, str, str, bool], Contract | None]
+_AddressRowCache = dict[tuple[int, str, int], Contract | None]
 
 
-def _lookup_contract_by_address_chain(
+def _lookup_contract_by_address_chain_id(
     session: Session,
     protocol_id: int,
     address: str,
-    chain_key: str,
+    chain_id: int,
     row_cache: _AddressRowCache,
-    *,
-    allow_global_fallback: bool = False,
 ) -> Contract | None:
-    """Return the best Contract row for ``(protocol, address, chain)``.
-
-    Historical data may contain legacy ``chain=NULL`` rows for Ethereum.
-    Treat those as Ethereum-compatible, but prefer an explicit
-    ``chain='ethereum'`` row when both exist. Explicit audit scope
-    addresses may fall back to the global row because ``contracts`` is
-    unique by deployed ``(address, chain)``, not by protocol.
-    """
-    cache_key = (protocol_id, address, chain_key, allow_global_fallback)
+    """Return the best Contract row for ``(protocol, address, chain_id)``."""
+    cache_key = (protocol_id, address, chain_id)
     if cache_key not in row_cache:
-        exact_chain = func.lower(Contract.chain) == chain_key
-        if chain_key == "ethereum":
-            chain_filter = or_(exact_chain, Contract.chain.is_(None))
-        else:
-            chain_filter = exact_chain
         row = (
             session.execute(
                 select(Contract)
                 .where(
                     Contract.protocol_id == protocol_id,
                     func.lower(Contract.address) == address,
-                    chain_filter,
+                    Contract.chain_id == chain_id,
                 )
-                .order_by(
-                    case((exact_chain, 0), else_=1).asc(),
-                    Contract.id.asc(),
-                )
+                .order_by(Contract.id.asc())
             )
             .scalars()
             .first()
         )
-        if row is None and allow_global_fallback:
-            row = (
-                session.execute(
-                    select(Contract)
-                    .where(
-                        func.lower(Contract.address) == address,
-                        chain_filter,
-                    )
-                    .order_by(
-                        case((exact_chain, 0), else_=1).asc(),
-                        Contract.id.asc(),
-                    )
-                )
-                .scalars()
-                .first()
-            )
         row_cache[cache_key] = row
     return row_cache[cache_key]
 
@@ -408,7 +385,6 @@ def _resolve_impl_for_address(
     audit_ts: datetime | None,
     row_cache: _AddressRowCache,
     proxy_events_cache: dict[int, list[UpgradeEvent]],
-    allow_global_fallback: bool = False,
 ) -> Contract | None:
     """Return the impl Contract row that should carry a coverage insert.
 
@@ -418,7 +394,9 @@ def _resolve_impl_for_address(
     but the audit can't be placed inside a specific impl window, return
     ``None`` rather than rebinding the audit to today's impl.
     """
-    chain_key = _normalize_chain(row.chain)
+    chain_id = row.chain_id
+    if chain_id is None:
+        return None
     if not row.is_proxy:
         return row
     proxy_events = proxy_events_cache.get(row.id)
@@ -452,13 +430,12 @@ def _resolve_impl_for_address(
                 break
     if not impl_addr:
         return None
-    target = _lookup_contract_by_address_chain(
+    target = _lookup_contract_by_address_chain_id(
         session,
         protocol_id,
         impl_addr,
-        chain_key,
+        chain_id,
         row_cache,
-        allow_global_fallback=allow_global_fallback,
     )
     if target is None or target.is_proxy:
         return None
@@ -478,14 +455,15 @@ def _resolve_scope_entry_target(
     addr = (entry.get("address") or "").lower()
     if not addr:
         return None
-    chain_key = _normalize_chain(entry.get("chain"))
-    row = _lookup_contract_by_address_chain(
+    chain_id = _scope_entry_chain_id(entry)
+    if chain_id is None:
+        return None
+    row = _lookup_contract_by_address_chain_id(
         session,
         protocol_id,
         addr,
-        chain_key,
+        chain_id,
         row_cache,
-        allow_global_fallback=True,
     )
     if row is None:
         return None
@@ -496,7 +474,6 @@ def _resolve_scope_entry_target(
         audit_ts=audit_ts,
         row_cache=row_cache,
         proxy_events_cache=proxy_events_cache,
-        allow_global_fallback=True,
     )
 
 
@@ -560,7 +537,7 @@ def match_contracts_for_audit(session: Session, audit_id: int) -> list[CoverageM
     Two paths:
       1. **Address-anchored** (Phase F): when the audit has
          ``scope_entries`` with explicit addresses, each entry maps to a
-         single ``Contract`` row at that ``(address, chain)`` in the
+         single ``Contract`` row at that ``(address, chain_id)`` in the
          protocol — unambiguous. Emits ``match_type='reviewed_address'``.
          Handles proxies by resolving to the impl active at the audit's
          timestamp before the final insert (the
@@ -721,7 +698,7 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
     if contract.is_proxy:
         return []
     name_key = _normalize_name(contract.contract_name)
-    contract_chain = _normalize_chain(contract.chain)
+    contract_chain_id = contract.chain_id
 
     audits = (
         session.execute(
@@ -755,7 +732,7 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
             addr = (entry.get("address") or "").lower()
             if not addr:
                 continue
-            if _normalize_chain(entry.get("chain")) != contract_chain:
+            if _scope_entry_chain_id(entry) != contract_chain_id:
                 continue
             if addr == contract_addr_lower:
                 target = contract
@@ -845,43 +822,40 @@ def _match_to_row_kwargs(match: CoverageMatch) -> dict:
 
 # --- Bytecode anchor ----------------------------------------------------
 
-# Env-keyed so prod + tests can point at different RPC providers. Default
-# matches policy_worker / protocol_monitor conventions.
-_DEFAULT_RPC_URL: Final[str] = "https://ethereum-rpc.publicnode.com"
-
-
-def _rpc_url() -> str:
-    import os
-
-    return os.environ.get("ETH_RPC") or _DEFAULT_RPC_URL
-
-
-def _fetch_bytecode_keccak(address: str) -> str | None:
+def _fetch_bytecode_keccak(address: str, *, chain_id: int) -> str:
     """Runtime bytecode keccak256 at ``address`` via ``eth_getCode``.
 
-    Returns ``"0x" + 64hex`` on success, ``None`` when the RPC call fails
-    or the address has no code (EOA / selfdestructed). ``None`` propagates
-    to ``AuditContractCoverage.bytecode_keccak_at_match`` meaning "drift
-    unknown" — safer than fabricating a zero-bytecode hash.
+    Returns ``"0x" + 64hex`` on success. RPC failures, malformed RPC data,
+    missing ``chain_id``, missing eRPC configuration, and empty bytecode are
+    hard failures; coverage anchors point at Contract rows that must represent
+    verified deployments on the explicit chain.
     """
     from eth_utils.crypto import keccak
 
     from utils.rpc import get_code
 
     if not address:
-        return None
+        logger.error("bytecode anchor requires address")
+        raise RuntimeError("bytecode anchor requires address")
     try:
-        code_hex = get_code(_rpc_url(), address)
+        chain_id = require_supported_chain_id(chain_id=chain_id, context=f"bytecode anchor for {address}")
+    except RuntimeError as exc:
+        logger.error("bytecode anchor: %s", exc)
+        raise
+    rpc_url = default_rpc_url(chain_id=chain_id)
+    try:
+        code_hex = get_code(rpc_url, address, chain_id=chain_id)
     except Exception as exc:
-        logger.warning("bytecode anchor: eth_getCode failed for %s: %s", address, exc)
-        return None
+        logger.error("bytecode anchor: eth_getCode failed for %s: %s", address, exc)
+        raise RuntimeError(f"bytecode anchor eth_getCode failed for {address}") from exc
     if not code_hex or code_hex == "0x":
-        return None
+        logger.error("bytecode anchor found no deployed code for address=%s chain_id=%s", address, chain_id)
+        raise RuntimeError(f"bytecode anchor found no deployed code for {address} chain_id={chain_id}")
     try:
         raw = bytes.fromhex(code_hex[2:]) if code_hex.startswith("0x") else bytes.fromhex(code_hex)
-    except ValueError:
-        logger.warning("bytecode anchor: malformed hex from RPC for %s: %r", address, code_hex[:40])
-        return None
+    except ValueError as exc:
+        logger.error("bytecode anchor: malformed hex from RPC for %s: %r", address, code_hex[:40])
+        raise RuntimeError(f"bytecode anchor received malformed eth_getCode result for {address}") from exc
     return "0x" + keccak(raw).hex()
 
 
@@ -897,21 +871,35 @@ def _apply_bytecode_anchor(
     """
     if not matches:
         return matches
-    addr_by_cid: dict[int, str] = {
-        cid: addr
-        for cid, addr in session.execute(
-            select(Contract.id, Contract.address).where(Contract.id.in_({m.contract_id for m in matches}))
-        ).all()
-    }
+    contract_rows = session.execute(
+        select(Contract.id, Contract.address, Contract.chain_id).where(
+            Contract.id.in_({m.contract_id for m in matches})
+        )
+    ).all()
+    contract_by_cid: dict[int, tuple[str, int]] = {}
+    for cid, addr, chain_id in contract_rows:
+        contract_by_cid[cid] = (
+            addr,
+            require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"coverage bytecode anchor for contract {cid}",
+            ),
+        )
 
-    keccak_by_cid: dict[int, str | None] = {}
-    for cid in addr_by_cid:
-        keccak_by_cid[cid] = _fetch_bytecode_keccak(addr_by_cid[cid])
+    missing_contract_ids = {m.contract_id for m in matches} - set(contract_by_cid)
+    if missing_contract_ids:
+        ordered = sorted(missing_contract_ids)
+        logger.error("bytecode anchor missing Contract rows for contract_ids=%s", ordered)
+        raise RuntimeError(f"bytecode anchor missing Contract rows for contract_ids={ordered}")
+
+    keccak_by_cid: dict[int, str] = {}
+    for cid, (addr, chain_id) in contract_by_cid.items():
+        keccak_by_cid[cid] = _fetch_bytecode_keccak(addr, chain_id=chain_id)
 
     now = datetime.now(timezone.utc)
     stamped: list[CoverageMatch] = []
     for m in matches:
-        kk = keccak_by_cid.get(m.contract_id)
+        kk = keccak_by_cid[m.contract_id]
         stamped.append(
             CoverageMatch(
                 audit_report_id=m.audit_report_id,
@@ -923,9 +911,7 @@ def _apply_bytecode_anchor(
                 covered_from_block=m.covered_from_block,
                 covered_to_block=m.covered_to_block,
                 bytecode_keccak_at_match=kk,
-                # Only stamp verified_at when we actually got a keccak —
-                # a NULL keccak with a fresh timestamp is a misleading signal.
-                verified_at=now if kk is not None else m.verified_at,
+                verified_at=now,
                 # Preserve equivalence stamps from _apply_equivalence_http.
                 equivalence_status=m.equivalence_status,
                 equivalence_reason=m.equivalence_reason,
@@ -970,6 +956,7 @@ def _preload_equivalence_inputs(
             audit_report_id=m.audit_report_id,
             contract_id=m.contract_id,
             contract_address=contract.address,
+            contract_chain_id=contract.chain_id,
             reviewed_commits=tuple(audit.reviewed_commits or ()),
             scope_contracts=tuple(audit.scope_contracts or ()),
             source_repo=audit.source_repo,
@@ -1063,29 +1050,18 @@ def _apply_equivalence_http(
     statuses leave the heuristic temporal match intact — a failed
     verification annotates but doesn't delete.
 
-    Per-match work fans out via ``parallel_map(max_workers=4)`` — the
-    GitHub authenticated rate limit is 5000/hr and the Etherscan cache
-    collapses repeats behind a lock, so 4 concurrent workers stay well
-    inside both budgets.
+    Per-match work fans out via ``parallel_map(max_workers=4)``. This phase
+    may fetch audit-side GitHub source, but contract source must already be
+    persisted in DB source files.
     """
     import os
-    import threading
 
     from services.audits.source_equivalence import (
-        EtherscanFetch,
-        VerifiedSource,
-        fetch_etherscan_source_files,
         verify_audit_covers_impl,
     )
     from utils.concurrency import parallel_map
 
     gh_token = os.environ.get("GITHUB_TOKEN") or None
-    # Per-address cache so two audit rows pointing at the same impl only
-    # pay one Etherscan round-trip. Stores EtherscanFetch (the new envelope
-    # that carries status + detail, not just source). Lock guards the
-    # check-then-set pattern across worker threads.
-    etherscan_cache: dict[str, Any] = {}
-    cache_lock = threading.Lock()
     now = datetime.now(timezone.utc)
 
     def _stamp(
@@ -1116,36 +1092,6 @@ def _apply_equivalence_http(
             matched_commit_sha=matched_commit_sha if proven else None,
         )
 
-    def _fetch_etherscan(addr_key: str, contract_address: str, contract_id: int) -> EtherscanFetch:
-        with cache_lock:
-            cached = etherscan_cache.get(addr_key)
-        if cached is not None:
-            return cached
-        try:
-            raw_fetch = fetch_etherscan_source_files(contract_address)
-            if isinstance(raw_fetch, EtherscanFetch):
-                fetch = raw_fetch
-            elif isinstance(raw_fetch, VerifiedSource):
-                # Backward compatibility for older tests/callers
-                # that still stub the pre-envelope return type.
-                fetch = EtherscanFetch(source=raw_fetch, status="ok", detail="")
-            else:
-                raise TypeError(
-                    f"fetch_etherscan_source_files returned {type(raw_fetch).__name__}, expected EtherscanFetch"
-                )
-        except Exception as exc:
-            logger.exception(
-                "source-equivalence Etherscan fetch crashed for contract %s",
-                contract_id,
-            )
-            # Synthesize a fetch_failed envelope so the branches below
-            # treat this uniformly with API-returned errors.
-            fetch = EtherscanFetch(source=None, status="fetch_failed", detail=f"crash: {exc}")
-        with cache_lock:
-            # First writer wins — avoid clobbering another thread's
-            # successful fetch with a later error.
-            return etherscan_cache.setdefault(addr_key, fetch)
-
     def _process_match(m: CoverageMatch) -> CoverageMatch:
         key = (m.audit_report_id, m.contract_id)
         data = inputs.get(key)
@@ -1156,21 +1102,13 @@ def _apply_equivalence_http(
         if not data.source_repo and not data.referenced_repos:
             return _stamp(m, status="no_source_repo", reason="audit has no source_repo or referenced_repos")
 
-        # Resolve impl source: DB preload first, Etherscan (cached) next.
         impl_source = data.db_impl_source
-        fetch_status = "ok"
-        fetch_detail = ""
-        if impl_source is None and data.contract_address:
-            fetch = _fetch_etherscan(data.contract_address.lower(), data.contract_address, m.contract_id)
-            impl_source = fetch.source
-            fetch_status = fetch.status
-            fetch_detail = fetch.detail
-
         if impl_source is None:
-            # Map Etherscan envelope into the row's equivalence status.
-            if fetch_status == "unverified":
-                return _stamp(m, status="etherscan_unverified", reason=fetch_detail or "no verified source")
-            return _stamp(m, status="etherscan_fetch_failed", reason=fetch_detail or "etherscan fetch failed")
+            return _stamp(
+                m,
+                status="source_missing",
+                reason=f"no persisted source files for contract {m.contract_id}",
+            )
 
         # Verify scoped to THIS row's matched_name — critical: the reason
         # must describe the right contract. When the match came from an
@@ -1422,10 +1360,10 @@ def verify_one_coverage_row(
 ) -> str | None:
     """Run source-equivalence on one ``audit_contract_coverage`` row.
 
-    Resolves audit + contract from the row, fetches the impl source
-    (DB-first, Etherscan fallback), and runs ``verify_audit_covers_impl``
-    against the row's ``matched_name``. The verdict is persisted onto
-    the row in the caller's session — caller commits.
+    Resolves audit + contract from the row, reads the persisted impl source,
+    and runs ``verify_audit_covers_impl`` against the row's ``matched_name``.
+    The verdict is persisted onto the row in the caller's session — caller
+    commits.
 
     Returns the resulting ``equivalence_status`` or ``None`` if the row
     vanished. Re-running on a row that's already been verified is safe
@@ -1433,17 +1371,11 @@ def verify_one_coverage_row(
     ``equivalence_checked_at``); the worker only claims rows where
     ``equivalence_status='pending'`` so this is rarely exercised.
 
-    Network errors are caught and mapped to transient statuses
-    (``etherscan_fetch_failed`` / ``github_fetch_failed``) so the
-    caller's transaction commits cleanly. The verify worker re-claims
-    transients on its next pass after operator intervention promotes
-    them back to ``pending``.
+    Network errors from audit-side GitHub fetches are caught and mapped to
+    ``github_fetch_failed`` so the caller's transaction commits cleanly.
     """
     from services.audits.source_equivalence import (
-        EtherscanFetch,
-        VerifiedSource,
         fetch_db_source_files,
-        fetch_etherscan_source_files,
         verify_audit_covers_impl,
     )
 
@@ -1471,47 +1403,15 @@ def verify_one_coverage_row(
         )
         return row.equivalence_status
 
-    # Resolve impl source: DB rows first (free), Etherscan single-call fallback.
-    # The deferred path makes one Etherscan call per row max — vs. the
-    # inline path's per-batch fan-out — so the global Etherscan rate
-    # limit is the only throttle that matters here.
-    impl_source: VerifiedSource | None = fetch_db_source_files(session, contract.id)
-    fetch_status = "ok"
-    fetch_detail = ""
-    if impl_source is None and contract.address:
-        try:
-            fetch = fetch_etherscan_source_files(contract.address)
-        except Exception as exc:
-            logger.exception(
-                "verify_one_coverage_row: etherscan fetch crashed for contract %s",
-                contract.id,
-            )
-            _stamp_coverage_row(session, row, status="etherscan_fetch_failed", reason=f"crash: {exc}")
-            return row.equivalence_status
-        if isinstance(fetch, EtherscanFetch):
-            impl_source = fetch.source
-            fetch_status = fetch.status
-            fetch_detail = fetch.detail
-        elif isinstance(fetch, VerifiedSource):
-            # Backwards-compat: legacy stubs may still return the unwrapped
-            # type. Treat as a happy fetch with empty detail.
-            impl_source = fetch
+    impl_source = fetch_db_source_files(session, contract.id)
 
     if impl_source is None:
-        if fetch_status == "unverified":
-            _stamp_coverage_row(
-                session,
-                row,
-                status="etherscan_unverified",
-                reason=fetch_detail or "no verified source",
-            )
-        else:
-            _stamp_coverage_row(
-                session,
-                row,
-                status="etherscan_fetch_failed",
-                reason=fetch_detail or "etherscan fetch failed",
-            )
+        _stamp_coverage_row(
+            session,
+            row,
+            status="source_missing",
+            reason=f"no persisted source files for contract {contract.id}",
+        )
         return row.equivalence_status
 
     pinned_commit = _resolve_pinned_commit(session, audit, row)
@@ -1573,8 +1473,8 @@ def upsert_coverage_for_audit(
     Two paths:
 
     - ``verify_source_equivalence=True`` (legacy): inline two-phase —
-      compute matches, pre-load inputs, commit, run GitHub + Etherscan
-      HTTP with the tx released, then open a fresh tx for the
+      compute matches, pre-load inputs, commit, run GitHub source checks
+      with the tx released, then open a fresh tx for the
       delete-then-insert. Used by the admin ``refresh_coverage`` endpoint
       where the caller is willing to wait minutes for cryptographic
       proof to land synchronously.
@@ -1585,9 +1485,8 @@ def upsert_coverage_for_audit(
       drains them at a controlled rate; rows whose audit lacks inputs
       (``no_reviewed_commit`` / ``no_source_repo``) get a terminal
       status immediately. This keeps the synchronous coverage write
-      under a second instead of holding the worker thread through tens
-      of Etherscan calls — the Etherscan rate-limit storm that used to
-      cascade across every worker on the box (#82).
+      under a second instead of holding the worker thread through audit-side
+      GitHub source fetches.
 
     Returns inserted row count; caller commits.
     """
@@ -1625,9 +1524,8 @@ def upsert_coverage_for_audit(
         matches = _stamp_pending_when_verifiable(matches, {audit_id: audit})
 
     # Bytecode anchor — one eth_getCode per distinct impl. Runs outside
-    # the tx; keccak stays NULL on RPC failure (drift-unknown, not
-    # drift-detected). Cheap enough (one RPC per impl, not Etherscan)
-    # to keep inline on both paths.
+    # the tx and fails hard on RPC errors so drift state never degrades to
+    # "unknown" because eRPC was unavailable.
     matches = _apply_bytecode_anchor(session, matches)
 
     # Phase B: fresh transaction for the delete-then-insert.
@@ -1645,9 +1543,8 @@ def upsert_coverage_for_contract(
     Called after a live upgrade changes the contract's impl windows.
     ``verify_source_equivalence`` selects between the inline-verify and
     deferred paths described on :func:`upsert_coverage_for_audit`. The
-    coverage worker calls in with ``verify=False`` so the tens of
-    Etherscan calls that used to ride on every coverage job now land
-    on the dedicated ``CoverageVerifyWorker`` instead.
+    coverage worker calls in with ``verify=False`` so GitHub source checks
+    land on the dedicated ``CoverageVerifyWorker`` instead.
     """
     matches = match_audits_for_contract(session, contract_id)
     if matches:

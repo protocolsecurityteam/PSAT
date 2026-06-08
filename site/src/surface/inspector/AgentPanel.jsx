@@ -157,8 +157,8 @@ export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusA
         {
           company: companyName,
           message: trimmed,
-          selected_address: selectedMachine?.address || null,
-          selected_chain: selectedMachine?.chain || null,
+          selected_address: selectedMachine?.address ?? null,
+          selected_chain_id: selectedMachine?.chain_id ?? null,
           history: llmHistory,
         },
         (evt) => {

@@ -237,6 +237,11 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
     setBulkAnalyzing(true);
     try {
       for (const r of bulkPendingRows) {
+        const chainId = Number.parseInt(r.chain_id, 10);
+        if (!Number.isInteger(chainId) || chainId <= 0) {
+          console.error("Queue skipped for pending row without chain_id", r.address, r);
+          continue;
+        }
         try {
           // eslint-disable-next-line no-await-in-loop
           await api("/api/analyze", {
@@ -244,6 +249,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               address: r.address,
+              chain_id: chainId,
               company: companyName,
               name: r.name || null,
             }),
@@ -284,14 +290,18 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
 
   const onDeleteAddress = async (row) => {
     const label = prettyAddressName(row) || row.address;
+    if (!row.chain_id) {
+      window.alert("Delete requires chain_id for this address.");
+      return;
+    }
     const ok = window.confirm(
-      `Delete "${label}" (${row.address}) from ${companyName}?\n\nThis removes the contract row and its audit coverage links.`,
+      `Delete "${label}" (${row.address} on chain_id ${row.chain_id}) from ${companyName}?\n\nThis removes the contract row and its audit coverage links.`,
     );
     if (!ok) return;
     setBusyAddr(row.address);
     try {
       await api(
-        `/api/company/${encodeURIComponent(companyName)}/addresses/${row.address}`,
+        `/api/company/${encodeURIComponent(companyName)}/addresses/${row.address}?chain_id=${encodeURIComponent(row.chain_id)}`,
         { method: "DELETE" },
       );
       refresh();
@@ -480,9 +490,13 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                 {rows.map((r) => {
                   const rank = r.rank_score == null ? null : r.rank_score.toFixed(2);
                   const isMissing = r._compareStatus === "missing";
+                  const chainId = Number.parseInt(r.chain_id, 10);
+                  const rowKey = Number.isInteger(chainId) && chainId > 0
+                    ? `${chainId}:${r.address}`
+                    : `missing-chain:${r.address}`;
                   return (
                     <tr
-                      key={`${r.chain || "?"}-${r.address}`}
+                      key={rowKey}
                       className={[
                         onSelectContract && !isMissing ? "ps-addresses-modal-row--clickable" : "",
                         isMissing ? "ps-addresses-modal-row--missing" : "",

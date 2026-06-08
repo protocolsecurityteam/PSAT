@@ -1,8 +1,8 @@
 """Discovery package."""
 
 from .activity import enrich_with_activity
-from .audit_reports import merge_audit_reports, search_audit_reports
-from .chain_resolver import expand_entries_by_resolved_chains, resolve_address_chains
+from .audit_reports import search_audit_reports
+from .chain_resolver import expand_entries_by_resolved_chains, resolve_address_chain_ids
 from .classifier import classify_contracts
 from .dependency_graph_builder import build_dependency_visualization
 from .deployer import expand_from_deployers
@@ -15,7 +15,6 @@ from .unified_dependencies import build_unified_dependencies, enrich_dependency_
 __all__ = [
     "build_unified_dependencies",
     "classify_contracts",
-    "merge_audit_reports",
     "enrich_dependency_metadata",
     "enrich_with_activity",
     "expand_from_deployers",
@@ -29,6 +28,6 @@ __all__ = [
     "scaffold",
     "search_audit_reports",
     "search_protocol_inventory",
-    "resolve_address_chains",
+    "resolve_address_chain_ids",
     "build_dependency_visualization",
 ]

@@ -61,7 +61,7 @@ def _audit_brief(audit: Any, match: Any | None = None) -> dict[str, Any]:
         # Source-equivalence verdict — see services.audits.source_equivalence
         # for the status vocabulary. ``proven`` means cryptographically
         # verified (file SHA-256 match between audit's GitHub commit and
-        # Etherscan-verified source). Other values describe *why* the
+        # persisted contract source). Other values describe *why* the
         # check couldn't produce a proof so the UI can badge specifically.
         out["equivalence_status"] = getattr(match, "equivalence_status", None)
         out["equivalence_reason"] = getattr(match, "equivalence_reason", None)

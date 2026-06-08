@@ -101,7 +101,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://psat:psat@postgres:5432/psat
-    command: ["uv", "run", "--no-sync", "python", "-m", "workers.protocol_monitor"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "workers.protocol_monitor", "--all-supported-chains"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,7 +116,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://psat:psat@postgres:5432/psat
-    command: ["uv", "run", "--no-sync", "python", "-m", "workers.protocol_monitor", "--poll"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "workers.protocol_monitor", "--poll", "--all-supported-chains"]
     depends_on:
       postgres:
         condition: service_healthy

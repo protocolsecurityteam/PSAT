@@ -87,7 +87,7 @@ def process_audit_scope(
     raw_text = _normalize_ligatures(raw_text)
     extracted_date = extract_date_from_pdf_text(raw_text)
     # Commits pulled from the full text so ``source_equivalence`` can later
-    # cross-reference reviewed code against Etherscan-verified impl source.
+    # cross-reference reviewed code against persisted impl source.
     # Referenced repos (Phase D) are fallback candidates for source-
     # equivalence when ``source_repo`` misses — common when discovery
     # recorded the auditor's publication repo instead of the protocol's.

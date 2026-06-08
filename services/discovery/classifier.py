@@ -17,7 +17,7 @@ import json
 import logging
 
 from services.discovery.static_dependencies import get_code, normalize_address, rpc_call
-from utils.rpc import rpc_batch_request_with_status
+from utils.rpc import require_configured_erpc_url, require_supported_chain_id, rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
 
@@ -96,20 +96,39 @@ _KNOWN_EVENT_PROXY_TYPES = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def get_storage_at(rpc_url: str, address: str, slot: str) -> str:
+def get_storage_at(rpc_url: str, address: str, slot: str, *, chain_id: int) -> str:
     """Read a single 32-byte storage slot."""
-    return rpc_call(rpc_url, "eth_getStorageAt", [address, slot, "latest"], retries=1)
+    return rpc_call(rpc_url, "eth_getStorageAt", [address, slot, "latest"], retries=1, chain_id=chain_id)
 
 
 def _slot_to_address(slot_value: str) -> str | None:
     """Extract a 20-byte address from a 32-byte storage value.  Returns None for zero/empty."""
+    if not isinstance(slot_value, str) or not slot_value.startswith("0x"):
+        raise ValueError(f"expected hex storage/address result, got {slot_value!r}")
     if not slot_value or slot_value in ("0x", "0x0"):
         return None
-    raw = slot_value.replace("0x", "").zfill(64)
+    raw = slot_value[2:]
+    if len(raw) > 64:
+        raise ValueError(f"expected 32-byte storage/address result, got {slot_value!r}")
+    try:
+        bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError(f"malformed hex storage/address result: {slot_value!r}") from exc
+    raw = raw.zfill(64)
     addr_hex = raw[-40:]
     if all(c == "0" for c in addr_hex):
         return None
     return normalize_address("0x" + addr_hex)
+
+
+def _normalize_trace_address(raw: object) -> str:
+    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) != 42:
+        raise ValueError(f"malformed trace address: {raw!r}")
+    try:
+        bytes.fromhex(raw[2:])
+    except ValueError as exc:
+        raise ValueError(f"malformed trace address hex: {raw!r}") from exc
+    return normalize_address(raw)
 
 
 def detect_eip1167(bytecode_hex: str) -> str | None:
@@ -154,8 +173,7 @@ def _extract_delegatecall_target_geth(node) -> str | None:
     if not isinstance(node, dict):
         return None
     if str(node.get("type", "")).upper() == "DELEGATECALL":
-        raw = node.get("to")
-        return normalize_address(raw) if isinstance(raw, str) and len(raw) >= 42 else ""
+        return _normalize_trace_address(node.get("to"))
     for child in node.get("calls", []) or []:
         target = _extract_delegatecall_target_geth(child)
         if target is not None:
@@ -171,49 +189,60 @@ def _extract_delegatecall_target_parity(result) -> str | None:
             continue
         action = item.get("action", {}) or {}
         if str(action.get("callType", "")).lower() == "delegatecall":
-            raw = action.get("to")
-            return normalize_address(raw) if isinstance(raw, str) and len(raw) >= 42 else ""
+            return _normalize_trace_address(action.get("to"))
     return None
 
 
-def _probe_delegatecall(rpc_url: str, address: str) -> str | None | bool:
-    """Send a synthetic eth_call with tracing to check if DELEGATECALL fires
-    in the fallback path.
+def _is_expected_eth_call_probe_miss(exc: RuntimeError) -> bool:
+    """True when an optional getter call failed because the contract did not support it."""
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "execution reverted",
+            "revert",
+            "invalid opcode",
+            "out of gas",
+        )
+    )
+
+
+def _probe_delegatecall(rpc_url: str, address: str, *, chain_id: int) -> str | None | bool:
+    """Send a synthetic eth_call with tracing to check if DELEGATECALL fires.
 
     Returns:
       - An address string if DELEGATECALL is triggered (the implementation).
       - ``""`` (empty string) if DELEGATECALL fired but the target couldn't be parsed.
       - ``False`` if no DELEGATECALL was triggered (not a proxy).
-      - ``None`` if tracing is unavailable (caller should fall back to static heuristic).
 
     Any truthy return means the contract is a proxy.
     """
     call_obj = {"to": address, "data": _PROBE_CALLDATA}
-
-    # Try debug_traceCall (Geth-style) with callTracer
-    for params in [
-        [call_obj, "latest", {"tracer": "callTracer", "timeout": "10s"}],
-        [call_obj, "latest", {"tracer": "callTracer"}],
-    ]:
-        try:
-            result = rpc_call(rpc_url, "debug_traceCall", params, retries=0)
-            target = _extract_delegatecall_target_geth(result)
-            return target if target is not None else False
-        except RuntimeError:
-            pass
-
-    # Try trace_call (Parity / OpenEthereum / Erigon-style)
     try:
-        result = rpc_call(rpc_url, "trace_call", [call_obj, ["trace"], "latest"], retries=0)
-        target = _extract_delegatecall_target_parity(result)
+        result = rpc_call(
+            rpc_url,
+            "debug_traceCall",
+            [call_obj, "latest", {"tracer": "callTracer", "timeout": "10s"}],
+            retries=0,
+            chain_id=chain_id,
+        )
+        target = _extract_delegatecall_target_geth(result)
         return target if target is not None else False
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        logger.error("debug_traceCall proxy probe failed for address=%s: %s", address, exc)
+        raise RuntimeError(f"debug_traceCall proxy probe failed for {address}") from exc
+    except ValueError as exc:
+        logger.error("debug_traceCall proxy probe returned malformed trace address=%s: %s", address, exc)
+        raise RuntimeError(f"debug_traceCall proxy probe returned malformed trace for {address}") from exc
 
-    return None  # tracing unavailable
 
-
-def _try_implementation_call(rpc_url: str, address: str, selector: str = IMPLEMENTATION_SELECTOR) -> str | None:
+def _try_implementation_call(
+    rpc_url: str,
+    address: str,
+    selector: str = IMPLEMENTATION_SELECTOR,
+    *,
+    chain_id: int,
+) -> str | None:
     """Call an address-returning getter on a contract.
     Returns the address on success, or None."""
     try:
@@ -222,30 +251,51 @@ def _try_implementation_call(rpc_url: str, address: str, selector: str = IMPLEME
             "eth_call",
             [{"to": address, "data": selector}, "latest"],
             retries=0,
+            chain_id=chain_id,
         )
         return _slot_to_address(result)
-    except RuntimeError:
-        return None
+    except RuntimeError as exc:
+        if _is_expected_eth_call_probe_miss(exc):
+            return None
+        logger.error(
+            "implementation getter probe failed address=%s selector=%s: %s",
+            address,
+            selector,
+            exc,
+        )
+        raise RuntimeError(f"implementation getter probe failed for {address}") from exc
+    except ValueError as exc:
+        logger.error(
+            "implementation getter returned invalid address data address=%s selector=%s: %s",
+            address,
+            selector,
+            exc,
+        )
+        raise RuntimeError(f"implementation getter returned invalid data for {address}") from exc
 
 
 def _decode_address_array(hex_data: str) -> list[str] | None:
     """Decode an ABI-encoded ``address[]`` return value."""
+    if not isinstance(hex_data, str) or not hex_data.startswith("0x"):
+        raise ValueError(f"expected 0x-prefixed ABI return data, got {hex_data!r}")
     raw = hex_data[2:] if hex_data.startswith("0x") else hex_data
     try:
         data = bytes.fromhex(raw)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError("ABI return data is non-hex") from exc
     if len(data) < 64:
-        return None
+        raise ValueError("ABI address[] return data is too short")
     offset = int.from_bytes(data[:32], "big")
     if offset + 32 > len(data):
-        return None
+        raise ValueError("ABI address[] return offset is out of bounds")
     length = int.from_bytes(data[offset : offset + 32], "big")
-    if length == 0 or length > 100:
+    if length == 0:
         return None
+    if length > 100:
+        raise ValueError(f"ABI address[] return length is too large: {length}")
     start = offset + 32
     if start + length * 32 > len(data):
-        return None
+        raise ValueError("ABI address[] return data is truncated")
     addresses = []
     for i in range(length):
         addr = _slot_to_address("0x" + data[start + i * 32 : start + (i + 1) * 32].hex())
@@ -254,7 +304,7 @@ def _decode_address_array(hex_data: str) -> list[str] | None:
     return addresses or None
 
 
-def _try_facet_addresses_call(rpc_url: str, address: str) -> list[str] | None:
+def _try_facet_addresses_call(rpc_url: str, address: str, *, chain_id: int) -> list[str] | None:
     """Call ``facetAddresses()`` (EIP-2535) on a contract.
     Returns a list of facet addresses on success, or None."""
     try:
@@ -263,10 +313,17 @@ def _try_facet_addresses_call(rpc_url: str, address: str) -> list[str] | None:
             "eth_call",
             [{"to": address, "data": FACET_ADDRESSES_SELECTOR}, "latest"],
             retries=0,
+            chain_id=chain_id,
         )
         return _decode_address_array(result)
-    except RuntimeError:
-        return None
+    except RuntimeError as exc:
+        if _is_expected_eth_call_probe_miss(exc):
+            return None
+        logger.error("facetAddresses probe failed address=%s: %s", address, exc)
+        raise RuntimeError(f"facetAddresses probe failed for {address}") from exc
+    except ValueError as exc:
+        logger.error("facetAddresses returned invalid address data address=%s: %s", address, exc)
+        raise RuntimeError(f"facetAddresses returned invalid data for {address}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -283,28 +340,40 @@ _PROXY_SLOT_BATCH = (
 )
 
 
-def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[str | None, ...]:
+def _read_proxy_slots_batched(rpc_url: str, address: str, *, chain_id: int) -> tuple[str | None, ...]:
     """Read the five proxy-detection slots in one JSON-RPC batch.
 
     Returns ``(impl, beacon, admin, uups, oz)`` decoded via :func:`_slot_to_address`.
-    On whole-batch failure each slot falls back to a single ``eth_getStorageAt`` —
-    matches the prior sequential behaviour where each call could individually
-    raise and we'd surface a None.
+    Provider or per-slot RPC failures raise. Storage-slot reads do not
+    legitimately revert for supported chains, so treating an errored slot as
+    empty would hide incomplete proxy classification.
     """
     calls = [("eth_getStorageAt", [address, slot, "latest"]) for slot in _PROXY_SLOT_BATCH]
-    try:
-        results = rpc_batch_request_with_status(rpc_url, calls)
-    except Exception:
-        results = [(None, True)] * len(_PROXY_SLOT_BATCH)
+    results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
+    if len(results) != len(_PROXY_SLOT_BATCH):
+        logger.error(
+            "Proxy slot batch returned %d result(s) for %d slot(s) address=%s",
+            len(results),
+            len(_PROXY_SLOT_BATCH),
+            address,
+        )
+        raise RuntimeError(f"proxy slot batch returned {len(results)} result(s) for {address}")
 
     decoded: list[str | None] = []
     for idx, (raw, had_error) in enumerate(results):
         if had_error or raw is None:
-            try:
-                raw = get_storage_at(rpc_url, address, _PROXY_SLOT_BATCH[idx])
-            except RuntimeError:
-                raw = None
-        decoded.append(_slot_to_address(raw) if isinstance(raw, str) else None)
+            logger.error("Proxy slot read failed address=%s slot=%s", address, _PROXY_SLOT_BATCH[idx])
+            raise RuntimeError(f"proxy slot read failed for {address} slot={_PROXY_SLOT_BATCH[idx]}")
+        try:
+            decoded.append(_slot_to_address(raw))
+        except ValueError as exc:
+            logger.error(
+                "Proxy slot read returned invalid payload address=%s slot=%s: %r",
+                address,
+                _PROXY_SLOT_BATCH[idx],
+                raw,
+            )
+            raise RuntimeError(f"proxy slot read returned invalid payload for {address}") from exc
     return tuple(decoded)
 
 
@@ -313,6 +382,8 @@ def classify_single(
     rpc_url: str,
     bytecode: str | None = None,
     code_cache: dict[str, str] | None = None,
+    *,
+    chain_id: int,
 ) -> dict:
     """Classify one contract via bytecode patterns and storage slot inspection.
 
@@ -321,11 +392,20 @@ def classify_single(
     duplicate ``eth_getCode`` RPC calls across pipeline stages.
     """
     address = normalize_address(address)
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"classify_single {address}",
+    )
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"classify_single {address}",
+        chain_id=effective_chain_id,
+    )
     if bytecode is None:
         if code_cache is not None and address in code_cache:
             bytecode = code_cache[address]
         else:
-            bytecode = get_code(rpc_url, address)
+            bytecode = get_code(rpc_url, address, chain_id=effective_chain_id)
             if code_cache is not None:
                 code_cache[address] = bytecode
 
@@ -344,7 +424,7 @@ def classify_single(
     # the first slot (rare: the contract is more often non-proxy, where we'd have read all five
     # anyway), and trades five sequential RTTs for one. Order matches the historical sequential
     # reads so downstream branch logic is unchanged.
-    slot_addrs = _read_proxy_slots_batched(rpc_url, address)
+    slot_addrs = _read_proxy_slots_batched(rpc_url, address, chain_id=effective_chain_id)
     impl, beacon, admin, uups, oz = slot_addrs
     logger.debug("%s EIP-1967 slots: impl=%s beacon=%s admin=%s", address, impl, beacon, admin)
 
@@ -354,7 +434,7 @@ def classify_single(
             info["implementation"] = impl
         else:
             # Resolve implementation through the beacon contract
-            beacon_impl = _try_implementation_call(rpc_url, beacon)
+            beacon_impl = _try_implementation_call(rpc_url, beacon, chain_id=effective_chain_id)
             logger.debug("%s beacon %s → resolved impl=%s", address, beacon, beacon_impl)
             if beacon_impl:
                 info["implementation"] = beacon_impl
@@ -382,7 +462,7 @@ def classify_single(
         return info
 
     # 5. EIP-2535 diamond proxy — facetAddresses() call
-    facets = _try_facet_addresses_call(rpc_url, address)
+    facets = _try_facet_addresses_call(rpc_url, address, chain_id=effective_chain_id)
     if facets:
         logger.debug("%s → eip2535 diamond, %d facets", address, len(facets))
         info.update(type="proxy", proxy_type="eip2535", facets=facets)
@@ -401,7 +481,7 @@ def classify_single(
         # Loads implementation from slot 0 and delegates.  Covers v1.0-1.3+
         # including minimal proxies where masterCopy()/singleton() revert.
         if GNOSIS_SLOT0_PATTERN in raw_bc:
-            slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0"))
+            slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0", chain_id=effective_chain_id))
             if slot0_impl:
                 logger.debug("%s → gnosis_safe proxy (slot0 pattern), impl=%s", address, slot0_impl)
                 info.update(type="proxy", proxy_type="gnosis_safe", implementation=slot0_impl)
@@ -409,21 +489,21 @@ def classify_single(
 
         # GnosisSafe fallback — masterCopy() getter (older implementations
         # that expose the variable but don't use the slot-0 bytecode pattern).
-        master = _try_implementation_call(rpc_url, address, MASTER_COPY_SELECTOR)
+        master = _try_implementation_call(rpc_url, address, MASTER_COPY_SELECTOR, chain_id=effective_chain_id)
         if master:
             logger.debug("%s → gnosis_safe proxy (masterCopy), impl=%s", address, master)
             info.update(type="proxy", proxy_type="gnosis_safe", implementation=master)
             return info
 
         # Compound — comptrollerImplementation()
-        comp_impl = _try_implementation_call(rpc_url, address, COMPTROLLER_IMPL_SELECTOR)
+        comp_impl = _try_implementation_call(rpc_url, address, COMPTROLLER_IMPL_SELECTOR, chain_id=effective_chain_id)
         if comp_impl:
             logger.debug("%s → compound proxy, impl=%s", address, comp_impl)
             info.update(type="proxy", proxy_type="compound", implementation=comp_impl)
             return info
 
         # Synthetix — target()
-        target_addr = _try_implementation_call(rpc_url, address, TARGET_SELECTOR)
+        target_addr = _try_implementation_call(rpc_url, address, TARGET_SELECTOR, chain_id=effective_chain_id)
         if target_addr:
             logger.debug("%s → synthetix proxy, impl=%s", address, target_addr)
             info.update(type="proxy", proxy_type="synthetix", implementation=target_addr)
@@ -439,7 +519,7 @@ def classify_single(
     #    soft signal is the last resort.
     raw_bc = bytecode[2:] if bytecode.startswith("0x") else bytecode
     if len(raw_bc) // 2 <= GENERIC_IMPL_PROXY_MAX_BYTES:
-        impl_call = _try_implementation_call(rpc_url, address)
+        impl_call = _try_implementation_call(rpc_url, address, chain_id=effective_chain_id)
         if impl_call:
             logger.debug("%s → custom proxy (implementation() call), impl=%s", address, impl_call)
             info.update(type="proxy", proxy_type="custom", implementation=impl_call)
@@ -459,17 +539,12 @@ def classify_single(
     raw = bytecode[2:] if bytecode.startswith("0x") else bytecode
     if 10 <= len(raw) <= SHORT_BYTECODE_THRESHOLD and _bytecode_has_delegatecall(bytecode):
         logger.debug("%s short bytecode (%d chars) with DELEGATECALL, probing", address, len(raw))
-        probe = _probe_delegatecall(rpc_url, address)
+        probe = _probe_delegatecall(rpc_url, address, chain_id=effective_chain_id)
         if probe is False:
             # DELEGATECALL exists but isn't triggered by arbitrary calldata —
             # this is a library or utility, not a proxy.
             logger.debug("%s probe returned False — not a proxy (library/utility)", address)
             info["type"] = "regular"
-            return info
-        if probe is None:
-            # Tracing unavailable — fall back to static heuristic.
-            logger.debug("%s probe unavailable — marking as unknown proxy", address)
-            info.update(type="proxy", proxy_type="unknown")
             return info
         # probe is a str: the DELEGATECALL target (implementation address)
         logger.debug("%s probe confirmed proxy, delegatecall target=%s", address, probe or "(empty)")
@@ -492,6 +567,8 @@ def classify_contracts(
     target: str,
     dependencies: list[str],
     rpc_url: str,
+    *,
+    chain_id: int,
     dynamic_edges: list[dict] | None = None,
     code_cache: dict[str, str] | None = None,
     pre_classified: dict[str, dict] | None = None,
@@ -511,6 +588,15 @@ def classify_contracts(
     from utils.concurrency import parallel_map
 
     target = normalize_address(target)
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"classify_contracts {target}",
+    )
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"classify_contracts {target}",
+        chain_id=effective_chain_id,
+    )
     all_addrs = list(dict.fromkeys([target] + [normalize_address(a) for a in dependencies]))
     logger.debug("classify_contracts: target=%s, %d dependencies", target, len(dependencies))
 
@@ -527,15 +613,15 @@ def classify_contracts(
     # serialises bytecode reads safely.
     addrs_to_classify = [addr for addr in all_addrs if not (pre_classified and addr in pre_classified)]
     parallel_results = parallel_map(
-        lambda addr: classify_single(addr, rpc_url, code_cache=None),
+        lambda addr: classify_single(addr, rpc_url, code_cache=None, chain_id=effective_chain_id),
         addrs_to_classify,
         max_workers=8,
     )
     classified_phase1: dict[str, dict] = {}
     for addr, result in parallel_results:
         if isinstance(result, BaseException):
-            logger.debug("Phase 1: classify error for %s (%s) — defaulting to regular", addr, result)
-            classified_phase1[addr] = {"address": addr, "type": "regular"}
+            logger.error("Phase 1: classify error for %s: %s", addr, result)
+            raise RuntimeError(f"contract classification failed for {addr}") from result
         else:
             classified_phase1[addr] = result
 
@@ -568,13 +654,14 @@ def classify_contracts(
     # any already covered by Phase 1.
     discovered_to_classify = sorted(addr for addr in discovered if addr not in classifications)
     discovered_results = parallel_map(
-        lambda addr: classify_single(addr, rpc_url, code_cache=None),
+        lambda addr: classify_single(addr, rpc_url, code_cache=None, chain_id=effective_chain_id),
         discovered_to_classify,
         max_workers=8,
     )
     for addr, result in discovered_results:
         if isinstance(result, BaseException):
-            classifications[addr] = {"address": addr, "type": "regular"}
+            logger.error("Discovered address classification failed for %s: %s", addr, result)
+            raise RuntimeError(f"discovered address classification failed for {addr}") from result
         else:
             classifications[addr] = result
 
@@ -590,7 +677,7 @@ def classify_contracts(
             info["type"] = "beacon"
             info["proxies"] = sorted(beacon_to_proxies[addr])
             if "implementation" not in info:
-                impl = _try_implementation_call(rpc_url, addr)
+                impl = _try_implementation_call(rpc_url, addr, chain_id=effective_chain_id)
                 if impl:
                     info["implementation"] = impl
             logger.debug("Phase 2: %s reclassified %s → beacon (proxies: %s)", addr, old_type, info["proxies"])
@@ -662,24 +749,26 @@ def classify_contracts(
 
 def main():
     import argparse
-    import os
     from pathlib import Path
 
     from dotenv import load_dotenv
+
+    from utils.rpc import default_rpc_url
 
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
     parser = argparse.ArgumentParser(description="Classify contract dependencies")
     parser.add_argument("address", help="Contract address to classify")
-    parser.add_argument("--rpc", help="RPC URL")
+    parser.add_argument("--chain-id", type=int, required=True, help="EIP-155 chain id")
     parser.add_argument("--deps", nargs="*", default=[], help="Dependency addresses")
     args = parser.parse_args()
 
-    resolved_rpc = args.rpc or os.getenv("ETH_RPC")
-    if not resolved_rpc:
-        raise SystemExit("No RPC URL provided (use --rpc or set ETH_RPC)")
+    try:
+        resolved_rpc = default_rpc_url(chain_id=args.chain_id)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    result = classify_contracts(args.address.strip(), args.deps, resolved_rpc)
+    result = classify_contracts(args.address.strip(), args.deps, resolved_rpc, chain_id=args.chain_id)
     print(json.dumps(result, indent=2))
 
 

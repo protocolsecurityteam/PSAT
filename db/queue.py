@@ -15,13 +15,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.discovery.source_confidence import asserts_ownership
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.rpc import require_supported_chain_id
 
 from .models import (
     Artifact,
-    Base,
     Contract,
-    ContractSummary,
     Job,
     JobDependency,
     JobStage,
@@ -42,6 +40,61 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_chain_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"chain_id must be a positive integer, got {value!r}") from None
+    if parsed <= 0:
+        raise ValueError(f"chain_id must be a positive integer, got {value!r}")
+    return parsed
+
+
+def _require_supported_queue_chain_id(value: Any, *, context: str) -> int:
+    chain_id = _coerce_chain_id(value)
+    if chain_id is None:
+        raise ValueError(f"{context} requires explicit chain_id")
+    return require_supported_chain_id(chain_id=chain_id, context=context)
+
+
+def find_contract_for_job(session: Session, job: Job, *, context: str) -> Contract | None:
+    """Find the canonical Contract row for a job's explicit ``(chain_id, address)`` identity."""
+    if not job.address:
+        raise ValueError(f"{context} requires job address")
+    chain_id = _require_supported_queue_chain_id(job.chain_id, context=context)
+    return (
+        session.execute(
+            select(Contract)
+            .where(
+                func.lower(Contract.address) == job.address.lower(),
+                Contract.chain_id == chain_id,
+            )
+            .limit(1)
+        )
+        .scalar_one_or_none()
+    )
+
+
+def require_contract_for_job(session: Session, job: Job, *, context: str) -> Contract:
+    """Return the canonical Contract row for ``job`` or fail with an operator-visible log."""
+    contract = find_contract_for_job(session, job, context=context)
+    if contract is None:
+        logger.error(
+            "%s missing Contract row for job_id=%s chain_id=%s address=%s",
+            context,
+            job.id,
+            job.chain_id,
+            job.address,
+        )
+        raise RuntimeError(f"{context} missing Contract row for job {job.id}")
+    return contract
+
 
 # How long a job can sit in ``status='processing'`` before we assume the
 # worker holding it crashed and return the row to the queue. ``updated_at``
@@ -178,14 +231,31 @@ def create_job(
     from utils.logging import trace_id_var
 
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
+    request_payload = dict(request_dict)
+    legacy_routing_keys = {"chain", "chains", "chain_ids", "rpc_url"}
+    present_legacy_keys = sorted(key for key in legacy_routing_keys if key in request_payload)
+    if present_legacy_keys:
+        raise ValueError(
+            f"legacy routing field(s) are not accepted on jobs: {', '.join(present_legacy_keys)}; "
+            "use numeric chain_id and configured eRPC"
+        )
+    chain_id = _coerce_chain_id(request_payload.get("chain_id"))
+    request_payload.pop("chain_id", None)
+    if chain_id is not None:
+        chain_id = require_supported_chain_id(chain_id=chain_id, context="job creation")
+    if chain_id is None and request_dict.get("address"):
+        raise ValueError("address jobs require explicit chain_id")
+    if chain_id is None and request_dict.get("dapp_urls"):
+        raise ValueError("dapp crawl jobs require explicit chain_id")
     job = Job(
         address=request_dict.get("address"),
+        chain_id=chain_id,
         company=request_dict.get("company"),
         name=request_dict.get("name"),
         status=JobStatus.queued,
         stage=initial_stage,
         detail="Queued for analysis",
-        request=request_dict,
+        request=request_payload,
         protocol_id=request_dict.get("protocol_id"),
         trace_id=trace_id,
     )
@@ -204,8 +274,8 @@ def bulk_upsert_discovered_contracts(
     """Bulk variant of :func:`upsert_discovered_contract` with identical first-writer-wins semantics.
 
     Each *entries* item is a dict with keys: ``address`` (required),
-    ``chain``, ``new_sources`` (list[str]), ``contract_name``, ``confidence``,
-    ``chains``, ``discovery_url``. The single-row helper does one SELECT per
+    ``chain_id``, ``new_sources`` (list[str]), ``contract_name``, ``confidence``,
+    ``discovery_url``. The single-row helper does one SELECT per
     address, which dominates wall time when discovery surfaces 100-300
     contracts at once. This collapses every SELECT into one ``IN (...)`` and
     keeps the merge logic identical so semantics don't drift.
@@ -217,25 +287,41 @@ def bulk_upsert_discovered_contracts(
         return []
 
     # Normalize once so the lookup map and the merge loop see identical keys.
-    norm_entries: list[tuple[str, str | None, dict[str, Any]]] = []
+    norm_entries: list[tuple[str, int, dict[str, Any]]] = []
+    legacy_routing_keys = {"chain", "chains", "chain_ids", "rpc_url"}
     for entry in entries:
         address = str(entry["address"]).lower()
-        chain = canonical_chain(entry.get("chain"))
+        present_legacy_keys = sorted(key for key in legacy_routing_keys if key in entry)
+        if present_legacy_keys:
+            logger.error(
+                "discovered contract %s retained legacy routing field(s): %s",
+                address,
+                ", ".join(present_legacy_keys),
+            )
+            raise ValueError(
+                f"discovered contract {address} retained legacy routing field(s): "
+                f"{', '.join(present_legacy_keys)}"
+            )
+        chain_id = _require_supported_queue_chain_id(
+            entry.get("chain_id"),
+            context=f"discovered contract {address}",
+        )
         clean_entry = dict(entry)
-        clean_entry["chain"] = chain
-        clean_entry["chains"] = canonical_chain_list(entry.get("chains"))
-        norm_entries.append((address, chain, clean_entry))
+        clean_entry["chain_id"] = chain_id
+        norm_entries.append((address, chain_id, clean_entry))
 
-    # One round-trip for every existing row across the requested (address, chain) tuples.
+    # One round-trip for every existing row across the requested (address, chain_id) tuples.
     # We can't use a single tuple-IN against a composite key efficiently in SQLAlchemy
-    # core without raw SQL, so query by address set and filter chain in Python — the
-    # set is small (typically 100-300 addresses) and the chain comparison is O(1).
+    # core without raw SQL, so query by address set and filter chain_id in Python — the
+    # set is small (typically 100-300 addresses) and the comparison is O(1).
     addresses = list({a for a, _c, _e in norm_entries})
     existing_rows = session.execute(select(Contract).where(Contract.address.in_(addresses))).scalars().all()
-    existing_by_key: dict[tuple[str, str | None], Contract] = {(row.address, row.chain): row for row in existing_rows}
+    existing_by_key: dict[tuple[str, int | None], Contract] = {
+        (row.address, row.chain_id): row for row in existing_rows
+    }
 
     out: list[Contract] = []
-    for address, chain, entry in norm_entries:
+    for address, chain_id, entry in norm_entries:
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
         # Only high-confidence sources may assert protocol ownership.
         # Low-confidence sources (dapp_crawl scraping, upgrade_history
@@ -243,20 +329,19 @@ def bulk_upsert_discovered_contracts(
         # but leave protocol_id NULL until a high-confidence source
         # corroborates. See services/discovery/source_confidence.py.
         owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
-        existing = existing_by_key.get((address, chain))
+        existing = existing_by_key.get((address, chain_id))
         if existing is None:
             row = Contract(
                 address=address,
-                chain=chain,
+                chain_id=chain_id,
                 protocol_id=owning_protocol_id,
                 contract_name=entry.get("contract_name"),
                 confidence=entry.get("confidence"),
                 discovery_sources=list(clean_sources) or None,
-                chains=entry.get("chains"),
                 discovery_url=entry.get("discovery_url"),
             )
             session.add(row)
-            existing_by_key[(address, chain)] = row
+            existing_by_key[(address, chain_id)] = row
             out.append(row)
             continue
 
@@ -272,8 +357,6 @@ def bulk_upsert_discovered_contracts(
             existing.contract_name = entry["contract_name"]
         if existing.confidence is None and entry.get("confidence") is not None:
             existing.confidence = entry["confidence"]
-        if not existing.chains and entry.get("chains"):
-            existing.chains = entry["chains"]
         if not existing.discovery_url and entry.get("discovery_url"):
             existing.discovery_url = entry["discovery_url"]
         out.append(existing)
@@ -285,12 +368,11 @@ def upsert_discovered_contract(
     session: Session,
     *,
     address: str,
-    chain: str | None,
+    chain_id: int,
     protocol_id: int | None,
     new_sources: list[str],
     contract_name: str | None = None,
     confidence: float | None = None,
-    chains: list[str] | None = None,
     discovery_url: str | None = None,
 ) -> Contract:
     """Insert or update a discovered contract, unioning ``discovery_sources``.
@@ -305,8 +387,8 @@ def upsert_discovered_contract(
         - ``discovery_sources`` is unioned (new entries appended, dedup
           preserves order so the first discoverer stays first).
         - ``protocol_id`` is backfilled if null (orphan adoption).
-        - ``contract_name`` / ``confidence`` / ``chains`` /
-          ``discovery_url`` are first-writer-wins: later writers only
+        - ``contract_name`` / ``confidence`` / ``discovery_url`` are
+          first-writer-wins: later writers only
           fill them if the stored value is missing, so a later
           lower-quality source doesn't stomp a better one.
 
@@ -314,12 +396,11 @@ def upsert_discovered_contract(
     upserts into one transaction.
     """
     normalized = address.lower()
-    chain = canonical_chain(chain)
-    chains = canonical_chain_list(chains)
+    chain_id = _require_supported_queue_chain_id(chain_id, context=f"discovered contract {normalized}")
     existing = session.execute(
         select(Contract).where(
             Contract.address == normalized,
-            Contract.chain == chain,
+            Contract.chain_id == chain_id,
         )
     ).scalar_one_or_none()
 
@@ -331,12 +412,11 @@ def upsert_discovered_contract(
     if existing is None:
         row = Contract(
             address=normalized,
-            chain=chain,
+            chain_id=chain_id,
             protocol_id=owning_protocol_id,
             contract_name=contract_name,
             confidence=confidence,
             discovery_sources=list(clean_sources) or None,
-            chains=chains,
             discovery_url=discovery_url,
         )
         session.add(row)
@@ -355,8 +435,6 @@ def upsert_discovered_contract(
         existing.contract_name = contract_name
     if existing.confidence is None and confidence is not None:
         existing.confidence = confidence
-    if not existing.chains and chains:
-        existing.chains = chains
     if not existing.discovery_url and discovery_url:
         existing.discovery_url = discovery_url
 
@@ -709,7 +787,7 @@ def reconcile_impl_job_for_proxy(
     impl_addr: str,
     proxy_addr: str,
     proxy_type: str | None = None,
-    chain: str | None = None,
+    chain_id: int,
     root_job_id: str | None = None,
     discovery_relationship: str = "implementation",
 ) -> str:
@@ -730,18 +808,21 @@ def reconcile_impl_job_for_proxy(
     """
     impl_lc = impl_addr.lower()
     proxy_lc = proxy_addr.lower()
+    effective_chain_id = _require_supported_queue_chain_id(
+        chain_id,
+        context=f"implementation job reconciliation for {impl_lc}",
+    )
 
     def _scoped(stmt):
+        stmt = stmt.where(Job.chain_id == effective_chain_id)
         if root_job_id is not None:
             stmt = stmt.where(Job.request["root_job_id"].as_string() == root_job_id)
-            if chain is not None:
-                stmt = stmt.where(Job.request["chain"].as_string() == chain)
         return stmt
 
     same_proxy = session.execute(
         _scoped(
             select(Job).where(
-                Job.address == impl_lc,
+                func.lower(Job.address) == impl_lc,
                 func.lower(Job.request["proxy_address"].as_string()) == proxy_lc,
             )
         ).limit(1)
@@ -752,7 +833,7 @@ def reconcile_impl_job_for_proxy(
     standalone = session.execute(
         _scoped(
             select(Job).where(
-                Job.address == impl_lc,
+                func.lower(Job.address) == impl_lc,
                 Job.request["proxy_address"].as_string().is_(None),
             )
         ).limit(1)
@@ -767,7 +848,9 @@ def reconcile_impl_job_for_proxy(
         )
         return "backpatched"
 
-    other_proxy = session.execute(_scoped(select(Job.id).where(Job.address == impl_lc)).limit(1)).scalar_one_or_none()
+    other_proxy = session.execute(
+        _scoped(select(Job.id).where(func.lower(Job.address) == impl_lc)).limit(1)
+    ).scalar_one_or_none()
     if other_proxy is not None:
         logger.warning(
             "Shared implementation %s is behind multiple proxies; spawning a separate "
@@ -1138,7 +1221,7 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
         session.commit()
         return
 
-    # Fan out the per-file uploads — Etherscan-verified contracts often have
+    # Fan out the per-file uploads — verified contracts often have
     # 30-100 source files and the prior sequential loop was paying one S3/MinIO
     # RTT per file on the static-stage critical path. Threading-only: each
     # ``client.put`` is an independent HTTP request to object storage with no
@@ -1243,337 +1326,30 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Static data caching
-# ---------------------------------------------------------------------------
-
-# Artifact names that constitute cached static data (immutable, never change).
-# slither_results / analysis_report were removed when vulnerability-detector
-# triage was split out of PSAT's pipeline; downstream stages don't depend on
-# them, and the only writer (StaticWorker._run_slither_phase) is gone.
-# static_analysis_artifact is the canonical static-stage bundle consumed by
-# resolution and policy.
-_STATIC_ARTIFACT_NAMES = frozenset(
-    {
-        "static_analysis_artifact",
-        "static_dependencies",
-        "enrichment_cache",
-    }
-)
-
-# Artifacts copied as a starting baseline but appended to on subsequent runs.
-_SEED_ARTIFACT_NAMES = frozenset(
-    {
-        "dynamic_dependencies",
-        "classifications",
-        "upgrade_history",
-    }
-)
-
-# Contract columns that are mutable (resolved live by _resolve_proxy) and
-# must NOT be carried over from a cached job.
-_MUTABLE_CONTRACT_FIELDS = frozenset({"is_proxy", "proxy_type", "implementation", "beacon", "admin"})
-
-
-def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozenset(), **overrides: Any) -> Base:
-    """Copy a SQLAlchemy row, returning a new detached instance.
-
-    - Primary keys are always skipped (auto-generated).
-    - Columns with a ``server_default`` (e.g. ``created_at``) are skipped
-      so the DB assigns fresh values, unless explicitly passed in *overrides*.
-    - *exclude* names additional columns to drop.
-    - *overrides* supply values that differ from the source (e.g. remapped
-      foreign keys, zeroed-out mutable fields).
-
-    Lists are shallow-copied so the new row doesn't share references with
-    the source.
-    """
-    from sqlalchemy import inspect as sa_inspect
-
-    mapper = sa_inspect(type(source))
-    kwargs: dict[str, Any] = {}
-    for attr in mapper.column_attrs:
-        key = attr.key
-        if key in exclude:
-            continue
-        col = attr.columns[0]
-        if col.primary_key:
-            continue
-        if key in overrides:
-            kwargs[key] = overrides[key]
-            continue
-        if col.server_default is not None:
-            continue
-        value = getattr(source, key)
-        if isinstance(value, list):
-            value = list(value)
-        kwargs[key] = value
-
-    new_row = type(source)(**kwargs)
-    session.add(new_row)
-    return new_row
-
-
-def find_completed_static_cache(session: Session, address: str, chain: str | None = None) -> Job | None:
-    """Find a previously completed job for *address* (and *chain*) that has all required static data.
-
-    Returns the cached :class:`Job` if one exists with:
-    - status = completed, stage = done
-    - at least one ``source_files`` row
-    - the ``static_analysis_artifact`` artifact (key indicator that the static stage finished)
-    - a ``contracts`` row for this address/chain with a ``contract_summaries`` row
-
-    The contract lookup uses (address, chain) rather than ``job_id`` so that
-    the cache remains valid even after ``copy_static_cache`` reassigned the
-    Contract row to a later target job.
-
-    Returns ``None`` when no suitable cache exists.
-    """
-    stmt = (
-        select(Job)
-        .where(
-            func.lower(Job.address) == address.lower(),
-            Job.status == JobStatus.completed,
-            Job.stage == JobStage.done,
-        )
-        .order_by(Job.updated_at.desc())
-    )
-    candidates = session.execute(stmt).scalars().all()
-
-    for candidate in candidates:
-        # Filter by chain stored in the job's request dict
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-
-        src_count = session.execute(
-            select(SourceFile).where(SourceFile.job_id == candidate.id).limit(1)
-        ).scalar_one_or_none()
-        if not src_count:
-            continue
-
-        # Look up by (address, chain), not job_id — copy_static_cache may have reassigned.
-        # Join ContractSummary so .limit(1) skips stub rows that lack the cached summary.
-        contract_stmt = (
-            select(Contract)
-            .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-            .where(func.lower(Contract.address) == address.lower())
-        )
-        if chain is not None:
-            contract_stmt = contract_stmt.where(Contract.chain == chain)
-        contract_row = session.execute(contract_stmt.limit(1)).scalar_one_or_none()
-        if not contract_row:
-            continue
-
-        # Static-stage-finished check. For non-proxy contracts the canonical
-        # indicator is ``static_analysis_artifact``. Proxies skip full static
-        # analysis on their own job, so require ``contract_flags`` instead.
-        required_artifacts = ("contract_flags",) if contract_row.is_proxy else ("static_analysis_artifact",)
-        has_required = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name.in_(required_artifacts)).limit(1)
-        ).scalar_one_or_none()
-        if not has_required:
-            continue
-
-        summary = session.execute(
-            select(ContractSummary).where(ContractSummary.contract_id == contract_row.id).limit(1)
-        ).scalar_one_or_none()
-        if not summary:
-            continue
-
-        return candidate
-
-    return None
-
-
-def find_previous_company_inventory(
-    session: Session,
-    company: str,
-    exclude_job_id: Any = None,
-    chain: str | None = None,
-) -> Job | None:
-    """Find the most recent completed company job with a discovery artifact.
-
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    considered, preventing cross-chain inventory contamination.
-    """
-    stmt = (
-        select(Job)
-        .where(
-            func.lower(Job.company) == company.lower(),
-            Job.status == JobStatus.completed,
-            Job.stage == JobStage.done,
-        )
-        .order_by(Job.updated_at.desc())
-    )
-    candidates = session.execute(stmt).scalars().all()
-    for candidate in candidates:
-        if exclude_job_id and candidate.id == exclude_job_id:
-            continue
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-        art = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "discovery_artifact").limit(1)
-        ).scalar_one_or_none()
-        if art:
-            return candidate
-    return None
-
-
-def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
-    """Find a non-failed job for *address* (and *chain*), case-insensitive.
-
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    returned, so an Ethereum job won't suppress a Base job at the same address.
-    """
-    candidates = (
+def find_existing_job_for_address(session: Session, address: str, chain_id: int) -> Job | None:
+    """Find a non-failed job for ``(chain_id, address)``, case-insensitive."""
+    effective_chain_id = _require_supported_queue_chain_id(chain_id, context=f"existing job lookup for {address}")
+    return (
         session.execute(
-            select(Job).where(
+            select(Job)
+            .where(
                 func.lower(Job.address) == address.lower(),
+                Job.chain_id == effective_chain_id,
                 Job.status != JobStatus.failed,
             )
+            .order_by(Job.updated_at.desc(), Job.created_at.desc())
+            .limit(1)
         )
-        .scalars()
-        .all()
+        .scalar_one_or_none()
     )
-    for c in candidates:
-        if chain is not None:
-            req = c.request if isinstance(c.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-        return c
-    return None
 
 
-def is_known_proxy(session: Session, address: str, chain: str | None = None) -> bool:
-    """Return True if *address* (on *chain*) has been classified as a proxy in any prior analysis."""
+def is_known_proxy(session: Session, address: str, chain_id: int) -> bool:
+    """Return True if ``(chain_id, address)`` has been classified as a proxy in any prior analysis."""
+    effective_chain_id = _require_supported_queue_chain_id(chain_id, context=f"proxy lookup for {address}")
     stmt = select(Contract).where(
         func.lower(Contract.address) == address.lower(),
+        Contract.chain_id == effective_chain_id,
         Contract.is_proxy.is_(True),
     )
-    if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
     return session.execute(stmt.limit(1)).scalar_one_or_none() is not None
-
-
-def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) -> int | None:
-    """Copy all cached static data from *source_job_id* to *target_job_id*.
-
-    Copies:
-    - ``contracts`` row (immutable fields only; proxy fields left as defaults)
-    - ``source_files`` rows
-    - ``contract_summaries`` and ``role_definitions``
-      rows (linked to the new contract row)
-    - Static artifacts (``static_analysis_artifact``, ``static_dependencies``,
-      ``enrichment_cache``)
-
-    The source contract is looked up by (address, chain) rather than by
-    ``job_id`` so that subsequent cache copies still work after a prior copy
-    reassigned the Contract row.
-
-    Returns the new ``Contract.id`` on success, or ``None`` on failure.
-    """
-    # Guard: if the target already has a contract row, return early.
-    existing = session.execute(select(Contract).where(Contract.job_id == target_job_id).limit(1)).scalar_one_or_none()
-    if existing:
-        return existing.id
-
-    # Resolve the source job's address and chain so we can find the Contract
-    # by its natural key (address, chain) rather than by job_id.  A prior
-    # copy_static_cache may have reassigned the Contract row's job_id to a
-    # different target, so job_id lookup is unreliable after the first copy.
-    src_job = session.get(Job, source_job_id)
-    if not src_job or not src_job.address:
-        return None
-
-    src_req = src_job.request if isinstance(src_job.request, dict) else {}
-    src_chain = src_req.get("chain")
-
-    # Join ContractSummary so we copy a summaried row, not a stub (mirrors find_completed_static_cache).
-    src_contract_stmt = (
-        select(Contract)
-        .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-        .where(func.lower(Contract.address) == src_job.address.lower())
-    )
-    if src_chain is not None:
-        src_contract_stmt = src_contract_stmt.where(Contract.chain == src_chain)
-    src_contract = session.execute(src_contract_stmt.limit(1)).scalar_one_or_none()
-    if not src_contract:
-        return None
-
-    # The unique constraint on (address, chain) means src_contract IS the
-    # only Contract for this address/chain.  Reassign it to the target job.
-    src_contract.job_id = target_job_id
-
-    # Save the current proxy state so _check_proxy_cache can compare it
-    # against the live on-chain implementation to decide whether
-    # re-classification is needed.  The Contract row keeps its proxy
-    # fields intact — zeroing them would corrupt data for the old
-    # completed job that also references this row via address lookup.
-    _cached_proxy_state = {
-        "is_proxy": src_contract.is_proxy,
-        "proxy_type": src_contract.proxy_type,
-        "implementation": src_contract.implementation,
-        "beacon": src_contract.beacon,
-        "admin": src_contract.admin,
-    }
-    store_artifact(session, target_job_id, "cached_proxy_state", data=_cached_proxy_state)
-
-    session.flush()
-    new_contract = src_contract
-
-    storage = get_storage_client()
-
-    # --- source files ---
-    src_files = session.execute(select(SourceFile).where(SourceFile.job_id == source_job_id)).scalars().all()
-    for sf in src_files:
-        if sf.storage_key and storage is not None:
-            new_key = source_file_key(target_job_id, sf.path)
-            storage.copy(sf.storage_key, new_key)
-            session.add(SourceFile(job_id=target_job_id, path=sf.path, content=None, storage_key=new_key))
-        else:
-            copy_row(session, sf, job_id=target_job_id)
-
-    # --- artifacts (static + seed) ---
-    src_artifacts = (
-        session.execute(
-            select(Artifact).where(
-                Artifact.job_id == source_job_id,
-                Artifact.name.in_(_STATIC_ARTIFACT_NAMES | _SEED_ARTIFACT_NAMES),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for art in src_artifacts:
-        if art.storage_key and storage is not None:
-            new_key = artifact_key(target_job_id, art.name)
-            storage.copy(art.storage_key, new_key)
-            stmt = pg_insert(Artifact).values(
-                job_id=target_job_id,
-                name=art.name,
-                data=None,
-                text_data=None,
-                storage_key=new_key,
-                size_bytes=art.size_bytes,
-                content_type=art.content_type,
-            )
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_artifact_job_name",
-                set_={
-                    "data": None,
-                    "text_data": None,
-                    "storage_key": stmt.excluded.storage_key,
-                    "size_bytes": stmt.excluded.size_bytes,
-                    "content_type": stmt.excluded.content_type,
-                },
-            )
-            session.execute(stmt)
-        else:
-            store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
-
-    session.commit()
-    return new_contract.id  # type: ignore[attr-defined]

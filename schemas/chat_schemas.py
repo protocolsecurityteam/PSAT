@@ -11,7 +11,7 @@ from schemas.common import Address
 class AgentContext:
     company: str
     selected_address: Address | None = None
-    selected_chain: str | None = None
+    selected_chain_id: int | None = None
 
 
 __all__ = ["AgentContext"]

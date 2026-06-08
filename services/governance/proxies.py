@@ -17,23 +17,38 @@ GENERIC_PROXY_NAMES = {
 
 
 def _display_name(entry: AnalysisListEntry) -> str:
-    chain = str(entry.get("chain") or "").strip()
-
-    def with_chain(name: str) -> str:
-        if not name:
-            return name
-        if not chain:
-            return name
-        suffix = f" ({chain})"
-        return name if name.endswith(suffix) else f"{name}{suffix}"
-
     explicit = str(entry.get("display_name") or "").strip()
     if explicit:
-        return with_chain(explicit)
+        return explicit
     contract_name = str(entry.get("contract_name") or "").strip()
     if contract_name and contract_name.lower() not in GENERIC_PROXY_NAMES:
-        return with_chain(contract_name)
-    return with_chain(str(entry.get("run_name") or contract_name or "").strip())
+        return contract_name
+    return str(entry.get("run_name") or contract_name or "").strip()
+
+
+def _require_same_chain_id(proxy_entry: AnalysisListEntry, impl_entry: AnalysisListEntry) -> int:
+    proxy_chain_id = proxy_entry.get("chain_id")
+    impl_chain_id = impl_entry.get("chain_id")
+    if proxy_chain_id is None or impl_chain_id is None:
+        raise RuntimeError(
+            "proxy/implementation analysis merge requires chain_id on both entries "
+            f"proxy={proxy_entry.get('address')} impl={impl_entry.get('address')}"
+        )
+    try:
+        proxy_chain_id_int = int(proxy_chain_id)
+        impl_chain_id_int = int(impl_chain_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "proxy/implementation analysis merge requires numeric chain_id on both entries "
+            f"proxy={proxy_entry.get('address')} impl={impl_entry.get('address')}"
+        ) from exc
+    if proxy_chain_id_int != impl_chain_id_int:
+        raise RuntimeError(
+            "proxy/implementation analysis merge chain_id mismatch "
+            f"proxy={proxy_entry.get('address')} chain_id={proxy_chain_id_int} "
+            f"impl={impl_entry.get('address')} chain_id={impl_chain_id_int}"
+        )
+    return proxy_chain_id_int
 
 
 def _merge_proxy_impl_entries(entries: list[AnalysisListEntry]) -> list[AnalysisListEntry]:
@@ -54,11 +69,12 @@ def _merge_proxy_impl_entries(entries: list[AnalysisListEntry]) -> list[Analysis
         address = str(entry.get("address") or "").lower()
         impl = impl_by_proxy.get(address)
         if entry.get("is_proxy") and entry.get("implementation_address") and impl:
+            chain_id = _require_same_chain_id(entry, impl)
             merged.append(
                 {
                     **impl,
                     "company": entry.get("company") or impl.get("company"),
-                    "chain": entry.get("chain") or impl.get("chain"),
+                    "chain_id": chain_id,
                     "rank_score": entry.get("rank_score")
                     if entry.get("rank_score") is not None
                     else impl.get("rank_score"),

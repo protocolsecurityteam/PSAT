@@ -7,7 +7,7 @@ DRY-RUN by default; pass --yes to apply. Runs from any cwd:
 
 Gives a clean local slate for testing WITHOUT re-paying for cached work:
   KEPT  - DB:      alembic_version (migrations) + IMMUTABLE external-data caches
-                   (etherscan_cache = verified source/ABI; bytecode_cache = on-chain code)
+                   (etherscan_cache = verified source; bytecode_cache = on-chain code)
   KEPT  - storage: tavily-cache/, exa-cache/  (Exa/Tavily research = external API data)
   WIPED - everything else, incl. LOGIC-DERIVED caches that must recompute when you
           change analysis code: mapping_enumeration_cache, contract_materializations

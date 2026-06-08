@@ -59,7 +59,7 @@ LOW_TRUST_DOMAINS = {
 
 CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "base": 4, "unknown": 99}
 
-# Etherscan v2 chain IDs for chains the inventory pipeline can discover.
+# EVM chain IDs for chains the inventory pipeline can discover.
 CHAIN_IDS: dict[str, int] = {
     "ethereum": 1,
     "arbitrum": 42161,
@@ -179,17 +179,20 @@ def _resolve_chain(inferred: str, requested: str | None) -> tuple[str | None, bo
     return requested, inferred == "unknown"
 
 
-def _fetch_page(url: str, debug: bool = False) -> str | None:
-    """Fetch a page via HTTP and return its text, or None on failure."""
+def _fetch_page(url: str, debug: bool = False) -> str:
+    """Fetch a selected inventory page via HTTP or raise on failure."""
     try:
         resp = _requests.get(url, timeout=30, headers={"User-Agent": "PSAT/0.1"})
         if resp.status_code == 200:
             _debug_log(debug, f"Fetched {url} ({len(resp.text)} chars)")
             return resp.text
-        _debug_log(debug, f"Fetch {url}: HTTP {resp.status_code}")
+        message = f"Fetch {url}: HTTP {resp.status_code}"
+        _debug_log(debug, message)
+        raise RuntimeError(message)
     except _requests.RequestException as exc:
-        _debug_log(debug, f"Fetch {url} failed: {exc!r}")
-    return None
+        message = f"Fetch {url} failed: {exc!r}"
+        _debug_log(debug, message)
+        raise RuntimeError(message) from exc
 
 
 # -- Domain selection & page discovery ---------------------------------------
@@ -262,10 +265,13 @@ def _llm_select_domain(
         if selected:
             _debug_log(debug, f"LLM selected domain(s): {selected}")
             return selected[0], selected[1:]
-        _debug_log(debug, f"LLM returned unparseable response: {response!r}")
+        message = f"LLM domain selection returned no valid domain for {company}: {response!r}"
+        _debug_log(debug, message)
+        raise RuntimeError(message)
     except (_requests.RequestException, json.JSONDecodeError, RuntimeError) as exc:
-        _debug_log(debug, f"LLM domain selection failed: {exc!r}")
-    return None, []
+        message = f"LLM domain selection failed for {company}: {exc}"
+        _debug_log(debug, message)
+        raise RuntimeError(message) from exc
 
 
 def _domain_candidates_from_results(results: list[dict[str, Any]]) -> list[str]:
@@ -333,10 +339,15 @@ def _llm_select_pages(
                 seen.add(clean_url)
                 recommended.append(clean_url)
         _debug_log(debug, f"LLM recommended {len(recommended)} in-domain URL(s)")
+        if not recommended:
+            raise RuntimeError(
+                f"LLM page selection returned no allowed URL for {company} on {domain_label}: {response!r}"
+            )
         return recommended
     except (_requests.RequestException, json.JSONDecodeError, RuntimeError) as exc:
-        _debug_log(debug, f"LLM page selection failed: {exc!r}")
-        return []
+        message = f"LLM page selection failed for {company} on {domain_label}: {exc}"
+        _debug_log(debug, message)
+        raise RuntimeError(message) from exc
 
 
 def _dedupe_results_by_url(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -391,8 +402,9 @@ def _discover_contract_inventory_pages(
         [r for r in broad_results if _is_allowed_domain(_get_domain(str(r.get("url", ""))), all_domains)] + site_results
     )
     if not combined:
-        _debug_log(debug, "No inventory page candidates returned")
-        return [], []
+        message = f"No inventory page candidates returned for {company} on {all_domains}"
+        _debug_log(debug, message)
+        raise RuntimeError(message)
 
     page_info: list[dict[str, str]] = []
     for d in all_domains:
@@ -407,8 +419,9 @@ def _discover_contract_inventory_pages(
     page_info = unique_page_info
 
     if not page_info:
-        _debug_log(debug, "No in-domain inventory page candidates available")
-        return combined, []
+        message = f"No in-domain inventory page candidates available for {company} on {all_domains}"
+        _debug_log(debug, message)
+        raise RuntimeError(message)
 
     domain_label = " / ".join(all_domains)
     prompt = (

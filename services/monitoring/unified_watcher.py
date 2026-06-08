@@ -36,6 +36,8 @@ from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from utils.rpc import (
     normalize_hex,
+    require_configured_erpc_url,
+    require_supported_chain_id,
     rpc_batch_request,
     rpc_request,
 )
@@ -57,21 +59,37 @@ _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
 _AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
 
 
-def get_latest_block(rpc_url: str) -> int:
-    result = rpc_request(rpc_url, "eth_blockNumber", [])
-    return int(result, 16)
+def _require_supported_monitor_chain_id(chain_id: int | None, context: str) -> int:
+    return require_supported_chain_id(chain_id=chain_id, context=context)
 
 
-def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
+def get_latest_block(rpc_url: str, *, chain_id: int) -> int:
+    result = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
+    if not isinstance(result, str) or not result.startswith("0x"):
+        logger.error("Protocol monitor eth_blockNumber returned invalid payload: %r", result)
+        raise RuntimeError("protocol monitor eth_blockNumber returned invalid payload")
+    try:
+        return int(result, 16)
+    except ValueError as exc:
+        logger.error("Protocol monitor eth_blockNumber returned malformed hex: %r", result)
+        raise RuntimeError("protocol monitor eth_blockNumber returned malformed hex") from exc
+
+
+def scan_for_events(session: Session, rpc_url: str, *, chain_id: int) -> list[MonitoredEvent]:
     """Scan new blocks for all governance and proxy events.
 
     Uses a single eth_getLogs call per block chunk with all monitored
     addresses and all event topic0s. Returns list of new MonitoredEvent
     records created.
     """
+    chain_id = _require_supported_monitor_chain_id(chain_id, "protocol event scan")
+    rpc_url = require_configured_erpc_url(rpc_url, context="protocol event scan", chain_id=chain_id)
     contracts = (
         session.execute(
-            select(MonitoredContract).where(MonitoredContract.is_active == True)  # noqa: E712
+            select(MonitoredContract).where(
+                MonitoredContract.is_active == True,  # noqa: E712
+                MonitoredContract.chain_id == chain_id,
+            )
         )
         .scalars()
         .all()
@@ -103,7 +121,7 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             tracked_specs_by_emitter[addr] = spec_map
 
     from_block = min(c.last_scanned_block for c in contracts)
-    latest_block = get_latest_block(rpc_url)
+    latest_block = get_latest_block(rpc_url, chain_id=chain_id)
 
     if from_block >= latest_block:
         logger.debug("Scan: no new blocks (from=%d, latest=%d)", from_block, latest_block)
@@ -173,22 +191,39 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
         }
 
         try:
-            logs = rpc_request(rpc_url, "eth_getLogs", [filter_params])
+            logs = rpc_request(rpc_url, "eth_getLogs", [filter_params], chain_id=chain_id)
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "eth_getLogs failed for blocks %d-%d: %s",
                 cursor,
                 to_block,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
-            break
+            raise RuntimeError(f"protocol event eth_getLogs failed for blocks {cursor}-{to_block}") from exc
 
         if not isinstance(logs, list):
-            logs = []
+            logger.error("eth_getLogs returned non-list payload for blocks %d-%d: %r", cursor, to_block, logs)
+            raise RuntimeError(f"protocol event eth_getLogs returned non-list payload for blocks {cursor}-{to_block}")
 
         for log in logs:
-            emitter = normalize_hex(log.get("address", "")).lower()
+            if not isinstance(log, dict):
+                logger.error("eth_getLogs returned invalid log item for blocks %d-%d: %r", cursor, to_block, log)
+                raise RuntimeError(
+                    f"protocol event eth_getLogs returned invalid log item for blocks {cursor}-{to_block}"
+                )
+            raw_emitter = log.get("address")
+            if not isinstance(raw_emitter, str) or not raw_emitter.startswith("0x") or len(raw_emitter) != 42:
+                logger.error(
+                    "eth_getLogs returned invalid log address for blocks %d-%d: %r",
+                    cursor,
+                    to_block,
+                    raw_emitter,
+                )
+                raise RuntimeError(
+                    f"protocol event eth_getLogs returned invalid log address for blocks {cursor}-{to_block}"
+                )
+            emitter = normalize_hex(raw_emitter).lower()
             parsed = parse_any_log(log)
             if not parsed:
                 # Fall through to the per-contract tracked-topic
@@ -525,7 +560,7 @@ def _resolve_value_for_write_target(parsed: dict, write_target: str) -> object |
          ``ProtocolAdminChanged(previousAdmin, newAdmin)`` for a
          write_target like ``protocolAdmin`` where neither the bare
          name nor the OZ ``new<Cap>`` convention applies.
-      4. **Positional last-arg fallback** — for single-write events the
+      4. **Positional last-arg resolution** — for single-write events the
          "new value" is conventionally the last arg even when no naming
          convention applies (Solady, custom ABIs that just name the
          arg ``account`` or ``to``). Only fires when ``_inputs`` is
@@ -533,7 +568,7 @@ def _resolve_value_for_write_target(parsed: dict, write_target: str) -> object |
 
     Underscore-prefixed write_targets (``_roles``, ``_timelock_op``,
     ``_safe_op``, ``_safe_module_op``) are synthetic activity markers
-    not real slots; they short-circuit to ``None`` so the fallback
+    not real slots; they short-circuit to ``None`` so positional resolution
     doesn't false-positive on the third-arg ``sender`` of a RoleGranted
     event (which has no canonical extractor and would otherwise hit
     pass (4) and overwrite ``state["_roles"]`` with a sender address).
@@ -607,7 +642,7 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
             continue
         # Generic resolution for custom slots — uses bare-name match,
         # OZ ``new<Cap>`` convention, ABI-pinned ``new*`` arg, and last-
-        # arg positional fallback. Unlike the canonical branch we DO
+        # arg positional resolution. Unlike the canonical branch we DO
         # overwrite an existing state entry — this path is the only one
         # that updates custom slots, so a subsequent observation must
         # take precedence.
@@ -713,8 +748,8 @@ def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -
     """Rebuild ``audit_contract_coverage`` for a protocol after an upgrade.
 
     Called from the event- and poll-sync paths so impl_era windows stay in
-    sync with the live upgrade history. Swallows exceptions so a coverage
-    bug can never block a detected upgrade from being recorded.
+    sync with the live upgrade history. Failures are raised so chain-scoped
+    bytecode/source anchoring cannot silently fall behind detected upgrades.
     """
     if not protocol_id:
         return
@@ -733,12 +768,13 @@ def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -
         # worker drains the resulting ``pending`` rows at a controlled rate.
         upsert_coverage_for_protocol(session, protocol_id, verify_source_equivalence=False)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "Failed to refresh audit coverage for protocol %s after upgrade: %s",
             protocol_id,
             exc,
             extra={"exc_type": type(exc).__name__},
         )
+        raise RuntimeError(f"failed to refresh audit coverage for protocol {protocol_id} after upgrade") from exc
 
 
 def _update_controller_value_rows(
@@ -821,26 +857,28 @@ def _sync_relational_from_poll(
 # ---------------------------------------------------------------------------
 
 
-def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list] | None:
+def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list]:
     """Translate a polling-plan entry into a JSON-RPC ``(method, params)``
-    pair. Returns ``None`` for unrecognized entry kinds — the loop drops
-    those silently so a forward-compatible schema addition can't break
-    a running watcher."""
+    pair. Unsupported or incomplete entries are pipeline inconsistencies and
+    fail the poller instead of silently dropping a requested state read."""
     kind = entry.get("kind")
     if kind == "getter_call":
         selector = entry.get("selector")
-        if not selector:
-            return None
+        if not isinstance(selector, str) or not selector:
+            logger.error("Protocol state poll getter entry missing selector address=%s entry=%r", address, entry)
+            raise RuntimeError(f"protocol state poll getter entry missing selector for {address}")
         return ("eth_call", [{"to": address, "data": selector}, "latest"])
     if kind == "storage_slot":
         slot = entry.get("slot")
-        if not slot:
-            return None
+        if not isinstance(slot, str) or not slot:
+            logger.error("Protocol state poll storage entry missing slot address=%s entry=%r", address, entry)
+            raise RuntimeError(f"protocol state poll storage entry missing slot for {address}")
         return ("eth_getStorageAt", [address, slot, "latest"])
-    return None
+    logger.error("Protocol state poll entry has unsupported kind address=%s kind=%r entry=%r", address, kind, entry)
+    raise RuntimeError(f"protocol state poll entry has unsupported kind for {address}: {kind!r}")
 
 
-def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
+def poll_for_state_changes(session: Session, rpc_url: str, *, chain_id: int) -> list[MonitoredEvent]:
     """Poll for state changes by walking each contract's persisted
     ``polling_plan``.
 
@@ -860,11 +898,14 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     backfills the plan within its interval (default 600s) so this is a
     bounded transient on freshly-migrated rows.
     """
+    chain_id = _require_supported_monitor_chain_id(chain_id, "protocol state poll")
+    rpc_url = require_configured_erpc_url(rpc_url, context="protocol state poll", chain_id=chain_id)
     contracts = (
         session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.is_active == True,  # noqa: E712
                 MonitoredContract.needs_polling == True,  # noqa: E712
+                MonitoredContract.chain_id == chain_id,
             )
         )
         .scalars()
@@ -880,13 +921,23 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     for mc in contracts:
         plan = (mc.monitoring_config or {}).get("polling_plan") or []
         if not isinstance(plan, list):
-            continue
+            logger.error(
+                "Protocol state poll contract has invalid polling_plan address=%s chain_id=%s: %r",
+                mc.address,
+                chain_id,
+                plan,
+            )
+            raise RuntimeError(f"protocol state poll contract has invalid polling_plan for {mc.address}")
         for entry in plan:
             if not isinstance(entry, dict):
-                continue
+                logger.error(
+                    "Protocol state poll contract has invalid polling_plan entry address=%s chain_id=%s: %r",
+                    mc.address,
+                    chain_id,
+                    entry,
+                )
+                raise RuntimeError(f"protocol state poll contract has invalid polling_plan entry for {mc.address}")
             call = _rpc_call_for_entry(mc.address, entry)
-            if call is None:
-                continue
             poll_dispatch.append((mc, len(batch_calls), entry))
             batch_calls.append(call)
 
@@ -894,10 +945,10 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         return []
 
     try:
-        results = rpc_batch_request(rpc_url, batch_calls)
+        results = rpc_batch_request(rpc_url, batch_calls, chain_id=chain_id)
     except Exception as exc:
-        logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
-        return []
+        logger.error("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
+        raise RuntimeError("protocol state poll batch RPC failed") from exc
 
     new_events: list[MonitoredEvent] = []
 
@@ -905,8 +956,27 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         raw = results[idx]
         field_name = entry.get("field")
         if not isinstance(field_name, str) or not field_name:
-            continue
-        new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
+            logger.error(
+                "Protocol state poll entry missing field address=%s chain_id=%s entry=%r",
+                mc.address,
+                chain_id,
+                entry,
+            )
+            raise RuntimeError(f"protocol state poll entry missing field for {mc.address}")
+        try:
+            new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
+        except ValueError as exc:
+            logger.error(
+                "Protocol state poll returned invalid payload address=%s field=%s chain_id=%s: %s",
+                mc.address,
+                field_name,
+                chain_id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(
+                f"protocol state poll returned invalid payload for {mc.address} field={field_name} chain_id={chain_id}"
+            ) from exc
         if new_value is None:
             continue
 
@@ -1033,31 +1103,39 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 # ---------------------------------------------------------------------------
 
 
-def _boot_reconcile(rpc_url: str) -> None:
-    """Best-effort enrollment reconcile on watcher startup.
+def _boot_reconcile(rpc_url: str, *, chain_id: int) -> None:
+    """Enrollment reconcile on watcher startup.
 
     Catches the case where a migration / admin fix-up landed while the
     watcher was down. The reconciler converges on every tick anyway, so
-    a failure here is non-fatal — but the boot pass closes the deploy-
-    window gap so monitored_contracts is correct before the first scan.
+    the boot pass closes the deploy-window gap before the first scan.
     """
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="protocol monitor boot reconcile")
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context="protocol monitor boot reconcile",
+        chain_id=effective_chain_id,
+    )
     try:
         from services.monitoring.reconciler import reconcile_enrollments
 
         with SessionLocal() as session:
-            reconcile_enrollments(session, rpc_url)
+            reconcile_enrollments(session, rpc_url, effective_chain_id)
     except Exception as exc:
-        logger.warning("Boot reconcile failed: %s", exc, extra={"exc_type": type(exc).__name__})
+        logger.error("Boot reconcile failed: %s", exc, extra={"exc_type": type(exc).__name__})
+        raise RuntimeError("protocol monitor boot reconcile failed") from exc
 
 
-def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None:
+def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL, *, chain_id: int) -> None:
     """Run the unified event scanner in a blocking loop."""
-    logger.info("Starting unified protocol monitor (interval=%ss)", interval)
-    _boot_reconcile(rpc_url)
+    chain_id = _require_supported_monitor_chain_id(chain_id, "protocol event scan loop")
+    rpc_url = require_configured_erpc_url(rpc_url, context="protocol event scan loop", chain_id=chain_id)
+    logger.info("Starting unified protocol monitor (interval=%ss chain_id=%s)", interval, chain_id)
+    _boot_reconcile(rpc_url, chain_id=chain_id)
     while True:
         try:
             with SessionLocal() as session:
-                new_events = scan_for_events(session, rpc_url)
+                new_events = scan_for_events(session, rpc_url, chain_id=chain_id)
                 if new_events:
                     logger.info("Detected %d new event(s)", len(new_events))
                     try:
@@ -1067,18 +1145,21 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
                     except Exception as exc:
                         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
         except Exception as exc:
-            logger.warning("Scan cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            logger.error("Scan cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            raise RuntimeError("protocol event scan cycle failed") from exc
         time.sleep(interval)
 
 
-def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None:
+def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL, *, chain_id: int) -> None:
     """Run the unified state polling loop."""
-    logger.info("Starting unified protocol poller (interval=%ss)", interval)
-    _boot_reconcile(rpc_url)
+    chain_id = _require_supported_monitor_chain_id(chain_id, "protocol state poll loop")
+    rpc_url = require_configured_erpc_url(rpc_url, context="protocol state poll loop", chain_id=chain_id)
+    logger.info("Starting unified protocol poller (interval=%ss chain_id=%s)", interval, chain_id)
+    _boot_reconcile(rpc_url, chain_id=chain_id)
     while True:
         try:
             with SessionLocal() as session:
-                new_events = poll_for_state_changes(session, rpc_url)
+                new_events = poll_for_state_changes(session, rpc_url, chain_id=chain_id)
                 if new_events:
                     logger.info("Poll detected %d state change(s)", len(new_events))
                     try:
@@ -1088,5 +1169,6 @@ def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None
                     except Exception as exc:
                         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
         except Exception as exc:
-            logger.warning("Poll cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            logger.error("Poll cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            raise RuntimeError("protocol state poll cycle failed") from exc
         time.sleep(interval)

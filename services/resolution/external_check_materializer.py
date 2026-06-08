@@ -8,9 +8,8 @@ the checker for each candidate.
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import os
-import time
 from typing import Any
 
 from sqlalchemy import func, select
@@ -19,11 +18,12 @@ from sqlalchemy.orm import Session
 from db.models import IndexedEventLog
 from services.resolution.capabilities import CapabilityExpr, Confidence, MembershipQuality
 from services.resolution.repos.event_logs_pg import _word_to_address
-from utils.rpc import rpc_batch_request_with_status
+from utils.rpc import require_configured_erpc_url, rpc_batch_request_with_status
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
 _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
+logger = logging.getLogger(__name__)
 
 # Event words are 32 bytes; ``_word_to_address`` takes the low 20. A non-address
 # field carrying a small integer (a uint8 role, a bool, an array length, a small
@@ -45,7 +45,7 @@ def _is_plausible_candidate_address(addr: str) -> bool:
 def materialize_external_check_from_events(
     *,
     session: Session,
-    rpc_url: str | None,
+    rpc_url: str,
     chain_id: int,
     checker_address: str,
     checker_selector: str | None,
@@ -59,7 +59,12 @@ def materialize_external_check_from_events(
       * all other arguments are concrete ABI words;
       * candidates are addresses observed in events from the checker.
     """
-    if not rpc_url or not checker_selector:
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"external check materialization chain_id={chain_id} checker={checker_address}",
+        chain_id=chain_id,
+    )
+    if not checker_selector:
         return None
     caller_index = _caller_arg_index(call_args)
     if caller_index is None:
@@ -77,8 +82,6 @@ def materialize_external_check_from_events(
             checker_address=checker_address,
             limit=_MAX_CANDIDATES,
         )
-        if not candidates:
-            candidates = _candidate_addresses_from_hypersync(checker_address=checker_address, limit=_MAX_CANDIDATES)
         _CANDIDATE_CACHE[cache_key] = list(candidates)
     if not candidates:
         return None
@@ -93,12 +96,46 @@ def materialize_external_check_from_events(
         calls.append(("eth_call", [call, hex(block) if isinstance(block, int) else "latest"]))
         ordered_candidates.append(candidate)
 
-    results = rpc_batch_request_with_status(rpc_url, calls)
+    results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
+    if len(results) != len(calls):
+        logger.error(
+            "External check materialization batch returned %d result(s) for %d call(s) chain_id=%s checker=%s",
+            len(results),
+            len(calls),
+            chain_id,
+            checker_address,
+        )
+        raise RuntimeError(
+            f"external check materialization batch returned {len(results)} result(s) for {len(calls)} call(s)"
+        )
     allowed: list[str] = []
-    for candidate, (raw, had_error) in zip(ordered_candidates, results, strict=False):
+    for candidate, (raw, had_error) in zip(ordered_candidates, results, strict=True):
         if had_error:
-            continue
-        if _decode_bool(raw):
+            logger.error(
+                "External check candidate probe failed chain_id=%s checker=%s candidate=%s",
+                chain_id,
+                checker_address,
+                candidate,
+            )
+            raise RuntimeError(
+                f"external check candidate probe failed for chain_id={chain_id} checker={checker_address}"
+            )
+        try:
+            allowed_result = _decode_bool(raw)
+        except ValueError as exc:
+            logger.error(
+                "External check candidate probe returned malformed bool chain_id=%s checker=%s candidate=%s: %s",
+                chain_id,
+                checker_address,
+                candidate,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(
+                f"external check candidate probe returned malformed bool for chain_id={chain_id} "
+                f"checker={checker_address}"
+            ) from exc
+        if allowed_result:
             allowed.append(candidate)
     if not allowed:
         return None
@@ -146,11 +183,14 @@ def _encode_address(address: str) -> str:
 
 def _decode_bool(raw: Any) -> bool:
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
-        return False
+        raise ValueError(f"expected ABI bool return data, got {raw!r}")
+    body = raw[2:]
+    if len(body) % 64 != 0:
+        raise ValueError(f"expected ABI bool return word-aligned data, got {raw!r}")
     try:
         return int(raw[-64:], 16) != 0
-    except ValueError:
-        return False
+    except ValueError as exc:
+        raise ValueError(f"expected ABI bool return hex data, got {raw!r}") from exc
 
 
 def _candidate_addresses_from_events(
@@ -184,84 +224,3 @@ def _candidate_addresses_from_events(
             if len(out) >= limit:
                 return out
     return out
-
-
-def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int) -> list[str]:
-    token = os.getenv("ENVIO_API_TOKEN")
-    if not token:
-        return []
-    try:
-        return asyncio.run(_candidate_addresses_from_hypersync_async(checker_address=checker_address, limit=limit))
-    except Exception:
-        return []
-
-
-async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int) -> list[str]:
-    try:
-        import hypersync  # type: ignore
-    except Exception:
-        return []
-
-    url = os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
-    timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
-    max_pages = int(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_MAX_PAGES", "20"))
-    client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=os.getenv("ENVIO_API_TOKEN")))
-    current_from = 0
-    page_count = 0
-    started = time.monotonic()
-    seen: set[str] = set()
-    out: list[str] = []
-    while len(out) < limit:
-        if time.monotonic() - started > timeout_s or page_count >= max_pages:
-            break
-        query = hypersync.Query(
-            from_block=current_from,
-            logs=[hypersync.LogSelection(address=[checker_address.lower()])],
-            field_selection=hypersync.FieldSelection(log=[field.value for field in hypersync.LogField]),
-        )
-        response = await client.get(query)
-        page_count += 1
-        for log in _logs_from_hypersync_response(response):
-            for word in _topics_from_hypersync_log(log)[1:] + _data_words_from_hypersync_log(log):
-                addr = _word_to_address(word)
-                if addr is None or not _is_plausible_candidate_address(addr) or addr in seen:
-                    continue
-                seen.add(addr)
-                out.append(addr)
-                if len(out) >= limit:
-                    return out
-        next_block = getattr(response, "next_block", None)
-        if next_block is None or next_block <= current_from:
-            break
-        current_from = next_block
-    return out
-
-
-def _logs_from_hypersync_response(response: Any) -> list[Any]:
-    data = getattr(response, "data", None)
-    if data is not None:
-        logs = getattr(data, "logs", None)
-        if isinstance(logs, list):
-            return logs
-    logs = getattr(response, "logs", None)
-    return logs if isinstance(logs, list) else []
-
-
-def _topics_from_hypersync_log(log: Any) -> list[str]:
-    topics = getattr(log, "topics", None)
-    if isinstance(topics, list):
-        return [t for t in topics if isinstance(t, str)]
-    out: list[str] = []
-    for key in ("topic0", "topic1", "topic2", "topic3"):
-        value = getattr(log, key, None)
-        if isinstance(value, str) and value.startswith("0x"):
-            out.append(value)
-    return out
-
-
-def _data_words_from_hypersync_log(log: Any) -> list[str]:
-    data = getattr(log, "data", None)
-    if not isinstance(data, str) or not data.startswith("0x"):
-        return []
-    body = data[2:]
-    return ["0x" + body[idx : idx + 64] for idx in range(0, len(body), 64) if len(body[idx : idx + 64]) == 64]

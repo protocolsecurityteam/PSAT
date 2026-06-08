@@ -488,9 +488,9 @@ export default function ProtocolGraph({ companyName }) {
 
         const fnData = {};
         for (const contract of data.contracts) {
-          if (!contract.job_id) continue;
+          if (!contract.analysis_job_id) continue;
           try {
-            const lookupId = contract.impl_job_id || contract.job_id;
+            const lookupId = contract.implementation_analysis_job_id || contract.analysis_job_id;
             const fnRes = await fetch(`/api/analyses/${lookupId}/artifact/effective_permissions`);
             if (fnRes.ok) {
               const perms = await fnRes.json();

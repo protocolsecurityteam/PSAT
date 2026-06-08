@@ -9,10 +9,13 @@ adapter consumes those records directly with no per-standard adapter.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, cast
 
 from ..capabilities import CapabilityExpr, Confidence, ExternalCheck, MembershipQuality
 from . import EnumerationResult, EvaluationContext
+
+logger = logging.getLogger(__name__)
 
 
 class EventIndexedAdapter:
@@ -101,31 +104,24 @@ class EventIndexedAdapter:
                     key_sources=key_sources,
                     block=ctx.block,
                 )
-            except Exception:
-                return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
+            except Exception as exc:
+                logger.error(
+                    "Event-indexed history fold failed chain_id=%s event_address=%s: %s",
+                    ctx.chain_id,
+                    event_address,
+                    exc,
+                    extra={"exc_type": type(exc).__name__},
+                )
+                raise RuntimeError(
+                    f"event-indexed history fold failed for chain_id={ctx.chain_id} event_address={event_address}"
+                ) from exc
             if result.confidence == Confidence.PARTIAL and result.partial_reason in {
                 "event_history_fold_unavailable",
                 "unresolved_event_key",
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
             if result.confidence == Confidence.PARTIAL and result.partial_reason == "no_index_cursor":
-                try:
-                    fallback = _hypersync_fallback_result(
-                        hints=event_hints,
-                        ctx=ctx,
-                        event_address=event_address,
-                        key_sources=key_sources,
-                    )
-                except Exception:
-                    return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
-                if fallback.confidence == Confidence.PARTIAL and fallback.partial_reason == "no_hypersync_token":
-                    return self._external_check(descriptor, first_hint, ctx, ["no_index_cursor", "no_hypersync_token"])
-                result = fallback
-                if result.confidence == Confidence.PARTIAL and result.partial_reason in {
-                    "event_history_fold_unavailable",
-                    "unresolved_event_key",
-                }:
-                    return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
+                return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
             merged.extend(result.members)
             if result.confidence == Confidence.PARTIAL and worst_confidence == Confidence.ENUMERABLE:
                 worst_confidence = Confidence.PARTIAL
@@ -212,10 +208,20 @@ class EventIndexedAdapter:
             scan = enumerate_mapping_values_sync(
                 contract_address,
                 writer_specs,  # type: ignore[arg-type]
+                chain_id=ctx.chain_id,
                 value_predicate=value_predicate,
             )
-        except Exception:
-            return CapabilityExpr.unsupported("mapping_value_scan_failed")
+        except Exception as exc:
+            logger.error(
+                "Mapping value scan failed chain_id=%s contract=%s: %s",
+                ctx.chain_id,
+                contract_address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(
+                f"mapping value scan failed for chain_id={ctx.chain_id} contract={contract_address}"
+            ) from exc
 
         keys = filter_value_entries(scan["entries"], value_predicate)
         is_complete = scan["status"] == "complete"
@@ -328,27 +334,4 @@ def _fold_event_history(
         key_sources=key_sources,
         direction=hint.get("direction"),
         block=block,
-    )
-
-
-def _hypersync_fallback_result(
-    *,
-    hints: list[dict],
-    ctx: EvaluationContext,
-    event_address: str,
-    key_sources: list[dict],
-) -> EnumerationResult:
-    from ..repos.event_logs_hypersync import HyperSyncEventLogRepo
-
-    repo = HyperSyncEventLogRepo(
-        url=str(ctx.meta.get("hypersync_url") or "https://eth.hypersync.xyz"),
-        bearer_token=ctx.meta.get("hypersync_token"),
-    )
-    return _fold_event_history(
-        repo=repo,
-        chain_id=ctx.chain_id,
-        event_address=event_address,
-        event_hints=hints,
-        key_sources=key_sources,
-        block=ctx.block,
     )

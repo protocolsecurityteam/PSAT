@@ -8,13 +8,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors, StageErrorSeverity
+from services.discovery.chain_resolver import resolve_address_chain_ids
 from services.discovery.ranking import not_superseded_impl_clause
+from utils.rpc import require_supported_chain_id
 
 from . import deps
 
@@ -33,14 +35,39 @@ def list_jobs() -> list[dict[str, Any]]:
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)])
 def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
-    if request.address and not request.address.startswith("0x"):
-        raise HTTPException(status_code=400, detail="Address must start with 0x")
     with deps.SessionLocal() as session:
-        # Workers read ``request["rpc_url"]`` as a per-job RPC override; the
-        # value is stored verbatim here and sanitized by ``Job.to_dict`` at
-        # output.
         req_dict = request.model_dump()
+        if request.address and request.chain_id is None:
+            try:
+                resolved = resolve_address_chain_ids([request.address])
+            except Exception as exc:
+                detail = f"Could not resolve deployed chains for address: {exc}"
+                raise HTTPException(status_code=400, detail=detail) from exc
+            chain_ids = resolved.get(request.address.lower(), [])
+            if not chain_ids:
+                raise HTTPException(status_code=400, detail="Address has no deployed code on supported chains")
+            jobs: list[Job] = []
+            for chain_id in chain_ids:
+                chain_req = {**req_dict, "chain_id": chain_id}
+                jobs.append(deps.create_job(session, chain_req))
+            root_job_id = str(jobs[0].id)
+            for job in jobs:
+                job.request = {**(job.request if isinstance(job.request, dict) else {}), "root_job_id": root_job_id}
+            session.commit()
+            out = jobs[0].to_dict()
+            out["multichain_jobs"] = [job.to_dict() for job in jobs]
+            return out
+
+        if request.address:
+            chain_id = require_supported_chain_id(
+                chain_id=req_dict.get("chain_id"),
+                context="analyze address request",
+            )
+            req_dict["chain_id"] = chain_id
+
         if request.dapp_urls:
+            chain_id = require_supported_chain_id(chain_id=req_dict.get("chain_id"), context="DApp crawl request")
+            req_dict["chain_id"] = chain_id
             job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
         elif request.defillama_protocol:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.defillama_scan)
@@ -65,11 +92,10 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
         # proxy's CURRENT impl is kept (it carries the live marker), since that
         # is where the real functions live. Single source of truth for the
         # anchor predicate: services/discovery/ranking.not_superseded_impl_clause.
-        unanalyzed = (
+        candidates = (
             session.execute(
                 select(Contract).where(
                     Contract.protocol_id == protocol_row.id,
-                    Contract.job_id.is_(None),
                     not_superseded_impl_clause(Contract.discovery_sources),
                 )
             )
@@ -78,28 +104,24 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
         )
 
         queued = []
-        for contract in unanalyzed:
-            # Re-check inside the loop so concurrent calls (double-click or
-            # duplicate request) don't each create a job for the same contract.
-            session.refresh(contract, attribute_names=["job_id"])
-            if contract.job_id is not None:
-                continue
-            existing = deps.find_existing_job_for_address(session, contract.address, chain=contract.chain)
+        for contract in candidates:
+            effective_chain_id = require_supported_chain_id(
+                chain_id=contract.chain_id,
+                context=f"analyze remaining {contract.address}",
+            )
+            existing = deps.find_existing_job_for_address(session, contract.address, chain_id=effective_chain_id)
             if existing is not None:
-                contract.job_id = existing.id
-                session.commit()
                 continue
             req_dict = {
                 "address": contract.address,
                 "name": contract.contract_name or f"{company_name}_{contract.address[2:10]}",
-                "chain": contract.chain,
+                "chain_id": effective_chain_id,
                 "protocol_id": protocol_row.id,
                 "company": company_name,
             }
             job = deps.create_job(session, req_dict)
-            contract.job_id = job.id
             session.commit()
-            queued.append({"job_id": str(job.id), "address": contract.address})
+            queued.append({"job_id": str(job.id), "address": contract.address, "chain_id": effective_chain_id})
 
         return {"queued": len(queued), "jobs": queued}
 
@@ -133,16 +155,20 @@ def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
     "/api/company/{company_name}/addresses/{address}",
     dependencies=[Depends(deps.require_admin_key)],
 )
-def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
+def delete_company_address(company_name: str, address: str, chain_id: int) -> dict[str, Any]:
     """Remove a Contract row from a protocol.
 
-    Scoped to the protocol so unrelated contracts sharing an address (very
-    rare — addresses are chain-global but we key by address only) aren't
-    affected. FK cascades on ``contracts.id`` clean up the audit coverage
-    rows and any upgrade-event attribution.
+    Scoped to the protocol and chain id so same-address deployments on other
+    chains are never affected. FK cascades on ``contracts.id`` clean up the
+    audit coverage rows and any upgrade-event attribution.
     """
     if not deps._ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid address")
+    try:
+        effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="delete company address")
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
@@ -150,14 +176,15 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
         contract = session.execute(
             select(Contract).where(
                 Contract.protocol_id == protocol_row.id,
-                Contract.address == address,
+                Contract.chain_id == effective_chain_id,
+                func.lower(Contract.address) == address.lower(),
             )
         ).scalar_one_or_none()
         if contract is None:
-            raise HTTPException(status_code=404, detail="Address not found for this protocol")
+            raise HTTPException(status_code=404, detail="Address not found for this protocol and chain_id")
         session.delete(contract)
         session.commit()
-    return {"company": company_name, "address": address, "deleted": True}
+    return {"company": company_name, "address": address.lower(), "chain_id": effective_chain_id, "deleted": True}
 
 
 @router.get("/api/jobs/{job_id}")

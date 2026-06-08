@@ -287,7 +287,8 @@ def _normalize_capability_output(
         if isinstance(cap, dict):
             cap_dict = dict(cap)
             if not isinstance(cap_dict.get("kind"), str):
-                cap_dict = _unsupported_capability("malformed_semantic_capability")
+                logger.error("Malformed semantic capability for function %s: missing string kind", fn_signature)
+                raise RuntimeError(f"malformed semantic capability for {fn_signature}: missing string kind")
             out[str(fn_signature)] = cap_dict
             continue
         if is_dataclass(cap):
@@ -296,27 +297,27 @@ def _normalize_capability_output(
 
                 cap_dict = capability_to_dict(cap)  # type: ignore[arg-type]
                 if not isinstance(cap_dict.get("kind"), str):
-                    cap_dict = _unsupported_capability("malformed_semantic_capability")
+                    logger.error(
+                        "Malformed serialized CapabilityExpr for function %s: missing string kind",
+                        fn_signature,
+                    )
+                    raise RuntimeError(f"malformed serialized CapabilityExpr for {fn_signature}: missing string kind")
                 out[str(fn_signature)] = cap_dict
             except Exception as exc:
-                logger.warning(
+                logger.error(
                     "Failed to serialize CapabilityExpr for function %s: %s",
                     fn_signature,
                     exc,
                 )
-                out[str(fn_signature)] = _unsupported_capability("malformed_semantic_capability")
+                raise RuntimeError(f"failed to serialize CapabilityExpr for {fn_signature}") from exc
             continue
-        out[str(fn_signature)] = _unsupported_capability("malformed_semantic_capability")
+        logger.error(
+            "Malformed semantic capability for function %s: expected dict or dataclass, got %s",
+            fn_signature,
+            type(cap).__name__,
+        )
+        raise RuntimeError(f"malformed semantic capability for {fn_signature}: {type(cap).__name__}")
     return out
-
-
-def _unsupported_capability(reason: str) -> dict[str, Any]:
-    return {
-        "kind": "unsupported",
-        "unsupported_reason": reason,
-        "membership_quality": "exact",
-        "confidence": "check_only",
-    }
 
 
 def _public_capability() -> dict[str, Any]:
@@ -428,15 +429,15 @@ def _function_records_from_semantic_artifacts(
         }
         if signature not in capability_dicts:
             if signature in predicate_trees_by_function:
-                record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
-                record["status"] = "unsupported"
+                logger.error("Missing semantic capability resolver output for predicate tree %s", signature)
+                raise RuntimeError(f"missing semantic capability resolver output for predicate tree {signature}")
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
                 record["status"] = "public"
                 record["authority_public"] = True
             else:
-                record["capability_expr"] = _unsupported_capability("missing_semantic_capability_resolver_output")
-                record["status"] = "unsupported"
+                logger.error("Semantic capability resolver output is unavailable for function %s", signature)
+                raise RuntimeError(f"semantic capability resolver output unavailable for {signature}")
         records.append(record)
     return records
 

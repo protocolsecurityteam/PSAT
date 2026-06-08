@@ -1,7 +1,7 @@
 """Worker-fleet concurrency primitives shared across pipeline stages.
 
-The pipeline is dominated by JSON-RPC and Etherscan I/O — the few bits of CPU
-work between requests don't justify processes, but the cumulative RTT cost on
+The pipeline is dominated by JSON-RPC and source-provider I/O — the few bits of
+CPU work between requests don't justify processes, but the cumulative RTT cost on
 serial loops is the dominant share of every worker's wall time. These helpers
 give every fan-out site a uniform, threading-only way to stack RTTs while
 keeping the request shape, ordering guarantees, and error semantics identical
@@ -232,6 +232,8 @@ def submit_rpc(fn: Callable[..., R], *args: Any, **kwargs: Any) -> Future[R]:
 def parallel_rpc_calls(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
+    *,
+    chain_id: int | str | None = None,
 ) -> list[tuple[Any, bool]]:
     """Drop-in replacement for ``rpc_batch_request_with_status`` that parallelizes across chunks.
 
@@ -244,7 +246,7 @@ def parallel_rpc_calls(
     if not calls:
         return []
     if len(calls) <= MAX_BATCH_SIZE:
-        return rpc_batch_request_with_status(rpc_url, calls)
+        return rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
 
     chunks: list[tuple[int, list[tuple[str, list[Any]]]]] = []
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
@@ -256,15 +258,15 @@ def parallel_rpc_calls(
         # Per-chunk context copy — see ``parallel_map`` above for why a
         # shared ``Context`` object cannot be concurrently entered.
         ctx = contextvars.copy_context()
-        futures[RpcExecutor.submit(ctx.run, rpc_batch_request_with_status, rpc_url, chunk)] = offset
+        futures[RpcExecutor.submit(ctx.run, rpc_batch_request_with_status, rpc_url, chunk, chain_id=chain_id)] = offset
 
     for fut in as_completed(futures):
         offset = futures[fut]
         try:
             chunk_results = fut.result()
-        except Exception:
+        except Exception as exc:
             logger.exception("parallel_rpc_calls: chunk at offset %d failed wholesale", offset)
-            continue
+            raise RuntimeError(f"parallel_rpc_calls chunk at offset {offset} failed") from exc
         for i, item in enumerate(chunk_results):
             results[offset + i] = item
     return results

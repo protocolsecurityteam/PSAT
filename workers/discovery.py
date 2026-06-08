@@ -1,4 +1,4 @@
-"""Discovery worker — fetches verified source from Etherscan and stores in DB.
+"""Discovery worker — fetches verified source and stores it in DB.
 
 For address-mode jobs: fetches source, stores files + metadata, advances to static.
 For company-mode jobs: discovers contracts via protocol inventory, writes them
@@ -10,7 +10,6 @@ set and creates the top-N analysis child jobs once the siblings settle.
 from __future__ import annotations
 
 import logging
-from typing import cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -19,10 +18,7 @@ from db.models import Contract, Job, JobStage
 from db.queue import (
     advance_job,
     bulk_upsert_discovered_contracts,
-    copy_static_cache,
     create_job,
-    find_completed_static_cache,
-    find_previous_company_inventory,
     get_or_create_protocol,
     store_artifact,
     store_source_files,
@@ -31,36 +27,66 @@ from schemas.common import Contract as ContractSchema
 from schemas.common import make_contract
 from services.artifacts import (
     DISCOVERY_ARTIFACT,
-    get_artifact_field,
     make_job_contract,
     make_job_stage_context,
     make_stage_artifact,
 )
-from services.discovery.audit_reports import merge_audit_reports
 from services.discovery.chain_resolver import expand_entries_by_resolved_chains
-from services.discovery.deployer import _batch_get_creators
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources
-from services.discovery.inventory import merge_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
-from utils import etherscan
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from utils.rpc import chain_id_for_chain_name
+from utils.rpc import require_supported_chain_id, supported_chain_ids
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
 
 
-def _contract_from_inventory_entry(entry: dict) -> ContractSchema | None:
+def _resolve_job_chain_id(job: Job) -> int:
+    return require_supported_chain_id(
+        chain_id=job.chain_id,
+        context=f"discovery job {job.id}",
+    )
+
+
+def _chain_id_for_company_job(job: Job) -> int | None:
+    if job.chain_id is None:
+        return None
+    return require_supported_chain_id(chain_id=job.chain_id, context=f"company discovery job {job.id}")
+
+
+def _dapp_crawl_chain_ids_for_company_job(job: Job) -> list[int]:
+    if job.chain_id is not None:
+        chain_id = _chain_id_for_company_job(job)
+        if chain_id is None:
+            message = f"company discovery job {job.id} has no DApp crawl chain_id"
+            logger.error("%s", message)
+            raise RuntimeError(message)
+        return [chain_id]
+    try:
+        chain_ids = sorted(supported_chain_ids())
+    except RuntimeError as exc:
+        logger.error("company discovery job %s could not load supported DApp crawl chain ids: %s", job.id, exc)
+        raise
+    if not chain_ids:
+        message = f"company discovery job {job.id} has no supported DApp crawl chain ids"
+        logger.error("%s", message)
+        raise RuntimeError(message)
+    return chain_ids
+
+
+def _contract_from_inventory_entry(entry: dict) -> ContractSchema:
     address = entry.get("address")
     if not isinstance(address, str) or not address:
-        return None
-    entry_chains = entry.get("chains")
-    if not isinstance(entry_chains, list) or not entry_chains or not isinstance(entry_chains[0], str):
-        return None
-    chain_id = chain_id_for_chain_name(entry_chains[0])
-    if chain_id is None:
-        return None
-    name = entry.get("name") if isinstance(entry.get("name"), str) else None
+        raise ValueError(f"inventory artifact entry missing address: {entry!r}")
+    try:
+        chain_id = require_supported_chain_id(
+            chain_id=entry.get("chain_id"),
+            context=f"inventory artifact entry for {address}",
+        )
+    except RuntimeError as exc:
+        raise ValueError(f"inventory artifact entry requires supported chain_id: {entry!r}") from exc
+    name_value = entry.get("name") or entry.get("contract_name")
+    name = name_value if isinstance(name_value, str) else None
     return make_contract(
         address=address,
         chain_id=chain_id,
@@ -74,9 +100,7 @@ def _contracts_from_inventory(inventory: dict) -> list[ContractSchema]:
     for entry in inventory.get("contracts", []):
         if not isinstance(entry, dict):
             continue
-        contract = _contract_from_inventory_entry(entry)
-        if contract is not None:
-            contracts.append(contract)
+        contracts.append(_contract_from_inventory_entry(entry))
     return contracts
 
 
@@ -172,7 +196,7 @@ def _deployer_cascade_protocol_id(session: Session, deployer: str | None) -> int
     ``discovery_relationship`` for impl / beacon edges. Contracts pulled
     in by a plain function-call dependency edge land here with NULL
     ``discovery_sources`` and no structural signal — even when their
-    Etherscan-recorded deployer is one of the protocol's known
+    source-provider-recorded deployer is one of the protocol's known
     qualified deployer EOAs.
 
     The HIGH-sourced sibling requirement keeps shared-infrastructure
@@ -225,19 +249,11 @@ class DiscoveryWorker(BaseWorker):
         if company is None:
             raise ValueError("Company job missing company name")
         request = job.request if isinstance(job.request, dict) else {}
-        chain = request.get("chain")
+        chain_id = _chain_id_for_company_job(job)
         root_job_id = str(job.id)
 
-        # Load previous inventory from a prior completed company job (same chain)
-        prev_inventory: dict | None = None
-        prev_job = find_previous_company_inventory(session, company, exclude_job_id=job.id, chain=chain)
-        if prev_job:
-            _raw = get_artifact_field(session, prev_job.id, "discovery_inventory")
-            if isinstance(_raw, dict):
-                prev_inventory = _raw
-
         self.update_detail(session, job, f"Discovering contracts + audits for {company}")
-        logger.info("Discovery started for job %s: company=%s, chain=%s", job.id, company, chain)
+        logger.info("Discovery started for job %s: company=%s, chain_id=%s", job.id, company, chain_id)
 
         # Premium+Deps unified discovery (see services/discovery/run_discovery.py).
         # Runs audit + address pipelines in one call, including Deep Research seeds,
@@ -245,16 +261,12 @@ class DiscoveryWorker(BaseWorker):
         from services.discovery.run_discovery import run_discovery
 
         with log_timed_phase(logger, "unified_discovery") as ph:
-            unified = run_discovery(company, chain=chain)
+            unified = run_discovery(company, chain_id=chain_id)
             inventory = unified["addresses"]
             audit_result_raw: dict = unified["audits"]
             discovery_meta = unified["meta"]
             ph["contracts"] = len(inventory) if hasattr(inventory, "__len__") else None
             ph["audits"] = len(audit_result_raw) if isinstance(audit_result_raw, (list, dict)) else None
-
-        # Merge with previous inventory if available
-        if prev_inventory and isinstance(prev_inventory, dict):
-            inventory = merge_inventory(prev_inventory, inventory)
 
         # Resolve to a DefiLlama family slug FIRST so the Protocol upsert is
         # keyed on a stable canonical id. Without this, the same protocol
@@ -276,17 +288,9 @@ class DiscoveryWorker(BaseWorker):
 
         # --- Audit report discovery ---
         self.update_detail(session, job, f"Persisting audit reports for {company}")
-        prev_audits: dict | None = None
-        if prev_job:
-            _raw_audits = get_artifact_field(session, prev_job.id, "discovery_audit_reports")
-            if isinstance(_raw_audits, dict):
-                prev_audits = _raw_audits
-
         audit_result: dict | None = None
         try:
             audit_result = audit_result_raw
-            if prev_audits:
-                audit_result = merge_audit_reports(prev_audits, audit_result)
             _sync_audit_reports_to_db(session, protocol_row.id, audit_result.get("reports", []))
             audit_count = len(audit_result.get("reports", []))
             record_stage_metric("audit_reports", audit_count)
@@ -300,10 +304,10 @@ class DiscoveryWorker(BaseWorker):
                 context={"company": company},
                 include_traceback=True,
             )
-            logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
+            logger.error("Job %s: audit report persistence failed: %s", job.id, exc)
+            raise RuntimeError(f"audit report persistence failed for {company}") from exc
 
-        discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
-        record_stage_metric("contracts_discovered", len(discovered))
+        discovered = [e for e in inventory.get("contracts", []) if isinstance(e, dict)]
 
         # Write ALL discovered addresses to contracts table. Ranking and
         # job creation happen later in the selection stage, once DApp
@@ -319,21 +323,57 @@ class DiscoveryWorker(BaseWorker):
         # so ranking sees the richer corroboration story.
         bulk_entries: list[dict] = []
         for entry in discovered:
-            entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else None
             entry_sources = entry.get("source")
             if not isinstance(entry_sources, list) or not entry_sources:
                 raise ValueError(f"Discovered contract entry missing explicit source: {entry!r}")
-            bulk_entries.append(
-                {
-                    "address": str(entry["address"]),
-                    "chain": entry_chain,
-                    "new_sources": entry_sources,
-                    "contract_name": entry.get("name"),
-                    "confidence": entry.get("confidence"),
-                    "chains": entry.get("chains"),
-                }
-            )
+            base_entry = {
+                "new_sources": entry_sources,
+                "contract_name": entry.get("name"),
+                "confidence": entry.get("confidence"),
+            }
+            deployments = entry.get("deployments")
+            if isinstance(deployments, list) and deployments:
+                deployment_entries = deployments
+            elif entry.get("address"):
+                deployment_entries = [entry]
+            else:
+                raise ValueError(f"Discovered contract entry missing address/deployments: {entry!r}")
+
+            for deployment in deployment_entries:
+                if not isinstance(deployment, dict) or not deployment.get("address"):
+                    raise ValueError(f"Discovered deployment entry missing address: {deployment!r}")
+                raw_chain_ids = deployment.get("chain_ids") or []
+                if not isinstance(raw_chain_ids, list):
+                    raise ValueError(f"Discovered deployment entry has invalid chain_ids: {deployment!r}")
+                chain_ids: list[int] = []
+                for raw_chain_id in raw_chain_ids:
+                    try:
+                        parsed_chain_id = require_supported_chain_id(
+                            chain_id=raw_chain_id,
+                            context=f"discovered deployment entry for {deployment.get('address')}",
+                        )
+                    except RuntimeError as exc:
+                        raise ValueError(
+                            f"Discovered deployment entry requires supported chain_id: {deployment!r}"
+                        ) from exc
+                    chain_ids.append(parsed_chain_id)
+                if chain_ids:
+                    for deployment_chain_id in chain_ids:
+                        bulk_entries.append(
+                            {
+                                **base_entry,
+                                "address": str(deployment["address"]),
+                                "chain_id": deployment_chain_id,
+                            }
+                        )
+                else:
+                    bulk_entries.append(
+                        {
+                            **base_entry,
+                            "address": str(deployment["address"]),
+                        }
+                    )
+        record_stage_metric("contracts_discovered", len(bulk_entries))
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
         # into roughly one round-trip.
@@ -345,10 +385,10 @@ class DiscoveryWorker(BaseWorker):
             "mode": "company",
             "company": company,
             "official_domain": inventory.get("official_domain"),
-            "discovered_count": len(discovered),
+            "discovered_count": len(bulk_entries),
         }
         artifact_data = {
-            "contracts": _contracts_from_inventory(inventory),
+            "contracts": _contracts_from_inventory({"contracts": bulk_entries}),
             "inventory": inventory,
             "metadata": discovery_meta,
             "summary": summary,
@@ -379,7 +419,7 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(
             session,
             job,
-            f"Discovered {len(discovered)} contracts; awaiting parallel discovery before ranking",
+            f"Discovered {len(bulk_entries)} contracts; awaiting parallel discovery before ranking",
         )
 
         # Hand off to the selection stage. The SelectionWorker waits for
@@ -390,7 +430,7 @@ class DiscoveryWorker(BaseWorker):
             session,
             job.id,
             JobStage.selection,
-            f"Discovery complete for {company}: {len(discovered)} contracts; ranking pending",
+            f"Discovery complete for {company}: {len(bulk_entries)} contracts; ranking pending",
         )
         raise JobHandledDirectly()
 
@@ -429,7 +469,6 @@ class DiscoveryWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "analyze_limit": request.get("analyze_limit", 5),
-                "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
             }
             dl_job = create_job(session, defillama_request, initial_stage=JobStage.defillama_scan)
@@ -438,98 +477,51 @@ class DiscoveryWorker(BaseWorker):
         # Spawn DApp crawl
         dapp_url = protocol.get("url")
         if dapp_url:
-            dapp_request = {
-                "dapp_urls": [dapp_url],
-                "name": f"{company}_dapp_crawl",
-                "company": company,
-                "parent_job_id": str(job.id),
-                "root_job_id": root_job_id,
-                "analyze_limit": request.get("analyze_limit", 5),
-                "chain_id": request.get("chain_id"),
-                "wait": request.get("wait", 10),
-                "rpc_url": request.get("rpc_url"),
-                "protocol_id": job.protocol_id,
-            }
-            crawl_job = create_job(session, dapp_request, initial_stage=JobStage.dapp_crawl)
-            logger.info("Job %s: spawned DApp crawl job %s (url=%s)", job.id, crawl_job.id, dapp_url)
-
+            dapp_chain_ids = _dapp_crawl_chain_ids_for_company_job(job)
+            crawl_jobs: list[str] = []
+            for dapp_chain_id in dapp_chain_ids:
+                dapp_request = {
+                    "dapp_urls": [dapp_url],
+                    "name": f"{company}_dapp_crawl_chain_{dapp_chain_id}",
+                    "company": company,
+                    "parent_job_id": str(job.id),
+                    "root_job_id": root_job_id,
+                    "analyze_limit": request.get("analyze_limit", 5),
+                    "chain_id": dapp_chain_id,
+                    "wait": request.get("wait", 10),
+                    "protocol_id": job.protocol_id,
+                }
+                crawl_job = create_job(session, dapp_request, initial_stage=JobStage.dapp_crawl)
+                crawl_jobs.append(str(crawl_job.id))
+                logger.info(
+                    "Job %s: spawned DApp crawl job %s (url=%s chain_id=%s)",
+                    job.id,
+                    crawl_job.id,
+                    dapp_url,
+                    dapp_chain_id,
+                )
+            logger.info(
+                "Job %s: spawned %d DApp crawl job(s) for %s across chain_ids=%s",
+                job.id,
+                len(crawl_jobs),
+                company,
+                dapp_chain_ids,
+            )
     def _process_address(self, session: Session, job: Job) -> None:
         """Fetch verified source for a single address."""
         address = job.address
         if address is None:
             raise ValueError("Address job missing address")
 
-        # Check for cached static data from a previously completed job (same chain).
-        # `force` is the bench-mode escape hatch — see AnalyzeRequest.force in api.py.
         request = job.request if isinstance(job.request, dict) else {}
-        if request.get("force"):
-            cached_job = None
-            logger.info("Discovery: force=True, skipping static cache lookup for %s", address)
-        else:
-            cached_job = find_completed_static_cache(session, address, chain=request.get("chain"))
-        if cached_job is not None:
-            self.update_detail(session, job, f"Reusing cached static data for {address}")
-            new_contract_id = copy_static_cache(session, cached_job.id, job.id)
-            if new_contract_id is not None:
-                # Mark the job so downstream workers know static data was cached
-                req = job.request if isinstance(job.request, dict) else {}
-                job.request = {**req, "static_cached": True, "cache_source_job_id": str(cached_job.id)}
-                session.commit()
-
-                # Set job name from the cached contract if not already set
-                if not job.name:
-                    from sqlalchemy import select as sa_select
-
-                    contract_row = session.execute(
-                        sa_select(Contract).where(Contract.job_id == job.id).limit(1)
-                    ).scalar_one_or_none()
-                    if contract_row and contract_row.contract_name:
-                        job.name = f"{contract_row.contract_name}_{address[2:10]}"
-                        session.commit()
-                else:
-                    contract_row = session.get(Contract, new_contract_id)
-
-                _store_address_discovery_artifact(
-                    session,
-                    job,
-                    contract_row,
-                    summary={
-                        "mode": "address",
-                        "address": address.lower(),
-                        "cached": True,
-                        "cache_source_job_id": str(cached_job.id),
-                    },
-                )
-
-                logger.info(
-                    "Discovery cache hit for %s — reused data from job %s",
-                    address,
-                    cached_job.id,
-                )
-                self.update_detail(session, job, f"Discovery complete (cached): {address}")
-                return
-
-            logger.warning(
-                "Discovery cache copy failed for %s from job %s — falling back to fetch",
-                address,
-                cached_job.id,
-            )
+        chain_id = _resolve_job_chain_id(job)
+        if job.chain_id != chain_id:
+            job.chain_id = chain_id
+            session.commit()
 
         self.update_detail(session, job, f"Fetching verified source for {address}")
-        # Both calls hit Etherscan. parallel_get routes each thunk through
-        # _wait_rate_limit, so the 5/sec global limit is preserved while the
-        # serial RTT between them goes away.
         with log_timed_phase(logger, "source_fetch"):
-            fan_out = etherscan.parallel_get(
-                {
-                    "fetch": lambda a=address: fetch(a),
-                    "creators": lambda a=address: _batch_get_creators([a]),
-                }
-            )
-        result_or_exc = fan_out["fetch"]
-        if isinstance(result_or_exc, BaseException):
-            raise result_or_exc
-        result = cast(dict, result_or_exc)
+            result = fetch(address, chain_id=chain_id)
 
         contract_name = result.get("ContractName", "Contract")
 
@@ -542,20 +534,14 @@ class DiscoveryWorker(BaseWorker):
         raw_evm = result.get("EVMVersion", "") or ""
         evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
 
-        # Look up deployer wallet via Etherscan
         deployer = None
-        creators_or_exc = fan_out.get("creators")
-        if isinstance(creators_or_exc, dict):
-            deployer = creators_or_exc.get(address.lower())
-        elif isinstance(creators_or_exc, BaseException):
-            logger.debug("Could not fetch deployer for %s: %s", address, creators_or_exc)
 
         # Write to contracts table — upsert to handle pre-existing discovered rows
         request = job.request if isinstance(job.request, dict) else {}
         existing = session.execute(
             select(Contract).where(
                 Contract.address == address.lower(),
-                Contract.chain == request.get("chain"),
+                Contract.chain_id == chain_id,
             )
         ).scalar_one_or_none()
 
@@ -585,7 +571,6 @@ class DiscoveryWorker(BaseWorker):
 
         contract_row: Contract | None
         if existing:
-            existing.job_id = job.id
             existing.contract_name = contract_name
             existing.compiler_version = result.get("CompilerVersion", "")
             existing.language = "vyper" if is_vyper_result(result) else "solidity"
@@ -651,7 +636,7 @@ class DiscoveryWorker(BaseWorker):
             contract = Contract(
                 job_id=job.id,
                 address=address.lower(),
-                chain=request.get("chain"),
+                chain_id=chain_id,
                 protocol_id=owning_protocol_id,
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
@@ -667,7 +652,6 @@ class DiscoveryWorker(BaseWorker):
                 rank_score=request.get("rank_score"),
                 confidence=request.get("confidence"),
                 discovery_sources=sources_for_row or None,
-                chains=request.get("chains"),
                 source_verified=True,
             )
             session.add(contract)

@@ -22,28 +22,18 @@ from db.models import (
     AuditReport,
     Contract,
     ContractSummary,
-    Job,
-    JobStatus,
     Protocol,
     UpgradeEvent,
 )
-
-# Common aliases the same chain shows up under in our DB. Treat
-# `ethereum`/`mainnet` as the same canonical chain when matching, so a
-# tool call with `chain="ethereum"` resolves rows tagged `mainnet` and
-# vice versa. NULL/empty chain stays a separate "legacy/unknown" bucket
-# — we don't blanket-treat it as Ethereum because that turns missing
-# data into false confidence (per codex's pitfall flag).
-_CHAIN_ALIASES = {"ethereum": "ethereum", "mainnet": "ethereum"}
+from utils.rpc import require_supported_chain_id
 
 
-def _canonical_chain(c: str | None) -> str | None:
-    if not c:
-        return None
-    return _CHAIN_ALIASES.get(c.lower(), c.lower())
-
-
-def classify_address(session, address: str, chain: str | None = None) -> dict[str, Any]:
+def classify_address(
+    session,
+    address: str,
+    *,
+    chain_id: int | None = None,
+) -> dict[str, Any]:
     """Resolve an address to its control type and gating properties.
 
     Surfaced to the agent so it never has to *infer* "is this an EOA or
@@ -60,19 +50,24 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
          owners, and delays.
       2. ``contracts`` row — if the address has a Contract row it has
          bytecode and is at minimum a generic "contract".
-      3. Fallback: "unknown" with a note instructing the agent to
-         verify before reasoning about compromise semantics.
+      3. Unknown, only when the chain-scoped pipeline has no classification.
     """
     from db.models import ControlGraphNode
 
     if not address:
         return {"address": address, "kind": "unknown", "is_eoa": False, "note": ""}
     addr_lc = address.lower()
+    try:
+        effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"chat classify address {addr_lc}")
+    except RuntimeError as exc:
+        return {"address": address, "error": str(exc)}
 
-    cg_node = session.execute(
-        select(ControlGraphNode).where(func.lower(ControlGraphNode.address) == addr_lc).limit(1)
-    ).scalar_one_or_none()
-    contract = _resolve_contract(session, address, chain)
+    cg_stmt = select(ControlGraphNode).where(func.lower(ControlGraphNode.address) == addr_lc)
+    cg_stmt = cg_stmt.join(Contract, ControlGraphNode.contract_id == Contract.id).where(
+        Contract.chain_id == effective_chain_id
+    )
+    cg_node = session.execute(cg_stmt.limit(1)).scalar_one_or_none()
+    contract = _resolve_contract(session, address, chain_id=effective_chain_id)
 
     details = (cg_node.details if cg_node else None) or {}
     kind = (cg_node.resolved_type if cg_node else None) or ("contract" if contract else "unknown")
@@ -110,48 +105,30 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
     return out
 
 
-def _resolve_contract(session, address: str, chain: str | None) -> Contract | None:
-    """Find a Contract by address. The LLM may pass ``chain`` as a hint
-    (sometimes it's wrong — e.g. it says "ethereum" while the row is
-    tagged ``mainnet`` or NULL). Resolution strategy (codex-recommended):
-
-      1. If chain is provided: match address + canonical chain. ethereum
-         and mainnet are aliases. Strict miss falls through to (3).
-      2. If chain not provided: address-only.
-      3. Fallback: address-only across all rows, with a tiebreak that
-         prefers ethereum/mainnet over multi-chain hits, NULL last.
-    """
+def _resolve_contract(
+    session,
+    address: str,
+    *,
+    chain_id: int,
+) -> Contract | None:
+    """Find a Contract by ``(chain_id, address)``."""
     if not address:
         return None
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"chat contract lookup for {address}")
     addr_lc = address.lower()
-    rows = session.execute(select(Contract).where(func.lower(Contract.address) == addr_lc)).scalars().all()
-    if not rows:
-        return None
-    if len(rows) == 1:
-        return rows[0]
-
-    if chain is not None:
-        target = _canonical_chain(chain)
-        # Strict canonical match (handles ethereum/mainnet alias).
-        canonical_matches = [r for r in rows if _canonical_chain(r.chain) == target]
-        if canonical_matches:
-            return canonical_matches[0]
-        # No canonical match — fall through to the address-only tiebreak
-        # below rather than returning None, since the LLM's chain hint
-        # was probably wrong.
-
-    # Tiebreak: prefer ethereum/mainnet rows; then any non-NULL chain;
-    # NULL last. Stable within each bucket via input order.
-    eth = [r for r in rows if _canonical_chain(r.chain) == "ethereum"]
-    if eth:
-        return eth[0]
-    nonempty = [r for r in rows if r.chain]
-    if nonempty:
-        return nonempty[0]
-    return rows[0]
+    stmt = select(Contract).where(
+        func.lower(Contract.address) == addr_lc,
+        Contract.chain_id == effective_chain_id,
+    )
+    return session.execute(stmt.order_by(Contract.id.asc()).limit(1)).scalar_one_or_none()
 
 
-def contract_brief(session, address: str, chain: str | None = None) -> dict[str, Any]:
+def contract_brief(
+    session,
+    address: str,
+    *,
+    chain_id: int | None = None,
+) -> dict[str, Any]:
     """One-screen contract summary: identity, proxy status, controls, recent upgrade.
 
     Every address that appears (the contract itself + each controller)
@@ -161,9 +138,12 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
     """
     from db.models import ControllerValue
 
-    contract = _resolve_contract(session, address, chain)
+    try:
+        contract = _resolve_contract(session, address, chain_id=chain_id)
+    except RuntimeError as exc:
+        return {"error": str(exc), "address": address}
     if contract is None:
-        return {"error": f"contract not found: {address} on chain={chain}"}
+        return {"error": f"contract not found: {address} on chain_id={chain_id}"}
 
     summary = session.execute(
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
@@ -183,15 +163,15 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
     controllers: dict[str, dict[str, Any]] = {}
     for cv in cv_rows:
         if cv.value and cv.value.startswith("0x"):
-            controllers[cv.controller_id] = classify_address(session, cv.value, chain)
+            controllers[cv.controller_id] = classify_address(session, cv.value, chain_id=contract.chain_id)
         else:
             controllers[cv.controller_id] = {"value": cv.value}
 
-    self_kind = classify_address(session, contract.address, contract.chain)
+    self_kind = classify_address(session, contract.address, chain_id=contract.chain_id)
 
     return {
         "address": contract.address,
-        "chain": contract.chain,
+        "chain_id": contract.chain_id,
         "name": contract.contract_name,
         "kind": self_kind.get("kind"),
         "is_eoa": self_kind.get("is_eoa", False),
@@ -222,11 +202,19 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
     }
 
 
-def upgrade_summary(session, address: str, chain: str | None = None) -> dict[str, Any]:
+def upgrade_summary(
+    session,
+    address: str,
+    *,
+    chain_id: int | None = None,
+) -> dict[str, Any]:
     """Per-impl windows + audit-coverage status for a (proxy) contract."""
-    contract = _resolve_contract(session, address, chain)
+    try:
+        contract = _resolve_contract(session, address, chain_id=chain_id)
+    except RuntimeError as exc:
+        return {"error": str(exc), "address": address}
     if contract is None:
-        return {"error": f"contract not found: {address}"}
+        return {"error": f"contract not found: {address} on chain_id={chain_id}"}
 
     rows = (
         session.execute(
@@ -257,7 +245,13 @@ def upgrade_summary(session, address: str, chain: str | None = None) -> dict[str
     scope_ids = {contract.id}
     if impl_addrs:
         scope_ids.update(
-            r[0] for r in session.execute(select(Contract.id).where(func.lower(Contract.address).in_(impl_addrs))).all()
+            r[0]
+            for r in session.execute(
+                select(Contract.id).where(
+                    func.lower(Contract.address).in_(impl_addrs),
+                    Contract.chain_id == contract.chain_id,
+                )
+            ).all()
         )
 
     coverage_rows = session.execute(
@@ -293,6 +287,7 @@ def live_findings(
     session,
     *,
     address: str | None = None,
+    chain_id: int | None = None,
     company: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
@@ -304,10 +299,18 @@ def live_findings(
     stmt = select(AuditReport)
     if address:
         addr_lc = address.lower()
+        try:
+            effective_chain_id = require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"chat audit findings for {addr_lc}",
+            )
+        except RuntimeError as exc:
+            return {"error": str(exc), "findings": [], "truncated": False}
         stmt = (
             stmt.join(AuditContractCoverage, AuditContractCoverage.audit_report_id == AuditReport.id)
             .join(Contract, Contract.id == AuditContractCoverage.contract_id)
             .where(func.lower(Contract.address) == addr_lc)
+            .where(Contract.chain_id == effective_chain_id)
         )
     if company:
         # AuditReport keys to Protocol via protocol_id; resolve the name.
@@ -344,17 +347,7 @@ def protocol_brief(session, name: str) -> dict[str, Any]:
     if proto is None:
         return {"error": f"protocol not found: {name}"}
 
-    job_ids = [
-        j.id
-        for j in session.execute(
-            select(Job).where(
-                Job.protocol_id == proto.id,
-                Job.status == JobStatus.completed,
-                Job.address.isnot(None),
-            )
-        ).scalars()
-    ]
-    contracts = session.execute(select(Contract).where(Contract.job_id.in_(job_ids))).scalars().all() if job_ids else []
+    contracts = session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars().all()
     proxy_count = sum(1 for c in contracts if c.is_proxy)
     audit_count = session.execute(
         select(func.count(AuditReport.id)).where(AuditReport.protocol_id == proto.id)
@@ -375,26 +368,24 @@ def list_protocol_principals(session, name: str) -> dict[str, Any]:
     proto = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
     if proto is None:
         return {"error": f"protocol not found: {name}"}
-    job_ids = [
-        j.id
-        for j in session.execute(
-            select(Job).where(Job.protocol_id == proto.id, Job.status == JobStatus.completed)
-        ).scalars()
-    ]
-    if not job_ids:
+    contracts = list(session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars())
+    contract_ids = [c.id for c in contracts]
+    if not contract_ids:
         return {"principals": []}
-    contract_ids = [c.id for c in session.execute(select(Contract).where(Contract.job_id.in_(job_ids))).scalars()]
+    chain_id_by_contract_id = {c.id: c.chain_id for c in contracts}
     nodes = (
         session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id.in_(contract_ids))).scalars().all()
     )
-    by_addr: dict[str, dict[str, Any]] = {}
+    by_addr: dict[tuple[str, int | None], dict[str, Any]] = {}
     for n in nodes:
         if not n.address or n.address.startswith("role:"):
             continue
+        chain_id = chain_id_by_contract_id.get(n.contract_id)
         slot = by_addr.setdefault(
-            n.address.lower(),
+            (n.address.lower(), chain_id),
             {
                 "address": n.address,
+                "chain_id": chain_id,
                 "controls_count": 0,
             },
         )
@@ -406,7 +397,7 @@ def list_protocol_principals(session, name: str) -> dict[str, Any]:
     # tags X as a Timelock contract or a 4-of-7 Safe.
     out = []
     for entry in by_addr.values():
-        cls = classify_address(session, entry["address"])
+        cls = classify_address(session, entry["address"], chain_id=entry.get("chain_id"))
         merged = {**cls, "controls_count": entry["controls_count"]}
         out.append(merged)
 
@@ -436,7 +427,9 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
     if proto is None:
         return {"error": f"protocol not found: {company}"}
 
-    contract_ids = [c.id for c in session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars()]
+    contracts = list(session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars())
+    contract_ids = [c.id for c in contracts]
+    chain_id_by_contract_id = {c.id: c.chain_id for c in contracts}
     if not contract_ids:
         return {"roles": []}
 
@@ -454,17 +447,19 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
     # Group by (role, address). For each unique (role, address) build a
     # holder entry once, classify the address via classify_address so the
     # caller sees kind/threshold/owners/delay.
-    by_role: dict[str, dict[str, dict[str, Any]]] = {}
+    by_role: dict[str, dict[tuple[str, int | None], dict[str, Any]]] = {}
     for fp, ef in rows:
         role = fp.origin or ""
         addr = (fp.address or "").lower()
         if not addr:
             continue
+        chain_id = chain_id_by_contract_id.get(ef.contract_id)
         slot = by_role.setdefault(role, {})
-        if addr not in slot:
-            slot[addr] = classify_address(session, fp.address)
-            slot[addr]["functions"] = []
-        slot[addr]["functions"].append(f"{ef.function_name}")
+        key = (addr, chain_id)
+        if key not in slot:
+            slot[key] = classify_address(session, fp.address, chain_id=chain_id)
+            slot[key]["functions"] = []
+        slot[key]["functions"].append(f"{ef.function_name}")
 
     # Cap functions list per holder so the prompt stays small even when
     # one principal holds the role on many contracts.
@@ -524,15 +519,7 @@ def list_protocol_addresses(session, name: str) -> set[str]:
     proto = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
     if proto is None:
         return set()
-    job_ids = [
-        j.id
-        for j in session.execute(
-            select(Job).where(Job.protocol_id == proto.id, Job.status == JobStatus.completed)
-        ).scalars()
-    ]
-    if not job_ids:
-        return set()
     rows = session.execute(
-        select(Contract.address).where(Contract.job_id.in_(job_ids), Contract.address.isnot(None))
+        select(Contract.address).where(Contract.protocol_id == proto.id, Contract.address.isnot(None))
     ).all()
     return {r[0].lower() for r in rows}

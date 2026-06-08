@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
-import { blockExplorerAddressUrl } from "../blockExplorer.js";
+import { blockExplorerAddressUrl, blockExplorerTxUrl } from "../blockExplorer.js";
 import { proxyDisplayName } from "../displayName.js";
 import { shortenAddress } from "../graph.js";
 import {
@@ -33,6 +33,13 @@ const FILTER_GROUPS = [
 
 const ALL_EVENT_TYPES = FILTER_GROUPS.flatMap((g) => g.types);
 
+function identityKey(address, chainId) {
+  const addr = String(address || "").toLowerCase();
+  const parsedChainId = Number.parseInt(chainId, 10);
+  if (!addr || !Number.isInteger(parsedChainId) || parsedChainId <= 0) return null;
+  return `${parsedChainId}:${addr}`;
+}
+
 // Sidebar groups the contracts list by contract_type. Order here matches
 // the TYPE_RANK in sortedContracts so the iteration order falls out for free.
 const TYPE_LABELS = {
@@ -44,13 +51,6 @@ const TYPE_LABELS = {
   regular: "Regular",
 };
 
-function explorerTxUrl(txHash, chain = "ethereum") {
-  // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
-  const addrUrl = blockExplorerAddressUrl("0x", chain);
-  if (!addrUrl) return null;
-  return `${addrUrl.replace("/address/0x", "/tx/")}${txHash}`;
-}
-
 export default function ProtocolMonitoringPage({ companyName }) {
   const [protocolId, setProtocolId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -58,7 +58,8 @@ export default function ProtocolMonitoringPage({ companyName }) {
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
   const [events, setEvents] = useState([]);
-  const [labelMap, setLabelMap] = useState({}); // address-lower → friendly name
+  const [labelMap, setLabelMap] = useState({}); // `${chain_id}:${address-lower}` → friendly name
+  const [knownChainIds, setKnownChainIds] = useState([]);
   const [error, setError] = useState(null);
   const [reEnrolling, setReEnrolling] = useState(false);
 
@@ -95,17 +96,24 @@ export default function ProtocolMonitoringPage({ companyName }) {
         if (overview.protocol_id) {
           setProtocolId(overview.protocol_id);
           const map = {};
+          const chainIds = new Set();
           for (const a of addrs?.all_addresses || []) {
             if (!a?.address) continue;
-            const key = a.address.toLowerCase();
+            const key = identityKey(a.address, a.chain_id);
+            if (!key) {
+              console.error("Monitoring label skipped for address without chain_id", a);
+              continue;
+            }
+            chainIds.add(Number.parseInt(a.chain_id, 10));
             map[key] = {
               name: a.name || null,
               implName: a.implementation_name || null,
               isProxy: !!a.is_proxy,
-              chain: a.chain || "ethereum",
+              chain_id: Number.parseInt(a.chain_id, 10),
             };
           }
           setLabelMap(map);
+          setKnownChainIds([...chainIds].sort((a, b) => a - b));
         } else {
           setNoProtocol(true);
         }
@@ -144,9 +152,10 @@ export default function ProtocolMonitoringPage({ companyName }) {
   }, [refresh]);
 
   const friendlyName = useCallback(
-    (addr) => {
+    (addr, chainId) => {
       if (!addr) return "Unknown";
-      const entry = labelMap[addr.toLowerCase()];
+      const key = identityKey(addr, chainId);
+      const entry = key ? labelMap[key] : null;
       // Same "Impl (via UUPSProxy)" treatment as the addresses page so the
       // sidebar's proxy rows don't all collapse to the bare template name.
       const pretty = proxyDisplayName({
@@ -174,7 +183,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
       if (la && lb) return new Date(lb).getTime() - new Date(la).getTime();
       if (la) return -1;
       if (lb) return 1;
-      return friendlyName(a.address).localeCompare(friendlyName(b.address));
+      return friendlyName(a.address, a.chain_id).localeCompare(friendlyName(b.address, b.chain_id));
     });
   }, [contracts, lastEventTimes, friendlyName]);
 
@@ -198,6 +207,15 @@ export default function ProtocolMonitoringPage({ companyName }) {
     () => contracts.find((c) => c.id === selectedContractId) || null,
     [contracts, selectedContractId],
   );
+
+  const reEnrollChainIds = useMemo(() => {
+    const ids = new Set(knownChainIds);
+    for (const contract of contracts) {
+      const chainId = Number.parseInt(contract?.chain_id, 10);
+      if (Number.isInteger(chainId) && chainId > 0) ids.add(chainId);
+    }
+    return [...ids].sort((a, b) => a - b);
+  }, [contracts, knownChainIds]);
 
   const filteredEvents = useMemo(() => {
     const kindsActive = activeKinds.size > 0;
@@ -266,10 +284,19 @@ export default function ProtocolMonitoringPage({ companyName }) {
 
   async function reEnroll() {
     if (!protocolId) return;
+    if (reEnrollChainIds.length === 0) {
+      setError("Re-enroll requires at least one known chain_id for this protocol.");
+      return;
+    }
     setReEnrolling(true);
     setError(null);
     try {
-      await api(`/api/protocols/${protocolId}/re-enroll`, { method: "POST" });
+      for (const chainId of reEnrollChainIds) {
+        // eslint-disable-next-line no-await-in-loop
+        await api(`/api/protocols/${protocolId}/re-enroll?chain_id=${encodeURIComponent(chainId)}`, {
+          method: "POST",
+        });
+      }
       if (refresh) refresh();
     } catch (err) {
       setError(String(err.message || err));
@@ -363,7 +390,6 @@ export default function ProtocolMonitoringPage({ companyName }) {
             search={search}
             onSearch={setSearch}
             friendlyName={friendlyName}
-            labelMap={labelMap}
             onClearSelection={() => setSelectedContractId(null)}
           />
         </div>
@@ -493,7 +519,7 @@ function ContractGroup({ group, selectedId, lastEventTimes, friendlyName, onSele
 function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, onToggleActive }) {
   const rows = useMemo(() => stateRows(contract), [contract]);
   const badge = contract.contract_type || "regular";
-  const name = friendlyName(contract.address);
+  const name = friendlyName(contract.address, contract.chain_id);
   return (
     <button
       type="button"
@@ -541,23 +567,23 @@ function EventsPane({
   search,
   onSearch,
   friendlyName,
-  labelMap,
   onClearSelection,
 }) {
   const headerTitle = selectedContract
-    ? friendlyName(selectedContract.address)
+    ? friendlyName(selectedContract.address, selectedContract.chain_id)
     : "All contracts";
   const headerAddr = selectedContract ? selectedContract.address : null;
-  const headerChain = selectedContract?.chain || "ethereum";
+  const headerChainId = selectedContract?.chain_id ?? null;
+  const headerHref = blockExplorerAddressUrl(headerAddr, headerChainId);
 
   return (
     <div className="pm-pane">
       <div className="pm-zone-detail">
         <div className="pm-z-name">{headerTitle}</div>
-        {headerAddr && (
+        {headerAddr && headerHref && (
           <a
             className="pm-z-addr pm-z-link"
-            href={blockExplorerAddressUrl(headerAddr, headerChain)}
+            href={headerHref}
             target="_blank"
             rel="noreferrer noopener"
           >
@@ -613,7 +639,6 @@ function EventsPane({
               key={evt.id}
               evt={evt}
               friendlyName={friendlyName}
-              chainOf={(addr) => labelMap[String(addr || "").toLowerCase()]?.chain || "ethereum"}
               isAllView={!selectedContract}
             />
           ))
@@ -623,12 +648,13 @@ function EventsPane({
   );
 }
 
-function EventRow({ evt, friendlyName, chainOf, isAllView }) {
+function EventRow({ evt, friendlyName, isAllView }) {
   const decoded = useMemo(() => decodeEvent(evt), [evt]);
   const kind = eventKind(evt);
   const label = eventKindLabel(evt);
   const addr = evt.data?.contract_address;
-  const chain = chainOf(addr);
+  const chainId = evt.chain_id ?? null;
+  const txHref = blockExplorerTxUrl(evt.tx_hash, chainId);
   return (
     <div className="pm-ev">
       <div className="pm-when" title={evt.detected_at}>{relativeTime(evt.detected_at)}</div>
@@ -636,15 +662,17 @@ function EventRow({ evt, friendlyName, chainOf, isAllView }) {
       <div className="pm-msg">
         <b>{decoded.title}</b>
         {isAllView && addr && (
-          <span className="pm-msg-on">on {friendlyName(addr)}</span>
+          <span className="pm-msg-on">on {friendlyName(addr, chainId)}</span>
         )}
         {decoded.sub && <span className="pm-msg-sub">{decoded.sub}</span>}
       </div>
       <div className="pm-ext">
-        {evt.tx_hash ? (
-          <a href={explorerTxUrl(evt.tx_hash, chain)} target="_blank" rel="noreferrer noopener">
+        {evt.tx_hash && txHref ? (
+          <a href={txHref} target="_blank" rel="noreferrer noopener">
             {shortenAddress(evt.tx_hash)} ↗
           </a>
+        ) : evt.tx_hash ? (
+          <span className="pm-blk">{shortenAddress(evt.tx_hash)}</span>
         ) : (
           <span className="pm-blk">no tx</span>
         )}
@@ -784,4 +812,3 @@ function WebhookModal({
     </div>
   );
 }
-

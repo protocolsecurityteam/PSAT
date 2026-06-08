@@ -245,7 +245,7 @@ describe("ProductHero", () => {
   it("renders with form state", () => {
     render(
       <ProductHero
-        form={{ target: "", chain: "", analyzeLimit: "5", name: "" }}
+        form={{ target: "", chainId: "", analyzeLimit: "5", name: "" }}
         setForm={() => {}}
         onSubmit={(e) => e.preventDefault()}
         loading={false}

@@ -26,6 +26,7 @@ correct, just unfilled.
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from typing import Any, cast
 
@@ -54,21 +55,45 @@ _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller
 SetDescriptor = PredicateSetDescriptor
 SetAdapter = PredicateEvaluatorSetAdapter
 EvaluationContext = PredicateEvaluationContext
+logger = logging.getLogger(__name__)
+
+
+def _require_hex_return(raw: Any, *, context: str) -> str:
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise ValueError(f"{context} expected hex RPC result, got {raw!r}")
+    if raw not in {"0x", "0x0"}:
+        try:
+            bytes.fromhex(raw[2:])
+        except ValueError as exc:
+            raise ValueError(f"{context} returned malformed hex") from exc
+    return raw.lower()
 
 
 def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
     """Increment a resolve-level work-volume counter on the outer
     EvaluationContext's ``meta['resolve_counters']`` (wired by the capability
     resolver). No-op when absent, so unit evaluations and the pure-week-4 path
-    are untouched. Surfaces redundant work (live getter eth_calls, cross-contract
-    inline recursions, HyperSync fallback scans) on the per-job
-    ``capability_summary`` without per-RPC latency noise."""
+    are untouched. Surfaces redundant work (live getter eth_calls and
+    cross-contract inline recursions) on the per-job ``capability_summary``
+    without per-RPC latency noise."""
     meta = getattr(outer_ctx, "meta", None)
     if not isinstance(meta, dict):
         return
     counters = meta.get("resolve_counters")
     if isinstance(counters, dict):
         counters[key] = counters.get(key, 0) + n
+
+
+def _require_outer_chain_id(outer_ctx: Any, context: str) -> int:
+    from utils.rpc import require_supported_chain_id
+
+    raw_chain_id = getattr(outer_ctx, "chain_id", None)
+    if raw_chain_id is None:
+        raise ValueError(f"{context} requires explicit chain_id")
+    try:
+        return require_supported_chain_id(chain_id=raw_chain_id, context=context)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _frame_is_inlined(ctx: "EvaluationContext") -> bool:
@@ -155,6 +180,7 @@ def evaluate_tree_with_registry(
             return registry.enumerate(descriptor, ctx)
 
     eval_ctx = EvaluationContext(
+        chain_id=getattr(ctx, "chain_id"),
         contract_address=getattr(ctx, "contract_address", None),
         adapter=_RegistryBackedAdapter(),
         block=getattr(ctx, "block", None),
@@ -179,7 +205,7 @@ def evaluate_tree(
     side-condition roles, then caller/delegated auth.
     """
     if ctx is None:
-        ctx = EvaluationContext()
+        raise ValueError("evaluate_tree requires an EvaluationContext with an explicit chain_id")
     if tree is None:
         return CapabilityExpr.conditional_universal(
             Condition(kind="business", description="no gating"),
@@ -506,18 +532,24 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
 
     Returns ``finite_set([addr], exact)`` for a concrete non-zero address,
     ``finite_set([], exact)`` when the getter returns the zero address
-    (genuinely unset / renounced), or ``None`` when nothing could be read — no
-    RPC reachable through the outer context, a malformed selector, or a revert
-    — in which case the caller keeps the ``lower_bound`` placeholder. Gating on
-    a reachable ``rpc_url`` keeps pure-unit evaluations (no RPC) on their
-    existing empty-placeholder behaviour."""
+    (genuinely unset / renounced), or ``None`` for malformed static inputs. A
+    configured live RPC read failure is raised so unsupported/unhealthy chains
+    do not become lower-bound placeholders.
+    """
     if ctx is None or not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
         return None
     outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
     rpc_url = getattr(outer, "rpc_url", None)
     contract = getattr(outer, "contract_address", None) or ctx.contract_address
     block = getattr(outer, "block", None) if outer is not None else ctx.block
+    chain_id = _require_outer_chain_id(
+        outer if outer is not None else ctx,
+        "live authority getter resolution",
+    )
     if not isinstance(rpc_url, str) or not rpc_url:
+        if outer is not None:
+            logger.error("live authority getter resolution requires configured eRPC")
+            raise RuntimeError("live authority getter resolution requires configured eRPC")
         return None
     if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
         return None
@@ -530,13 +562,44 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
             "eth_call",
             [{"to": contract.lower(), "data": selector}, hex(block) if isinstance(block, int) else "latest"],
             retries=1,
+            chain_id=chain_id,
         )
-    except Exception:
+    except Exception as exc:
         _bump_resolve_counter(outer, "live_getter_failures")
-        return None
-    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
-        return None
-    addr = "0x" + raw[-40:].lower()
+        logger.error(
+            "Live authority getter failed for contract=%s selector=%s: %s",
+            contract.lower(),
+            selector,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(f"live authority getter failed for {contract.lower()} selector={selector}") from exc
+    try:
+        raw_hex = _require_hex_return(raw, context="live authority getter")
+    except ValueError as exc:
+        _bump_resolve_counter(outer, "live_getter_failures")
+        logger.error(
+            "Live authority getter returned invalid payload for contract=%s selector=%s: %s",
+            contract.lower(),
+            selector,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(
+            f"live authority getter returned invalid payload for {contract.lower()} selector={selector}"
+        ) from exc
+    if len(raw_hex) < 66:
+        _bump_resolve_counter(outer, "live_getter_failures")
+        logger.error(
+            "Live authority getter returned short ABI word for contract=%s selector=%s: %r",
+            contract.lower(),
+            selector,
+            raw_hex,
+        )
+        raise RuntimeError(
+            f"live authority getter returned short ABI word for {contract.lower()} selector={selector}"
+        )
+    addr = "0x" + raw_hex[-40:]
     if _is_zero_address(addr) or addr == _BURN_ADDRESS:
         return CapabilityExpr.finite_set([], quality=MembershipQuality.EXACT, confidence=Confidence.ENUMERABLE)
     return CapabilityExpr.finite_set(
@@ -770,8 +833,11 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
     outer_ctx = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
     session = getattr(outer_ctx, "session", None)
     rpc_url = getattr(outer_ctx, "rpc_url", None)
-    if session is None or not isinstance(rpc_url, str) or not rpc_url:
+    if session is None:
         return None
+    if not isinstance(rpc_url, str) or not rpc_url:
+        logger.error("view-key membership resolution requires configured eRPC")
+        raise RuntimeError("view-key membership resolution requires configured eRPC")
 
     view_index = view_indices[0]
     view_source = key_sources[view_index]
@@ -806,6 +872,7 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
         selector=selector,
         args=role_words,
         block=getattr(outer_ctx, "block", None) or ctx.block,
+        chain_id=_require_outer_chain_id(outer_ctx, "view-key membership resolution"),
     )
     if not admin_words:
         return CapabilityExpr.external_check_only(
@@ -851,7 +918,7 @@ def _observed_event_key_words(
             continue
         stmt = (
             select(IndexedEventLog)
-            .where(IndexedEventLog.chain_id == getattr(outer_ctx, "chain_id", 1))
+            .where(IndexedEventLog.chain_id == _require_outer_chain_id(outer_ctx, "observed event key lookup"))
             .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
             .where(func.lower(IndexedEventLog.topic0) == topic0.lower())
             .order_by(
@@ -873,119 +940,7 @@ def _observed_event_key_words(
             word = _normalize_word(keys.get(key_index))
             if word is not None:
                 out.add(word)
-    if not out:
-        out.update(
-            _observed_event_key_words_from_hypersync(
-                outer_ctx=outer_ctx,
-                descriptor=descriptor,
-                event_hints=event_hints,
-                key_index=key_index,
-            )
-        )
     return sorted(out)
-
-
-def _observed_event_key_words_from_hypersync(
-    *,
-    outer_ctx: Any,
-    descriptor: SetDescriptor,
-    event_hints: list[dict[str, Any]],
-    key_index: int,
-) -> list[str]:
-    import asyncio
-    import os
-    import time
-
-    from services.resolution.adapters.event_indexed import _resolve_event_address
-    from services.resolution.repos.event_logs_hypersync import (
-        _data_words_from_log,
-        _logs_from_response,
-        _topics_from_log,
-    )
-    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
-
-    token = os.getenv("ENVIO_API_TOKEN") or getattr(outer_ctx, "meta", {}).get("hypersync_token")
-    if not token:
-        return []
-    _bump_resolve_counter(outer_ctx, "hypersync_fallback_scans")
-    address_topics: dict[str, set[str]] = {}
-    hints_by_address_topic: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for hint in event_hints:
-        topic0 = hint.get("topic0")
-        if not isinstance(topic0, str):
-            continue
-        event_address = _resolve_event_address(cast(dict[str, Any], descriptor), hint, outer_ctx)
-        if event_address is None:
-            continue
-        address_topics.setdefault(event_address.lower(), set()).add(topic0.lower())
-        hints_by_address_topic.setdefault((event_address.lower(), topic0.lower()), []).append(hint)
-    if not address_topics:
-        return []
-
-    async def _scan() -> list[str]:
-        try:
-            import hypersync  # type: ignore
-        except Exception:
-            return []
-        url = str(
-            getattr(outer_ctx, "meta", {}).get("hypersync_url")
-            or os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
-        )
-        timeout_s = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
-        max_pages = int(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_MAX_PAGES", "50"))
-        client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=token))
-        found: set[str] = set()
-        for event_address, topic0s in address_topics.items():
-            current_from = 0
-            page_count = 0
-            started = time.monotonic()
-            while True:
-                if time.monotonic() - started > timeout_s or page_count >= max_pages:
-                    break
-                query = hypersync.Query(
-                    from_block=current_from,
-                    to_block=getattr(outer_ctx, "block", None),
-                    logs=[
-                        hypersync.LogSelection(
-                            address=[event_address],
-                            topics=[sorted(topic0s)],
-                        )
-                    ],
-                    field_selection=hypersync.FieldSelection(log=[field.value for field in hypersync.LogField]),
-                )
-                try:
-                    response = await client.get(query)
-                except Exception:
-                    break
-                page_count += 1
-                for log in _logs_from_response(response):
-                    topics = _topics_from_log(log)
-                    if not topics:
-                        continue
-                    topic0 = topics[0].lower()
-                    for hint in hints_by_address_topic.get((event_address, topic0), []):
-                        keys = _event_keys(
-                            topics,
-                            _data_words_from_log(log),
-                            hint.get("topics_to_keys") or {},
-                            hint.get("data_to_keys") or {},
-                        )
-                        word = _normalize_word(keys.get(key_index))
-                        if word is not None:
-                            found.add(word)
-                next_block = getattr(response, "next_block", None)
-                if next_block is None or next_block <= current_from:
-                    break
-                block = getattr(outer_ctx, "block", None)
-                if isinstance(block, int) and next_block >= block:
-                    break
-                current_from = next_block
-        return sorted(found)
-
-    try:
-        return asyncio.run(_scan())
-    except Exception:
-        return []
 
 
 def _call_unary_bytes32_view(
@@ -995,6 +950,7 @@ def _call_unary_bytes32_view(
     selector: str,
     args: list[str],
     block: int | None,
+    chain_id: int,
 ) -> list[str]:
     from services.resolution.repos.event_logs_pg import _normalize_word
     from utils.rpc import rpc_batch_request_with_status
@@ -1016,12 +972,35 @@ def _call_unary_bytes32_view(
     if not calls:
         return []
     out: set[str] = set()
-    for raw, had_error in rpc_batch_request_with_status(rpc_url, calls):
+    results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
+    if len(results) != len(calls):
+        logger.error(
+            "Unary bytes32 view batch returned %d result(s) for %d call(s) contract=%s",
+            len(results),
+            len(calls),
+            contract_address,
+        )
+        raise RuntimeError(f"unary bytes32 view batch returned {len(results)} result(s) for {len(calls)} calls")
+    for idx, (raw, had_error) in enumerate(results):
         if had_error:
-            continue
+            logger.error(
+                "Unary bytes32 view call failed contract=%s selector=%s arg_index=%d",
+                contract_address,
+                selector,
+                idx,
+            )
+            raise RuntimeError(f"unary bytes32 view call failed for {contract_address} selector={selector}")
         word = _normalize_word(raw)
-        if word is not None:
-            out.add(word)
+        if word is None:
+            logger.error(
+                "Unary bytes32 view returned malformed word contract=%s selector=%s arg_index=%d: %r",
+                contract_address,
+                selector,
+                idx,
+                raw,
+            )
+            raise RuntimeError(f"unary bytes32 view returned malformed word for {contract_address} selector={selector}")
+        out.add(word)
     return sorted(out)
 
 
@@ -1144,7 +1123,7 @@ def _maybe_inline_cross_contract_call(
         return None
     registry_addr = registry_addr.lower()
 
-    chain_id = getattr(outer_ctx, "chain_id", 1)
+    chain_id = _require_outer_chain_id(outer_ctx, "cross-contract inlining")
     stack = outer_ctx.evaluation_stack if hasattr(outer_ctx, "evaluation_stack") else set()
     callee_identity = callee_signature or callee_selector or ""
     key = (chain_id, registry_addr, callee_identity)
@@ -1168,6 +1147,7 @@ def _maybe_inline_cross_contract_call(
         session,
         registry_addr,
         required_artifact="predicate_trees",
+        chain_id=chain_id,
         completed_only=False,
     )
     if lookup is None:
@@ -1192,6 +1172,7 @@ def _maybe_inline_cross_contract_call(
             callee_contract_address=registry_addr,
             rpc_url=getattr(outer_ctx, "rpc_url", None),
             block=getattr(outer_ctx, "block", None),
+            chain_id=chain_id,
         )
         for arg in _callee_argument_operands(
             leaf,
@@ -1248,9 +1229,15 @@ def _maybe_inline_cross_contract_call(
         session,
         lookup.analysis_job.address or registry_addr,
         job_id=lookup.analysis_job.id,
+        chain_id=chain_id,
     )
     if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id)
+        state_var_values = _load_state_var_values(
+            session,
+            registry_addr,
+            job_id=lookup.runtime_job.id,
+            chain_id=chain_id,
+        )
 
     parent_this = getattr(parent_frame, "current_address_this", None) or getattr(
         parent_frame, "executing_contract_address", None
@@ -1377,8 +1364,23 @@ def _materialize_external_check_from_candidates(
             call_args=call_args,
             block=getattr(outer_ctx, "block", None),
         )
-    except Exception:
-        return None
+    except RuntimeError as exc:
+        logger.error(
+            "External check materialization failed for chain_id=%s checker=%s: %s",
+            chain_id,
+            registry_addr,
+            exc,
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "External check materialization failed unexpectedly for chain_id=%s checker=%s: %s",
+            chain_id,
+            registry_addr,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise
 
 
 def _callee_argument_operands(
@@ -1425,6 +1427,7 @@ def _normalize_operand_for_call_arg(
     frame: Any,
     ctx: EvaluationContext,
     *,
+    chain_id: int,
     callee_contract_address: str | None = None,
     rpc_url: str | None = None,
     block: int | None = None,
@@ -1438,6 +1441,7 @@ def _normalize_operand_for_call_arg(
             callee_contract_address=callee_contract_address,
             rpc_url=rpc_url,
             block=block,
+            chain_id=chain_id,
         )
         if constant is not None:
             return constant
@@ -1459,6 +1463,7 @@ def _normalize_operand_for_call_arg(
                 callee_contract_address=callee_contract_address,
                 rpc_url=rpc_url,
                 block=block,
+                chain_id=chain_id,
             )
     if source == "state_variable":
         name = _state_var_lookup_key(operand)
@@ -1474,6 +1479,7 @@ def _resolve_static_external_call_operand(
     callee_contract_address: str | None,
     rpc_url: str | None,
     block: int | None,
+    chain_id: int,
 ) -> dict[str, Any] | None:
     signature = operand.get("callee_signature")
     selector = operand.get("callee_selector")
@@ -1484,22 +1490,63 @@ def _resolve_static_external_call_operand(
     if not selector or not isinstance(callee_contract_address, str) or not callee_contract_address.startswith("0x"):
         return None
     if not rpc_url:
-        return None
+        logger.error(
+            "Static external call operand resolution requires configured eRPC for callee=%s selector=%s",
+            callee_contract_address,
+            selector,
+        )
+        raise RuntimeError("static external call operand resolution requires configured eRPC")
     block_tag = hex(block) if isinstance(block, int) else "latest"
     try:
-        from utils.rpc import rpc_request
+        from utils.rpc import require_supported_chain_id, rpc_request
+
+        effective_chain_id = require_supported_chain_id(
+            chain_id=chain_id,
+            context="static external call operand resolution",
+        )
 
         raw = rpc_request(
             rpc_url,
             "eth_call",
             [{"to": callee_contract_address.lower(), "data": selector}, block_tag],
             retries=1,
+            chain_id=effective_chain_id,
         )
-    except Exception:
-        return None
-    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
-        return None
-    return {"source": "constant", "constant_value": "0x" + raw[-64:].lower()}
+    except Exception as exc:
+        logger.error(
+            "Static external call operand resolution failed callee=%s selector=%s: %s",
+            callee_contract_address,
+            selector,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(
+            f"static external call operand resolution failed for {callee_contract_address} selector={selector}"
+        ) from exc
+    try:
+        raw_hex = _require_hex_return(raw, context="static external call operand")
+    except ValueError as exc:
+        logger.error(
+            "Static external call operand returned invalid payload callee=%s selector=%s: %s",
+            callee_contract_address,
+            selector,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(
+            f"static external call operand returned invalid payload for {callee_contract_address} selector={selector}"
+        ) from exc
+    if len(raw_hex) < 66:
+        logger.error(
+            "Static external call operand returned short ABI word callee=%s selector=%s: %r",
+            callee_contract_address,
+            selector,
+            raw_hex,
+        )
+        raise RuntimeError(
+            f"static external call operand returned short ABI word for {callee_contract_address} selector={selector}"
+        )
+    return {"source": "constant", "constant_value": "0x" + raw_hex[-64:]}
 
 
 def _normalize_tree_for_frame(tree: PredicateTree, frame: Any) -> PredicateTree:

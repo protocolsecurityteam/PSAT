@@ -25,7 +25,7 @@ from schemas.common import (
     make_contract,
     make_stage_context,
 )
-from utils.rpc import chain_id_for_chain_name
+from utils.rpc import require_supported_chain_id
 
 StagePayloadT = TypeVar("StagePayloadT")
 
@@ -164,32 +164,45 @@ def make_job_contract(session: Session, job: Job, contract_row: ContractRow | No
     row = contract_row
     if row is None:
         row = session.execute(select(ContractRow).where(ContractRow.job_id == job.id).limit(1)).scalar_one_or_none()
-    request = job.request if isinstance(job.request, dict) else {}
     if row is None and job.address:
-        chain = request.get("chain")
-        stmt = select(ContractRow).where(ContractRow.address == job.address.lower())
-        if isinstance(chain, str) and chain:
-            stmt = stmt.where(ContractRow.chain == chain)
+        chain_id = require_supported_chain_id(
+            chain_id=job.chain_id,
+            context=f"contract artifact lookup for job {job.id}",
+        )
+        stmt = select(ContractRow).where(
+            ContractRow.address == job.address.lower(),
+            ContractRow.chain_id == chain_id,
+        )
         row = session.execute(stmt.limit(1)).scalar_one_or_none()
 
     if row is None:
-        chain_id = _request_chain_id(request)
+        chain_id = job.chain_id
+        if chain_id is None:
+            raise RuntimeError(f"contract artifact for job {job.id} requires chain_id")
+        if not job.address:
+            raise RuntimeError(f"contract artifact for job {job.id} requires address")
         return make_contract(
-            address=job.address or "0x0000000000000000000000000000000000000000",
+            address=job.address,
             chain_id=chain_id,
             name=job.name,
             label=job.name,
         )
 
-    chain_id = _request_chain_id(request) or chain_id_for_chain_name(row.chain) or 1
+    chain_id = row.chain_id
+    if chain_id is None:
+        raise RuntimeError(f"contract artifact for job {job.id} requires chain_id")
+    request = job.request if isinstance(job.request, dict) else {}
     request_proxy_address = request.get("proxy_address") if isinstance(request.get("proxy_address"), str) else None
     implementation_addresses = [
         item for item in [row.implementation, *(row.secondary_implementations or [])] if isinstance(item, str) and item
     ]
     if request_proxy_address and row.address:
         implementation_addresses.insert(0, row.address)
+    contract_address = row.address or job.address
+    if not contract_address:
+        raise RuntimeError(f"contract artifact for job {job.id} requires address")
     return make_contract(
-        address=row.address or job.address or "0x0000000000000000000000000000000000000000",
+        address=contract_address,
         chain_id=chain_id,
         name=row.contract_name,
         label=job.name,
@@ -210,10 +223,11 @@ def make_job_stage_context(
     schema_version: str,
     chain_id: int | None = None,
     block_number: int | None = None,
-    rpc_url: str | None = None,
 ) -> StageContext:
     request = job.request if isinstance(job.request, dict) else {}
-    resolved_chain_id = chain_id or _request_chain_id(request) or 1
+    resolved_chain_id = chain_id if chain_id is not None else job.chain_id
+    if resolved_chain_id is None and job.address:
+        raise ValueError(f"stage context for job {job.id} requires explicit chain_id")
     return make_stage_context(
         schema_version=schema_version,
         stage=stage,
@@ -223,7 +237,6 @@ def make_job_stage_context(
         company=job.company,
         protocol_id=job.protocol_id,
         block_number=block_number,
-        rpc_url=rpc_url,
     )
 
 
@@ -286,11 +299,3 @@ def get_artifact_or_stage_field(session: Session, job_id: Any, name: str) -> Any
     if is_stage_field_name(name):
         return get_artifact_field(session, job_id, name)
     return get_artifact(session, job_id, name)
-
-
-def _request_chain_id(request: Mapping[str, Any]) -> int | None:
-    raw = request.get("chain_id")
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None

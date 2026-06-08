@@ -243,10 +243,18 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
             onClose={() => setAddressesModalOpen(false)}
             onSelectContract={(row) => {
               // Only jump into the job view for addresses that were actually
-              // analyzed; discovered-only rows don't have a job_id. Pass the
-              // matching Contract job_id up to the App-level loader.
-              const full = contracts.find((c) => c.address?.toLowerCase() === row.address?.toLowerCase());
-              if (full?.job_id) onSelectContract(full.job_id);
+              // analyzed; discovered-only rows don't have an analysis_job_id.
+              const rowChainId = Number.parseInt(row?.chain_id, 10);
+              const full = contracts.find((c) => {
+                if (c.address?.toLowerCase() !== row.address?.toLowerCase()) return false;
+                const contractChainId = Number.parseInt(c.chain_id, 10);
+                return (
+                  Number.isInteger(rowChainId)
+                  && rowChainId > 0
+                  && contractChainId === rowChainId
+                );
+              });
+              if (full?.analysis_job_id) onSelectContract(full.analysis_job_id);
             }}
           />
         </Suspense>

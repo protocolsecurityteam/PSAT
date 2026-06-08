@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing_extensions import NotRequired, TypedDict
 
-from schemas.common import Address, Contract, JsonObject
+from schemas.common import Address, ChainId, Contract, JsonObject
 
 FunctionPrincipalPayload = JsonObject
 GovernanceFunctionController = JsonObject
@@ -19,7 +19,7 @@ class AnalysisListEntry(TypedDict):
     job_id: str
     address: Address | None
     contract: NotRequired[Contract]
-    chain: str | None
+    chain_id: ChainId | None
     company: str | None
     parent_job_id: str | None
     rank_score: float | None

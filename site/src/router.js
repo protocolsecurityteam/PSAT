@@ -46,17 +46,37 @@ export function parseLocationPath(pathname) {
   }
 
   if (segments[0] === "address" && segments[1] && isAddress(segments[1])) {
+    const maybeChainId = Number.parseInt(segments[2], 10);
+    if (Number.isInteger(maybeChainId) && maybeChainId > 0) {
+      return {
+        mode: "address",
+        value: segments[1],
+        chainId: maybeChainId,
+        tab: normalizeTab(segments[3]),
+      };
+    }
     return {
       mode: "address",
       value: segments[1],
+      chainId: null,
       tab: normalizeTab(segments[2]),
     };
   }
 
   if (isAddress(segments[0])) {
+    const maybeChainId = Number.parseInt(segments[1], 10);
+    if (Number.isInteger(maybeChainId) && maybeChainId > 0) {
+      return {
+        mode: "address",
+        value: segments[0],
+        chainId: maybeChainId,
+        tab: normalizeTab(segments[2]),
+      };
+    }
     return {
       mode: "address",
       value: segments[0],
+      chainId: null,
       tab: normalizeTab(segments[1]),
     };
   }
@@ -64,9 +84,16 @@ export function parseLocationPath(pathname) {
   return { mode: "default", value: null, tab: "summary" };
 }
 
-export function buildLocationPath(runId, address, tab) {
+export function buildLocationPath(runId, address, tab, chainId = null) {
   const nextTab = normalizeTab(tab);
+  const parsedChainId = Number.parseInt(chainId, 10);
   if (isAddress(address)) {
+    if (Number.isInteger(parsedChainId) && parsedChainId > 0) {
+      return `/address/${String(address).trim()}/${parsedChainId}/${nextTab}`;
+    }
+    if (runId) {
+      return `/runs/${encodeURIComponent(runId)}/${nextTab}`;
+    }
     return `/address/${String(address).trim()}/${nextTab}`;
   }
   if (runId) {

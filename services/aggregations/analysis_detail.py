@@ -11,7 +11,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from db.models import (
@@ -22,6 +22,7 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
 )
+from db.queue import require_contract_for_job
 
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
@@ -29,18 +30,24 @@ from routers import deps
 from schemas.common import Contract as ContractSchema
 from schemas.common import make_contract
 from services.artifacts import expand_available_artifact_names, get_artifact_field, get_artifact_or_stage_field
-from utils.rpc import chain_id_for_chain_name
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
+
+
+class AmbiguousAnalysisLookup(RuntimeError):
+    """Raised when a non-address analysis lookup needs an explicit chain id."""
 
 
 def _contract_ref(contract_row: Contract, *, label: str | None = None) -> ContractSchema:
     implementation_addresses = [
         item for item in [contract_row.implementation, *(contract_row.secondary_implementations or [])] if item
     ]
+    if contract_row.chain_id is None:
+        raise RuntimeError(f"contract {contract_row.id} requires chain_id for analysis detail")
     return make_contract(
         address=contract_row.address,
-        chain_id=chain_id_for_chain_name(contract_row.chain) or 1,
+        chain_id=contract_row.chain_id,
         name=contract_row.contract_name,
         label=label,
         is_proxy=bool(contract_row.is_proxy),
@@ -53,10 +60,56 @@ def _contract_ref(contract_row: Contract, *, label: str | None = None) -> Contra
     )
 
 
-def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
+def _looks_like_address(value: str) -> bool:
+    return isinstance(value, str) and value.startswith("0x") and len(value) == 42
+
+
+def _job_by_name(session: Session, run_name: str, *, chain_id: int | None) -> Job | None:
+    if chain_id is not None:
+        return session.execute(
+            select(Job)
+            .where(Job.name == run_name, Job.chain_id == chain_id)
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    rows = list(
+        session.execute(select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc())).scalars()
+    )
+    if not rows:
+        return None
+
+    chain_ids: set[int | None] = set()
+    for row in rows:
+        if row.chain_id is None:
+            chain_ids.add(None)
+            continue
+        chain_ids.add(
+            require_supported_chain_id(
+                chain_id=row.chain_id,
+                context=f"analysis detail name lookup {run_name}",
+            )
+        )
+    if len(chain_ids) > 1:
+        logger.error(
+            "analysis detail lookup for name=%r is ambiguous across chain_ids=%s",
+            run_name,
+            sorted(chain_ids, key=lambda item: -1 if item is None else item),
+        )
+        raise AmbiguousAnalysisLookup(f"Analysis name {run_name!r} is ambiguous; provide chain_id")
+    return rows[0]
+
+
+def build_analysis_detail(session: Session, run_name: str, *, chain_id: int | None = None) -> dict[str, Any] | None:
     # Try by name first, then by id, then by address
-    stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
-    job = session.execute(stmt).scalar_one_or_none()
+    effective_chain_id = (
+        require_supported_chain_id(chain_id=chain_id, context=f"analysis detail lookup for {run_name}")
+        if chain_id is not None
+        else None
+    )
+    job = None
+    if not _looks_like_address(run_name):
+        job = _job_by_name(session, run_name, chain_id=effective_chain_id)
     if job is None:
         try:
             job = session.get(Job, run_name)
@@ -64,9 +117,18 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             session.rollback()
     if job is None:
         # Try by address
+        if effective_chain_id is None:
+            effective_chain_id = require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"analysis detail address lookup for {run_name}",
+            )
         job = session.execute(
             select(Job)
-            .where(Job.address == run_name, Job.status == JobStatus.completed)
+            .where(
+                func.lower(Job.address) == run_name.lower(),
+                Job.chain_id == effective_chain_id,
+                Job.status == JobStatus.completed,
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         ).scalar_one_or_none()
@@ -76,16 +138,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     # Load artifacts (for those still stored as artifacts)
     all_artifacts = deps.get_all_artifacts(session, job.id)
 
-    # Fall back to address lookup when copy_static_cache has reassigned
-    # the Contract row to a newer job. Chain-scoped so we don't pick up
-    # the same address on a different chain.
-    contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-    if contract_row is None and job.address:
-        fallback_stmt = select(Contract).where(Contract.address == job.address.lower())
-        job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-        if job_chain:
-            fallback_stmt = fallback_stmt.where(Contract.chain == job_chain)
-        contract_row = session.execute(fallback_stmt.limit(1)).scalar_one_or_none()
+    contract_row = (
+        require_contract_for_job(session, job, context=f"analysis detail contract lookup for {job.id}")
+        if job.address
+        else None
+    )
 
     def _company_for(j: Job) -> str | None:
         seen: set[str] = set()
@@ -146,35 +203,38 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
 
     # Resolved semantic capabilities. Computed lazily — the raw
     # predicate_trees lives on the artifact; resolving it to the typed
-    # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
-    # capability-resolution failure MUST NOT fail the whole analysis_detail
-    # response; the rest of the detail payload is still useful.
+    # CapabilityExpr requires the AdapterRegistry + repos. Failures are
+    # surfaced instead of returning a partial payload, because resolver errors
+    # can represent missing chain identity, unsupported chain ids, or eRPC
+    # failures that must not be hidden by the detail endpoint.
     if isinstance(payload.get("predicate_trees"), dict) and job.address:
         try:
             from services.resolution.capability_resolver import resolve_contract_capabilities
 
-            # Per C.1 cutover: scope by (job_id, chain) so a re-analysis
+            # Scope by (job_id, chain_id) so a re-analysis
             # on a different chain or a follow-up job on the same address
             # doesn't leak controller rows into this job's resolution.
-            # Chain comes from the Contract row when present, falling
-            # back to job.request['chain'].
-            req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
+            raw_chain_id = contract_row.chain_id if contract_row is not None else job.chain_id
+            effective_chain_id = require_supported_chain_id(
+                chain_id=raw_chain_id,
+                context=f"semantic capability enrichment for job {job.id}",
+            )
             semantic_caps = resolve_contract_capabilities(
                 session,
                 address=job.address.lower(),
                 job_id=job.id,
-                chain=chain if isinstance(chain, str) else None,
+                chain_id=effective_chain_id,
             )
             if semantic_caps is not None:
                 payload["semantic_capabilities"] = semantic_caps
         except Exception as exc:
-            logger.warning(
-                "semantic capability resolution failed for job %s; omitting capability enrichment: %s",
+            logger.error(
+                "semantic capability resolution failed for job %s: %s",
                 job.id,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+            raise RuntimeError(f"semantic capability resolution failed for job {job.id}") from exc
 
     if contract_row:
         _populate_from_contract(session, payload, contract_row, label=job.name)
@@ -183,7 +243,16 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     request = job.request if isinstance(job.request, dict) else {}
     proxy_address = request.get("proxy_address")
     if proxy_address:
-        proxy_stmt = select(Job).where(Job.address == proxy_address).order_by(Job.updated_at.desc()).limit(1)
+        effective_chain_id = require_supported_chain_id(
+            chain_id=job.chain_id,
+            context=f"analysis detail proxy lookup for {job.id}",
+        )
+        proxy_stmt = (
+            select(Job)
+            .where(func.lower(Job.address) == proxy_address.lower(), Job.chain_id == effective_chain_id)
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        )
         proxy_job = session.execute(proxy_stmt).scalar_one_or_none()
         if proxy_job:
             proxy_artifacts = deps.get_all_artifacts(session, proxy_job.id)
@@ -199,7 +268,16 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     is_proxy = contract_row.is_proxy if contract_row else False
     impl_addr = contract_row.implementation if contract_row else None
     if is_proxy and impl_addr:
-        impl_stmt = select(Job).where(Job.address == impl_addr).order_by(Job.updated_at.desc()).limit(1)
+        effective_chain_id = require_supported_chain_id(
+            chain_id=contract_row.chain_id,
+            context=f"analysis detail impl lookup for {job.id}",
+        )
+        impl_stmt = (
+            select(Job)
+            .where(func.lower(Job.address) == impl_addr.lower(), Job.chain_id == effective_chain_id)
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        )
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr)
@@ -210,19 +288,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         subject = contract_analysis.get("subject", {})
         payload["contract_name"] = subject.get("name", payload["run_name"])
         payload["summary"] = contract_analysis.get("summary")
-
-    # Synthesis fallback for upgrade_history. Mirrors the per-artifact
-    # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
-    # all other paths (artifact body, proxy-impl inheritance) so it only
-    # fires when nothing else surfaced one — typically a storage outage or
-    # a never-materialized artifact. Gated on is_proxy because UpgradeEvent
-    # rows only ever exist for proxies.
-    if "upgrade_history" not in payload and contract_row is not None and getattr(contract_row, "is_proxy", False):
-        from services.discovery.upgrade_history import synthesize_from_events
-
-        synthesized = synthesize_from_events(session, contract_row)
-        if synthesized:
-            payload["upgrade_history"] = synthesized
 
     return payload
 
@@ -298,7 +363,12 @@ def _populate_from_contract(
             .all()
         )
         if cgn_rows:
-            payload["resolved_control_graph"] = _build_control_graph(contract_row.address, cgn_rows, cge_rows)
+            payload["resolved_control_graph"] = _build_control_graph(
+                contract_row.address,
+                chain_id=contract_row.chain_id,
+                cgn_rows=cgn_rows,
+                cge_rows=cge_rows,
+            )
 
 
 def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dict[str, Any]]:
@@ -365,7 +435,7 @@ def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[Controller
     }
 
 
-def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any]:
+def _build_control_graph(root_address: str, *, chain_id: int, cgn_rows, cge_rows) -> dict[str, Any]:
     return {
         "root_contract_address": root_address,
         "nodes": [
@@ -376,7 +446,7 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "resolved_type": n.resolved_type,
                 "label": n.label,
                 "contract_name": n.contract_name,
-                "contract": make_contract(address=n.address, name=n.contract_name, label=n.label),
+                "contract": make_contract(address=n.address, chain_id=chain_id, name=n.contract_name, label=n.label),
                 "depth": n.depth,
                 "analyzed": n.analyzed,
                 "details": n.details or {},
@@ -411,7 +481,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             if val is not None:
                 payload[fallback_name] = val
 
-    impl_c = session.execute(select(Contract).where(Contract.job_id == impl_job.id).limit(1)).scalar_one_or_none()
+    impl_c = require_contract_for_job(session, impl_job, context=f"analysis detail impl lookup for {impl_job.id}")
     if impl_c:
         if "effective_permissions" not in payload:
             impl_efs = list(
@@ -450,7 +520,12 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
                 .all()
             )
             if impl_cgn:
-                payload["resolved_control_graph"] = _build_control_graph(impl_c.address, impl_cgn, impl_cge)
+                payload["resolved_control_graph"] = _build_control_graph(
+                    impl_c.address,
+                    chain_id=impl_c.chain_id,
+                    cgn_rows=impl_cgn,
+                    cge_rows=impl_cge,
+                )
 
         if "principal_labels" not in payload:
             impl_pls = (

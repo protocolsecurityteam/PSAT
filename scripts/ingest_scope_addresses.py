@@ -4,7 +4,7 @@ Merges JSON output from:
 - ``/tmp/agent1_addresses.json`` — etherfi deployment registry (GitHub + docs)
 - ``/tmp/agent2_addresses.json`` — addresses extracted from audit PDF text
 
-For each ``(address, chain)`` pair:
+For each ``(address, chain_id)`` pair:
 
 - If a ``contracts`` row exists:
   - Set ``protocol_id`` to 1 (etherfi) when NULL. Audit coverage's name
@@ -28,6 +28,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from db.models import Contract, SessionLocal
+from utils.rpc import require_supported_chain_id
 
 _GENERIC_PROXY_NAMES: frozenset[str] = frozenset(
     {"uupsproxy", "upgradeableproxy", "upgradeablebeacon", "beaconproxy", "transparentupgradeableproxy"}
@@ -36,26 +37,52 @@ _GENERIC_PROXY_NAMES: frozenset[str] = frozenset(
 
 def _load(paths: list[Path]) -> list[dict]:
     merged: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, int]] = set()
+    errors: list[str] = []
     for p in paths:
         if not p.exists():
-            print(f"warn: {p} not found, skipping", file=sys.stderr)
+            errors.append(f"{p} not found")
             continue
         with p.open() as f:
             entries = json.load(f)
+        if not isinstance(entries, list):
+            errors.append(f"{p} must contain a JSON list")
+            continue
         for e in entries:
+            if not isinstance(e, dict):
+                errors.append(f"{p} entry must be an object: {e!r}")
+                continue
             addr = (e.get("address") or "").lower().strip()
-            chain = (e.get("chain") or "ethereum").lower().strip()
+            raw_chain_id = e.get("chain_id")
+            try:
+                chain_id = require_supported_chain_id(
+                    chain_id=raw_chain_id,
+                    context=f"audit scope ingest {p} address={addr or '<missing>'}",
+                )
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                continue
             name = (e.get("name") or "").strip()
             if not addr or not addr.startswith("0x") or len(addr) != 42:
+                errors.append(f"{p} entry has invalid address: {addr!r}")
+                continue
+            try:
+                int(addr[2:], 16)
+            except ValueError:
+                errors.append(f"{p} entry has non-hex address: {addr!r}")
                 continue
             if not name:
+                errors.append(f"{p} entry for {addr} chain_id={chain_id} missing name")
                 continue
-            key = (addr, chain)
+            key = (addr, chain_id)
             if key in seen:
                 continue
             seen.add(key)
-            merged.append({"address": addr, "chain": chain, "name": name})
+            merged.append({"address": addr, "chain_id": chain_id, "name": name})
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        raise RuntimeError(f"audit scope ingest failed validation with {len(errors)} error(s)")
     return merged
 
 
@@ -69,7 +96,7 @@ def ingest(session, entries: list[dict], *, protocol_id: int) -> dict[str, int]:
         existing = session.execute(
             select(Contract).where(
                 Contract.address == entry["address"],
-                Contract.chain == entry["chain"],
+                Contract.chain_id == entry["chain_id"],
             )
         ).scalar_one_or_none()
 
@@ -77,10 +104,10 @@ def ingest(session, entries: list[dict], *, protocol_id: int) -> dict[str, int]:
             session.add(
                 Contract(
                     address=entry["address"],
-                    chain=entry["chain"],
+                    chain_id=entry["chain_id"],
                     contract_name=entry["name"],
                     protocol_id=protocol_id,
-                    discovery_source="audit_scope",
+                    discovery_sources=["audit_scope"],
                 )
             )
             inserted += 1

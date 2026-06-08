@@ -8,26 +8,26 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from schemas.common import Address, ChainId, JsonObject
 from schemas.monitoring_schemas import MonitoringEventFilter
 
 
 class AnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     address: Address | None = Field(default=None, min_length=42, max_length=42)
     company: str | None = Field(default=None, min_length=1)
     dapp_urls: list[str] | None = None
     defillama_protocol: str | None = Field(default=None, min_length=1)
     name: str | None = None
-    chain: str | None = None
     chain_id: ChainId | None = Field(default=None, ge=1)
     wait: int | None = Field(default=None, ge=1, le=120)
     analyze_limit: int = Field(default=5, ge=1, le=200)
-    rpc_url: str | None = None
     force: bool = Field(
         default=False,
-        description="Bench-only: skip the static-cache discovery shortcut so every stage re-runs cold.",
+        description="Bench-only: scope proxy implementation dedupe to the current re-run cascade.",
     )
 
     @model_validator(mode="after")
@@ -39,6 +39,15 @@ class AnalyzeRequest(BaseModel):
         if not has_primary and not company_only:
             raise ValueError("Provide exactly one of: address, company, dapp_urls, defillama_protocol")
         return self
+
+    @field_validator("address")
+    @classmethod
+    def validate_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
+            raise ValueError("address must be a 20-byte hex address")
+        return value.lower()
 
 
 class ProtocolSubscribeRequest(BaseModel):
@@ -76,7 +85,7 @@ class ProtocolSubscribeRequest(BaseModel):
 
 class UpsertMonitoredContractRequest(BaseModel):
     address: Address = Field(min_length=42, max_length=42)
-    chain: str = "ethereum"
+    chain_id: ChainId = Field(ge=1)
     contract_type: str = "regular"
     monitoring_config: JsonObject | None = None
     needs_polling: bool = False

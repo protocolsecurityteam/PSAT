@@ -248,7 +248,7 @@ def _effect_targets_from_sinks(sinks: list[SinkRecord]) -> list[str]:
 
 def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
     """For a state-write function, its own selector is the relevant
-    writer selector (HyperSync replays this function to attribute the
+    writer selector (event-log replay uses it to attribute the
     write). Returns a list because some pipelines accumulate multiple
     selectors per logical writer (overloads)."""
     has_state_write = any(s["kind"] == "state_write" for s in sinks)

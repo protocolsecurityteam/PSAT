@@ -27,6 +27,7 @@ from schemas.common import (
 )
 from schemas.control_tracking import ControlSnapshot, ResolvedControllerType
 from services.static.contract_analysis_pipeline.pipeline_types import PredicateSetDescriptor, StaticAnalysisArtifact
+from utils.rpc import require_configured_erpc_url, require_supported_chain_id
 
 ResolvedNodeType = Literal["contract", "principal"]
 ResolvedEdgeRelation = Literal[
@@ -297,8 +298,8 @@ class BytecodeRepo(Protocol):
 
 @dataclass
 class EvaluationContext:
-    chain_id: ChainId = 1
-    rpc_url: str | None = None
+    chain_id: ChainId
+    rpc_url: str
     block: int | None = None
     finality_depth: int = 12
     contract_address: Address | None = None
@@ -310,6 +311,14 @@ class EvaluationContext:
     evaluation_stack: set[tuple[int, str, str]] = field(default_factory=set)
     call_frame: CallFrame | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.chain_id = require_supported_chain_id(chain_id=self.chain_id, context="evaluation context")
+        self.rpc_url = require_configured_erpc_url(
+            self.rpc_url,
+            context=f"evaluation context chain_id={self.chain_id}",
+            chain_id=self.chain_id,
+        )
 
 
 AdapterSetDescriptor: TypeAlias = dict[Any, Any]

@@ -1,7 +1,7 @@
 """HTML parsing and contract entry extraction for the inventory pipeline.
 
 Fetches official protocol pages and extracts contract records (name, address,
-chain) from tables, lists, explorer links, and prose text.  Called by
+chain_id) from tables, lists, explorer links, and prose text.  Called by
 inventory.py after inventory_domain.py identifies the pages.
 """
 
@@ -10,6 +10,8 @@ from __future__ import annotations
 import html as _html
 import re
 from typing import Any
+
+from utils.rpc import require_chain_id_for_evidence_label
 
 from .inventory_domain import (
     ADDRESS_RE,
@@ -205,24 +207,34 @@ def _default_name_from_heading(heading: str | None) -> str | None:
     return heading
 
 
-def _resolve_candidate_chains(
+def _resolve_candidate_chain_ids(
     chain_value: str | None,
     line_chain: str,
     requested_chain: str | None,
-) -> list[tuple[str, bool]]:
+) -> list[tuple[int | None, bool]]:
     explicit = _parse_chain_values(chain_value or "")
     candidates = explicit or ([line_chain] if line_chain != "unknown" else [])
     if not candidates:
         candidates = ["unknown"]
 
-    resolved: list[tuple[str, bool]] = []
-    seen: set[str] = set()
+    resolved: list[tuple[int | None, bool]] = []
+    seen: set[int | None] = set()
     for candidate in candidates:
         final_chain, hinted = _resolve_chain(candidate, requested_chain)
-        if final_chain is None or final_chain in seen:
+        if final_chain is None:
             continue
-        seen.add(final_chain)
-        resolved.append((final_chain, hinted))
+        chain_id = (
+            None
+            if final_chain == "unknown"
+            else require_chain_id_for_evidence_label(
+                final_chain,
+                context="inventory extraction evidence",
+            )
+        )
+        if chain_id in seen:
+            continue
+        seen.add(chain_id)
+        resolved.append((chain_id, hinted))
     return resolved
 
 
@@ -248,17 +260,17 @@ def _build_entries_from_table_row(
         _default_name_from_heading(current_heading),
     )
     chain_value = " ".join(cell_by_role.get("chain", [])) if cell_by_role.get("chain") else None
-    resolved_chains = _resolve_candidate_chains(chain_value, current_chain, requested_chain)
+    resolved_chains = _resolve_candidate_chain_ids(chain_value, current_chain, requested_chain)
 
     entries: list[dict[str, Any]] = []
     for address in addresses:
         explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-        for resolved, chain_from_hint in resolved_chains:
+        for chain_id, chain_from_hint in resolved_chains:
             entries.append(
                 {
                     "name": name,
                     "address": address,
-                    "chain": resolved,
+                    "chain_id": chain_id,
                     "kind": "official_inventory_table",
                     "url": url,
                     "explorer_url": explorer_url,
@@ -400,7 +412,7 @@ def extract_inventory_entries_from_page_text(
                     if row_entries:
                         for entry in row_entries:
                             signature = (
-                                entry["chain"],
+                                entry["chain_id"],
                                 entry["address"],
                                 entry["name"],
                                 entry["kind"],
@@ -455,8 +467,8 @@ def extract_inventory_entries_from_page_text(
 
         for address in addresses:
             explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-            for resolved, chain_from_hint in _resolve_candidate_chains(None, line_chain, requested_chain):
-                signature = (resolved, address, name, kind, url)
+            for chain_id, chain_from_hint in _resolve_candidate_chain_ids(None, line_chain, requested_chain):
+                signature = (chain_id, address, name, kind, url)
                 if signature in seen:
                     continue
                 seen.add(signature)
@@ -464,7 +476,7 @@ def extract_inventory_entries_from_page_text(
                     {
                         "name": name,
                         "address": address,
-                        "chain": resolved,
+                        "chain_id": chain_id,
                         "kind": kind,
                         "url": url,
                         "explorer_url": explorer_url,
@@ -496,8 +508,10 @@ def extract_inventory_entries_from_pages(
     for url, page_text in zip(urls, [r for _u, r in fetch_results]):
         if isinstance(page_text, BaseException):
             _debug_log(debug, f"Fetch {url} raised: {page_text!r}")
-            continue
-        if not page_text:
-            continue
+            raise RuntimeError(f"Inventory page fetch failed for {url}") from page_text
+        if not page_text.strip():
+            message = f"Inventory page fetch returned empty body for {url}"
+            _debug_log(debug, message)
+            raise RuntimeError(message)
         out.extend(extract_inventory_entries_from_page_text(url, page_text, requested_chain, debug=debug))
     return out

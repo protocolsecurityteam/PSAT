@@ -29,7 +29,6 @@ from db.storage import (
     deserialize_artifact,
     get_storage_client,
 )
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +39,6 @@ if not ADMIN_KEY:
         "Set PSAT_ADMIN_KEY in the environment to enable admin operations."
     )
 
-DEFAULT_RPC_URL = (
-    default_rpc_url(chain_id=1, fallback_url=os.environ.get("ETH_RPC") or PUBLIC_ETH_RPC_URL) or PUBLIC_ETH_RPC_URL
-)
 MAX_TVL_HISTORY_DAYS = 90
 
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -63,7 +59,6 @@ def _normalize_address_or_400(address: str) -> str:
 
 __all__ = [
     "ADMIN_KEY",
-    "DEFAULT_RPC_URL",
     "MAX_TVL_HISTORY_DAYS",
     "SessionLocal",
     "StorageError",

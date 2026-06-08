@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { matchesEra } from "../../auditMatching.js";
 import { isBytecodeVerifiedAudit } from "../../auditCoverage.js";
 import { api } from "../../api/client.js";
+import { blockExplorerAddressUrl } from "../../blockExplorer.js";
 import { shortenAddress } from "../../graph.js";
 
 function formatDate(ts) {
@@ -31,16 +32,6 @@ function formatSpan(fromTs, toTs) {
   if (!start) return null;
   const end = toTs ? formatDate(toTs) : null;
   return end ? `${start} → ${end}` : start;
-}
-
-function etherscanLink(address, chain) {
-  if (!address) return null;
-  const base = chain === "base" ? "https://basescan.org/address/"
-    : chain === "scroll" ? "https://scrollscan.com/address/"
-    : chain === "blast" ? "https://blastscan.io/address/"
-    : chain === "bsc" ? "https://bscscan.com/address/"
-    : "https://etherscan.io/address/";
-  return base + address;
 }
 
 export function UpgradesPanel({
@@ -93,7 +84,6 @@ export function UpgradesPanel({
   const targetAddr = (history.target_address || contractAddress || "").toLowerCase();
   const targetProxy = history.proxies?.[targetAddr] || Object.values(history.proxies)[0] || null;
   const otherProxies = Object.entries(history.proxies).filter(([addr]) => addr.toLowerCase() !== targetAddr);
-  const chain = targetProxy?.chain || null;
 
   function implName(addr, fallbackName) {
     if (!addr) return null;
@@ -121,6 +111,9 @@ export function UpgradesPanel({
   const currentAudited = currentImpl ? isAudited(currentImpl) : false;
   const upgradeCount = targetProxy?.upgrade_count ?? Math.max(0, impls.length - 1);
   const lastTs = currentImpl?.timestamp_introduced;
+  const currentImplHref = currentImpl
+    ? blockExplorerAddressUrl(currentImpl.address, currentImpl.chain_id)
+    : null;
 
   function StatusChip({ audited }) {
     return audited ? (
@@ -133,7 +126,7 @@ export function UpgradesPanel({
   function ImplRow({ impl, isCurrent, isFirst }) {
     const name = implName(impl.address, impl.contract_name);
     const span = formatSpan(impl.timestamp_introduced, impl.timestamp_replaced);
-    const link = etherscanLink(impl.address, chain);
+    const link = blockExplorerAddressUrl(impl.address, impl.chain_id);
     const audits = auditsFor(impl);
     return (
       <li className={`upgr2-impl${isCurrent ? " upgr2-impl--current" : ""}`}>
@@ -184,14 +177,18 @@ export function UpgradesPanel({
         </div>
         {currentImpl ? (
           <div className="upgr2-status-meta">
-            <a
-              className="upgr2-status-addr mono"
-              href={etherscanLink(currentImpl.address, chain) || "#"}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {shortenAddress(currentImpl.address)}
-            </a>
+            {currentImplHref ? (
+              <a
+                className="upgr2-status-addr mono"
+                href={currentImplHref}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {shortenAddress(currentImpl.address)}
+              </a>
+            ) : (
+              <span className="upgr2-status-addr mono">{shortenAddress(currentImpl.address)}</span>
+            )}
             {lastTs ? (
               <span className="upgr2-status-since">since {formatDate(lastTs)} · {formatRelative(lastTs)}</span>
             ) : null}

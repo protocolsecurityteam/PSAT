@@ -11,8 +11,9 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from eth_abi.abi import decode
+from eth_utils.crypto import keccak
 
-from schemas.common import Contract, make_contract
+from schemas.common import Contract
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from services.static.contract_analysis_pipeline.analysis_types import AssociatedEvent, ControllerReadSpec
@@ -20,7 +21,11 @@ from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
 from utils.rpc import (
-    rpc_batch_request_with_status as _rpc_batch_request_with_status,
+    require_configured_erpc_url,
+    require_supported_chain_id,
+)
+from utils.rpc import (
+    rpc_batch_request_with_item_errors as _rpc_batch_request_with_item_errors,
 )
 from utils.rpc import (
     rpc_request as _rpc_request,
@@ -35,16 +40,27 @@ logger = logging.getLogger(__name__)
 # misclassification.
 _PROBE_ERROR = object()
 
-# Process-wide classify cache keyed on (rpc_url, address, block_tag); skips error returns and applies a TTL so latest-
-# block reads eventually re-probe.
-_CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[str, dict[str, object], float]] = {}
+# Process-wide classify cache keyed on (rpc_url, address, block_tag, chain_id);
+# skips error returns and applies a TTL so latest-block reads eventually re-probe.
+_CLASSIFY_CACHE: dict[tuple[str, str, str, int], tuple[str, dict[str, object], float]] = {}
 _CLASSIFY_CACHE_LOCK = threading.Lock()
 _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
 
-# Single-batch classify probes (default ON); falls back to sequential on whole-batch failure. Toggle
+# Single-batch classify probes (default ON). Toggle
 # PSAT_CLASSIFY_BATCH=0 to force sequential.
 _CLASSIFY_BATCH_ENABLED = os.getenv("PSAT_CLASSIFY_BATCH", "1").lower() in ("1", "true", "yes")
+
+
+def _require_hex_data(raw: Any, *, context: str) -> str:
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise RuntimeError(f"Unexpected {context} result: {raw!r}")
+    if raw not in {"0x", "0x0"}:
+        try:
+            bytes.fromhex(raw[2:])
+        except ValueError as exc:
+            raise RuntimeError(f"Unexpected malformed {context} hex result") from exc
+    return raw.lower()
 
 
 def type_authority_contract(rpc_url: str, address: str, block_tag: str = "latest") -> dict[str, object]:
@@ -98,8 +114,8 @@ def _decode_controller_value(
         decoded = value
     # Refuse an unstorable value here rather than letting the resolution
     # worker's controller_values INSERT raise StringDataRightTruncation
-    # mid-commit (which poisons the worker session). The caller
-    # (build_control_snapshot) turns this into a value=None entry.
+    # mid-commit. build_control_snapshot logs and fails the stage so the
+    # controller is not silently omitted.
     if len(decoded) > _CONTROLLER_VALUE_MAX_LEN:
         member_path = read_spec.get("member_path") if isinstance(read_spec, dict) else None
         raise ValueError(
@@ -141,12 +157,17 @@ def _decode_projected_member_value(raw_value: str, read_spec: ControllerReadSpec
     return str(value)
 
 
-def _eth_call_raw(rpc_url: str, contract_address: str, signature: str, block_tag: str = "latest") -> str:
+def _eth_call_raw(
+    rpc_url: str,
+    contract_address: str,
+    signature: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int,
+) -> str:
     call = {"to": contract_address, "data": _selector(signature)}
-    raw = _rpc_request(rpc_url, "eth_call", [call, block_tag])
-    if not isinstance(raw, str) or not raw.startswith("0x"):
-        raise RuntimeError(f"Unexpected eth_call result for {signature}: {raw!r}")
-    return raw
+    raw = _rpc_request(rpc_url, "eth_call", [call, block_tag], chain_id=chain_id)
+    return _require_hex_data(raw, context=f"eth_call {signature}")
 
 
 def _decode_abi_value(raw_value: str, abi_type: str):
@@ -175,25 +196,64 @@ def _decode_topic_value(raw_value: str, abi_type: str):
 
 
 def _try_eth_call_decoded(
-    rpc_url: str, contract_address: str, signature: str, abi_type: str, block_tag: str = "latest"
+    rpc_url: str,
+    contract_address: str,
+    signature: str,
+    abi_type: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int,
 ) -> object | None:
-    """Decoded value, None (function absent / decode failure), or _PROBE_ERROR (transient RPC issue — caller should not
-    cache)."""
+    """Decoded value, None for valid empty/absent function, or _PROBE_ERROR for malformed/runtime failure."""
     try:
-        raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag)
+        raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag, chain_id=chain_id)
         if _normalize_hex(raw) in {"0x", "0x0"}:
             return None
         try:
             return _decode_abi_value(raw, abi_type)
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "resolved-address probe returned malformed ABI data address=%s signature=%s abi_type=%s: %s",
+                contract_address,
+                signature,
+                abi_type,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return _PROBE_ERROR
+    except RuntimeError as exc:
+        if _is_expected_eth_call_probe_miss(exc):
             return None
+        return _PROBE_ERROR
     except Exception:
         return _PROBE_ERROR
 
 
-def _get_code(rpc_url: str, address: str, block_tag: str = "latest") -> str:
-    raw = _rpc_request(rpc_url, "eth_getCode", [address, block_tag])
-    return _normalize_hex(raw if isinstance(raw, str) else "0x")
+def _is_expected_eth_call_probe_miss(exc: RuntimeError) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "execution reverted",
+            "revert",
+            "invalid opcode",
+            "out of gas",
+        )
+    )
+
+
+def _get_code(rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int) -> str:
+    raw = _rpc_request(rpc_url, "eth_getCode", [address, block_tag], chain_id=chain_id)
+    return _require_hex_data(raw, context=f"eth_getCode {address}")
+
+
+def _runtime_code_keccak(code: str) -> str:
+    if not isinstance(code, str) or not code.startswith("0x"):
+        raise RuntimeError(f"Unexpected runtime bytecode value: {code!r}")
+    try:
+        return "0x" + keccak(bytes.fromhex(code[2:])).hex()
+    except ValueError as exc:
+        raise RuntimeError("Unexpected malformed runtime bytecode hex") from exc
 
 
 def _coerce_int(value: object) -> int:
@@ -207,11 +267,28 @@ def _coerce_int(value: object) -> int:
 
 
 def classify_resolved_address_with_status(
-    rpc_url: str, address: str, block_tag: str = "latest"
+    rpc_url: str,
+    address: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int,
 ) -> tuple[str, dict[str, object], bool]:
     """Like ``classify_resolved_address`` but also returns a ``cacheable`` flag (False if any probe errored)."""
     normalized = _normalize_hex(address)
-    cache_key = (rpc_url, normalized, block_tag)
+    try:
+        effective_chain_id = require_supported_chain_id(
+            chain_id=chain_id,
+            context=f"resolved-address classification for {address}",
+        )
+        rpc_url = require_configured_erpc_url(
+            rpc_url,
+            context=f"resolved-address classification for {address}",
+            chain_id=effective_chain_id,
+        )
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise
+    cache_key = (rpc_url, normalized, block_tag, effective_chain_id)
     now = time.monotonic()
 
     with _CLASSIFY_CACHE_LOCK:
@@ -223,9 +300,14 @@ def classify_resolved_address_with_status(
             del _CLASSIFY_CACHE[cache_key]
 
     if _CLASSIFY_BATCH_ENABLED:
-        kind, details, had_error = _classify_uncached_batched(rpc_url, normalized, block_tag)
+        kind, details, had_error = _classify_uncached_batched(
+            rpc_url,
+            normalized,
+            block_tag,
+            chain_id=effective_chain_id,
+        )
     else:
-        kind, details, had_error = _classify_uncached(rpc_url, normalized, block_tag)
+        kind, details, had_error = _classify_uncached(rpc_url, normalized, block_tag, chain_id=effective_chain_id)
 
     if not had_error:
         with _CLASSIFY_CACHE_LOCK:
@@ -238,10 +320,21 @@ def classify_resolved_address_with_status(
     return kind, details, not had_error
 
 
-def classify_resolved_address(rpc_url: str, address: str, block_tag: str = "latest") -> tuple[str, dict[str, object]]:
+def classify_resolved_address(
+    rpc_url: str,
+    address: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int,
+) -> tuple[str, dict[str, object]]:
     """Backwards-compatible wrapper that drops the cacheable flag; use the ``_with_status`` form if you maintain a
     downstream cache."""
-    kind, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, block_tag)
+    kind, details, _cacheable = classify_resolved_address_with_status(
+        rpc_url,
+        address,
+        block_tag,
+        chain_id=chain_id,
+    )
     return kind, details
 
 
@@ -257,65 +350,89 @@ _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
 
 
 def _decode_probe_result(raw: object, abi_type: str) -> object | None:
-    """Decode a pre-fetched probe result; returns None on empty/decode-failure (caller maps RPC errors to _PROBE_ERROR
-    before calling)."""
+    """Decode a pre-fetched probe result.
+
+    Returns ``None`` only for valid empty/decode-miss responses. A successful
+    JSON-RPC item with a malformed payload is a provider/runtime error and must
+    not be treated as an absent optional getter.
+    """
     if not isinstance(raw, str):
-        return None
+        return _PROBE_ERROR
+    if not raw.startswith("0x"):
+        return _PROBE_ERROR
     if _normalize_hex(raw) in {"0x", "0x0"}:
         return None
     try:
+        bytes.fromhex(raw[2:])
+    except ValueError:
+        return _PROBE_ERROR
+    try:
         return _decode_abi_value(raw, abi_type)
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.error(
+            "resolved-address batch probe returned malformed ABI data abi_type=%s: %s",
+            abi_type,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        return _PROBE_ERROR
 
 
-def _batch_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
-    """Fire all 6 classify probes in one JSON-RPC batch; per-slot errors yield _PROBE_ERROR so callers skip caching."""
+def _batch_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int) -> list[object]:
+    """Fire all 6 classify probes in one JSON-RPC batch.
+
+    Expected contract-level getter misses decode to ``None``. Provider/runtime
+    item errors yield ``_PROBE_ERROR`` so callers can fail instead of returning
+    a generic contract classification from incomplete evidence.
+    """
     calls = [("eth_call", [{"to": address, "data": _selector(sig)}, block_tag]) for sig, _abi in _CLASSIFY_PROBE_SIGS]
-    raw_results = _rpc_batch_request_with_status(rpc_url, calls)
+    raw_results = _rpc_batch_request_with_item_errors(rpc_url, calls, chain_id=chain_id)
     decoded: list[object] = []
-    for (raw, had_err), (_sig, abi_type) in zip(raw_results, _CLASSIFY_PROBE_SIGS):
-        if had_err:
+    for (raw, item_error), (_sig, abi_type) in zip(raw_results, _CLASSIFY_PROBE_SIGS):
+        if item_error is not None:
+            if _is_expected_eth_call_probe_miss(RuntimeError(str(item_error))):
+                decoded.append(None)
+                continue
             decoded.append(_PROBE_ERROR)
             continue
         decoded.append(_decode_probe_result(raw, abi_type))
     return decoded
 
 
-def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) -> tuple[str, dict[str, object], bool]:
+def _classify_uncached_batched(
+    rpc_url: str,
+    normalized: str,
+    block_tag: str,
+    *,
+    chain_id: int,
+) -> tuple[str, dict[str, object], bool]:
     """Same contract as ``_classify_uncached`` but batches the 6 probes upfront, saving 5 RTT in the common generic-
     contract case."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
     try:
-        code = _get_code(rpc_url, normalized, block_tag)
-    except Exception:
-        return "contract", {"address": normalized}, True
+        code = _get_code(rpc_url, normalized, block_tag, chain_id=chain_id)
+    except Exception as exc:
+        logger.error("resolved-address eth_getCode failed for %s chain_id=%s: %s", normalized, chain_id, exc)
+        raise RuntimeError(f"resolved-address eth_getCode failed for {normalized} chain_id={chain_id}") from exc
     if code in {"0x", "0x0"}:
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the batch round trip when bytecode matches a canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from utils.rpc import get_code_with_keccak
+        bytecode_keccak = _runtime_code_keccak(code)
+        hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
+        if hit is not None:
+            kind, partial = hit
+            details: dict[str, object] = {"address": normalized}
+            details.update(partial)
+            return kind, details, False
 
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
-
-    probes = _batch_probe(rpc_url, normalized, block_tag)
-    # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
-    # accuracy.
+    probes = _batch_probe(rpc_url, normalized, block_tag, chain_id=chain_id)
     if all(p is _PROBE_ERROR for p in probes):
-        return _classify_uncached(rpc_url, normalized, block_tag)
+        logger.error("resolved-address classify probes all failed for %s chain_id=%s", normalized, chain_id)
+        raise RuntimeError(f"resolved-address classify probes all failed for {normalized} chain_id={chain_id}")
     safe_owners_raw, safe_threshold_raw, min_delay_a, min_delay_b, upgrade_iv, owner_raw = probes
 
     def _ok(v: object) -> object | None:
@@ -325,6 +442,9 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
         return v
 
     had_error = any(p is _PROBE_ERROR for p in probes)
+    if had_error:
+        logger.error("resolved-address classify probes failed for %s chain_id=%s", normalized, chain_id)
+        raise RuntimeError(f"resolved-address classify probes failed for {normalized} chain_id={chain_id}")
     safe_owners = _ok(safe_owners_raw)
     safe_threshold = _ok(safe_threshold_raw)
     if safe_owners is not None and safe_threshold is not None:
@@ -362,9 +482,16 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
     details = {"address": normalized}
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag))
-    except Exception:
-        had_error = True
-    return "contract", details, had_error
+    except Exception as exc:
+        logger.error(
+            "resolved-address authority typing failed for %s chain_id=%s: %s",
+            normalized,
+            chain_id,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(f"resolved-address authority typing failed for {normalized} chain_id={chain_id}") from exc
+    return "contract", details, False
 
 
 # Canonical-impl bytecode keccak registry; matches short-circuit the 6-probe classifier (empty by default — populate via
@@ -372,39 +499,40 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
 _KNOWN_BYTECODE_IMPLS: dict[str, tuple[str, dict[str, object]]] = {}
 
 
-def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[str, dict[str, object], bool]:
+def _classify_uncached(
+    rpc_url: str,
+    normalized: str,
+    block_tag: str,
+    *,
+    chain_id: int,
+) -> tuple[str, dict[str, object], bool]:
     """The classifier. Returns ``(kind, details, had_rpc_error)``; caller must skip caching on had_rpc_error."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
     try:
-        code = _get_code(rpc_url, normalized, block_tag)
-    except Exception:
-        return "contract", {"address": normalized}, True
+        code = _get_code(rpc_url, normalized, block_tag, chain_id=chain_id)
+    except Exception as exc:
+        logger.error("resolved-address eth_getCode failed for %s chain_id=%s: %s", normalized, chain_id, exc)
+        raise RuntimeError(f"resolved-address eth_getCode failed for {normalized} chain_id={chain_id}") from exc
     if code in {"0x", "0x0"}:
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the 6-probe sequence when bytecode matches a registered canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from utils.rpc import get_code_with_keccak
-
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
+        bytecode_keccak = _runtime_code_keccak(code)
+        hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
+        if hit is not None:
+            kind, partial = hit
+            details: dict[str, object] = {"address": normalized}
+            details.update(partial)
+            return kind, details, False
 
     had_error = False
 
     def _probe(signature: str, abi_type: str) -> object | None:
         nonlocal had_error
-        result = _try_eth_call_decoded(rpc_url, normalized, signature, abi_type, block_tag)
+        result = _try_eth_call_decoded(rpc_url, normalized, signature, abi_type, block_tag, chain_id=chain_id)
         if result is _PROBE_ERROR:
             had_error = True
             return None
@@ -412,6 +540,9 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
 
     safe_owners = _probe("getOwners()", "address[]")
     safe_threshold = _probe("getThreshold()", "uint256")
+    if had_error:
+        logger.error("resolved-address classify probes failed for %s chain_id=%s", normalized, chain_id)
+        raise RuntimeError(f"resolved-address classify probes failed for {normalized} chain_id={chain_id}")
     if safe_owners is not None and safe_threshold is not None:
         return (
             "safe",
@@ -428,6 +559,9 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
         min_delay = _probe("delay()", "uint256")
     if min_delay is not None:
         owner = _probe("owner()", "address")
+        if had_error:
+            logger.error("resolved-address classify probes failed for %s chain_id=%s", normalized, chain_id)
+            raise RuntimeError(f"resolved-address classify probes failed for {normalized} chain_id={chain_id}")
         details: dict[str, object] = {"address": normalized, "delay": _coerce_int(min_delay)}
         if owner is not None:
             details["owner"] = owner
@@ -436,6 +570,9 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
     upgrade_interface_version = _probe("UPGRADE_INTERFACE_VERSION()", "string")
     if upgrade_interface_version is not None:
         owner = _probe("owner()", "address")
+        if had_error:
+            logger.error("resolved-address classify probes failed for %s chain_id=%s", normalized, chain_id)
+            raise RuntimeError(f"resolved-address classify probes failed for {normalized} chain_id={chain_id}")
         details = {
             "address": normalized,
             "upgrade_interface_version": str(upgrade_interface_version),
@@ -444,19 +581,35 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
             details["owner"] = owner
         return "proxy_admin", details, had_error
 
+    if had_error:
+        logger.error("resolved-address classify probes failed for %s chain_id=%s", normalized, chain_id)
+        raise RuntimeError(f"resolved-address classify probes failed for {normalized} chain_id={chain_id}")
+
     details = {"address": normalized}
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag))
-    except Exception:
-        had_error = True
-    return "contract", details, had_error
+    except Exception as exc:
+        logger.error(
+            "resolved-address authority typing failed for %s chain_id=%s: %s",
+            normalized,
+            chain_id,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(f"resolved-address authority typing failed for {normalized} chain_id={chain_id}") from exc
+    return "contract", details, False
 
 
-def _current_block_number(rpc_url: str) -> int:
-    raw = _rpc_request(rpc_url, "eth_blockNumber", [])
+def _current_block_number(rpc_url: str, *, chain_id: int) -> int:
+    raw = _rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
     if not isinstance(raw, str) or not raw.startswith("0x"):
+        logger.error("resolved-address eth_blockNumber returned invalid payload: %r", raw)
         raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
-    return int(raw, 16)
+    try:
+        return int(raw, 16)
+    except ValueError as exc:
+        logger.error("resolved-address eth_blockNumber returned malformed hex: %r", raw)
+        raise RuntimeError(f"Unexpected malformed eth_blockNumber result: {raw!r}") from exc
 
 
 def _read_polling_source(
@@ -466,13 +619,15 @@ def _read_polling_source(
     controller_kind: str,
     block_tag: str = "latest",
     read_spec: ControllerReadSpec | None = None,
+    *,
+    chain_id: int,
 ) -> str:
     target = source
     if isinstance(read_spec, dict) and read_spec.get("strategy") == "getter_call":
         read_target = read_spec.get("target")
         if isinstance(read_target, str) and read_target:
             target = read_target
-    raw = _eth_call_raw(rpc_url, contract_address, f"{target}()", block_tag)
+    raw = _eth_call_raw(rpc_url, contract_address, f"{target}()", block_tag, chain_id=chain_id)
     return _decode_controller_value(raw, controller_kind, read_spec)
 
 
@@ -482,7 +637,6 @@ def build_control_snapshot(
     block_tag: str = "latest",
     *,
     heartbeat: Callable[[], None] | None = None,
-    getter_fallback_address: str | None = None,
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
@@ -491,12 +645,6 @@ def build_control_snapshot(
     unsynchronised dict that becomes a race once the level fan-out runs in
     threads, and the global cache already handles dedup with a lock.
 
-    ``getter_fallback_address`` — the implementation address to retry a getter
-    against when the primary read (usually a proxy) reverts. Storage-backed
-    state lives in the proxy, but ``immutable`` authority addresses live in the
-    implementation bytecode and revert when the runtime address doesn't
-    delegatecall to that impl (beacon / per-instance patterns). Defaults to
-    ``None`` (no fallback), preserving the prior reverting-getter behavior.
     """
     from utils.concurrency import parallel_map
 
@@ -509,8 +657,20 @@ def build_control_snapshot(
             raise outcome
         return outcome
 
+    effective_chain_id = require_supported_chain_id(
+        chain_id=plan["contract"]["chain_id"],
+        context=f"control snapshot for {plan['contract_address']}",
+    )
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"control snapshot for {plan['contract_address']}",
+        chain_id=effective_chain_id,
+    )
+    chain_id = effective_chain_id
     block_number = (
-        _call_with_heartbeat(lambda: _current_block_number(rpc_url)) if block_tag == "latest" else int(block_tag, 16)
+        _call_with_heartbeat(lambda: _current_block_number(rpc_url, chain_id=chain_id))
+        if block_tag == "latest"
+        else int(block_tag, 16)
     )
     controller_values: dict[str, Any] = {}
 
@@ -533,7 +693,15 @@ def build_control_snapshot(
         spec = cast(ControllerReadSpec | None, read_spec if isinstance(read_spec, dict) else None)
 
         def _read_entry(read_address: str, observed_via: str) -> dict[str, Any]:
-            value = _read_polling_source(rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec)
+            value = _read_polling_source(
+                rpc_url,
+                read_address,
+                source,
+                controller["kind"],
+                block_tag,
+                read_spec=spec,
+                chain_id=chain_id,
+            )
             if controller["kind"] == "role_identifier":
                 return {
                     "source": source,
@@ -556,7 +724,7 @@ def build_control_snapshot(
                 "block_number": block_number,
                 "observed_via": observed_via,
             }
-            resolved_type, details = classify_resolved_address(rpc_url, value, block_tag)
+            resolved_type, details = classify_resolved_address(rpc_url, value, block_tag, chain_id=chain_id)
             entry["resolved_type"] = resolved_type
             entry["details"] = details
             return entry
@@ -564,37 +732,22 @@ def build_control_snapshot(
         try:
             return controller_id, _read_entry(plan["contract_address"], "eth_call")
         except Exception as exc:
-            # Storage-backed getters live in the proxy, but immutable-backed
-            # authority addresses live in the implementation bytecode and revert
-            # when the runtime address doesn't delegatecall to that impl (beacon
-            # / per-instance patterns — e.g. EtherFiNode, whose
-            # etherFiNodesManager/delegationManager are immutable). Retry against
-            # the implementation: impl storage reads as zero so a storage getter
-            # just yields the empty answer, while an immutable getter recovers
-            # its real value instead of being recorded null.
-            if getter_fallback_address and getter_fallback_address.lower() != str(plan["contract_address"]).lower():
-                try:
-                    return controller_id, _read_entry(getter_fallback_address, "eth_call_impl_fallback")
-                except Exception:
-                    pass
-            return controller_id, {
-                "source": source,
-                "value": None,
-                "block_number": block_number,
-                "observed_via": "eth_call_error",
-                "resolved_type": "unknown",
-                "details": {
-                    "source": source,
-                    "error": str(exc),
-                },
-            }
+            logger.error(
+                "controller read failed controller_id=%s source=%s contract=%s chain_id=%s: %s",
+                controller_id,
+                source,
+                plan["contract_address"],
+                chain_id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(
+                f"controller read failed for {controller_id} on {plan['contract_address']} chain_id={chain_id}"
+            ) from exc
 
     results = parallel_map(_compute_controller, plan["tracked_controllers"], max_workers=8, heartbeat=heartbeat)
     for _controller, outcome in results:
         if isinstance(outcome, BaseException):
-            # parallel_map captures exceptions, but ``_compute_controller``
-            # already converts every internal failure to an error-shaped
-            # entry. Anything reaching here is a genuine bug — surface it.
             raise outcome
         cid, entry = outcome
         if entry is None:
@@ -602,11 +755,9 @@ def build_control_snapshot(
         controller_values[cid] = entry
 
     raw_contract = plan.get("contract")
-    contract = (
-        cast(Contract, raw_contract)
-        if isinstance(raw_contract, dict)
-        else make_contract(address=plan["contract_address"], name=plan.get("contract_name"))
-    )
+    if not isinstance(raw_contract, dict):
+        raise RuntimeError("control tracking plan missing contract")
+    contract = cast(Contract, raw_contract)
 
     return {
         "schema_version": "0.1",

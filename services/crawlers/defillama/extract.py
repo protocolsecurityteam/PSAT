@@ -9,8 +9,13 @@ Handles multiple patterns:
   - coreAssets.json references (resolved separately)
 """
 
+import logging
 import re
 from pathlib import Path
+
+from utils.rpc import require_chain_id_for_evidence_label
+
+logger = logging.getLogger(__name__)
 
 # Matches 0x followed by exactly 40 hex chars, bounded so we don't
 # grab partial hashes or other hex strings
@@ -41,8 +46,9 @@ def extract_addresses_from_file(filepath: Path) -> list[str]:
     """Extract all Ethereum addresses from a single JS/TS file."""
     try:
         text = filepath.read_text(errors="ignore")
-    except Exception:
-        return []
+    except OSError as exc:
+        logger.error("Failed to read DefiLlama adapter file %s: %s", filepath, exc)
+        raise RuntimeError(f"Failed to read DefiLlama adapter file {filepath}") from exc
 
     raw = ADDR_RE.findall(text)
     # Deduplicate, lowercase, filter junk
@@ -113,7 +119,7 @@ def extract_protocol(project_dir: Path) -> dict:
             "protocol": "aave",
             "files_scanned": 3,
             "addresses": [
-                {"address": "0x...", "chain": "ethereum", "source": "index.js:12"},
+                {"address": "0x...", "chain_id": 1, "raw_chain_label": "ethereum", "source": "index.js:12"},
                 ...
             ]
         }
@@ -132,8 +138,9 @@ def extract_protocol(project_dir: Path) -> dict:
     for filepath in sorted(set(files)):
         try:
             text = filepath.read_text(errors="ignore")
-        except Exception:
-            continue
+        except OSError as exc:
+            logger.error("Failed to read DefiLlama adapter file %s: %s", filepath, exc)
+            raise RuntimeError(f"Failed to read DefiLlama adapter file {filepath}") from exc
 
         rel_path = filepath.relative_to(project_dir)
         raw_addrs = ADDR_RE.findall(text)
@@ -144,7 +151,15 @@ def extract_protocol(project_dir: Path) -> dict:
                 continue
             seen.add(lower)
 
-            chain = infer_chain_from_context(filepath, text, addr)
+            raw_chain_label = infer_chain_from_context(filepath, text, addr)
+            chain_id = (
+                require_chain_id_for_evidence_label(
+                    raw_chain_label,
+                    context=f"DefiLlama adapter {project_dir.name}/{rel_path} {lower}",
+                )
+                if raw_chain_label
+                else None
+            )
 
             # Find line number
             line_num = None
@@ -156,7 +171,8 @@ def extract_protocol(project_dir: Path) -> dict:
             addresses.append(
                 {
                     "address": lower,
-                    "chain": chain,
+                    "chain_id": chain_id,
+                    "raw_chain_label": raw_chain_label,
                     "source": f"{rel_path}:{line_num}" if line_num else str(rel_path),
                 }
             )

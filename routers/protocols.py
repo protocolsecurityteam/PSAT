@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,10 +18,12 @@ from db.models import (
     TvlSnapshot,
 )
 from schemas.api_requests import ProtocolSubscribeRequest
+from utils.rpc import default_rpc_url, require_supported_chain_id
 
 from . import deps
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/api/protocols/{protocol_id}/monitoring")
@@ -35,7 +38,7 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
             {
                 "id": str(c.id),
                 "address": c.address,
-                "chain": c.chain,
+                "chain_id": c.chain_id,
                 "contract_type": c.contract_type,
                 "monitoring_config": c.monitoring_config,
                 "last_known_state": c.last_known_state,
@@ -51,14 +54,19 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
 
 
 @router.post("/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)])
-def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, Any]:
+def re_enroll_protocol(protocol_id: int, chain_id: int) -> dict[str, Any]:
     """Manually trigger monitoring enrollment for a protocol.
 
     Calls enroll_protocol_contracts directly, bypassing the automatic
     in-flight job checks. Useful when enrollment produced wrong results
     or after manual DB changes.
     """
-    rpc_url = deps.DEFAULT_RPC_URL
+    try:
+        chain_id = require_supported_chain_id(chain_id=chain_id, context=f"protocol {protocol_id} re-enroll")
+        rpc_url = default_rpc_url(chain_id=chain_id)
+    except RuntimeError as exc:
+        logger.error("protocol re-enroll rejected protocol_id=%s chain_id=%r: %s", protocol_id, chain_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
         if protocol is None:
@@ -66,10 +74,11 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, A
 
         from services.monitoring.enrollment import enroll_protocol_contracts
 
-        enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain)
+        enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain_id)
         return {
             "status": "enrolled",
             "protocol_id": protocol_id,
+            "chain_id": chain_id,
             "contracts_enrolled": len(enrolled),
             "contracts": [
                 {
@@ -159,18 +168,39 @@ def list_protocol_events(protocol_id: int, limit: int = 50) -> list[dict[str, An
             .limit(limit)
         )
         rows = session.execute(stmt).all()
-        return [
-            {
-                "id": str(e.id),
-                "monitored_contract_id": str(e.monitored_contract_id),
-                "event_type": e.event_type,
-                "block_number": e.block_number,
-                "tx_hash": e.tx_hash,
-                "data": {**(e.data or {}), "contract_address": mc.address},
-                "detected_at": e.detected_at.isoformat() if e.detected_at else None,
-            }
-            for e, mc in rows
-        ]
+        events: list[dict[str, Any]] = []
+        for event, monitored_contract in rows:
+            try:
+                chain_id = require_supported_chain_id(
+                    chain_id=monitored_contract.chain_id,
+                    context=f"protocol event {event.id}",
+                )
+            except RuntimeError as exc:
+                logger.error(
+                    "protocol event serialization failed protocol_id=%s event_id=%s monitored_contract_id=%s: %s",
+                    protocol_id,
+                    event.id,
+                    monitored_contract.id,
+                    exc,
+                )
+                raise
+            events.append(
+                {
+                    "id": str(event.id),
+                    "monitored_contract_id": str(event.monitored_contract_id),
+                    "event_type": event.event_type,
+                    "chain_id": chain_id,
+                    "block_number": event.block_number,
+                    "tx_hash": event.tx_hash,
+                    "data": {
+                        **(event.data or {}),
+                        "contract_address": monitored_contract.address,
+                        "chain_id": chain_id,
+                    },
+                    "detected_at": event.detected_at.isoformat() if event.detected_at else None,
+                }
+            )
+        return events
 
 
 @router.get("/api/protocols/{protocol_id}/tvl")

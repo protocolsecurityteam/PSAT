@@ -12,6 +12,8 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
+from utils.chains import canonical_chain
+
 logger = logging.getLogger(__name__)
 
 JSON_RPC_TIMEOUT_SECONDS = 10
@@ -22,7 +24,6 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-PUBLIC_ETH_RPC_URL = "https://ethereum-rpc.publicnode.com"
 COMMON_CHAIN_IDS = {
     "ethereum": 1,
     "mainnet": 1,
@@ -40,9 +41,10 @@ COMMON_CHAIN_IDS = {
     "bera": 80094,
     "berachain": 80094,
 }
+DEFAULT_SUPPORTED_CHAIN_IDS = frozenset(COMMON_CHAIN_IDS.values())
 
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
-_GETCODE_CACHE: dict[tuple[str, str], tuple[str, str, float]] = {}
+_GETCODE_CACHE: dict[tuple[str, int, str], tuple[str, str, float]] = {}
 _GETCODE_CACHE_LOCK = threading.Lock()
 _GETCODE_CACHE_MAX = 8192
 _GETCODE_CACHE_TTL_S = float(os.getenv("PSAT_GETCODE_CACHE_TTL_S", "1800"))
@@ -51,8 +53,6 @@ _GETCODE_CACHE_TTL_S = float(os.getenv("PSAT_GETCODE_CACHE_TTL_S", "1800"))
 # a deployed address is effectively immutable, so the PG layer skips the TTL
 # the in-memory layer carries. Disabled flag makes the CLI usable without a DB.
 _PG_BYTECODE_CACHE_ENABLED = os.getenv("PSAT_BYTECODE_PG_CACHE", "1").lower() in ("1", "true", "yes")
-_chain_id_cache: dict[str, int] = {}
-_chain_id_cache_lock = threading.Lock()
 
 
 def clear_getcode_cache() -> None:
@@ -62,51 +62,19 @@ def clear_getcode_cache() -> None:
     with _GETCODE_CACHE_LOCK:
         _GETCODE_CACHE.clear()
     reset_cache_pressure_state("getcode")
-    with _chain_id_cache_lock:
-        _chain_id_cache.clear()
-
-
-def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None:
-    """Return the EIP-155 chain id for *rpc_url*, or None if discovery fails.
-
-    When *chain_hint* is supplied, it wins and is cached for future calls
-    against the same URL. Otherwise we issue one ``eth_chainId`` per URL per
-    process and memoise the result. Any RPC failure returns None so the caller
-    skips the PG layer cleanly — the in-memory dict + wire fetch keep working.
-    """
-    if chain_hint is not None:
-        with _chain_id_cache_lock:
-            _chain_id_cache[rpc_url] = chain_hint
-        return chain_hint
-    with _chain_id_cache_lock:
-        cached = _chain_id_cache.get(rpc_url)
-    if cached is not None:
-        return cached
-    try:
-        raw = rpc_request(rpc_url, "eth_chainId", [], retries=0)
-    except Exception:
-        return None
-    if not isinstance(raw, str) or not raw.startswith("0x"):
-        return None
-    try:
-        chain_id = int(raw, 16)
-    except ValueError:
-        return None
-    with _chain_id_cache_lock:
-        _chain_id_cache[rpc_url] = chain_id
-    return chain_id
 
 
 def _pg_bytecode_get(chain_id: int, address: str) -> tuple[str, str] | None:
-    """Postgres read-through; returns ``(bytecode, code_keccak)`` or None on miss/DB-unavailable."""
+    """Postgres read-through; returns ``(bytecode, code_keccak)`` or None on miss."""
     if not _PG_BYTECODE_CACHE_ENABLED:
         return None
     try:
         from sqlalchemy import text
 
         from db.models import SessionLocal
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.error("Bytecode PG cache lookup could not import DB dependencies: %s", exc)
+        raise RuntimeError("Bytecode PG cache lookup could not import DB dependencies") from exc
     try:
         with SessionLocal() as session:
             row = session.execute(
@@ -122,20 +90,21 @@ def _pg_bytecode_get(chain_id: int, address: str) -> tuple[str, str] | None:
             return None
         return str(row[0]), str(row[1])
     except Exception as exc:
-        logger.debug("Bytecode PG cache lookup failed (%s) — falling through", exc)
-        return None
+        logger.error("Bytecode PG cache lookup failed chain_id=%s address=%s: %s", chain_id, address, exc)
+        raise RuntimeError(f"Bytecode PG cache lookup failed for chain_id={chain_id} address={address}") from exc
 
 
 def _pg_bytecode_put(chain_id: int, address: str, bytecode: str, code_keccak: str) -> None:
-    """Best-effort upsert into bytecode_cache. DB errors swallowed (in-memory cache is the safety net)."""
+    """Upsert into bytecode_cache when the PG layer is enabled."""
     if not _PG_BYTECODE_CACHE_ENABLED:
         return
     try:
         from sqlalchemy import text
 
         from db.models import SessionLocal
-    except Exception:
-        return
+    except Exception as exc:
+        logger.error("Bytecode PG cache write could not import DB dependencies: %s", exc)
+        raise RuntimeError("Bytecode PG cache write could not import DB dependencies") from exc
     try:
         with SessionLocal() as session:
             session.execute(
@@ -152,19 +121,21 @@ def _pg_bytecode_put(chain_id: int, address: str, bytecode: str, code_keccak: st
             )
             session.commit()
     except Exception as exc:
-        logger.debug("Bytecode PG cache write failed (%s) — keeping in-memory only", exc)
+        logger.error("Bytecode PG cache write failed chain_id=%s address=%s: %s", chain_id, address, exc)
+        raise RuntimeError(f"Bytecode PG cache write failed for chain_id={chain_id} address={address}") from exc
 
 
 def _pg_bytecode_get_many(chain_id: int, addresses: list[str]) -> dict[str, tuple[str, str]]:
-    """Batch read for bytecode_cache; returns ``{address_lower: (bytecode, keccak)}``. Empty dict on disable/failure."""
+    """Batch read for bytecode_cache; returns ``{address_lower: (bytecode, keccak)}``."""
     if not _PG_BYTECODE_CACHE_ENABLED or not addresses:
         return {}
     try:
         from sqlalchemy import text
 
         from db.models import SessionLocal
-    except Exception:
-        return {}
+    except Exception as exc:
+        logger.error("Bytecode PG cache batch lookup could not import DB dependencies: %s", exc)
+        raise RuntimeError("Bytecode PG cache batch lookup could not import DB dependencies") from exc
     try:
         with SessionLocal() as session:
             rows = session.execute(
@@ -177,8 +148,13 @@ def _pg_bytecode_get_many(chain_id: int, addresses: list[str]) -> dict[str, tupl
             ).all()
         return {str(addr).lower(): (str(code), str(kek)) for addr, code, kek in rows}
     except Exception as exc:
-        logger.debug("Bytecode PG cache batch lookup failed (%s) — falling through", exc)
-        return {}
+        logger.error(
+            "Bytecode PG cache batch lookup failed chain_id=%s addresses=%d: %s",
+            chain_id,
+            len(addresses),
+            exc,
+        )
+        raise RuntimeError(f"Bytecode PG cache batch lookup failed for chain_id={chain_id}") from exc
 
 
 def _pg_bytecode_put_many(chain_id: int, rows: list[tuple[str, str, str]]) -> None:
@@ -189,8 +165,9 @@ def _pg_bytecode_put_many(chain_id: int, rows: list[tuple[str, str, str]]) -> No
         from sqlalchemy import text
 
         from db.models import SessionLocal
-    except Exception:
-        return
+    except Exception as exc:
+        logger.error("Bytecode PG cache batch write could not import DB dependencies: %s", exc)
+        raise RuntimeError("Bytecode PG cache batch write could not import DB dependencies") from exc
     try:
         payload = [
             {"c": chain_id, "a": addr.lower(), "b": bytecode, "k": code_keccak} for addr, bytecode, code_keccak in rows
@@ -210,7 +187,8 @@ def _pg_bytecode_put_many(chain_id: int, rows: list[tuple[str, str, str]]) -> No
             )
             session.commit()
     except Exception as exc:
-        logger.debug("Bytecode PG cache batch write failed (%s) — keeping in-memory only", exc)
+        logger.error("Bytecode PG cache batch write failed chain_id=%s rows=%d: %s", chain_id, len(rows), exc)
+        raise RuntimeError(f"Bytecode PG cache batch write failed for chain_id={chain_id}") from exc
 
 
 def _log_getcode_pressure() -> None:
@@ -224,6 +202,73 @@ def _log_getcode_pressure() -> None:
 
 def _normalized_addr(address: str) -> str:
     return address.lower() if address.startswith("0x") else "0x" + address.lower()
+
+
+def _normalize_bytecode_result(raw: Any, *, chain_id: int, address: str, source: str) -> tuple[str, str]:
+    """Validate one eth_getCode-shaped payload and return ``(code, keccak)``."""
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        logger.error(
+            "%s returned invalid bytecode for chain_id=%s address=%s: %r",
+            source,
+            chain_id,
+            address,
+            raw,
+        )
+        raise RuntimeError(f"{source} returned invalid bytecode for chain_id={chain_id} address={address}")
+    code = raw.lower()
+    if code in {"0x", "0x0"}:
+        code = "0x"
+    try:
+        code_bytes = bytes.fromhex(code[2:]) if len(code) > 2 else b""
+    except ValueError as exc:
+        logger.error("%s returned malformed bytecode hex for chain_id=%s address=%s", source, chain_id, address)
+        raise RuntimeError(
+            f"{source} returned malformed bytecode hex for chain_id={chain_id} address={address}"
+        ) from exc
+    return code, "0x" + keccak(code_bytes).hex()
+
+
+def _validate_cached_bytecode(
+    code: Any,
+    keccak_hex: Any,
+    *,
+    chain_id: int,
+    address: str,
+    source: str,
+) -> tuple[str, str]:
+    normalized_code, expected_keccak = _normalize_bytecode_result(
+        code,
+        chain_id=chain_id,
+        address=address,
+        source=source,
+    )
+    if not isinstance(keccak_hex, str) or not keccak_hex.startswith("0x") or len(keccak_hex) != 66:
+        logger.error(
+            "%s returned invalid code_keccak for chain_id=%s address=%s: %r",
+            source,
+            chain_id,
+            address,
+            keccak_hex,
+        )
+        raise RuntimeError(f"{source} returned invalid code_keccak for chain_id={chain_id} address={address}")
+    try:
+        bytes.fromhex(keccak_hex[2:])
+    except ValueError as exc:
+        logger.error("%s returned malformed code_keccak for chain_id=%s address=%s", source, chain_id, address)
+        raise RuntimeError(
+            f"{source} returned malformed code_keccak for chain_id={chain_id} address={address}"
+        ) from exc
+    if keccak_hex.lower() != expected_keccak:
+        logger.error(
+            "%s returned mismatched code_keccak for chain_id=%s address=%s cached=%s expected=%s",
+            source,
+            chain_id,
+            address,
+            keccak_hex.lower(),
+            expected_keccak,
+        )
+        raise RuntimeError(f"{source} returned mismatched code_keccak for chain_id={chain_id} address={address}")
+    return normalized_code, expected_keccak
 
 
 # Per-thread requests.Session for TCP/TLS reuse on RPC calls (Session is not thread-safe across calls, hence
@@ -242,7 +287,7 @@ def _get_session() -> requests.Session:
     return s
 
 
-def erpc_url_for_chain_id(
+def _erpc_url_for_chain_id(
     chain_id: int | str | None,
     *,
     base_url: str | None = None,
@@ -263,70 +308,168 @@ def erpc_url_for_chain_id(
     return f"{base.rstrip('/')}/main/evm/{chain_id_int}"
 
 
-def rpc_url_for_chain_id(chain_id: int | str | None, explicit_rpc_url: str | None = None) -> str | None:
-    """Return an explicit RPC URL when provided, otherwise the configured eRPC URL."""
-    if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
-        return explicit_rpc_url
-    return erpc_url_for_chain_id(chain_id)
+def supported_chain_ids() -> frozenset[int]:
+    """Return the eRPC chain ids this deployment is allowed to route.
+
+    The default is PSAT's built-in known-chain set. Operators can replace it
+    with an explicit comma-separated ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist
+    when adding a new eRPC-backed chain.
+    """
+    raw = os.getenv("PSAT_SUPPORTED_CHAIN_IDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_SUPPORTED_CHAIN_IDS
+    out: set[int] = set()
+    for item in raw.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            chain_id = int(text)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid PSAT_SUPPORTED_CHAIN_IDS entry: {text!r}") from exc
+        if chain_id <= 0:
+            raise RuntimeError(f"Invalid non-positive PSAT_SUPPORTED_CHAIN_IDS entry: {text!r}")
+        out.add(chain_id)
+    if not out:
+        raise RuntimeError("PSAT_SUPPORTED_CHAIN_IDS must include at least one chain id when set")
+    return frozenset(out)
 
 
-def chain_id_for_chain_name(chain: str | None) -> int | None:
-    if not isinstance(chain, str) or not chain.strip():
-        return None
-    return COMMON_CHAIN_IDS.get(chain.lower().strip())
+def require_chain_id(
+    *,
+    chain_id: int | str | None = None,
+    context: str = "operation",
+) -> int:
+    if chain_id is not None:
+        try:
+            parsed = int(chain_id)
+        except (TypeError, ValueError) as exc:
+            logger.error("%s requires a valid chain_id, got %r", context, chain_id)
+            raise RuntimeError(f"{context} requires a valid chain_id, got {chain_id!r}") from exc
+        if parsed > 0:
+            return parsed
+        logger.error("%s requires a positive chain_id, got %r", context, chain_id)
+        raise RuntimeError(f"{context} requires a positive chain_id, got {chain_id!r}")
+
+    logger.error("%s requires explicit chain_id", context)
+    raise RuntimeError(f"{context} requires explicit chain_id")
+
+
+def require_supported_chain_id(
+    *,
+    chain_id: int | str | None = None,
+    context: str = "operation",
+) -> int:
+    parsed = require_chain_id(chain_id=chain_id, context=context)
+    allowed = supported_chain_ids()
+    if parsed in allowed:
+        return parsed
+    message = f"{context} uses unsupported chain_id={parsed}; supported_chain_ids={sorted(allowed)}"
+    logger.error("%s", message)
+    raise RuntimeError(message)
+
+
+def require_chain_id_for_evidence_label(chain_label: str | None, *, context: str = "chain evidence") -> int:
+    """Resolve a human chain label from source evidence into a supported chain id.
+
+    Callers should only use this for evidence parsing. Runtime identity and RPC
+    routing must already carry numeric ``chain_id``.
+    """
+    normalized = canonical_chain(chain_label)
+    if not normalized or normalized == "unknown":
+        logger.error("%s requires explicit supported chain_id, got chain label %r", context, chain_label)
+        raise RuntimeError(f"{context} requires explicit supported chain_id, got chain label {chain_label!r}")
+
+    chain_id = COMMON_CHAIN_IDS.get(normalized)
+    if chain_id is None:
+        logger.error("%s encountered unsupported chain label %r normalized=%r", context, chain_label, normalized)
+        raise RuntimeError(f"{context} encountered unsupported chain label {chain_label!r}")
+    return require_supported_chain_id(chain_id=chain_id, context=f"{context} chain label {normalized!r}")
 
 
 def default_rpc_url(
     *,
-    explicit_rpc_url: str | None = None,
     chain_id: int | str | None = None,
-    chain: str | None = None,
-    fallback_url: str | None = None,
-    default_chain_id: int | None = 1,
-    public_fallback: bool = True,
-) -> str | None:
-    """Resolve the RPC URL PSAT should use for a job.
+) -> str:
+    """Resolve the eRPC URL PSAT should use for a job.
 
-    Explicit URLs win so local Anvil/tests keep working. Otherwise, use eRPC
-    when a chain id can be resolved, then fall back to the legacy ETH_RPC
-    default. Unknown explicit chain names do not get silently mapped to mainnet.
+    Chain id must be explicit. Legacy explicit URLs, fallback URLs, chain-label
+    resolution, and public mainnet fallback are intentionally unsupported.
     """
-    if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
-        return explicit_rpc_url
+    try:
+        effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="RPC URL resolution")
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise
 
-    effective_chain_id = None
-    if chain_id is not None:
-        try:
-            parsed = int(chain_id)
-            if parsed > 0:
-                effective_chain_id = parsed
-        except (TypeError, ValueError):
-            effective_chain_id = None
-    if effective_chain_id is None:
-        effective_chain_id = chain_id_for_chain_name(chain)
-    if effective_chain_id is None and not (isinstance(chain, str) and chain.strip()):
-        effective_chain_id = default_chain_id
-
-    erpc_url = erpc_url_for_chain_id(effective_chain_id)
+    erpc_url = _erpc_url_for_chain_id(effective_chain_id)
     if erpc_url:
         return erpc_url
-    if isinstance(fallback_url, str) and fallback_url.strip():
-        return fallback_url
-    env_rpc = os.getenv("ETH_RPC")
-    if env_rpc:
-        return env_rpc
-    if public_fallback:
-        return PUBLIC_ETH_RPC_URL
-    return None
+    logger.error("RPC URL resolution requires ERPC_BASE_URL for chain_id=%s", effective_chain_id)
+    raise RuntimeError(f"RPC URL resolution requires ERPC_BASE_URL for chain_id={effective_chain_id}")
+
+
+def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
+    if not isinstance(rpc_url, str):
+        return None
+    base = os.getenv("ERPC_BASE_URL")
+    if not base:
+        return None
+    normalized_url = rpc_url.rstrip("/")
+    normalized_base = base.rstrip("/")
+    prefix = f"{normalized_base}/main/evm/"
+    if not normalized_url.startswith(prefix):
+        return None
+    suffix = normalized_url[len(prefix) :]
+    if not suffix or "/" in suffix:
+        return None
+    try:
+        chain_id = int(suffix)
+    except ValueError:
+        return None
+    if str(chain_id) != suffix:
+        return None
+    return chain_id
 
 
 def _is_configured_erpc_url(rpc_url: str) -> bool:
-    base = os.getenv("ERPC_BASE_URL")
-    if not base:
+    chain_id = _erpc_chain_id_from_url(rpc_url)
+    if chain_id is None:
         return False
-    normalized_url = rpc_url.rstrip("/")
-    normalized_base = base.rstrip("/")
-    return normalized_url == normalized_base or normalized_url.startswith(f"{normalized_base}/")
+    return chain_id in supported_chain_ids()
+
+
+def require_configured_erpc_url(
+    rpc_url: str,
+    *,
+    context: str = "RPC request",
+    chain_id: int | str | None = None,
+) -> str:
+    """Validate that an on-chain JSON-RPC call is routed through a chain-scoped eRPC URL."""
+    url_chain_id_raw = _erpc_chain_id_from_url(rpc_url)
+    if url_chain_id_raw is None:
+        from utils.secrets import sanitize_url
+
+        logger.error("%s requires chain-scoped configured eRPC URL, got %s", context, sanitize_url(rpc_url))
+        raise RuntimeError(f"{context} requires chain-scoped configured eRPC URL")
+    url_chain_id = require_supported_chain_id(chain_id=url_chain_id_raw, context=f"{context} eRPC URL")
+    if chain_id is not None:
+        expected_chain_id = require_supported_chain_id(chain_id=chain_id, context=context)
+        if url_chain_id != expected_chain_id:
+            from utils.secrets import sanitize_url
+
+            logger.error(
+                "%s eRPC URL chain mismatch url_chain_id=%s expected_chain_id=%s url=%s",
+                context,
+                url_chain_id,
+                expected_chain_id,
+                sanitize_url(rpc_url),
+            )
+            raise RuntimeError(
+                f"{context} eRPC URL chain mismatch: url_chain_id={url_chain_id} "
+                f"expected_chain_id={expected_chain_id}"
+            )
+    return rpc_url.rstrip("/")
 
 
 def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -348,9 +491,11 @@ def erpc_healthcheck_url(chain_id: int | str | None = None, *, eval_chain_id: bo
         return None
     if chain_id is None:
         return f"{base}/healthcheck"
-    rpc_url = erpc_url_for_chain_id(chain_id)
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="eRPC healthcheck")
+    rpc_url = _erpc_url_for_chain_id(effective_chain_id)
     if rpc_url is None:
-        return None
+        logger.error("eRPC healthcheck URL requires ERPC_BASE_URL for chain_id=%s", effective_chain_id)
+        raise RuntimeError(f"eRPC healthcheck URL requires ERPC_BASE_URL for chain_id={effective_chain_id}")
     healthcheck = f"{rpc_url}/healthcheck"
     return f"{healthcheck}?eval=all:evm:eth_chainId" if eval_chain_id else healthcheck
 
@@ -366,7 +511,10 @@ def rpc_request(
     params: list[Any],
     retries: int = 1,
     headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | str | None = None,
 ) -> Any:
+    rpc_url = require_configured_erpc_url(rpc_url, context=f"RPC request {method}", chain_id=chain_id)
     session = _get_session()
     for attempt in range(retries + 1):
         try:
@@ -385,62 +533,118 @@ def rpc_request(
                 from utils.secrets import sanitize_url
 
                 raise RuntimeError(f"RPC HTTP {response.status_code} for {sanitize_url(rpc_url)}") from None
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC request %s returned invalid JSON from %s", method, sanitize_url(rpc_url))
+                raise RuntimeError(f"RPC request {method} returned invalid JSON for {sanitize_url(rpc_url)}") from exc
+            if not isinstance(payload, dict):
+                from utils.secrets import sanitize_url
+
+                logger.error(
+                    "RPC request %s returned invalid payload from %s: %r",
+                    method,
+                    sanitize_url(rpc_url),
+                    payload,
+                )
+                raise RuntimeError(f"RPC request {method} returned invalid payload for {sanitize_url(rpc_url)}")
             if payload.get("error"):
+                from utils.secrets import sanitize_url
+
+                logger.error(
+                    "RPC request %s returned JSON-RPC error from %s: %r",
+                    method,
+                    sanitize_url(rpc_url),
+                    payload["error"],
+                )
                 raise RuntimeError(str(payload["error"]))
-            return payload.get("result")
+            if "result" not in payload or payload["result"] is None:
+                from utils.secrets import sanitize_url
+
+                logger.error(
+                    "RPC request %s omitted result from %s: %r",
+                    method,
+                    sanitize_url(rpc_url),
+                    payload,
+                )
+                raise RuntimeError(f"RPC request {method} omitted result for {sanitize_url(rpc_url)}")
+            return payload["result"]
         except (requests.ConnectionError, requests.Timeout, OSError) as exc:
             if attempt < retries:
                 time.sleep(0.3 * (2**attempt))
                 continue
             from utils.secrets import sanitize_string, sanitize_url
 
-            raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: {sanitize_string(str(exc))}") from exc
+            sanitized_url = sanitize_url(rpc_url)
+            detail = sanitize_string(str(exc))
+            logger.error("RPC request %s failed for %s: %s", method, sanitized_url, detail)
+            raise RuntimeError(f"RPC request failed for {sanitized_url}: {detail}") from exc
     from utils.secrets import sanitize_url
 
-    raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
+    sanitized_url = sanitize_url(rpc_url)
+    logger.error("RPC request %s failed for %s: all %d attempts exhausted", method, sanitized_url, retries + 1)
+    raise RuntimeError(f"RPC request failed for {sanitized_url}: all {retries + 1} attempts exhausted")
 
 
-def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
+def get_code(rpc_url: str, address: str, *, chain_id: int) -> str:
     """Fetch deployed EVM bytecode at an address via eth_getCode.
 
     Process-wide cached (TTL ``PSAT_GETCODE_CACHE_TTL_S``, default 30 min)
     so repeated probes of the same address across stages and jobs hit
     the cache instead of the wire. RPC errors are NOT cached — they
     propagate as ``RuntimeError`` so callers can decide retry behavior.
-    Pass *chain_id* to skip the one-time ``eth_chainId`` discovery used by
-    the cross-process Postgres cache layer.
+    ``chain_id`` is required so both the in-memory and Postgres cache layers
+    are keyed by the same explicit deployment identity as the rest of the
+    pipeline.
     """
     code, _keccak = get_code_with_keccak(rpc_url, address, chain_id=chain_id)
     return code
 
 
-def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = None) -> tuple[str, str]:
+def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int) -> tuple[str, str]:
     """Return ``(bytecode_hex, keccak_hex)`` cached together so downstream content-addressed lookups get the keccak for
     free.
 
     Cache layering: in-memory dict (TTL'd) → Postgres ``bytecode_cache`` (no
     TTL — bytecode is immutable per ``(chain_id, address)``) → wire fetch.
-    Pass *chain_id* explicitly to skip the one-time ``eth_chainId`` lookup.
+    ``chain_id`` is required; callers must not infer cache tenancy from an RPC
+    URL.
     """
     addr = _normalized_addr(address)
-    key = (rpc_url, addr)
+    chain_id_eff = require_supported_chain_id(chain_id=chain_id, context="eth_getCode")
+    rpc_url = require_configured_erpc_url(rpc_url, context="eth_getCode", chain_id=chain_id_eff)
+    key = (rpc_url, chain_id_eff, addr)
     now = time.monotonic()
     with _GETCODE_CACHE_LOCK:
         cached = _GETCODE_CACHE.get(key)
         if cached is not None:
             code, keccak_hex, inserted_at = cached
             if now - inserted_at < _GETCODE_CACHE_TTL_S:
+                code, keccak_hex = _validate_cached_bytecode(
+                    code,
+                    keccak_hex,
+                    chain_id=chain_id_eff,
+                    address=addr,
+                    source="eth_getCode memory cache",
+                )
                 return code, keccak_hex
             # TTL expired; fall through to re-fetch.
             del _GETCODE_CACHE[key]
 
-    # PG cache: cross-process layer; only consulted when we can resolve a chain id.
-    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
-    if chain_id_eff is not None:
+    # PG cache: cross-process layer keyed by explicit chain id.
+    if _PG_BYTECODE_CACHE_ENABLED:
         pg_hit = _pg_bytecode_get(chain_id_eff, addr)
         if pg_hit is not None:
             code, keccak_hex = pg_hit
+            code, keccak_hex = _validate_cached_bytecode(
+                code,
+                keccak_hex,
+                chain_id=chain_id_eff,
+                address=addr,
+                source="eth_getCode PG cache",
+            )
             with _GETCODE_CACHE_LOCK:
                 _evict_getcode_if_needed()
                 _GETCODE_CACHE[key] = (code, keccak_hex, now)
@@ -448,19 +652,19 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
             return code, keccak_hex
 
     # RPC outside the lock so concurrent misses for different addresses don't serialize.
-    raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"])
-    code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
-    # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on odd-length hex.
-    if code in {"0x", "0x0"}:
-        code = "0x"
-    code_bytes = bytes.fromhex(code[2:]) if len(code) > 2 else b""
-    keccak_hex = "0x" + keccak(code_bytes).hex()
+    raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"], chain_id=chain_id_eff)
+    code, keccak_hex = _normalize_bytecode_result(
+        raw,
+        chain_id=chain_id_eff,
+        address=addr,
+        source="eth_getCode",
+    )
 
     with _GETCODE_CACHE_LOCK:
         _evict_getcode_if_needed()
         _GETCODE_CACHE[key] = (code, keccak_hex, now)
         _log_getcode_pressure()
-    if chain_id_eff is not None:
+    if _PG_BYTECODE_CACHE_ENABLED:
         _pg_bytecode_put(chain_id_eff, addr, code, keccak_hex)
     return code, keccak_hex
 
@@ -474,15 +678,18 @@ def _evict_getcode_if_needed() -> None:
         _GETCODE_CACHE.pop(k, None)
 
 
-def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None = None) -> dict[str, str]:
-    """Cache-aware batched eth_getCode; errored slots are omitted from the returned ``{address: bytecode}`` map.
+def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int) -> dict[str, str]:
+    """Cache-aware batched ``eth_getCode`` for explicit ``(chain_id, address)`` identities.
 
     Cache layering matches :func:`get_code_with_keccak`: in-memory → Postgres
-    ``bytecode_cache`` (one bulk SELECT for the misses) → wire batch.
+    ``bytecode_cache`` (one bulk SELECT for the misses) → wire batch. Per-call
+    RPC errors raise; callers must not silently treat omitted bytecode as an
+    empty account on the wrong or unsupported chain.
     """
+    chain_id_eff = require_supported_chain_id(chain_id=chain_id, context="eth_getCode batch")
+    rpc_url = require_configured_erpc_url(rpc_url, context="eth_getCode batch", chain_id=chain_id_eff)
     if not addresses:
         return {}
-
     normalized = [_normalized_addr(a) for a in addresses]
     now = time.monotonic()
     out: dict[str, str] = {}
@@ -490,10 +697,17 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
     to_fetch: list[str] = []
     with _GETCODE_CACHE_LOCK:
         for addr in normalized:
-            cached = _GETCODE_CACHE.get((rpc_url, addr))
+            cached = _GETCODE_CACHE.get((rpc_url, chain_id_eff, addr))
             if cached is not None:
-                code, _keccak, inserted_at = cached
+                code, keccak_hex, inserted_at = cached
                 if now - inserted_at < _GETCODE_CACHE_TTL_S:
+                    code, _keccak = _validate_cached_bytecode(
+                        code,
+                        keccak_hex,
+                        chain_id=chain_id_eff,
+                        address=addr,
+                        source="eth_getCode batch memory cache",
+                    )
                     out[addr] = code
                     continue
             to_fetch.append(addr)
@@ -503,8 +717,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
 
     # PG layer: bulk SELECT for the in-memory misses; promote hits into the
     # in-memory cache so a later same-process call short-circuits.
-    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
-    if chain_id_eff is not None and to_fetch:
+    if _PG_BYTECODE_CACHE_ENABLED and to_fetch:
         pg_hits = _pg_bytecode_get_many(chain_id_eff, to_fetch)
         if pg_hits:
             with _GETCODE_CACHE_LOCK:
@@ -513,8 +726,15 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
                     if payload is None:
                         continue
                     code, keccak_hex = payload
+                    code, keccak_hex = _validate_cached_bytecode(
+                        code,
+                        keccak_hex,
+                        chain_id=chain_id_eff,
+                        address=addr,
+                        source="eth_getCode batch PG cache",
+                    )
                     _evict_getcode_if_needed()
-                    _GETCODE_CACHE[(rpc_url, addr)] = (code, keccak_hex, now)
+                    _GETCODE_CACHE[(rpc_url, chain_id_eff, addr)] = (code, keccak_hex, now)
                     _log_getcode_pressure()
                     out[addr] = code
             to_fetch = [addr for addr in to_fetch if addr not in pg_hits]
@@ -523,28 +743,38 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
         return out
 
     calls: list[tuple[str, list[Any]]] = [("eth_getCode", [addr, "latest"]) for addr in to_fetch]
-    raw_results = rpc_batch_request_with_status(rpc_url, calls)
+    raw_results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id_eff)
+    if len(raw_results) != len(to_fetch):
+        logger.error(
+            "eth_getCode batch returned %d result(s) for %d address(es) on chain_id=%s",
+            len(raw_results),
+            len(to_fetch),
+            chain_id_eff,
+        )
+        raise RuntimeError(
+            f"eth_getCode batch returned {len(raw_results)} result(s) for {len(to_fetch)} address(es)"
+        )
     pg_writes: list[tuple[str, str, str]] = []
     with _GETCODE_CACHE_LOCK:
         for addr, (raw, had_error) in zip(to_fetch, raw_results):
             if had_error:
-                continue  # caller treats absence as missing/error
-            code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
-            # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on
-            # odd-length hex (some providers return "0x0" for EOAs).
-            if code in {"0x", "0x0"}:
-                code = "0x"
-            code_bytes = bytes.fromhex(code[2:]) if len(code) > 2 else b""
-            keccak_hex = "0x" + keccak(code_bytes).hex()
+                logger.error("eth_getCode batch item failed for chain_id=%s address=%s", chain_id_eff, addr)
+                raise RuntimeError(f"eth_getCode batch item failed for chain_id={chain_id_eff} address={addr}")
+            code, keccak_hex = _normalize_bytecode_result(
+                raw,
+                chain_id=chain_id_eff,
+                address=addr,
+                source="eth_getCode batch",
+            )
             # Honour the cache bound — codex iter-5 P2: batch path was
             # bypassing eviction, letting long-lived workers exceed
             # _GETCODE_CACHE_MAX with full bytecode payloads.
             _evict_getcode_if_needed()
-            _GETCODE_CACHE[(rpc_url, addr)] = (code, keccak_hex, now)
+            _GETCODE_CACHE[(rpc_url, chain_id_eff, addr)] = (code, keccak_hex, now)
             _log_getcode_pressure()
             out[addr] = code
             pg_writes.append((addr, code, keccak_hex))
-    if chain_id_eff is not None and pg_writes:
+    if _PG_BYTECODE_CACHE_ENABLED and pg_writes:
         _pg_bytecode_put_many(chain_id_eff, pg_writes)
     return out
 
@@ -553,10 +783,18 @@ def rpc_batch_request(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
     headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | str | None = None,
 ) -> list[Any]:
-    """Send a JSON-RPC batch and return results in call order; per-call errors yield ``None``."""
+    """Send a JSON-RPC batch and return results in call order.
+
+    Transport errors, malformed payloads, item-level JSON-RPC errors, and
+    omitted results are hard failures. Callers that need per-call status should
+    use :func:`rpc_batch_request_with_status`.
+    """
     if not calls:
         return []
+    rpc_url = require_configured_erpc_url(rpc_url, context="RPC batch request", chain_id=chain_id)
 
     results: list[Any] = [None] * len(calls)
 
@@ -578,36 +816,88 @@ def rpc_batch_request(
         except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as exc:
             from utils.secrets import sanitize_string, sanitize_url
 
+            sanitized_url = sanitize_url(rpc_url)
             status = getattr(getattr(exc, "response", None), "status_code", None)
             detail = f"HTTP {status}" if status is not None else sanitize_string(str(exc))
-            raise RuntimeError(f"RPC batch failed for {sanitize_url(rpc_url)}: {detail}") from None
+            logger.error("RPC batch failed for %s: %s", sanitized_url, detail)
+            raise RuntimeError(f"RPC batch failed for {sanitized_url}: {detail}") from None
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch returned invalid JSON for %s", sanitize_url(rpc_url))
+            raise RuntimeError(f"RPC batch returned invalid JSON for {sanitize_url(rpc_url)}") from exc
         if isinstance(payload, dict):
             payload = [payload]
+        if not isinstance(payload, list):
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch returned invalid payload for %s: %r", sanitize_url(rpc_url), payload)
+            raise RuntimeError(f"RPC batch returned invalid payload for {sanitize_url(rpc_url)}")
 
         for item in payload:
+            if not isinstance(item, dict):
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch returned invalid item for %s: %r", sanitize_url(rpc_url), item)
+                raise RuntimeError(f"RPC batch returned invalid item for {sanitize_url(rpc_url)}")
             idx = item.get("id")
-            if idx is not None and not item.get("error"):
-                results[idx] = item.get("result")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch returned invalid id for %s: %r", sanitize_url(rpc_url), idx)
+                raise RuntimeError(f"RPC batch returned invalid id for {sanitize_url(rpc_url)}")
+            if item.get("error"):
+                logger.error("RPC batch item failed for call index %s method=%s: %s", idx, calls[idx][0], item["error"])
+                raise RuntimeError(f"RPC batch item failed for method={calls[idx][0]}")
+            if "result" not in item or item["result"] is None:
+                from utils.secrets import sanitize_url
+
+                logger.error(
+                    "RPC batch item omitted result for %s call index %s method=%s: %r",
+                    sanitize_url(rpc_url),
+                    idx,
+                    calls[idx][0],
+                    item,
+                )
+                raise RuntimeError(f"RPC batch item omitted result for method={calls[idx][0]}")
+            results[idx] = item.get("result")
+
+    if any(result is None for result in results):
+        from utils.secrets import sanitize_url
+
+        logger.error("RPC batch omitted one or more results for %s", sanitize_url(rpc_url))
+        raise RuntimeError(f"RPC batch omitted one or more results for {sanitize_url(rpc_url)}")
 
     return results
 
 
-def rpc_batch_request_with_status(
+def rpc_batch_request_with_item_errors(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
     headers: Mapping[str, str] | None = None,
-) -> list[tuple[Any, bool]]:
-    """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
-    legitimate ``None`` result."""
+    *,
+    chain_id: int | str | None = None,
+) -> list[tuple[Any, Any | None]]:
+    """Send a JSON-RPC batch and preserve item-level error details.
+
+    Transport errors, malformed payloads, invalid item ids, and omitted
+    responses are hard failures. Item-level JSON-RPC errors are returned
+    beside their corresponding call so callers can distinguish an expected
+    contract-level probe miss from a provider/runtime failure.
+    """
     if not calls:
         return []
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context="RPC batch request with item errors",
+        chain_id=chain_id,
+    )
 
-    # Default to (None, True) so any chunk that fails wholesale leaves
-    # its slots flagged as errored — matches the sequential path's
-    # behavior of raising on any RPC failure.
-    results: list[tuple[Any, bool]] = [(None, True)] * len(calls)
+    results: list[tuple[Any, Any | None]] = [(None, None)] * len(calls)
+    seen: list[bool] = [False] * len(calls)
 
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
         chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
@@ -624,30 +914,169 @@ def rpc_batch_request_with_status(
                 headers=rpc_headers(rpc_url, headers),
             )
             response.raise_for_status()
+        except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as exc:
+            from utils.secrets import sanitize_string, sanitize_url
+
+            sanitized_url = sanitize_url(rpc_url)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            detail = f"HTTP {status}" if status is not None else sanitize_string(str(exc))
+            logger.error("RPC batch with item errors failed for %s: %s", sanitized_url, detail)
+            raise RuntimeError(f"RPC batch failed for {sanitized_url}: {detail}") from None
+
+        try:
             payload = response.json()
-        except Exception:
-            # Whole-chunk failure — leave defaults as (None, True). This
-            # is the conservative choice: caller will skip caching and
-            # treat results as transient.
-            continue
+        except ValueError as exc:
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch returned invalid JSON for %s", sanitize_url(rpc_url))
+            raise RuntimeError(f"RPC batch returned invalid JSON for {sanitize_url(rpc_url)}") from exc
 
         if isinstance(payload, dict):
             payload = [payload]
         if not isinstance(payload, list):
-            # Unexpected shape (some providers refuse batches with a
-            # non-list error object) — flag every slot in this chunk.
-            continue
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch returned invalid payload for %s: %r", sanitize_url(rpc_url), payload)
+            raise RuntimeError(f"RPC batch returned invalid payload for {sanitize_url(rpc_url)}")
 
         for item in payload:
             if not isinstance(item, dict):
-                continue
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch returned invalid item for %s: %r", sanitize_url(rpc_url), item)
+                raise RuntimeError(f"RPC batch returned invalid item for {sanitize_url(rpc_url)}")
             idx = item.get("id")
             if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
-                continue
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch returned invalid id for %s: %r", sanitize_url(rpc_url), idx)
+                raise RuntimeError(f"RPC batch returned invalid id for {sanitize_url(rpc_url)}")
+            seen[idx] = True
+            if item.get("error"):
+                results[idx] = (None, item["error"])
+            else:
+                if "result" not in item or item["result"] is None:
+                    from utils.secrets import sanitize_url
+
+                    logger.error(
+                        "RPC batch-with-item-errors item omitted result for %s call index %s method=%s: %r",
+                        sanitize_url(rpc_url),
+                        idx,
+                        calls[idx][0],
+                        item,
+                    )
+                    raise RuntimeError(f"RPC batch item omitted result for method={calls[idx][0]}")
+                results[idx] = (item["result"], None)
+
+    if not all(seen):
+        from utils.secrets import sanitize_url
+
+        logger.error("RPC batch omitted one or more results for %s", sanitize_url(rpc_url))
+        raise RuntimeError(f"RPC batch omitted one or more results for {sanitize_url(rpc_url)}")
+
+    return results
+
+
+def rpc_batch_request_with_status(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | str | None = None,
+) -> list[tuple[Any, bool]]:
+    """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
+    legitimate ``None`` result."""
+    if not calls:
+        return []
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context="RPC batch request with status",
+        chain_id=chain_id,
+    )
+
+    # Item-level JSON-RPC errors are returned as ``had_error=True`` so optional
+    # contract probes can distinguish getter misses from valid ``None`` results.
+    # Malformed or omitted transport responses are not item-level contract
+    # errors; they raise to prevent callers from treating provider corruption as
+    # an optional miss.
+    results: list[tuple[Any, bool]] = [(None, True)] * len(calls)
+    seen: list[bool] = [False] * len(calls)
+
+    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
+        chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
+        batch = [
+            {"jsonrpc": "2.0", "id": chunk_start + i, "method": method, "params": params}
+            for i, (method, params) in enumerate(chunk)
+        ]
+
+        try:
+            response = _get_session().post(
+                rpc_url,
+                json=batch,
+                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
+                headers=rpc_headers(rpc_url, headers),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            from utils.secrets import sanitize_string, sanitize_url
+
+            logger.error(
+                "RPC batch-with-status failed for %s: %s",
+                sanitize_url(rpc_url),
+                sanitize_string(str(exc)),
+            )
+            raise RuntimeError(f"RPC batch-with-status failed for {sanitize_url(rpc_url)}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch-with-status returned invalid JSON for %s", sanitize_url(rpc_url))
+            raise RuntimeError(f"RPC batch-with-status returned invalid JSON for {sanitize_url(rpc_url)}") from exc
+
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list):
+            from utils.secrets import sanitize_url
+
+            logger.error("RPC batch-with-status returned invalid payload for %s: %r", sanitize_url(rpc_url), payload)
+            raise RuntimeError(f"RPC batch-with-status returned invalid payload for {sanitize_url(rpc_url)}")
+
+        for item in payload:
+            if not isinstance(item, dict):
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch-with-status returned invalid item for %s: %r", sanitize_url(rpc_url), item)
+                raise RuntimeError(f"RPC batch-with-status returned invalid item for {sanitize_url(rpc_url)}")
+            idx = item.get("id")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
+                from utils.secrets import sanitize_url
+
+                logger.error("RPC batch-with-status returned invalid id for %s: %r", sanitize_url(rpc_url), idx)
+                raise RuntimeError(f"RPC batch-with-status returned invalid id for {sanitize_url(rpc_url)}")
+            seen[idx] = True
             if item.get("error"):
                 results[idx] = (None, True)
             else:
-                results[idx] = (item.get("result"), False)
+                if "result" not in item or item["result"] is None:
+                    from utils.secrets import sanitize_url
+
+                    logger.error(
+                        "RPC batch-with-status item omitted result for %s call index %s method=%s: %r",
+                        sanitize_url(rpc_url),
+                        idx,
+                        calls[idx][0],
+                        item,
+                    )
+                    raise RuntimeError(f"RPC batch item omitted result for method={calls[idx][0]}")
+                results[idx] = (item["result"], False)
+
+    if not all(seen):
+        from utils.secrets import sanitize_url
+
+        logger.error("RPC batch-with-status omitted one or more results for %s", sanitize_url(rpc_url))
+        raise RuntimeError(f"RPC batch-with-status omitted one or more results for {sanitize_url(rpc_url)}")
 
     return results
 
@@ -659,8 +1088,21 @@ def parse_address_result(raw: Any) -> str | None:
     A valid ABI-encoded address is at least 66 chars (``0x`` + 64 hex digits).
     Shorter responses are reverts, error selectors, or empty returns.
     """
-    if not raw or not isinstance(raw, str) or len(raw) < 66:
+    if raw is None:
         return None
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise ValueError(f"expected hex RPC result, got {raw!r}")
+    body = raw[2:]
+    if len(body) % 2 != 0:
+        raise ValueError(f"expected even-length hex RPC result, got {raw!r}")
+    try:
+        bytes.fromhex(body)
+    except ValueError as exc:
+        raise ValueError(f"malformed hex RPC result: {raw!r}") from exc
+    if raw in {"0x", "0x0"}:
+        return None
+    if len(raw) != 66:
+        raise ValueError(f"expected 32-byte ABI/address result, got {raw!r}")
     if raw == "0x" + "0" * 64:
         return None
     addr = "0x" + raw[-40:]

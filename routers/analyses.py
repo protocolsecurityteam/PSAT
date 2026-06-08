@@ -7,15 +7,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from db.models import Artifact, Contract, Job, JobStatus
 from schemas.common import make_contract
 from schemas.governance_schemas import AnalysisListEntry
 from services.aggregations import build_analysis_detail
+from services.aggregations.analysis_detail import AmbiguousAnalysisLookup
 from services.artifacts import expand_available_artifact_names, get_artifact_or_stage_field
 from services.governance.proxies import _merge_proxy_impl_entries
-from utils.rpc import chain_id_for_chain_name
+from utils.rpc import require_supported_chain_id
 
 from . import deps
 
@@ -36,10 +37,10 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         jobs = session.execute(stmt).scalars().all()
 
         jobs_by_id = {str(job.id): job for job in jobs}
-        jobs_by_address: dict[str, Job] = {}
+        jobs_by_identity: dict[tuple[str, int | None], Job] = {}
         for job in jobs:
             if job.address:
-                jobs_by_address.setdefault(job.address.lower(), job)
+                jobs_by_identity.setdefault((job.address.lower(), job.chain_id), job)
 
         # Rank scores, chains, name, proxy_type, implementation come from
         # the ``contracts`` table. is_proxy comes from Job (denormalized via
@@ -47,13 +48,13 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         # the per-job ``contract_flags`` storage GET entirely — at 25ms
         # production RTT × N jobs, that GET batch was the dominant cost
         # of this endpoint after the parallel-fanout commit.
-        contracts_by_address: dict[str, Contract] = {}
-        addresses_from_jobs = list(jobs_by_address.keys())
+        contracts_by_key: dict[tuple[str, int | None], Contract] = {}
+        addresses_from_jobs = list({address for address, _chain_id in jobs_by_identity})
         if addresses_from_jobs:
             for c in session.execute(select(Contract).where(Contract.address.in_(addresses_from_jobs))).scalars():
                 addr_lower = (c.address or "").lower()
                 if addr_lower:
-                    contracts_by_address.setdefault(addr_lower, c)
+                    contracts_by_key.setdefault((addr_lower, c.chain_id), c)
 
         job_ids = [job.id for job in jobs]
         # Earlier code fetched every job's ``contract_analysis`` artifact body
@@ -91,13 +92,15 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         request = job.request if isinstance(job.request, dict) else {}
         parent_job_id = request.get("parent_job_id")
         company = company_for_job(job)
-        addr_lower = (job.address or "").lower()
-        contract = contracts_by_address.get(addr_lower)
+        contract = contracts_by_key.get((job.address.lower(), job.chain_id)) if job.address else None
+        chain_id = job.chain_id
+        if chain_id is None:
+            raise RuntimeError(f"analysis job {job.id} requires chain_id")
         entry: AnalysisListEntry = {
             "run_name": run_name,
             "job_id": str(job.id),
             "address": job.address,
-            "chain": request.get("chain") or (contract.chain if contract else None),
+            "chain_id": chain_id,
             "company": company,
             "parent_job_id": parent_job_id,
             "rank_score": (float(contract.rank_score) if contract and contract.rank_score is not None else None),
@@ -107,9 +110,11 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
             "proxy_address": request.get("proxy_address"),
         }
         if contract is not None:
+            if contract.chain_id is None:
+                raise RuntimeError(f"contract {contract.id} requires chain_id for analyses list")
             entry["contract"] = make_contract(
                 address=contract.address,
-                chain_id=chain_id_for_chain_name(contract.chain) or 1,
+                chain_id=contract.chain_id,
                 name=contract.contract_name,
                 label=run_name,
                 is_proxy=bool(contract.is_proxy),
@@ -126,10 +131,10 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
 
         # Hide proxy entries until the impl is completed — otherwise the
         # listing renders a half-populated card that mutates once the impl
-        # lands. ``jobs_by_address`` only carries completed jobs.
+        # lands. ``jobs_by_identity`` only carries completed jobs.
         contract_name_source = contract
         if entry["is_proxy"] and entry["implementation_address"]:
-            impl_job = jobs_by_address.get(entry["implementation_address"].lower())
+            impl_job = jobs_by_identity.get((entry["implementation_address"].lower(), chain_id))
             if impl_job is None:
                 continue
             # Always prefer the impl's name over the proxy shell's. Proxy
@@ -138,7 +143,8 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
             # the user actually recognises (e.g. "WithdrawRequestNFT").
             # Fall back to the proxy's name if the impl Contract row is
             # missing or unnamed.
-            impl_contract = contracts_by_address.get(entry["implementation_address"].lower())
+            impl_address = entry["implementation_address"].lower()
+            impl_contract = contracts_by_key.get((impl_address, chain_id))
             if impl_contract is not None and impl_contract.contract_name:
                 contract_name_source = impl_contract
 
@@ -148,8 +154,48 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
     return _merge_proxy_impl_entries(results)
 
 
+def _looks_like_address(value: str) -> bool:
+    return isinstance(value, str) and value.startswith("0x") and len(value) == 42
+
+
+def _job_by_name(session, run_name: str, *, chain_id: int | None) -> Job | None:
+    if chain_id is not None:
+        return session.execute(
+            select(Job)
+            .where(Job.name == run_name, Job.chain_id == chain_id)
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    rows = list(
+        session.execute(select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc())).scalars()
+    )
+    if not rows:
+        return None
+
+    chain_ids: set[int | None] = set()
+    for row in rows:
+        if row.chain_id is None:
+            chain_ids.add(None)
+            continue
+        chain_ids.add(
+            require_supported_chain_id(
+                chain_id=row.chain_id,
+                context=f"analysis artifact name lookup {run_name}",
+            )
+        )
+    if len(chain_ids) > 1:
+        logger.error(
+            "analysis artifact lookup for name=%r is ambiguous across chain_ids=%s",
+            run_name,
+            sorted(chain_ids, key=lambda item: -1 if item is None else item),
+        )
+        raise HTTPException(status_code=409, detail=f"Analysis name {run_name!r} is ambiguous; provide chain_id")
+    return rows[0]
+
+
 @router.get("/api/analyses/{run_name:path}/artifact/{artifact_name:path}")
-def analysis_artifact(run_name: str, artifact_name: str):
+def analysis_artifact(run_name: str, artifact_name: str, chain_id: int | None = None):
     """Get a specific artifact for an analysis.
 
     Storage-backed artifacts are fetched from object storage transparently;
@@ -158,17 +204,32 @@ def analysis_artifact(run_name: str, artifact_name: str):
     """
     with deps.SessionLocal() as session:
         # Find job by name or id or address
-        stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
-        job = session.execute(stmt).scalar_one_or_none()
+        effective_chain_id = (
+            require_supported_chain_id(chain_id=chain_id, context=f"analysis artifact lookup for {run_name}")
+            if chain_id is not None
+            else None
+        )
+        job = None
+        if not _looks_like_address(run_name):
+            job = _job_by_name(session, run_name, chain_id=effective_chain_id)
         if job is None:
             try:
                 job = session.get(Job, run_name)
             except Exception:
                 session.rollback()
         if job is None:
+            if effective_chain_id is None:
+                effective_chain_id = require_supported_chain_id(
+                    chain_id=chain_id,
+                    context=f"analysis artifact address lookup for {run_name}",
+                )
             job = session.execute(
                 select(Job)
-                .where(Job.address == run_name, Job.status == JobStatus.completed)
+                .where(
+                    func.lower(Job.address) == run_name.lower(),
+                    Job.chain_id == effective_chain_id,
+                    Job.status == JobStatus.completed,
+                )
                 .order_by(Job.updated_at.desc())
                 .limit(1)
             ).scalar_one_or_none()
@@ -188,20 +249,14 @@ def analysis_artifact(run_name: str, artifact_name: str):
             if artifact is None:
                 artifact = get_artifact_or_stage_field(session, job.id, artifact_name)
         except Exception as exc:
-            # Storage backend can be transiently unreachable (MinIO/Tigris
-            # outage, expired credentials, missing object). Don't 500 — log
-            # and fall through to the per-artifact synthesis fallback.
-            logger.warning("artifact %s for job %s unreadable: %s", lookup_name, job.id, exc)
-
-        # upgrade_history is reproducible from UpgradeEvent rows. When the
-        # stored artifact is gone or storage is down, regenerate from the
-        # relational source so the per-proxy detail view stays usable.
-        if artifact is None and lookup_name == "upgrade_history":
-            from services.discovery.upgrade_history import synthesize_from_events
-
-            contract = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-            if contract is not None:
-                artifact = synthesize_from_events(session, contract)
+            logger.error(
+                "artifact %s for job %s unreadable; failing request: %s",
+                lookup_name,
+                job.id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise HTTPException(status_code=502, detail="Artifact storage read failed") from exc
 
         if artifact is None:
             raise HTTPException(status_code=404, detail="Artifact not found")
@@ -212,10 +267,13 @@ def analysis_artifact(run_name: str, artifact_name: str):
 
 
 @router.get("/api/analyses/{run_name:path}")
-def analysis_detail(run_name: str) -> dict:
+def analysis_detail(run_name: str, chain_id: int | None = None) -> dict:
     """Get analysis detail by job name (run_name) or job_id."""
     with deps.SessionLocal() as session:
-        payload = build_analysis_detail(session, run_name)
+        try:
+            payload = build_analysis_detail(session, run_name, chain_id=chain_id)
+        except AmbiguousAnalysisLookup as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if payload is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
         return payload

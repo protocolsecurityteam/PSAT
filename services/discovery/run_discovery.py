@@ -28,7 +28,7 @@ from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
 from services.discovery.inventory_domain import SearchFn
 from utils import exa, llm
-from utils.chains import canonical_chain
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,8 @@ def _make_exa_search_fn(mode: str, budget: _Budget) -> SearchFn:
             return exa.search(query, max_results=max_results, mode=mode)
         except Exception as exc:
             errors.append({"provider": "exa", "error": str(exc), "query": query[:120]})
-            return []
+            logger.error("Exa search failed mode=%s query=%r: %s", mode, query[:120], exc)
+            raise RuntimeError(f"Exa search failed for discovery query {query[:120]!r}") from exc
 
     return fn
 
@@ -159,7 +160,7 @@ def _address_research_instructions(protocol: str) -> str:
     return (
         f"Find the main deployed smart contract addresses for the {protocol} protocol. "
         f"List core production contracts with their names and 0x-prefixed on-chain addresses "
-        f"and the chain each is deployed on."
+        f"and the numeric EVM chain_id each is deployed on."
     )
 
 
@@ -200,13 +201,13 @@ _ADDRESS_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "required": ["name", "address"],
                 "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string"},
-                    "address": {"type": "string"},
-                    "chain": {"type": "string"},
-                    "role": {"type": "string"},
+                    "properties": {
+                        "name": {"type": "string"},
+                        "address": {"type": "string"},
+                        "chain_id": {"type": "integer"},
+                        "role": {"type": "string"},
+                    },
                 },
-            },
         }
     },
 }
@@ -244,7 +245,7 @@ def _dependency_classifier_evidence(contracts: list[dict], audits: list[dict]) -
             {
                 "name": name,
                 "address": address,
-                "chains": contract.get("chains") or contract.get("chain") or [],
+                "chain_ids": contract.get("chain_ids") or ([contract["chain_id"]] if contract.get("chain_id") else []),
                 "source": contract.get("source") or [],
             }
         )
@@ -314,24 +315,35 @@ def _needs_dependency_pass(protocol: str, contracts: list[dict], audits: list[di
     try:
         response = llm.chat([{"role": "user", "content": prompt}], max_tokens=700, temperature=0.0)
     except Exception as exc:
-        logger.warning("dependency classifier failed for %s: %s", protocol, exc)
-        return False
+        logger.error("dependency classifier failed for %s: %s", protocol, exc)
+        raise RuntimeError(f"dependency classifier failed for {protocol}") from exc
 
     parsed = _parse_json_object(response)
     if not parsed:
-        logger.warning("dependency classifier returned unparseable response for %s", protocol)
-        return False
+        logger.error("dependency classifier returned unparseable response for %s", protocol)
+        raise RuntimeError(f"dependency classifier returned unparseable response for {protocol}")
 
     try:
         confidence = float(parsed.get("confidence") or 0)
-    except (TypeError, ValueError):
-        confidence = 0.0
+    except (TypeError, ValueError) as exc:
+        logger.error("dependency classifier returned invalid confidence for %s: %r", protocol, parsed.get("confidence"))
+        raise RuntimeError(f"dependency classifier returned invalid confidence for {protocol}") from exc
 
     decision = parsed.get("should_run_dependency_pass")
     if isinstance(decision, str):
-        should_run = decision.strip().lower() in {"true", "yes", "1"}
-    else:
+        normalized = decision.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            should_run = True
+        elif normalized in {"false", "no", "0"}:
+            should_run = False
+        else:
+            logger.error("dependency classifier returned invalid decision for %s: %r", protocol, decision)
+            raise RuntimeError(f"dependency classifier returned invalid decision for {protocol}")
+    elif isinstance(decision, bool):
         should_run = bool(decision)
+    else:
+        logger.error("dependency classifier returned missing/non-boolean decision for %s: %r", protocol, decision)
+        raise RuntimeError(f"dependency classifier returned missing/non-boolean decision for {protocol}")
     return should_run and confidence >= 0.5
 
 
@@ -348,8 +360,8 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
     try:
         r1 = _cached_deep_research(pass1, schema=_DEPS_SCHEMA)
     except Exception as exc:
-        logger.warning("dep pass 1 failed for %s: %s", protocol, exc)
-        return []
+        logger.error("dep pass 1 failed for %s: %s", protocol, exc)
+        raise RuntimeError(f"dependency research pass 1 failed for {protocol}") from exc
     components = r1.get("data", {}).get("components", []) or []
 
     dep_audits: list[dict] = []
@@ -357,13 +369,14 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
         inst = f"Find smart contract security audit reports for {c.get('name')} by {c.get('author')}."
         try:
             budget.charge_research()
-        except RuntimeError:
-            break
+        except RuntimeError as exc:
+            logger.error("dep pass 2 budget exhausted for %s/%s: %s", c.get("name"), c.get("author"), exc)
+            raise
         try:
             r2 = _cached_deep_research(inst, schema=_AUDIT_SCHEMA)
         except Exception as exc:
-            logger.warning("dep pass 2 failed for %s/%s: %s", c.get("name"), c.get("author"), exc)
-            continue
+            logger.error("dep pass 2 failed for %s/%s: %s", c.get("name"), c.get("author"), exc)
+            raise RuntimeError(f"dependency research pass 2 failed for {c.get('name')}") from exc
         for a in r2.get("data", {}).get("auditReports", []):
             url = str(a.get("url") or "").strip()
             if not url:
@@ -412,12 +425,17 @@ def _apply_spa_overrides(protocol: str, inventory_result: dict, audit_result: di
         )
 
 
-def run_discovery(protocol: str, *, official_domain: str | None = None, chain: str | None = None) -> dict[str, Any]:
+def run_discovery(protocol: str, *, official_domain: str | None = None, chain_id: int | None = None) -> dict[str, Any]:
     """Premium+Deps discovery for one protocol.
 
     Returns ``{audits: <search_audit_reports shape>, addresses: <search_protocol_inventory shape>,
     meta: {...}}`` so existing workers can slot it in with minimal plumbing changes.
     """
+    requested_chain_id = (
+        require_supported_chain_id(chain_id=chain_id, context=f"discovery for {protocol}")
+        if chain_id is not None
+        else None
+    )
     budget = _Budget()
     started_at = time.monotonic()
 
@@ -446,7 +464,8 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
                 }
             )
     except Exception as exc:
-        logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
+        logger.error("deep research (audit seeds) failed for %s: %s", protocol, exc)
+        raise RuntimeError(f"deep research audit seeds failed for {protocol}") from exc
 
     # 1b. Full pipeline: Exa/deep-lite search + explicit Deep Research seeds.
     audit_result = audit_reports_mod.search_audit_reports(
@@ -463,7 +482,7 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     inventory_result = inventory_mod.search_protocol_inventory(
         protocol,
         search_fn=_make_exa_search_fn("auto", budget),
-        chain=chain,
+        chain_id=requested_chain_id,
         limit=500,
         max_queries=4,
         run_deployer=True,
@@ -482,14 +501,22 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
                 {
                     "name": item.get("name"),
                     "address": addr,
-                    "chains": [chain_key] if (chain_key := canonical_chain(item.get("chain"))) else [],
+                    "chain_ids": [
+                        require_supported_chain_id(
+                            chain_id=item.get("chain_id"),
+                            context=f"deep research address discovery for {protocol} {addr}",
+                        )
+                    ]
+                    if item.get("chain_id") is not None
+                    else [],
                     "confidence": 1.0,
                     "source": ["exa_deep_research"],
                     "evidence": {"deep_research": 1},
                 }
             )
     except Exception as exc:
-        logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
+        logger.error("deep research (addresses) failed for %s: %s", protocol, exc)
+        raise
 
     # ---- Dependency two-pass (conditional) ----
     dependency_pass_triggered = _needs_dependency_pass(

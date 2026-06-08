@@ -19,7 +19,7 @@ Usage:
 
     with SessionLocal() as session:
         result = resolve_contract_capabilities(
-            session, address="0x...", chain_id=1
+            session, address="0x...", chain_id=eip155_chain_id
         )
     # {
     #   "grantRole(bytes32,address)": {
@@ -50,10 +50,11 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
+from db.queue import find_contract_for_job
 from services.artifacts import get_artifact_field
 from services.resolution.types import AnalysisJobLookup
 from utils.logging import record_stage_metric
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import default_rpc_url, require_supported_chain_id
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
@@ -64,7 +65,6 @@ from .repos import PostgresEventLogRepo
 from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 
 
 def _capability_function_slow_ms() -> int:
@@ -133,7 +133,7 @@ def _emit_capability_summary(
     if isinstance(adapter_match, dict):
         for name, count in adapter_match.items():
             record_stage_metric(f"adapter_{str(name).replace('Adapter', '')}", count)
-    for ckey in ("live_getter_calls", "live_getter_failures", "inline_recursions", "hypersync_fallback_scans"):
+    for ckey in ("live_getter_calls", "live_getter_failures", "inline_recursions"):
         if ckey in resolve_counters:
             record_stage_metric(ckey, resolve_counters[ckey])
 
@@ -162,7 +162,7 @@ def find_analysis_job_for_address(
     address: str,
     *,
     required_artifact: str = "predicate_trees",
-    chain: str | None = None,
+    chain_id: int,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts should be used for a runtime address.
@@ -171,12 +171,18 @@ def find_analysis_job_for_address(
     on the implementation child job. Prefer a direct artifact when present;
     otherwise follow the proxy Contract row to the implementation job.
     """
-    for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"analysis job lookup for {address}")
+    for runtime_job in _jobs_for_address(
+        session,
+        address,
+        chain_id=effective_chain_id,
+        completed_only=completed_only,
+    ):
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
             required_artifact=required_artifact,
-            chain=chain,
+            chain_id=effective_chain_id,
             completed_only=completed_only,
         )
         if lookup is not None:
@@ -188,7 +194,7 @@ def find_dependency_provider_job_for_address(
     session: Session,
     address: str,
     *,
-    chain: str | None = None,
+    chain_id: int,
 ) -> AnalysisJobLookup | None:
     """Return the job that should satisfy a policy dependency for address.
 
@@ -197,8 +203,17 @@ def find_dependency_provider_job_for_address(
     be ``done`` without policy artifacts, so depending on the proxy address can
     unblock too early or never satisfy the semantic inlining path.
     """
-    for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=False):
-        impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=False)
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"dependency provider lookup for {address}",
+    )
+    for runtime_job in _jobs_for_address(
+        session,
+        address,
+        chain_id=effective_chain_id,
+        completed_only=False,
+    ):
+        impl_job = _implementation_child_job(session, runtime_job, chain_id=effective_chain_id, completed_only=False)
         if impl_job is not None:
             return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
@@ -209,10 +224,9 @@ def resolve_contract_capabilities(
     session: Session,
     *,
     address: str,
-    chain_id: int = 1,
+    chain_id: int | None = None,
     block: int | None = None,
     job_id: Any = None,
-    chain: str | None = None,
 ) -> dict[str, dict[str, Any]] | None:
     """Return ``{function_signature: capability_dict}`` for the most
     recent completed analysis of ``address``, or ``None`` if there's
@@ -227,20 +241,35 @@ def resolve_contract_capabilities(
     default ``Job.status == completed`` filter would otherwise skip
     the in-progress job and return None or stale prior artifacts.
 
-    ``chain`` is the string chain identifier (e.g. ``"ethereum"``,
-    ``"optimism"``) matching ``Contract.chain``. Together with
-    ``job_id`` it scopes the per-job ``ControllerValue`` lookup so a
-    re-analysis on a different chain (or a follow-up run on the same
-    address) doesn't leak rows back into a completed job's resolved
-    capabilities. Falls back to address-only lookup with a warn-log when
-    ``job_id`` is None.
+    ``chain_id`` scopes the per-job ``ControllerValue`` lookup so a re-analysis
+    on a different chain (or a follow-up run on the same address) doesn't leak
+    rows back into a completed job's resolved capabilities. Address-only lookup
+    is intentionally unsupported.
     """
     addr = address.lower()
     runtime_addr = addr
     if job_id is not None:
         job = session.get(Job, job_id)
-        if job is None or (job.address or "").lower() != addr:
+        if job is None:
             return None
+        if not job.address:
+            logger.error("capability resolver job %s requires address", job.id)
+            raise RuntimeError(f"capability resolver job {job.id} requires address")
+        if job.address.lower() != addr:
+            return None
+        job_chain_id = require_supported_chain_id(chain_id=job.chain_id, context=f"capability resolver job {job.id}")
+        if chain_id is not None:
+            requested_chain_id = require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"capability resolver for {addr}",
+            )
+            if requested_chain_id != job_chain_id:
+                raise RuntimeError(
+                    f"capability resolver chain mismatch for {addr}: job chain_id={job_chain_id}, "
+                    f"requested chain_id={requested_chain_id}"
+                )
+        else:
+            requested_chain_id = job_chain_id
         runtime_job = job
         analysis_job = job
         request = job.request if isinstance(job.request, dict) else {}
@@ -248,11 +277,12 @@ def resolve_contract_capabilities(
         if isinstance(proxy_address, str) and proxy_address.startswith("0x") and len(proxy_address) == 42:
             runtime_addr = proxy_address.lower()
     else:
+        requested_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"capability resolver for {addr}")
         lookup = find_analysis_job_for_address(
             session,
             addr,
             required_artifact="predicate_trees",
-            chain=chain,
+            chain_id=requested_chain_id,
             completed_only=True,
         )
         if lookup is None:
@@ -267,7 +297,7 @@ def resolve_contract_capabilities(
             session,
             runtime_job,
             required_artifact="predicate_trees",
-            chain=chain,
+            chain_id=requested_chain_id,
             completed_only=True,
         )
         if lookup is None:
@@ -278,66 +308,40 @@ def resolve_contract_capabilities(
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
-    # Default chain from Job.request when caller didn't supply one. The
-    # downstream ``_load_state_var_values`` only filters by chain when
-    # it's non-None, so this is best-effort: a job whose request lacks
-    # a 'chain' key falls back to address-only Contract lookup.
-    if chain is None and isinstance(analysis_job.request, dict):
-        req_chain = analysis_job.request.get("chain")
-        if isinstance(req_chain, str) and req_chain:
-            chain = req_chain
-    if chain is None and isinstance(runtime_job.request, dict):
-        req_chain = runtime_job.request.get("chain")
-        if isinstance(req_chain, str) and req_chain:
-            chain = req_chain
-    rpc_url: str | None = None
-    rpc_chain_id: int | str | None = None
-    for candidate_job in (analysis_job, runtime_job):
-        if not isinstance(candidate_job.request, dict):
-            continue
-        if rpc_chain_id is None:
-            rpc_chain_id = candidate_job.request.get("chain_id")
-        if isinstance(candidate_job.request.get("rpc_url"), str):
-            rpc_url = candidate_job.request["rpc_url"]
-            break
-    rpc_url = (
-        default_rpc_url(
-            explicit_rpc_url=rpc_url,
-            chain_id=rpc_chain_id,
-            chain=chain,
-            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
-        )
-        or DEFAULT_RPC_URL
+    effective_chain_id = require_supported_chain_id(
+        chain_id=requested_chain_id,
+        context=f"capability resolver for {addr}",
     )
+    resolved_rpc_url = default_rpc_url(chain_id=effective_chain_id)
 
     registry = AdapterRegistry()
     # Named standard adapters first (higher matches() scores win); the generic
-    # event-indexed adapter is the fallback for non-standard authority.
+    # event-indexed adapter handles descriptor-level event hints.
     registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EventIndexedAdapter)
 
     event_log_repo = PostgresEventLogRepo(session)
     # Lets adapters confirm a contract's standard from its bytecode — e.g. tell a
     # Solmate RolesAuthority from an OZ AccessManager, which share canCall's selector.
-    bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
+    bytecode_repo = BytecodeSelectorRepo(resolved_rpc_url, effective_chain_id)
     state_var_values = _load_state_var_values(
         session,
         analysis_job.address or addr,
         job_id=analysis_job.id,
-        chain=chain,
+        chain_id=effective_chain_id,
     )
     if not state_var_values and runtime_job.id != analysis_job.id:
-        state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
+        state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain_id=effective_chain_id)
     canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
     out: dict[str, dict[str, Any]] = {}
     # Per-function profiling + per-job capability-kind tally + work-volume
     # counters. This loop is the resolver-side twin of the static stage's
     # ``build_predicate_artifacts`` loop, which has predicate_function_slow /
-    # predicate_summary lines; this one had none, so a function (or a cold
-    # HyperSync fallback) that ran away inside the policy stage was invisible.
+    # predicate_summary lines; this one had none, so expensive work inside the
+    # policy stage was invisible.
     # ``resolve_counters`` rides on each EvaluationContext.meta so the adapter
     # dispatch and the cross-contract inline path increment it (adapter matches,
-    # live getter eth_calls, inline recursions, HyperSync scans) — surfacing
+    # live getter eth_calls, inline recursions) — surfacing
     # redundant work without per-RPC latency noise.
     started = time.monotonic()
     per_function_ms: list[tuple[str, int]] = []
@@ -346,12 +350,12 @@ def resolve_contract_capabilities(
     slow_threshold_ms = _capability_function_slow_ms()
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
-            chain_id=chain_id,
+            chain_id=effective_chain_id,
             contract_address=runtime_addr,
             block=block,
             event_log_repo=event_log_repo,
             bytecode=bytecode_repo,
-            rpc_url=rpc_url,
+            rpc_url=resolved_rpc_url,
             state_var_values=state_var_values,
             session=session,
             call_frame=CallFrame.root(
@@ -425,7 +429,7 @@ def _analysis_lookup_for_runtime_job(
     runtime_job: Job,
     *,
     required_artifact: str,
-    chain: str | None,
+    chain_id: int,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
     # A proxy's own predicate_trees artifact is present but *empty* — it has no
@@ -442,7 +446,7 @@ def _analysis_lookup_for_runtime_job(
     if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
-    impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
+    impl_job = _implementation_child_job(session, runtime_job, chain_id=chain_id, completed_only=completed_only)
     impl_artifact = get_artifact_field(session, impl_job.id, required_artifact) if impl_job is not None else None
     if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
@@ -458,36 +462,35 @@ def _jobs_for_address(
     session: Session,
     address: str,
     *,
-    chain: str | None = None,
+    chain_id: int,
     completed_only: bool = True,
 ) -> list[Job]:
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"job lookup for {address}")
     stmt = (
         select(Job)
         .where(func.lower(Job.address) == address.lower())
+        .where(Job.chain_id == effective_chain_id)
         .where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
     )
     if completed_only:
         stmt = stmt.where(Job.status == JobStatus.completed)
-    candidates = list(session.execute(stmt).scalars().all())
-    if chain is None:
-        return candidates
-    return [job for job in candidates if _job_chain(job) == chain]
+    return list(session.execute(stmt).scalars().all())
 
 
 def _implementation_child_job(
     session: Session,
     runtime_job: Job,
     *,
-    chain: str | None,
+    chain_id: int,
     completed_only: bool,
 ) -> Job | None:
-    contract = _contract_for_job(session, runtime_job, chain=chain)
+    contract = _contract_for_job(session, runtime_job, chain_id=chain_id)
     impl_addr = (contract.implementation if contract is not None else None) or None
     if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
         return None
 
-    candidates = _jobs_for_address(session, impl_addr, chain=chain, completed_only=completed_only)
+    candidates = _jobs_for_address(session, impl_addr, chain_id=chain_id, completed_only=completed_only)
     runtime_addr = (runtime_job.address or "").lower()
     parent_id = str(runtime_job.id)
 
@@ -504,27 +507,17 @@ def _implementation_child_job(
     return candidates[0] if candidates else None
 
 
-def _contract_for_job(session: Session, job: Job, *, chain: str | None) -> Contract | None:
-    contract = session.execute(
-        select(Contract).where(Contract.job_id == job.id).order_by(Contract.created_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    if contract is not None:
-        return contract
-
-    address = (job.address or "").lower()
-    if not address:
+def _contract_for_job(session: Session, job: Job, *, chain_id: int) -> Contract | None:
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"Contract lookup for job {job.id}")
+    job_chain_id = require_supported_chain_id(chain_id=job.chain_id, context=f"Contract lookup for job {job.id}")
+    if job_chain_id != effective_chain_id:
+        raise RuntimeError(
+            f"Contract lookup chain mismatch for job {job.id}: job chain_id={job_chain_id}, "
+            f"requested chain_id={effective_chain_id}"
+        )
+    if not job.address:
         return None
-    stmt = select(Contract).where(func.lower(Contract.address) == address)
-    effective_chain = chain or _job_chain(job)
-    if effective_chain is not None:
-        stmt = stmt.where(Contract.chain == effective_chain)
-    return session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
-
-
-def _job_chain(job: Job) -> str | None:
-    request = job.request if isinstance(job.request, dict) else {}
-    chain = request.get("chain")
-    return chain if isinstance(chain, str) and chain else None
+    return find_contract_for_job(session, job, context=f"Contract lookup for job {job.id}")
 
 
 def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
@@ -546,8 +539,8 @@ def _load_state_var_values(
     session: Session,
     address: str,
     *,
+    chain_id: int,
     job_id: Any = None,
-    chain: str | None = None,
 ) -> dict[str, str]:
     """Read persisted ``controller_values`` rows for ``address`` and key
     them by the bare state-variable name the predicate evaluator looks
@@ -562,49 +555,71 @@ def _load_state_var_values(
     name.
 
     Scoping rules:
-      - ``Contract.job_id == :job_id`` when ``job_id`` is non-None. Static
-        writes a fresh Contract row per analysis job, and resolution writes
-        the snapshot's ControllerValue rows under that exact row.
-      - ``Contract.chain == :chain`` when ``chain`` is non-None for fallback
-        address lookups.
+      - ``Contract`` identity is canonical ``(address, chain_id)``.
+      - when ``job_id`` is provided, the job must match the requested address
+        and chain id before controller rows are read.
 
-    Picks the exact job Contract when available. Falls back to the latest
-    address/chain Contract only when callers do not provide job context or
-    rows do not have job_id populated.
-
-    Returns an empty dict when no contract row matches — the evaluator
-    falls back to the lower_bound/partial placeholder."""
+    Missing contract identity is an operator-visible failure. A matched
+    contract with no controller rows returns an empty dict."""
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"_load_state_var_values for address={address}",
+    )
     if job_id is not None:
-        stmt = select(Contract).where(Contract.job_id == job_id)
-        if chain is not None:
-            stmt = stmt.where(Contract.chain == chain)
-        contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
-        if contract is not None:
-            # Scope to this job's deployment so a shared impl (N proxies → 1 impl
-            # row) reads only its own proxy's controller values, not a sibling's.
-            job = session.get(Job, job_id)
-            deployment = (
-                normalize_deployment(job.request.get("proxy_address"))
-                if job is not None and isinstance(job.request, dict)
-                else None
+        job = session.get(Job, job_id)
+        if job is None:
+            logger.error(
+                "_load_state_var_values missing job_id=%s for address=%s chain_id=%s",
+                job_id,
+                address,
+                chain_id,
             )
-            return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
+            raise RuntimeError(f"_load_state_var_values missing job {job_id}")
+        job_chain_id = require_supported_chain_id(chain_id=job.chain_id, context=f"_load_state_var_values job {job.id}")
+        if job_chain_id != effective_chain_id:
+            raise RuntimeError(
+                f"_load_state_var_values chain mismatch for job {job.id}: job chain_id={job_chain_id}, "
+                f"requested chain_id={effective_chain_id}"
+            )
+        if not job.address:
+            logger.error("_load_state_var_values job %s requires address", job.id)
+            raise RuntimeError(f"_load_state_var_values job {job.id} requires address")
+        if job.address.lower() != address.lower():
+            raise RuntimeError(
+                f"_load_state_var_values address mismatch for job {job.id}: "
+                f"job address={job.address}, requested address={address}"
+            )
+        contract = find_contract_for_job(
+            session,
+            job,
+            context=f"_load_state_var_values contract lookup for job {job.id}",
+        )
+        if contract is None:
+            logger.error(
+                "_load_state_var_values missing Contract row for job_id=%s chain_id=%s address=%s",
+                job.id,
+                effective_chain_id,
+                address,
+            )
+            raise RuntimeError(f"_load_state_var_values missing Contract row for job {job.id}")
+        # Scope to this job's deployment so a shared impl (N proxies -> 1 impl
+        # row) reads only its own proxy's controller values, not a sibling's.
+        deployment = normalize_deployment(job.request.get("proxy_address")) if isinstance(job.request, dict) else None
+        return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
     else:
-        logger.warning(
-            "_load_state_var_values called without job_id for address=%s; "
-            "falling back to address-only Contract lookup. "
-            "Capability resolution may surface controller rows from a "
-            "different job/chain.",
+        stmt = (
+            select(Contract)
+            .where(func.lower(Contract.address) == address.lower(), Contract.chain_id == effective_chain_id)
+            .limit(1)
+        )
+        contract = session.execute(stmt).scalar_one_or_none()
+    if contract is None:
+        logger.error(
+            "_load_state_var_values missing Contract row for chain_id=%s address=%s",
+            effective_chain_id,
             address,
         )
-
-    stmt = select(Contract).where(func.lower(Contract.address) == address.lower())
-    if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
-    stmt = stmt.order_by(Contract.created_at.desc()).limit(1)
-    contract = session.execute(stmt).scalar_one_or_none()
-    if contract is None:
-        return {}
+        raise RuntimeError(f"_load_state_var_values missing Contract row for {address} chain_id={effective_chain_id}")
     return _controller_values_for_contract(session, contract)
 
 
@@ -618,7 +633,7 @@ def _controller_values_for_contract(
     stmt = select(ControllerValue).where(ControllerValue.contract_id == contract.id)
     if scope_deployment:
         # One impl row can hold N per-proxy controller sets; read only this
-        # deployment's (plus legacy untagged NULL) rows. No-op for 1:1.
+        # deployment's rows. No-op for 1:1.
         stmt = stmt.where(deployment_scope(ControllerValue.deployment_address, deployment_address))
     rows = session.execute(stmt).scalars()
     state_var: dict[str, str] = {}

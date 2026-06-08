@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-import requests
 from eth_utils.crypto import keccak
 
 from services.resolution.capability_resolver import _selector_for_signature
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import record_stage_metric
+from utils.rpc import default_rpc_url, rpc_request
 
 logger = logging.getLogger(__name__)
 
-ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 MAX_LOGS_PER_TOPIC = int(os.getenv("PSAT_PRINCIPAL_HISTORY_MAX_LOGS_PER_TOPIC", "10000"))
-_ABI_CACHE: dict[tuple[int, str], list[dict[str, Any]]] = {}
+_LOG_BLOCK_RANGE = int(os.getenv("PSAT_PRINCIPAL_HISTORY_BLOCK_RANGE", "10000"))
+_MAX_LOG_WINDOWS = int(os.getenv("PSAT_PRINCIPAL_HISTORY_MAX_LOG_WINDOWS", "5000"))
 _LOG_CACHE: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+
+_ROLE_AUTHORITY_EVENT_TOPICS = {
+    "role_capability": "0x" + keccak(text="RoleCapabilityUpdated(uint8,address,bytes4,bool)").hex(),
+    "public_capability": "0x" + keccak(text="PublicCapabilityUpdated(address,bytes4,bool)").hex(),
+    "user_role": "0x" + keccak(text="UserRoleUpdated(address,uint8,bool)").hex(),
+}
 
 
 def build_principal_history(
@@ -58,32 +62,11 @@ def build_principal_history(
     public_capabilities: list[dict[str, Any]] = []
 
     for authority_address, functions in sorted(functions_by_authority.items()):
-        try:
-            authority_history = build_role_authority_history(
-                authority_address=authority_address,
-                chain_id=chain_id,
-                functions=functions,
-            )
-        except Exception as exc:
-            record_degraded(
-                phase="principal_history_authority",
-                exc=exc,
-                context={"authority_address": authority_address},
-            )
-            logger.warning(
-                "principal history failed for authority %s: %s",
-                authority_address,
-                exc,
-                extra={"exc_type": type(exc).__name__},
-            )
-            sources.append(
-                {
-                    "authority_address": authority_address,
-                    "status": "error",
-                    "reason": str(exc),
-                }
-            )
-            continue
+        authority_history = build_role_authority_history(
+            authority_address=authority_address,
+            chain_id=chain_id,
+            functions=functions,
+        )
         sources.append(authority_history["source"])
         role_membership.extend(authority_history["role_membership"])
         capability_roles.extend(authority_history["capability_roles"])
@@ -138,8 +121,7 @@ def build_role_authority_history(
     logs_by_topic: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     authority_address = authority_address.lower()
-    abi = abi if abi is not None else _fetch_abi(authority_address, chain_id)
-    event_topics = _classify_role_event_topics(abi)
+    event_topics = _classify_role_event_topics(abi) if abi is not None else dict(_ROLE_AUTHORITY_EVENT_TOPICS)
     if event_topics is None:
         return {
             "source": {
@@ -284,7 +266,7 @@ def _decode_authority_events(
     for log in logs_by_topic.get(event_topics["user_role"], []):
         topics = log.get("topics") or []
         if len(topics) < 3:
-            continue
+            raise RuntimeError("principal history user role log missing indexed topics")
         decoded.append(
             _event_base(log)
             | {
@@ -297,7 +279,7 @@ def _decode_authority_events(
     for log in logs_by_topic.get(event_topics["role_capability"], []):
         topics = log.get("topics") or []
         if len(topics) < 4:
-            continue
+            raise RuntimeError("principal history role capability log missing indexed topics")
         decoded.append(
             _event_base(log)
             | {
@@ -311,7 +293,7 @@ def _decode_authority_events(
     for log in logs_by_topic.get(event_topics["public_capability"], []):
         topics = log.get("topics") or []
         if len(topics) < 3:
-            continue
+            raise RuntimeError("principal history public capability log missing indexed topics")
         decoded.append(
             _event_base(log)
             | {
@@ -500,80 +482,169 @@ def _event_base(log: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fetch_abi(address: str, chain_id: int) -> list[dict[str, Any]]:
-    from utils.etherscan import get
-
-    cache_key = (chain_id, address.lower())
-    cached = _ABI_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    data = get("contract", "getabi", chain_id=chain_id, address=address)
-    raw = data.get("result")
-    decoded = json.loads(raw) if isinstance(raw, str) else raw
-    abi = decoded if isinstance(decoded, list) else []
-    _ABI_CACHE[cache_key] = abi
-    return abi
-
-
 def _fetch_logs(*, authority_address: str, chain_id: int, topic0: str) -> list[dict[str, Any]]:
     cache_key = (chain_id, authority_address.lower(), topic0.lower())
     cached = _LOG_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    api_key = os.getenv("ETHERSCAN_API_KEY")
-    if not api_key:
-        raise RuntimeError("ETHERSCAN_API_KEY not set")
-    out: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        response = requests.get(
-            ETHERSCAN_API,
-            params={
-                "chainid": str(chain_id),
-                "module": "logs",
-                "action": "getLogs",
-                "address": authority_address,
-                "fromBlock": "0",
-                "toBlock": "latest",
-                "topic0": topic0,
-                "page": str(page),
-                "offset": "1000",
-                "apikey": api_key,
-            },
-            timeout=30,
+    rpc_url = default_rpc_url(chain_id=chain_id)
+    head_raw = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
+    if not isinstance(head_raw, str) or not head_raw.startswith("0x"):
+        logger.error(
+            "principal history eth_blockNumber returned invalid payload chain_id=%s authority=%s: %r",
+            chain_id,
+            authority_address,
+            head_raw,
         )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("status") == "1":
-            batch = data.get("result") or []
-        elif str(data.get("result", "")).lower() in {"no records found", ""}:
-            batch = []
-        else:
-            raise RuntimeError(f"Etherscan logs error: {data.get('message')} - {data.get('result')}")
-        out.extend(batch)
+        raise RuntimeError(f"principal history eth_blockNumber returned invalid payload for chain_id={chain_id}")
+    head_block = int(head_raw, 16)
+
+    out: list[dict[str, Any]] = []
+    current_from = 0
+    windows = 0
+    while current_from <= head_block:
+        if windows >= _MAX_LOG_WINDOWS:
+            logger.error(
+                "principal history eRPC getLogs hit max windows chain_id=%s authority=%s topic0=%s last_block=%s",
+                chain_id,
+                authority_address,
+                topic0,
+                current_from,
+            )
+            raise RuntimeError(f"principal history eRPC getLogs hit max windows for chain_id={chain_id}")
+        current_to = min(head_block, current_from + _LOG_BLOCK_RANGE - 1)
+        filter_params = {
+            "address": authority_address.lower(),
+            "topics": [topic0.lower()],
+            "fromBlock": hex(current_from),
+            "toBlock": hex(current_to),
+        }
+        try:
+            batch = rpc_request(rpc_url, "eth_getLogs", [filter_params], chain_id=chain_id)
+        except Exception as exc:
+            logger.error(
+                "principal history eRPC getLogs failed chain_id=%s authority=%s topic0=%s blocks=%d-%d: %s",
+                chain_id,
+                authority_address,
+                topic0,
+                current_from,
+                current_to,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"principal history eRPC getLogs failed for chain_id={chain_id}") from exc
+        if not isinstance(batch, list):
+            logger.error(
+                "principal history eRPC getLogs returned invalid payload chain_id=%s authority=%s topic0=%s: %r",
+                chain_id,
+                authority_address,
+                topic0,
+                batch,
+            )
+            raise RuntimeError(f"principal history eRPC getLogs returned invalid payload for chain_id={chain_id}")
+        for log in batch:
+            if not isinstance(log, dict):
+                logger.error(
+                    "principal history eRPC getLogs returned malformed log chain_id=%s authority=%s "
+                    "topic0=%s blocks=%d-%d: %r",
+                    chain_id,
+                    authority_address,
+                    topic0,
+                    current_from,
+                    current_to,
+                    log,
+                )
+                raise RuntimeError(f"principal history eRPC getLogs returned malformed log for chain_id={chain_id}")
+            topics = log.get("topics")
+            if (
+                not isinstance(topics, list)
+                or not topics
+                or not all(_is_topic(topic) for topic in topics)
+                or str(topics[0]).lower() != topic0.lower()
+            ):
+                logger.error(
+                    "principal history eRPC getLogs returned invalid topics chain_id=%s authority=%s "
+                    "topic0=%s blocks=%d-%d: %r",
+                    chain_id,
+                    authority_address,
+                    topic0,
+                    current_from,
+                    current_to,
+                    topics,
+                )
+                raise RuntimeError(f"principal history eRPC getLogs returned invalid topics for chain_id={chain_id}")
+            data = log.get("data")
+            if not isinstance(data, str) or not data.startswith("0x"):
+                logger.error(
+                    "principal history eRPC getLogs returned invalid data chain_id=%s authority=%s "
+                    "topic0=%s blocks=%d-%d: %r",
+                    chain_id,
+                    authority_address,
+                    topic0,
+                    current_from,
+                    current_to,
+                    data,
+                )
+                raise RuntimeError(f"principal history eRPC getLogs returned invalid data for chain_id={chain_id}")
+            try:
+                bytes.fromhex(data[2:])
+            except ValueError as exc:
+                logger.error(
+                    "principal history eRPC getLogs returned malformed data chain_id=%s authority=%s "
+                    "topic0=%s blocks=%d-%d",
+                    chain_id,
+                    authority_address,
+                    topic0,
+                    current_from,
+                    current_to,
+                )
+                raise RuntimeError(
+                    f"principal history eRPC getLogs returned malformed data for chain_id={chain_id}"
+                ) from exc
+            out.append(log)
         if len(out) > MAX_LOGS_PER_TOPIC:
             raise RuntimeError(f"principal history log cap exceeded for {authority_address} topic {topic0}")
-        if len(batch) < 1000:
-            _LOG_CACHE[cache_key] = list(out)
-            return out
-        page += 1
-        time.sleep(0.25)
+        windows += 1
+        current_from = current_to + 1
+    _LOG_CACHE[cache_key] = list(out)
+    return out
 
 
 def _topic_address(topic: str) -> str:
+    if not _is_topic(topic):
+        raise ValueError(f"malformed topic address: {topic!r}")
     return "0x" + str(topic)[-40:].lower()
 
 
 def _topic_uint(topic: str) -> int:
+    if not _is_topic(topic):
+        raise ValueError(f"malformed topic uint: {topic!r}")
     return int(str(topic), 16)
 
 
 def _topic_bytes4(topic: str) -> str:
+    if not _is_topic(topic):
+        raise ValueError(f"malformed topic bytes4: {topic!r}")
     return "0x" + str(topic)[2:10].lower()
 
 
 def _data_bool(data: Any) -> bool:
-    return int(str(data or "0x0"), 16) != 0
+    if not isinstance(data, str) or not data.startswith("0x") or len(data) != 66:
+        raise ValueError(f"malformed bool event data: {data!r}")
+    try:
+        return int(data, 16) != 0
+    except ValueError as exc:
+        raise ValueError(f"malformed bool event data: {data!r}") from exc
+
+
+def _is_topic(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) != 66:
+        return False
+    try:
+        bytes.fromhex(value[2:])
+    except ValueError:
+        return False
+    return True
 
 
 def _hex_int(value: Any) -> int:

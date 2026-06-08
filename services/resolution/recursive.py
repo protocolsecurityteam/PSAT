@@ -32,6 +32,7 @@ from services.static.contract_analysis_pipeline.analysis_types import ContractAn
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.pipeline_types import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
+from utils.rpc import require_configured_erpc_url, require_supported_chain_id
 
 from .tracking import (
     build_control_snapshot,
@@ -76,21 +77,40 @@ def _workspace_name(contract_name: str, address: str, prefix: str) -> str:
     return f"{_sanitize_name(prefix)}_{_sanitize_name(contract_name)}_{address.lower()[2:10]}"
 
 
-def _contract_name_for_address(address: str) -> str | None:
-    try:
-        result = fetch(address)
-    except Exception:
-        return None
-    if not isinstance(result, dict):
-        return None
-    name = str(result.get("ContractName", "")).strip()
-    return name or None
+def _require_subject_chain_id(
+    subject: Mapping[str, Any],
+    *,
+    expected_chain_id: int,
+    address: str,
+    context: str,
+) -> int:
+    raw_chain_id = subject.get("chain_id")
+    if raw_chain_id is None:
+        logger.error("%s subject missing chain_id address=%s subject=%r", context, address, subject)
+        raise RuntimeError(f"{context} subject missing chain_id for {address}")
+    subject_chain_id = require_supported_chain_id(
+        chain_id=raw_chain_id,
+        context=f"{context} subject {address}",
+    )
+    if subject_chain_id != expected_chain_id:
+        logger.error(
+            "%s subject chain_id mismatch address=%s subject_chain_id=%s expected_chain_id=%s",
+            context,
+            address,
+            subject_chain_id,
+            expected_chain_id,
+        )
+        raise RuntimeError(
+            f"{context} subject chain_id mismatch for {address}: "
+            f"subject_chain_id={subject_chain_id} expected_chain_id={expected_chain_id}"
+        )
+    return subject_chain_id
 
 
 def _build_effective_permissions(
     analysis: dict[str, Any],
     snapshot: ControlSnapshot,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Compute the effective-permissions payload for nested resolution."""
     try:
         return cast(
@@ -102,28 +122,26 @@ def _build_effective_permissions(
             ),
         )
     except Exception as exc:
-        # A nested contract whose effective-permissions build fails silently drops
-        # its role principals from the graph (consumed below in
-        # ``_role_principals_from_effective_permissions``). Was debug-only — surface
-        # it as a degraded breadcrumb so the gap is visible in stage_errors.
         address = str((analysis.get("subject") or {}).get("address", "")) or "<unknown>"
         record_degraded(
             phase="recursive_effective_permissions",
             exc=exc,
             context={"address": address},
         )
-        logger.warning(
+        logger.error(
             "Recursive resolve: effective_permissions build failed for %s: %s",
             address,
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return None
+        raise RuntimeError(f"recursive effective_permissions build failed for {address}") from exc
 
 
 def _build_static_artifacts(
     effective_address: str,
     workspace_prefix: str,
+    *,
+    chain_id: int,
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
 
@@ -131,21 +149,19 @@ def _build_static_artifacts(
     ``effects`` is also produced by the predicate pipeline but is not
     plumbed back here: the recursive resolver doesn't consume it, and
     the policy stage reads the per-job ``effects`` artifact written by
-    the static worker (propagated across same-bytecode jobs by
-    ``copy_static_cache``), so the materialization cache has no
-    consumer for it.
+    the static worker, so the materialization cache has no consumer for it.
 
     Pulled out of ``_materialize_contract_artifacts`` so the cross-process
     cache can call this exact closure when it needs to populate the
     persistent row. The tempdir is cleaned up at function exit.
     """
-    result = fetch(effective_address)
+    result = fetch(effective_address, chain_id=chain_id)
     contract_name = str(result.get("ContractName", "Contract"))
     project_name = _workspace_name(contract_name, effective_address, workspace_prefix)
 
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
-        scaffold(effective_address, result, project_dir)
+        scaffold(effective_address, result, project_dir, chain_id=chain_id)
         analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
 
     plan = cast(dict, build_control_tracking_plan(cast(ContractAnalysis, analysis)))
@@ -157,6 +173,7 @@ def _materialize_with_cross_process_cache(
     effective_address: str,
     bytecode_keccak: str | None,
     workspace_prefix: str,
+    chain_id: int,
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Consult the persistent contract_materializations table; build on miss.
 
@@ -164,22 +181,12 @@ def _materialize_with_cross_process_cache(
     ``predicate_trees`` round-trips through the cache so mapping-writer
     enumeration stays functional on cache hits (pre-c1d2e3f4a5b6 the
     builder dropped it and downstream silently disabled enumeration).
-
-    Falls back to a direct ``_build_static_artifacts`` call when:
-      * ``bytecode_keccak`` is None (we have nothing to key on);
-      * the DB layer raises (e.g., the table doesn't exist in a
-        fixture-isolated test, or the DB is unreachable).
     """
     if not bytecode_keccak:
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=chain_id)
 
-    try:
-        from db import contract_materializations as cm
-    except Exception as exc:
-        logger.debug("contract_materializations unavailable, falling back to direct build: %s", exc)
-        _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+    from db import contract_materializations as cm
 
     if not cm.is_enabled():
         # Operator-controlled kill switch (PSAT_CONTRACT_MATERIALIZATIONS=0)
@@ -187,15 +194,18 @@ def _materialize_with_cross_process_cache(
         # broken table or hot-spot lock contention can't fail-stop the
         # pipeline.
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=chain_id)
 
-    chain = os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
     built = {"ran": False}
 
     def _builder() -> Mapping[str, Any]:
         built["ran"] = True
         _bump_materialize_metric("materialize_builds")
-        name, analysis, plan, predicate_trees = _build_static_artifacts(effective_address, workspace_prefix)
+        name, analysis, plan, predicate_trees = _build_static_artifacts(
+            effective_address,
+            workspace_prefix,
+            chain_id=chain_id,
+        )
         return {
             "contract_name": name,
             "analysis": analysis,
@@ -203,25 +213,12 @@ def _materialize_with_cross_process_cache(
             "predicate_trees": predicate_trees,
         }
 
-    try:
-        row = cm.materialize_or_wait(
-            chain=chain,
-            address=effective_address,
-            bytecode_keccak=bytecode_keccak,
-            builder=_builder,
-        )
-    except Exception as exc:
-        # ``materialize_or_wait`` re-raises the builder's exception. If
-        # the failure was *inside* the builder, propagating preserves the
-        # existing behaviour of letting the resolution stage handle its
-        # own retry/terminal classification. If the failure was in the
-        # DB layer (lock acquisition, schema absent), fall back so we
-        # don't fail-stop the whole pipeline on a cache outage.
-        if _is_builder_exception(exc):
-            raise
-        logger.warning("contract_materializations.materialize_or_wait failed, falling back: %s", exc)
-        _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+    row = cm.materialize_or_wait(
+        chain_id=chain_id,
+        address=effective_address,
+        bytecode_keccak=bytecode_keccak,
+        builder=_builder,
+    )
 
     if not built["ran"]:
         # materialize_or_wait returned without invoking our builder — served from
@@ -229,13 +226,11 @@ def _materialize_with_cross_process_cache(
         # process did not pay the forge/Slither cost.
         _bump_materialize_metric("materialize_cache_hits")
 
-    # ``hydrate_*`` transparently reads from blob storage when the row's
-    # ``*_blob_key`` is set or falls back to inline JSONB (rows written
-    # before blob storage was enabled, or when storage was unconfigured).
-    # The blob path's ``json.loads`` already returns a
-    # fresh dict per call, but the inline path returns the SQLAlchemy
-    # JSONB-cached dict, so the deepcopy is still required to avoid
-    # downstream mutations leaking back into the ORM identity map.
+    # ``hydrate_*`` reads blob-backed rows from storage and inline-only rows from
+    # JSONB. The blob path's ``json.loads`` already returns a fresh dict per
+    # call, but the inline path returns the SQLAlchemy JSONB-cached dict, so the
+    # deepcopy is still required to avoid downstream mutations leaking back into
+    # the ORM identity map.
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
     # ``predicate_trees`` is absent on rows written before the
@@ -246,54 +241,56 @@ def _materialize_with_cross_process_cache(
     contract_name = row.contract_name or "Contract"
     return contract_name, analysis, plan, predicate_trees
 
-
-def _is_builder_exception(exc: BaseException) -> bool:
-    """Did *exc* originate inside the materialization builder
-    rather than the DB cache layer?
-
-    Builder exceptions are anything raised by ``fetch`` / ``scaffold`` /
-    ``collect_contract_analysis`` — broadly Etherscan / Slither errors.
-    DB-layer errors are SQLAlchemy / psycopg2 exceptions. We can't
-    cleanly distinguish without a type sniff; treat anything from the
-    sqlalchemy module as a DB-layer error and let other exceptions
-    propagate.
-    """
-    mod = type(exc).__module__ or ""
-    return not (mod.startswith("sqlalchemy") or mod.startswith("psycopg2"))
-
-
 def _materialize_contract_artifacts(
     address: str,
     rpc_url: str,
     *,
+    chain_id: int,
     workspace_prefix: str,
 ) -> LoadedArtifacts:
     """Build analysis + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"recursive materialization for {address}",
+    )
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"recursive materialization for {address}",
+        chain_id=effective_chain_id,
+    )
+    chain_id = effective_chain_id
+
     # Proxy check — analyze the implementation but read storage from the proxy.
     effective_address = address
     snapshot_address = address
     try:
         from services.discovery.classifier import classify_single
 
-        classification = classify_single(address, rpc_url)
+        classification = classify_single(address, rpc_url, chain_id=chain_id)
         if classification.get("type") == "proxy":
             impl = classification.get("implementation")
             if impl:
                 logger.info("Recursive resolve: %s is a proxy, using impl %s", address, impl)
                 effective_address = impl
     except Exception as exc:
-        logger.debug("Recursive resolve: proxy check failed for %s: %s", address, exc)
+        logger.error("Recursive resolve: proxy check failed for %s chain_id=%s: %s", address, chain_id, exc)
+        raise RuntimeError(f"recursive proxy classification failed for {address} chain_id={chain_id}") from exc
 
     # Resolve bytecode_keccak so the persistent contract_materializations
     # row is keyed on byte-exact code match: identical-bytecode contracts
     # at different addresses share one row.
-    bytecode_keccak: str | None = None
     try:
         from utils.rpc import get_code_with_keccak
 
-        _code, bytecode_keccak = get_code_with_keccak(rpc_url, effective_address)
+        _code, bytecode_keccak = get_code_with_keccak(rpc_url, effective_address, chain_id=chain_id)
     except Exception as exc:
-        logger.debug("Recursive resolve: get_code_with_keccak failed for %s: %s", effective_address, exc)
+        logger.error(
+            "Recursive resolve: get_code_with_keccak failed for %s chain_id=%s: %s",
+            effective_address,
+            chain_id,
+            exc,
+        )
+        raise RuntimeError(f"recursive bytecode lookup failed for {effective_address} chain_id={chain_id}") from exc
 
     # Cross-process cache: consult contract_materializations before paying
     # the forge+Slither cost. Two impl jobs in the same protocol — or a
@@ -306,6 +303,7 @@ def _materialize_contract_artifacts(
         effective_address=effective_address,
         bytecode_keccak=bytecode_keccak,
         workspace_prefix=workspace_prefix,
+        chain_id=chain_id,
     )
     # Address-mismatch retarget: when the persistent row was populated for
     # a different address that shares this bytecode, the cached
@@ -674,6 +672,7 @@ def _add_nested_principals(
     queue: deque[PendingContract],
     queued: set[str],
     rpc_url: str,
+    chain_id: int,
     from_node_id: str,
     source_controller_id: str | None,
     resolved_type: str,
@@ -683,7 +682,7 @@ def _add_nested_principals(
     classify_fn: Any | None = None,
 ) -> None:
     for nested_address, relation, label in _nested_principals_for_details(resolved_type, details):
-        classify = classify_fn or (lambda addr: classify_resolved_address(rpc_url, addr))
+        classify = classify_fn or (lambda addr: classify_resolved_address(rpc_url, addr, chain_id=chain_id))
         nested_type, nested_details = classify(nested_address)
         nested_node_type = "contract" if nested_type in ANALYZABLE_TYPES else "principal"
         nested_node_id = _ensure_node(
@@ -714,6 +713,7 @@ def resolve_control_graph(
     *,
     root_artifacts: LoadedArtifacts,
     rpc_url: str,
+    chain_id: int,
     max_depth: int = DEFAULT_RECURSION_MAX_DEPTH,
     workspace_prefix: str = "recursive",
     nested_artifacts_override: dict[str, LoadedArtifacts] | None = None,
@@ -722,6 +722,17 @@ def resolve_control_graph(
     heartbeat: Callable[[], None] | None = None,
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
     """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place."""
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context="recursive control graph",
+    )
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context="recursive control graph",
+        chain_id=effective_chain_id,
+    )
+    chain_id = effective_chain_id
+
     root_analysis = root_artifacts["analysis"]
     root_subject_obj = root_analysis.get("subject", {})
     root_subject = root_subject_obj if isinstance(root_subject_obj, dict) else {}
@@ -733,9 +744,15 @@ def resolve_control_graph(
         "artifacts": root_artifacts,
     }
     if root_subject:
+        subject_chain_id = _require_subject_chain_id(
+            root_subject,
+            expected_chain_id=chain_id,
+            address=root_address,
+            context="recursive root",
+        )
         root_pending["contract"] = make_contract(
             address=str(root_subject.get("address") or root_address),
-            chain_id=root_subject.get("chain_id"),
+            chain_id=subject_chain_id,
             name=root_subject.get("name"),
             label=root_subject.get("label"),
             is_proxy=bool(root_subject.get("is_proxy")),
@@ -760,9 +777,7 @@ def resolve_control_graph(
             classify_stats["hits"] += 1
             return _classify_cache[key]
         classify_stats["misses"] += 1
-        kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr)
-        # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
-        # classified_addresses artifact.
+        kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr, chain_id=chain_id)
         if cacheable:
             _classify_cache[key] = (kind, details)
         return kind, details
@@ -810,6 +825,7 @@ def resolve_control_graph(
             artifacts = _materialize_contract_artifacts(
                 address,
                 rpc_url,
+                chain_id=chain_id,
                 workspace_prefix=workspace_prefix,
             )
             return artifacts, None
@@ -871,32 +887,18 @@ def resolve_control_graph(
 
             if mat_exc is not None or artifacts is None:
                 err_text = str(mat_exc) if mat_exc is not None else "no artifacts produced"
-                contract_name = _contract_name_for_address(address)
                 record_degraded(
                     phase="recursive_materialize",
                     exc=mat_exc if mat_exc is not None else RuntimeError(err_text),
                     context={"address": address, "depth": depth},
                 )
-                logger.warning(
+                logger.error(
                     "Recursive resolve: failed to materialize nested contract %s at depth %s: %s",
                     address,
                     depth,
                     err_text,
                 )
-                _ensure_node(
-                    nodes,
-                    address=address,
-                    resolved_type="contract",
-                    label=contract_name or address,
-                    depth=depth,
-                    node_type="contract",
-                    analyzed=False,
-                    contract_name=contract_name,
-                    contract=make_contract(address=address, name=contract_name),
-                    details={"address": address, "materialize_error": err_text},
-                )
-                processed.add(address)
-                continue
+                raise RuntimeError(f"recursive materialization failed for {address} depth={depth}: {err_text}")
 
             if address not in nested_artifacts:
                 nested_artifacts[address] = artifacts
@@ -908,10 +910,20 @@ def resolve_control_graph(
             subject = analysis.get("subject", {})
             subject_mapping = subject if isinstance(subject, dict) else {}
             contract_name = str(subject_mapping.get("name", address))
+            subject_chain_id = (
+                _require_subject_chain_id(
+                    subject_mapping,
+                    expected_chain_id=chain_id,
+                    address=address,
+                    context="recursive nested",
+                )
+                if subject_mapping
+                else chain_id
+            )
             contract = (
                 make_contract(
                     address=str(subject_mapping.get("address") or address),
-                    chain_id=subject_mapping.get("chain_id"),
+                    chain_id=subject_chain_id,
                     name=subject_mapping.get("name"),
                     label=subject_mapping.get("label"),
                     is_proxy=bool(subject_mapping.get("is_proxy")),
@@ -923,7 +935,7 @@ def resolve_control_graph(
                     proxy_type=subject_mapping.get("proxy_type"),
                 )
                 if subject_mapping
-                else make_contract(address=address, name=contract_name)
+                else make_contract(address=address, chain_id=chain_id, name=contract_name)
             )
             node_details: dict[str, object] = {"address": address}
             contract_node_id = _ensure_node(
@@ -946,54 +958,55 @@ def resolve_control_graph(
             enumerated: list[Any] = []
             enumeration_status = "skipped"
             if mapping_specs:
-                hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
                 logger.info(
-                    "mapping_enumerator: %s has %d writer-event specs, token=%s",
+                    "mapping_enumerator: %s has %d writer-event specs",
                     address,
                     len(mapping_specs),
-                    "present" if hypersync_token else "missing",
                 )
-                if hypersync_token:
-                    from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
 
-                    try:
-                        result = enumerate_mapping_allowlist_sync(
-                            address,
-                            mapping_specs,
-                            bearer_token=hypersync_token,
-                        )
-                    except Exception as exc:
-                        # Bounds are inside enumerate_mapping_allowlist; raises here are
-                        # unexpected (auth, hypersync load, etc).
-                        record_degraded(
-                            phase="mapping_enumerator",
-                            exc=exc,
-                            context={"address": address},
-                        )
-                        logger.warning(
-                            "mapping_enumerator UNEXPECTED FAILURE for %s: %s — treating as truncated",
-                            address,
-                            exc,
-                        )
-                        enumeration_status = "error"
-                    else:
-                        enumerated = list(result["principals"])
-                        enumeration_status = result["status"]
-                        if enumeration_status != "complete":
-                            logger.warning(
-                                "mapping_enumerator: %s INCOMPLETE status=%s pages=%d last_block=%d "
-                                "(principal set may be missing entries)",
-                                address,
-                                enumeration_status,
-                                result["pages_fetched"],
-                                result["last_block_scanned"],
-                            )
-                        logger.info(
-                            "mapping_enumerator: %s returned %d principals (status=%s)",
-                            address,
-                            len(enumerated),
-                            enumeration_status,
-                        )
+                from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
+
+                try:
+                    result = enumerate_mapping_allowlist_sync(
+                        address,
+                        mapping_specs,
+                        chain_id=chain_id,
+                    )
+                except Exception as exc:
+                    record_degraded(
+                        phase="mapping_enumerator",
+                        exc=exc,
+                        context={"address": address, "chain_id": chain_id},
+                    )
+                    logger.error(
+                        "mapping_enumerator failed for chain_id=%s address=%s: %s",
+                        chain_id,
+                        address,
+                        exc,
+                        extra={"exc_type": type(exc).__name__},
+                    )
+                    raise RuntimeError(f"mapping_enumerator failed for {address} chain_id={chain_id}") from exc
+
+                enumerated = list(result["principals"])
+                enumeration_status = result["status"]
+                if enumeration_status != "complete":
+                    logger.error(
+                        "mapping_enumerator incomplete for chain_id=%s address=%s status=%s pages=%d last_block=%d",
+                        chain_id,
+                        address,
+                        enumeration_status,
+                        result["pages_fetched"],
+                        result["last_block_scanned"],
+                    )
+                    raise RuntimeError(
+                        f"mapping_enumerator incomplete for {address} chain_id={chain_id} status={enumeration_status}"
+                    )
+                logger.info(
+                    "mapping_enumerator: %s returned %d principals (status=%s)",
+                    address,
+                    len(enumerated),
+                    enumeration_status,
+                )
                 for principal in enumerated:
                     member_addr = principal["address"]
                     _ensure_node(
@@ -1065,6 +1078,7 @@ def resolve_control_graph(
                     queue=queue,
                     queued=queued,
                     rpc_url=rpc_url,
+                    chain_id=chain_id,
                     from_node_id=controller_node_id,
                     source_controller_id=controller_id,
                     resolved_type=resolved_type,
@@ -1117,6 +1131,7 @@ def resolve_control_graph(
                     queue=queue,
                     queued=queued,
                     rpc_url=rpc_url,
+                    chain_id=chain_id,
                     from_node_id=principal_node_id,
                     source_controller_id=None,
                     resolved_type=resolved_type,

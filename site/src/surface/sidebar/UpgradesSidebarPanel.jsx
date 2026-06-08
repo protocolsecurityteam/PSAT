@@ -9,7 +9,7 @@ import { shortAddr } from "../format.js";
 //     Click a row → focus that proxy on canvas (parent handles selection).
 //   - Machine selected (proxy): lazy-fetch the analysis blob for that contract
 //     (the per-contract upgrade_history isn't included in /api/company/{name},
-//     so we go via /api/analyses/{job_id}) and render the existing
+  //     so we go via /api/analyses/{analysis_job_id}) and render the existing
 //     UpgradesPanel — same layout as the standalone /address/<addr>/upgrades
 //     page so the per-impl audit cards (UpgradeAuditCard) appear identically.
 export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect, cache, onCache }) {
@@ -19,14 +19,15 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!machine || !machine.is_proxy || !machine.job_id) {
+    const analysisJobId = machine?.analysis_job_id;
+    if (!machine || !machine.is_proxy || !analysisJobId) {
       setHistory(null);
       setDeps({});
       setLoading(false);
       setError(null);
       return;
     }
-    const cached = cache && cache[machine.job_id];
+    const cached = cache && cache[analysisJobId];
     if (cached) {
       setHistory(cached.history || null);
       setDeps(cached.deps || {});
@@ -40,13 +41,13 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
     setHistory(null);
     setDeps({});
     // Two lean artifact fetches in parallel instead of the multi-MB
-    // /api/analyses/{job_id} blob — that endpoint merges every artifact
+    // /api/analyses/{analysis_job_id} blob — that endpoint merges every artifact
     // (contract_analysis, control_snapshot, effective_permissions, …) and
     // the Upgrades tab only needs upgrade_history + dependencies. Each
     // promise's failure is isolated: if `dependencies` errors out, the
     // timeline still renders with raw addresses instead of resolved
     // contract names.
-    const jid = encodeURIComponent(machine.job_id);
+    const jid = encodeURIComponent(analysisJobId);
     Promise.all([
       api(`/api/analyses/${jid}/artifact/upgrade_history`).catch(() => null),
       api(`/api/analyses/${jid}/artifact/dependencies`).catch(() => null),
@@ -62,7 +63,7 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
           : {};
         setHistory(h);
         setDeps(d);
-        if (onCache) onCache(machine.job_id, h, d);
+        if (onCache) onCache(analysisJobId, h, d);
       })
       .catch((e) => { if (!cancelled) setError(e.message || String(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -71,7 +72,7 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
     // only so a cache update from this very fetch doesn't retrigger the
     // effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machine?.job_id, machine?.is_proxy]);
+  }, [machine?.analysis_job_id, machine?.is_proxy]);
 
   if (!machine) {
     const proxies = (machines || []).filter((m) => m.is_proxy);
@@ -88,7 +89,7 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
     // rather than rendering a misleading "0".
     function countFor(m) {
       if (typeof m.upgrade_count === "number" && m.upgrade_count > 0) return m.upgrade_count;
-      const cached = cache && cache[m.job_id];
+      const cached = cache && cache[m.analysis_job_id];
       const totalUpgrades = cached?.history?.total_upgrades;
       return typeof totalUpgrades === "number" ? totalUpgrades : null;
     }
@@ -106,7 +107,7 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
         return { sortKey: m.last_upgrade_block, label: `block ${m.last_upgrade_block.toLocaleString()}` };
       }
       // Fall back to anything we cached during a per-proxy load.
-      const cached = cache && cache[m.job_id];
+      const cached = cache && cache[m.analysis_job_id];
       const targetAddr = (cached?.history?.target_address || m.address || "").toLowerCase();
       const proxy = cached?.history?.proxies?.[targetAddr];
       const block = proxy?.last_upgrade_block;

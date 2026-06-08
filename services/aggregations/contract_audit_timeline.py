@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -11,40 +12,50 @@ from sqlalchemy.orm import Session
 
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
 from services.audits.serializers import _audit_brief
+from utils.rpc import require_supported_chain_id
 
-# Per-process TTL cache of eth_getCode keccak hashes keyed by address.
+logger = logging.getLogger(__name__)
+
+# Per-process TTL cache of eth_getCode keccak hashes keyed by (chain_id, address).
 # The audit_timeline endpoint fetches these live to compare against the
 # per-coverage-row ``bytecode_keccak_at_match`` — a rapid reload of the
 # surface view shouldn't fire one RPC per audit row on every request.
 # TTL is intentionally short (30s) so "just upgraded" reflects quickly
 # in the UI when someone's actively debugging a drift.
-_BYTECODE_KECCAK_CACHE: dict[str, tuple[float, str | None]] = {}
+_BYTECODE_KECCAK_CACHE: dict[tuple[int, str], tuple[float, str]] = {}
 _BYTECODE_KECCAK_TTL_SECONDS: float = 30.0
 
 
-def _bytecode_keccak_now_batch(addresses: set[str]) -> dict[str, str | None]:
-    """Return ``{lower_address: keccak_hex_or_None}`` for a set of addresses.
+def _bytecode_keccak_now_batch(targets: set[tuple[int, str]]) -> dict[tuple[int, str], str]:
+    """Return ``{(chain_id, lower_address): keccak_hex}`` for targets.
 
     Uses a short TTL cache so the typical burst-of-requests pattern (UI
     loading and user flipping between contracts) only pays for one RPC
-    per impl per 30s. A ``None`` result is cached too — a temporary RPC
-    outage shouldn't cause a hot retry loop.
+    per impl per 30s. eRPC failures and no-code results raise so outages or
+    invalid contract rows are visible instead of being treated as missing
+    bytecode.
     """
     from services.audits.coverage import _fetch_bytecode_keccak
 
     now = time.monotonic()
-    out: dict[str, str | None] = {}
-    for raw in addresses:
-        if not raw:
-            continue
-        addr = raw.lower()
-        cached = _BYTECODE_KECCAK_CACHE.get(addr)
+    out: dict[tuple[int, str], str] = {}
+    for raw_chain_id, raw_address in targets:
+        if not raw_address:
+            logger.error("audit timeline bytecode anchor target missing address chain_id=%s", raw_chain_id)
+            raise RuntimeError("audit timeline bytecode anchor target missing address")
+        chain_id = require_supported_chain_id(
+            chain_id=raw_chain_id,
+            context=f"audit timeline bytecode anchor for {raw_address}",
+        )
+        addr = raw_address.lower()
+        key = (chain_id, addr)
+        cached = _BYTECODE_KECCAK_CACHE.get(key)
         if cached is not None and (now - cached[0]) < _BYTECODE_KECCAK_TTL_SECONDS:
-            out[addr] = cached[1]
+            out[key] = cached[1]
             continue
-        keccak = _fetch_bytecode_keccak(addr)
-        _BYTECODE_KECCAK_CACHE[addr] = (now, keccak)
-        out[addr] = keccak
+        keccak = _fetch_bytecode_keccak(addr, chain_id=chain_id)
+        _BYTECODE_KECCAK_CACHE[key] = (now, keccak)
+        out[key] = keccak
     return out
 
 
@@ -53,6 +64,10 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
     contract = session.get(Contract, contract_id)
     if contract is None:
         return None
+    contract_chain_id = require_supported_chain_id(
+        chain_id=contract.chain_id,
+        context=f"audit timeline for contract {contract_id}",
+    )
 
     # Historical upgrade windows on this contract if it's a proxy.
     upgrade_rows = (
@@ -101,6 +116,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
                     select(Contract.id).where(
                         Contract.protocol_id == contract.protocol_id,
                         Contract.address.in_(impl_addrs),
+                        Contract.chain_id == contract_chain_id,
                     )
                 )
                 .scalars()
@@ -136,19 +152,36 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         if prev is None or _row_score(r) > _row_score(prev):
             best_by_audit[r.audit_report_id] = r
 
-    addr_by_cid: dict[int, str] = {
-        cid: addr
-        for cid, addr in session.execute(
-            select(Contract.id, Contract.address).where(Contract.id.in_(scope_contract_ids))
-        ).all()
-    }
+    contract_by_cid: dict[int, tuple[str, int]] = {}
+    for cid, addr, chain_id in session.execute(
+        select(Contract.id, Contract.address, Contract.chain_id).where(Contract.id.in_(scope_contract_ids))
+    ).all():
+        try:
+            scoped_chain_id = require_supported_chain_id(
+                chain_id=chain_id,
+                context=f"audit timeline coverage contract {cid}",
+            )
+        except RuntimeError:
+            logger.error("Audit timeline coverage contract %s is missing chain_id", cid)
+            raise
+        contract_by_cid[cid] = (addr, scoped_chain_id)
+
+    missing_contract_ids = {r.contract_id for r in best_by_audit.values()} - set(contract_by_cid)
+    if missing_contract_ids:
+        ordered = sorted(missing_contract_ids)
+        logger.error("Audit timeline coverage rows reference missing Contract rows: contract_ids=%s", ordered)
+        raise RuntimeError(f"audit timeline coverage rows reference missing Contract rows: contract_ids={ordered}")
 
     # Live bytecode keccak for every impl referenced by a coverage row —
     # one RPC per distinct address, cached briefly so repeated hits don't
     # spam the provider. Compared against the persisted
     # ``bytecode_keccak_at_match`` to produce ``bytecode_drift``.
     live_keccaks = _bytecode_keccak_now_batch(
-        {addr_by_cid[r.contract_id] for r in best_by_audit.values() if r.contract_id in addr_by_cid}
+        {
+            (chain_id, addr)
+            for r in best_by_audit.values()
+            for addr, chain_id in [contract_by_cid[r.contract_id]]
+        }
     )
 
     coverage_out: list[dict[str, Any]] = []
@@ -157,14 +190,15 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         if not audit:
             continue
         brief = _audit_brief(audit, r)
-        impl_addr = addr_by_cid.get(r.contract_id)
+        impl_addr, impl_chain_id = contract_by_cid[r.contract_id]
         brief["impl_address"] = impl_addr
         brief["bytecode_keccak_at_match"] = r.bytecode_keccak_at_match
-        now_keccak = live_keccaks.get(impl_addr.lower()) if impl_addr else None
+        now_keccak = live_keccaks[(impl_chain_id, impl_addr.lower())]
         brief["bytecode_keccak_now"] = now_keccak
-        # Drift is only asserted when BOTH are known and differ. A NULL
-        # on either side leaves drift=None so the UI can say
-        # "unverified" rather than falsely flashing a drift warning.
+        # Drift is only asserted when the persisted match-time anchor exists
+        # and differs from the live bytecode hash. A NULL persisted anchor
+        # leaves drift=None so the UI can say "unverified" rather than
+        # falsely flashing a drift warning.
         if r.bytecode_keccak_at_match and now_keccak:
             brief["bytecode_drift"] = r.bytecode_keccak_at_match.lower() != now_keccak.lower()
         else:
@@ -184,7 +218,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         "contract": {
             "contract_id": contract.id,
             "address": contract.address,
-            "chain": contract.chain,
+            "chain_id": contract.chain_id,
             "contract_name": contract.contract_name,
             "is_proxy": contract.is_proxy,
             "current_implementation": contract.implementation,
@@ -212,9 +246,14 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
     if not current_impl:
         return "never_audited" if not cov_rows else "unaudited_since_upgrade"
 
+    contract_chain_id = require_supported_chain_id(
+        chain_id=contract.chain_id,
+        context=f"audit timeline current implementation lookup for contract {contract.id}",
+    )
     impl_contract = session.execute(
         select(Contract).where(
             Contract.address == current_impl.lower(),
+            Contract.chain_id == contract_chain_id,
             Contract.protocol_id == contract.protocol_id,
         )
     ).scalar_one_or_none()

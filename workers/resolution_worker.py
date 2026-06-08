@@ -7,7 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,7 +23,7 @@ from db.models import (
     JobStage,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, store_artifact
+from db.queue import create_job, require_contract_for_job, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.artifacts import (
     RESOLUTION_ARTIFACT,
@@ -39,28 +39,24 @@ from services.resolution.capability_resolver import (
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import default_rpc_url, require_supported_chain_id
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.resolution_worker")
 
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 
-def _rpc_url_for_job(job: Job) -> str:
-    request = job.request if isinstance(job.request, dict) else {}
-    explicit = request.get("rpc_url")
-    chain = request.get("chain")
-    return (
-        default_rpc_url(
-            explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-            chain_id=request.get("chain_id"),
-            chain=chain if isinstance(chain, str) else None,
-            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
-        )
-        or DEFAULT_RPC_URL
+def _resolve_job_chain_id(job: Job) -> int:
+    chain_id = require_supported_chain_id(
+        chain_id=job.chain_id,
+        context=f"resolution job {job.id}",
     )
+    return chain_id
+
+
+def _rpc_url_for_job(job: Job) -> str:
+    return default_rpc_url(chain_id=job.chain_id)
 
 
 def _build_root_artifacts(
@@ -83,12 +79,24 @@ class ResolutionWorker(BaseWorker):
     next_stage = JobStage.policy
 
     def process(self, session: Session, job: Job) -> None:
+        job_address = job.address
+        if not job_address:
+            raise RuntimeError(f"resolution job {job.id} requires address")
+        job_address = job_address.lower()
         logger.info(
             "Resolution stage started for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
+        chain_id = _resolve_job_chain_id(job)
+        raw_request = job.request
+        request: dict[str, Any] = cast(dict[str, Any], raw_request) if isinstance(raw_request, dict) else {}
+        if job.chain_id != chain_id:
+            job.chain_id = chain_id
+            session.commit()
+            raw_request = job.request
+            request = cast(dict[str, Any], raw_request) if isinstance(raw_request, dict) else {}
         rpc_url = _rpc_url_for_job(job)
 
         # Read control_tracking_plan from DB
@@ -105,19 +113,11 @@ class ResolutionWorker(BaseWorker):
             predicate_trees = None
 
         # For impl jobs, read storage from the proxy address (where state lives)
-        request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
         # Deployment this resolution is attributed to (proxy for an impl in proxy
         # context, else NULL) so a shared impl can hold per-proxy result sets.
         deployment_address = normalize_deployment(proxy_address)
-        getter_fallback_address: str | None = None
         if isinstance(proxy_address, str) and proxy_address:
-            # Reading impl state via the proxy is correct for storage-backed
-            # vars, but immutable authority addresses live in the impl bytecode
-            # and revert when the proxy doesn't delegatecall to this impl
-            # (beacon / per-instance patterns, e.g. EtherFiNode). Keep the impl
-            # address as a getter fallback so those reverting reads recover.
-            getter_fallback_address = tracking_plan.get("contract_address")
             normalized_proxy_address = proxy_address.lower()
             plan_contract = tracking_plan.get("contract")
             if isinstance(plan_contract, dict):
@@ -185,7 +185,6 @@ class ResolutionWorker(BaseWorker):
             cast(ControlTrackingPlan, tracking_plan),
             rpc_url,
             heartbeat=lambda: self._heartbeat(session, job),
-            getter_fallback_address=getter_fallback_address,
         )
         logger.info(
             "resolution phase complete: control snapshot",
@@ -196,37 +195,42 @@ class ResolutionWorker(BaseWorker):
             record_stage_metric("block_number", snapshot.get("block_number"))
 
         # Write to controller_values table
-        contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-        if contract_row:
-            session.query(ControllerValue).filter(
-                ControllerValue.contract_id == contract_row.id,
-                deployment_scope(ControllerValue.deployment_address, deployment_address),
-            ).delete(synchronize_session=False)
-            for cid, cv in snapshot.get("controller_values", {}).items():
-                session.add(
-                    ControllerValue(
-                        contract_id=contract_row.id,
-                        deployment_address=deployment_address,
-                        controller_id=cid,
-                        value=cv.get("value"),
-                        resolved_type=cv.get("resolved_type"),
-                        source=cv.get("source"),
-                        block_number=snapshot.get("block_number"),
-                        details=cv.get("details"),
-                        observed_via=cv.get("observed_via"),
-                    )
+        contract_row = require_contract_for_job(session, job, context=f"resolution controller write for {job.id}")
+        session.query(ControllerValue).filter(
+            ControllerValue.contract_id == contract_row.id,
+            deployment_scope(ControllerValue.deployment_address, deployment_address),
+        ).delete(synchronize_session=False)
+        for cid, cv in snapshot.get("controller_values", {}).items():
+            session.add(
+                ControllerValue(
+                    contract_id=contract_row.id,
+                    deployment_address=deployment_address,
+                    controller_id=cid,
+                    value=cv.get("value"),
+                    resolved_type=cv.get("resolved_type"),
+                    source=cv.get("source"),
+                    block_number=snapshot.get("block_number"),
+                    details=cv.get("details"),
+                    observed_via=cv.get("observed_via"),
                 )
-            session.commit()
+            )
+        session.commit()
 
         logger.info(
             "Resolution stage control snapshot complete for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
 
         # Fetch token balances
-        self._fetch_balances(session, job, contract_row, heartbeat=lambda: self._heartbeat(session, job))
+        self._fetch_balances(
+            session,
+            job,
+            contract_row,
+            chain_id=chain_id,
+            heartbeat=lambda: self._heartbeat(session, job),
+        )
 
         root_artifacts = _build_root_artifacts(contract_analysis, tracking_plan, snapshot, predicate_trees)
 
@@ -240,6 +244,7 @@ class ResolutionWorker(BaseWorker):
         resolved_graph, nested_artifacts = resolve_control_graph(
             root_artifacts=root_artifacts,
             rpc_url=rpc_url,
+            chain_id=chain_id,
             max_depth=RECURSION_MAX_DEPTH,
             workspace_prefix="recursive",
             classify_cache=classify_cache,
@@ -266,7 +271,7 @@ class ResolutionWorker(BaseWorker):
             logger.info(
                 "Resolution stage graph complete for job %s address=%s name=%s",
                 job.id,
-                job.address or "0x0",
+                job_address,
                 job.name or "Contract",
             )
 
@@ -311,7 +316,12 @@ class ResolutionWorker(BaseWorker):
                 session.commit()
 
             # Queue analysis jobs for contracts discovered during resolution
-            self._queue_discovered_contracts(session, job, cast(dict, resolved_graph), rpc_url)
+                self._queue_discovered_contracts(
+                    session,
+                    job,
+                    cast(dict, resolved_graph),
+                    chain_id=chain_id,
+                )
 
         resolution_payload = {
             "control_snapshot": snapshot,
@@ -328,7 +338,6 @@ class ResolutionWorker(BaseWorker):
                 stage="resolution",
                 schema_version="resolution.v1",
                 block_number=snapshot.get("block_number") if isinstance(snapshot, dict) else None,
-                rpc_url=rpc_url,
             ),
             contract=make_job_contract(session, job, contract_row),
             data=resolution_payload,
@@ -338,23 +347,21 @@ class ResolutionWorker(BaseWorker):
         # Emit JobDependency edges so the policy stage waits for any
         # external authority contract referenced by this job's predicate
         # trees (e.g. EtherFiAdmin.upgradeTo's roleRegistry call).
-        # Defensive: a failure to enumerate deps must not block the
-        # resolution stage from completing — the depender just won't
-        # benefit from cross-contract inlining at policy time.
         try:
             self._emit_dependency_edges_from_predicate_trees(session, job, snapshot, rpc_url)
         except Exception as exc:
             record_degraded(
                 phase="resolution_dependency_emission",
                 exc=exc,
-                context={"address": job.address or "0x0"},
+                context={"address": job_address},
             )
-            logger.warning(
+            logger.error(
                 "Job %s: dependency-edge emission failed: %s",
                 job.id,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+            raise RuntimeError(f"dependency-edge emission failed for job {job.id}") from exc
 
         self.update_detail(
             session,
@@ -364,7 +371,7 @@ class ResolutionWorker(BaseWorker):
         logger.info(
             "Resolution stage complete for job %s address=%s name=%s",
             job.id,
-            job.address or "0x0",
+            job_address,
             job.name or "Contract",
         )
 
@@ -374,10 +381,12 @@ class ResolutionWorker(BaseWorker):
         job: Job,
         contract_row: Contract | None,
         *,
+        chain_id: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
         """Fetch ETH + token balances and store in contract_balances table."""
-        from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances, parallel_get
+        from utils.concurrency import parallel_map
+        from utils.onchain import get_eth_balance, get_eth_price, get_token_balances
 
         address = job.address
         if not address or not contract_row:
@@ -387,17 +396,31 @@ class ResolutionWorker(BaseWorker):
         target_address = request.get("proxy_address") or address
 
         self.update_detail(session, job, "Fetching token balances")
-        # Fan out the three Etherscan calls (eth balance, token balances, eth
-        # price). All three serialise on the global rate lock, so threading
-        # only stacks RTTs — the limiter is preserved.
-        results = parallel_get(
-            {
-                "eth_wei": (lambda: get_eth_balance(target_address)),
-                "tokens": (lambda: get_token_balances(target_address)),
-                "eth_price": get_eth_price,
-            },
+        # Native balance is eRPC-backed. Token enumeration requires an indexed
+        # token universe; without one the helper raises so this stage does not
+        # persist partial/empty balances.
+        calls: dict[str, Callable[[], object]] = {
+            "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
+            "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
+            "eth_price": (lambda: get_eth_price(chain_id=chain_id)),
+        }
+
+        def _run_call(item: tuple[str, Callable[[], object]]) -> tuple[str, object]:
+            call_id, fn = item
+            return call_id, fn()
+
+        results: dict[str, object | BaseException] = {}
+        for (call_id, _fn), outcome in parallel_map(
+            _run_call,
+            list(calls.items()),
+            max_workers=len(calls),
             heartbeat=heartbeat,
-        )
+        ):
+            if isinstance(outcome, BaseException):
+                results[call_id] = outcome
+                continue
+            result_call_id, value = outcome
+            results[result_call_id] = value
 
         eth_wei_raw = results.get("eth_wei")
         tokens_raw = results.get("tokens")
@@ -413,13 +436,13 @@ class ResolutionWorker(BaseWorker):
                     "tokens_failed": isinstance(tokens_raw, BaseException),
                 },
             )
-            logger.warning(
+            logger.error(
                 "Job %s: balance fetch failed: eth=%r tokens=%r",
                 job.id,
                 eth_wei_raw,
                 tokens_raw,
             )
-            return
+            raise RuntimeError(f"balance fetch failed for {target_address}") from primary_exc
         eth_wei = cast(int, eth_wei_raw)
         tokens = cast(list, tokens_raw)
 
@@ -437,8 +460,8 @@ class ResolutionWorker(BaseWorker):
                     exc=eth_price_raw,
                     context={"address": target_address},
                 )
-                logger.warning("Job %s: ETH price fetch failed: %s", job.id, eth_price_raw)
-                eth_price = None
+                logger.error("Job %s: ETH price fetch failed: %s", job.id, eth_price_raw)
+                raise RuntimeError(f"ETH price fetch failed for {target_address}") from eth_price_raw
             else:
                 eth_price = cast(float, eth_price_raw)
                 eth_usd = (eth_wei / 1e18) * eth_price
@@ -474,7 +497,14 @@ class ResolutionWorker(BaseWorker):
         total = len(tokens) + (1 if eth_wei > 0 else 0)
         logger.info("Job %s: stored %d balance(s) for %s", job.id, total, target_address)
 
-    def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
+    def _queue_discovered_contracts(
+        self,
+        session: Session,
+        job: Job,
+        resolved_graph: dict,
+        *,
+        chain_id: int,
+    ) -> None:
         """Queue analysis jobs for contracts found during resolution that have no existing job."""
         from db.models import Contract, ContractDependency
         from services.discovery.source_confidence import asserts_ownership
@@ -515,81 +545,57 @@ class ResolutionWorker(BaseWorker):
         #   * proxy edge  → dep.implementation == parent.address
         #   * beacon edge → parent.beacon == dep.address
         #
-        # Best-effort structural-propagation lookup: a failure here
-        # falls back to "no propagation" (the safe default) rather than
-        # blocking discovery. Transient DB errors are logged + swallowed
-        # so the resolution stage still completes.
         parent_owns_high = False
         structural_rel_by_addr: dict[str, str] = {}
-        try:
-            parent_contract = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
-            ).scalar_one_or_none()
-        except Exception as exc:
-            logger.debug("Job %s: structural-propagation parent lookup failed: %s", job.id, exc)
-            parent_contract = None
-        if parent_contract is not None:
-            parent_sources = getattr(parent_contract, "discovery_sources", None)
-            parent_owns_high = asserts_ownership(list(parent_sources) if parent_sources else None)
-            parent_id = getattr(parent_contract, "id", None)
-            parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
-            parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
-            parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
-            if parent_id is not None:
-                try:
-                    dep_rows = list(
-                        session.execute(
-                            select(ContractDependency).where(ContractDependency.contract_id == parent_id)
-                        ).scalars()
+        parent_contract = require_contract_for_job(
+            session,
+            job,
+            context=f"resolution structural propagation parent lookup for {job.id}",
+        )
+        parent_sources = getattr(parent_contract, "discovery_sources", None)
+        parent_owns_high = asserts_ownership(list(parent_sources) if parent_sources else None)
+        parent_id = getattr(parent_contract, "id", None)
+        parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
+        parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
+        parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
+        if parent_id is not None:
+            dep_rows = list(
+                session.execute(select(ContractDependency).where(ContractDependency.contract_id == parent_id)).scalars()
+            )
+            # For proxy-direction edges we need to verify the dep's
+            # Contract.implementation back-links to the parent.
+            # Batch the lookup so the loop stays O(deps) not O(deps×SELECTs).
+            proxy_edge_addrs = [row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"]
+            dep_impl_by_addr: dict[str, str | None] = {}
+            if proxy_edge_addrs:
+                dep_contract_rows = session.execute(
+                    select(Contract).where(
+                        Contract.address.in_(proxy_edge_addrs),
+                        Contract.chain_id == chain_id,
                     )
-                except Exception as exc:
-                    logger.debug(
-                        "Job %s: structural-propagation dep-rows lookup failed: %s",
-                        job.id,
-                        exc,
-                    )
-                    dep_rows = []
-                # For proxy-direction edges we need to verify the dep's
-                # Contract.implementation back-links to the parent.
-                # Batch the lookup so the loop stays O(deps) not O(deps×SELECTs).
-                proxy_edge_addrs = [
-                    row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"
-                ]
-                dep_impl_by_addr: dict[str, str | None] = {}
-                if proxy_edge_addrs:
-                    try:
-                        dep_contract_rows = session.execute(
-                            select(Contract).where(Contract.address.in_(proxy_edge_addrs))
-                        ).scalars()
-                        for dc in dep_contract_rows:
-                            dep_impl_by_addr[dc.address.lower()] = (dc.implementation or "").lower() or None
-                    except Exception as exc:
-                        logger.debug(
-                            "Job %s: structural-propagation dep-contract back-link lookup failed: %s",
-                            job.id,
-                            exc,
-                        )
-                        dep_impl_by_addr = {}
+                ).scalars()
+                for dc in dep_contract_rows:
+                    dep_impl_by_addr[dc.address.lower()] = (dc.implementation or "").lower() or None
 
-                for row in dep_rows:
-                    rel = row.relationship_type
-                    if rel not in ("implementation", "proxy", "beacon"):
-                        continue
-                    dep_addr = (row.dependency_address or "").lower()
-                    if not dep_addr:
-                        continue
-                    structurally_linked = False
-                    if rel == "implementation":
-                        structurally_linked = parent_impl is not None and parent_impl == dep_addr
-                    elif rel == "proxy":
-                        dep_impl = dep_impl_by_addr.get(dep_addr)
-                        structurally_linked = (
-                            dep_impl is not None and parent_addr_lower is not None and dep_impl == parent_addr_lower
-                        )
-                    else:  # rel == "beacon"
-                        structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
-                    if structurally_linked:
-                        structural_rel_by_addr[dep_addr] = rel
+            for row in dep_rows:
+                rel = row.relationship_type
+                if rel not in ("implementation", "proxy", "beacon"):
+                    continue
+                dep_addr = (row.dependency_address or "").lower()
+                if not dep_addr:
+                    continue
+                structurally_linked = False
+                if rel == "implementation":
+                    structurally_linked = parent_impl is not None and parent_impl == dep_addr
+                elif rel == "proxy":
+                    dep_impl = dep_impl_by_addr.get(dep_addr)
+                    structurally_linked = (
+                        dep_impl is not None and parent_addr_lower is not None and dep_impl == parent_addr_lower
+                    )
+                else:  # rel == "beacon"
+                    structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
+                if structurally_linked:
+                    structural_rel_by_addr[dep_addr] = rel
 
         nodes = resolved_graph.get("nodes", [])
         root_address = resolved_graph.get("root_contract_address", "").lower()
@@ -612,8 +618,15 @@ class ResolutionWorker(BaseWorker):
             if node.get("node_type") != "contract":
                 continue
 
-            # Skip if a job already exists for this address
-            existing = session.execute(select(Job).where(Job.address == addr).limit(1)).scalar_one_or_none()
+            # Skip if a job already exists for this address on this chain.
+            existing = session.execute(
+                select(Job)
+                .where(
+                    Job.address == addr,
+                    Job.chain_id == chain_id,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
             if existing:
                 continue
 
@@ -621,12 +634,10 @@ class ResolutionWorker(BaseWorker):
             child_request = {
                 "address": addr,
                 "name": contract_name,
-                "rpc_url": rpc_url,
+                "chain_id": chain_id,
                 "parent_job_id": str(job.id),
                 "discovered_by": "resolution",
             }
-            if request.get("chain"):
-                child_request["chain"] = request["chain"]
             structural_rel = structural_rel_by_addr.get(addr)
             if structural_rel is not None:
                 child_request["discovery_relationship"] = structural_rel
@@ -676,7 +687,7 @@ class ResolutionWorker(BaseWorker):
         because that is where semantic policy artifacts are produced.
 
         Provider B jobs that don't yet exist are spawned via
-        ``create_job`` under a ``(chain, address)`` advisory lock so
+        ``create_job`` under a ``(chain_id, address)`` advisory lock so
         concurrent A workers can't race-create duplicate B jobs. This
         mirrors the existing ``_queue_discovered_contracts`` pattern but
         keys on the predicate-tree-referenced address rather than the
@@ -730,33 +741,49 @@ class ResolutionWorker(BaseWorker):
             return
 
         # Resolve each referenced state-variable name to a concrete
-        # address. Missing values are skipped — the snapshot may not
-        # have populated the row yet (e.g. private state-var without a
-        # public getter, or RPC failure during the snapshot pass).
+        # address. Missing values are hard failures: otherwise policy may
+        # run without the authority job it needs for cross-contract inlining.
+        missing_references = sorted(name for name in referenced if name not in state_var_addresses)
+        if missing_references:
+            logger.error(
+                "Job %s: dependency-edge emission missing authority address values: %s",
+                job.id,
+                missing_references,
+            )
+            raise RuntimeError(
+                f"dependency-edge emission missing authority address values for job {job.id}: {missing_references}"
+            )
         target_addresses = sorted({state_var_addresses[name] for name in referenced if name in state_var_addresses})
         if not target_addresses:
             return
 
-        request = job.request if isinstance(job.request, dict) else {}
-        chain = request.get("chain") if isinstance(request.get("chain"), str) else None
+        chain_id = require_supported_chain_id(
+            chain_id=job.chain_id,
+            context=f"resolution dependency edges for job {job.id}",
+        )
         parent_company = job.company
+        job_address = job.address
+        if not job_address:
+            raise RuntimeError(f"resolution dependency edges for job {job.id} require address")
+        job_address = job_address.lower()
 
         edges_inserted = 0
         n_satisfied = 0
         n_pending = 0
-        n_cycle = 0
         for target_addr in target_addresses:
             # Self-references — A's own state-var resolves to A's address
             # — never form a useful dependency. Skip.
-            if target_addr == (job.address or "").lower():
+            if target_addr == job_address:
                 continue
-            # Advisory xact-lock keyed on (chain, address) so two
+            if target_addr == "0x0000000000000000000000000000000000000000":
+                continue
+            # Advisory xact-lock keyed on (chain_id, address) so two
             # concurrent A jobs spawning the same B don't double-insert.
             # Mirrors the generic event indexer's insert pattern.
-            lock_key = _stable_lock_key(chain, target_addr)
+            lock_key = _stable_lock_key(chain_id, target_addr)
             session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
-            provider_lookup = find_dependency_provider_job_for_address(session, target_addr, chain=chain)
+            provider_lookup = find_dependency_provider_job_for_address(session, target_addr, chain_id=chain_id)
             provider_job = provider_lookup.analysis_job if provider_lookup is not None else None
             dependency_provider_addr = (
                 (provider_job.address or target_addr).lower() if provider_job is not None else target_addr
@@ -765,12 +792,10 @@ class ResolutionWorker(BaseWorker):
                 provider_request = {
                     "address": target_addr,
                     "name": target_addr,
-                    "rpc_url": rpc_url,
+                    "chain_id": chain_id,
                     "parent_job_id": str(job.id),
                     "discovered_by": "resolution_dependency",
                 }
-                if chain:
-                    provider_request["chain"] = chain
                 provider_job = create_job(session, provider_request, initial_stage=JobStage.discovery)
                 if parent_company:
                     provider_job.company = parent_company
@@ -787,7 +812,7 @@ class ResolutionWorker(BaseWorker):
                 session,
                 target_addr,
                 required_artifact="effective_permissions",
-                chain=chain,
+                chain_id=chain_id,
                 completed_only=False,
             )
             already_satisfied = False
@@ -796,13 +821,9 @@ class ResolutionWorker(BaseWorker):
                 dependency_provider_addr = (provider_job.address or dependency_provider_addr).lower()
                 already_satisfied = True
 
-            # Cycle detection: would inserting (A → B) close a path
-            # that's already (B → ... → A)? If so we'd have A waiting on
-            # B which is (transitively) waiting on A — deadlock under
-            # the claim gate. Insert with status='cycle_degraded'
-            # instead so the gate doesn't block A and the resolver
-            # short-circuits the leaf to external_check_only at
-            # evaluation time.
+            # Cycle detection: would inserting (A -> B) close a path
+            # that's already (B -> ... -> A)? If so, fail the stage instead
+            # of inserting a non-blocking degraded edge.
             cycle_path = None
             if not already_satisfied:
                 cycle_path = _detect_dep_cycle(
@@ -810,10 +831,19 @@ class ResolutionWorker(BaseWorker):
                     proposed_depender_id=job.id,
                     proposed_provider_id=provider_job.id,
                 )
-            edge_status = "satisfied" if already_satisfied else ("cycle_degraded" if cycle_path else "pending")
+            if cycle_path:
+                logger.error(
+                    "Job %s: dependency cycle on provider %s path=%s",
+                    job.id,
+                    dependency_provider_addr,
+                    cycle_path,
+                    extra={"provider_address": dependency_provider_addr, "cycle_path": cycle_path},
+                )
+                raise RuntimeError(f"dependency cycle detected for job {job.id}: {cycle_path}")
+            edge_status = "satisfied" if already_satisfied else "pending"
             values = {
                 "depender_job_id": job.id,
-                "provider_chain": chain,
+                "provider_chain_id": chain_id,
                 "provider_address": dependency_provider_addr,
                 "required_stage": JobStage.policy,
                 "status": edge_status,
@@ -827,7 +857,7 @@ class ResolutionWorker(BaseWorker):
                 .on_conflict_do_nothing(
                     index_elements=[
                         "depender_job_id",
-                        "provider_chain",
+                        "provider_chain_id",
                         "provider_address",
                         "required_stage",
                     ],
@@ -842,19 +872,6 @@ class ResolutionWorker(BaseWorker):
                 edges_inserted += 1
                 if edge_status == "satisfied":
                     n_satisfied += 1
-                elif edge_status == "cycle_degraded":
-                    n_cycle += 1
-                    # A dependency cycle is a degraded outcome — the edge is
-                    # inserted non-blocking so the depender doesn't deadlock under
-                    # the claim gate. Surface it instead of letting a real stall
-                    # condition land silently.
-                    logger.warning(
-                        "Job %s: dependency cycle on provider %s — edge inserted as cycle_degraded (path=%s)",
-                        job.id,
-                        dependency_provider_addr,
-                        cycle_path,
-                        extra={"provider_address": dependency_provider_addr, "cycle_path": cycle_path},
-                    )
                 else:
                     n_pending += 1
 
@@ -862,22 +879,19 @@ class ResolutionWorker(BaseWorker):
             session.commit()
             logger.info(
                 "Job %s: emitted %d dependency edge(s) on external authority contracts "
-                "(satisfied=%d pending=%d cycle_degraded=%d)",
+                "(satisfied=%d pending=%d)",
                 job.id,
                 edges_inserted,
                 n_satisfied,
                 n_pending,
-                n_cycle,
                 extra={
                     "dep_edges_inserted": edges_inserted,
                     "dep_satisfied": n_satisfied,
                     "dep_pending": n_pending,
-                    "dep_cycle_degraded": n_cycle,
                 },
             )
             record_stage_metric("dep_edges_inserted", edges_inserted)
             record_stage_metric("dep_edges_pending", n_pending)
-            record_stage_metric("dep_edges_cycle_degraded", n_cycle)
 
 
 def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:
@@ -915,7 +929,7 @@ def _detect_dep_cycle(
     Uses a recursive CTE walking forward from ``proposed_provider_id``:
     each hop joins ``job_dependencies.depender_job_id`` to the previous
     row's provider via ``Job.address`` (we don't carry job-id pointers
-    on the dep row's provider side — only chain+address — so the join
+    on the dep row's provider side — only chain_id+address — so the join
     goes through the ``jobs`` table). Bounded by ``ARRAY[…]`` cycle
     elimination on ``path``. The CTE answer is "is the proposed
     depender reachable from the proposed provider?"
@@ -934,7 +948,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = jd.provider_chain_id
             WHERE jd.depender_job_id = :start_provider
               AND jd.status IN ('pending', 'satisfied')
 
@@ -949,7 +963,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = jd.provider_chain_id
             JOIN chain ON jd.depender_job_id = chain.to_job
             WHERE jd.status IN ('pending', 'satisfied')
               AND NOT (jd.depender_job_id::text = ANY(chain.path))
@@ -972,15 +986,19 @@ def _detect_dep_cycle(
     return path
 
 
-def _stable_lock_key(chain: str | None, address: str) -> int:
-    """Hash ``(chain, address)`` to a 63-bit int for ``pg_advisory_xact_lock``.
+def _stable_lock_key(chain_id: int, address: str) -> int:
+    """Hash ``(chain_id, address)`` to a 63-bit int for ``pg_advisory_xact_lock``.
 
     Postgres advisory-lock keys are bigint; collapsing to 63 bits keeps
     us inside the signed range. Stable across processes — two workers
     racing to spawn the same provider job acquire the same lock."""
     import hashlib
 
-    h = hashlib.sha256(f"{chain or 'ethereum'}:{address.lower()}".encode()).digest()
+    effective_chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"resolution dependency lock for {address}",
+    )
+    h = hashlib.sha256(f"{effective_chain_id}:{address.lower()}".encode()).digest()
     return int.from_bytes(h[:8], "big") & ((1 << 63) - 1)
 
 

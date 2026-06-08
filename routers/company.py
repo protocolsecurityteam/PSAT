@@ -13,11 +13,7 @@ from sqlalchemy.orm import aliased
 
 from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
 from services.aggregations import CompanyNotFound, build_company_overview
-from services.aggregations.company_overview import (
-    all_addresses_for_protocol,
-    build_functions_for_protocol,
-    resolve_company_jobs,
-)
+from services.aggregations.company_overview import all_addresses_for_protocol, build_functions_for_protocol
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
 
 from . import deps
@@ -26,12 +22,11 @@ router = APIRouter()
 logger = logging.getLogger("routers.company")
 
 
-def _coverage_key(chain: str | None, address: str | None) -> tuple[str, str] | None:
-    chain_key = (chain or "").lower()
+def _coverage_key(chain_id: int | None, address: str | None) -> tuple[int, str] | None:
     address_key = (address or "").lower()
-    if not chain_key or not address_key:
+    if chain_id is None or not address_key:
         return None
-    return (chain_key, address_key)
+    return (int(chain_id), address_key)
 
 
 def _is_reusable_verified_coverage(row: Any) -> bool:
@@ -45,7 +40,7 @@ def _is_reusable_verified_coverage(row: Any) -> bool:
 def _inherit_verified_dependency_coverage(
     *,
     inherited_pairs: Iterable[Any],
-    target_contract_ids_by_key: dict[tuple[str, str], set[int]],
+    target_contract_ids_by_key: dict[tuple[int, str], set[int]],
     coverage_by_contract: dict[int, list[Any]],
     audits_by_id: dict[int, Any],
 ) -> list[Any]:
@@ -53,7 +48,7 @@ def _inherit_verified_dependency_coverage(
     for row, audit, covered_contract, source_protocol in inherited_pairs:
         if not _is_reusable_verified_coverage(row):
             continue
-        key = _coverage_key(getattr(covered_contract, "chain", None), getattr(covered_contract, "address", None))
+        key = _coverage_key(getattr(covered_contract, "chain_id", None), getattr(covered_contract, "address", None))
         target_ids = target_contract_ids_by_key.get(key) if key else None
         if not target_ids:
             continue
@@ -120,11 +115,11 @@ def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     started = time.monotonic()
     with deps.SessionLocal() as session:
-        protocol_row, jobs = resolve_company_jobs(session, company_name)
-        if protocol_row is None and not jobs:
+        protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
+        if protocol_row is None:
             _log_endpoint("/api/company/{name}/addresses", company=company_name, started=started, outcome="not_found")
             raise HTTPException(status_code=404, detail="Company not found")
-        addresses = all_addresses_for_protocol(session, protocol_row, jobs)
+        addresses = all_addresses_for_protocol(session, protocol_row)
     _log_endpoint(
         "/api/company/{name}/addresses",
         company=company_name,
@@ -259,11 +254,11 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
         # contract under another protocol. This lets dependency rows such as
         # Lido/WETH/LayerZero carry their own verified audits when they appear
         # in a dependent protocol, without crediting heuristic matches.
-        target_contract_ids_by_key: dict[tuple[str, str], set[int]] = {}
+        target_contract_ids_by_key: dict[tuple[int, str], set[int]] = {}
         for c in contracts:
-            if key := _coverage_key(c.chain, c.address):
+            if key := _coverage_key(c.chain_id, c.address):
                 target_contract_ids_by_key.setdefault(key, set()).add(c.id)
-            if c.is_proxy and (key := _coverage_key(c.chain, c.implementation)):
+            if c.is_proxy and (key := _coverage_key(c.chain_id, c.implementation)):
                 target_contract_ids_by_key.setdefault(key, set()).add(c.id)
 
         inherited_rows: list[AuditContractCoverage] = []
@@ -302,14 +297,14 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
         # company-level "is this contract audited?" view the user really
         # means "is the code this address is running audited?", so union
         # the proxy's entries with its current implementation's.
-        contracts_by_addr = {c.address.lower(): c for c in contracts if c.address}
+        contracts_by_key = {(c.chain_id, c.address.lower()): c for c in contracts if c.address}
 
         coverage: list[dict[str, Any]] = []
         for c in contracts:
             entries = list(coverage_by_contract.get(c.id, []))
             seen_audit_ids = {e.audit_report_id for e in entries}
             if c.is_proxy and c.implementation:
-                impl = contracts_by_addr.get(c.implementation.lower())
+                impl = contracts_by_key.get((c.chain_id, c.implementation.lower()))
                 if impl:
                     for e in coverage_by_contract.get(impl.id, []):
                         if e.audit_report_id not in seen_audit_ids:
@@ -337,7 +332,7 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
             coverage.append(
                 {
                     "address": c.address,
-                    "chain": c.chain,
+                    "chain_id": c.chain_id,
                     "contract_name": c.contract_name,
                     "audit_count": len(matching),
                     "last_audit": matching[0] if matching else None,

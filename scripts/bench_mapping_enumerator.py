@@ -1,6 +1,6 @@
 """Bench the mapping_enumerator against real contracts.
 
-Times the from-block-0 Hypersync replay for a handful of contracts
+Times the from-block-0 eRPC event replay for a handful of contracts
 chosen across the relevant age + activity matrix:
 
   - Maker DAI ``wards`` (deployed 2017, very high activity)
@@ -20,7 +20,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -31,6 +30,7 @@ from services.resolution.mapping_enumerator import (
     clear_enumeration_cache,
     enumerate_mapping_allowlist_sync,
 )
+from utils.rpc import require_supported_chain_id
 
 # Each entry mimics the writer-event spec the static-analysis stage produces
 # for a contract whose mapping is mutated via Add/Remove-style events.
@@ -38,6 +38,7 @@ FIXTURES = [
     {
         "label": "MakerDAO DAI (wards via Rely/Deny, 2017, high activity)",
         "address": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+        "chain_id": 1,
         "specs": [
             {
                 "mapping_name": "wards",
@@ -58,6 +59,7 @@ FIXTURES = [
     {
         "label": "LinkToken isMinter (RoleGranted/RoleRevoked, 2017, lower activity)",
         "address": "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+        "chain_id": 1,
         "specs": [
             {
                 "mapping_name": "minters",
@@ -71,6 +73,7 @@ FIXTURES = [
     {
         "label": "USDC FiatTokenV2 minters (MinterConfigured, 2020, low activity)",
         "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "chain_id": 1,
         "specs": [
             {
                 "mapping_name": "minters",
@@ -91,20 +94,25 @@ FIXTURES = [
 ]
 
 
-def _run_one(fixture: dict, *, timeout_s: float, max_pages: int, bearer_token: str) -> dict:
+def _run_one(fixture: dict, *, timeout_s: float, max_pages: int) -> dict:
     clear_enumeration_cache()
     t0 = time.monotonic()
+    chain_id = require_supported_chain_id(
+        chain_id=fixture["chain_id"],
+        context=f"mapping enumerator bench {fixture['label']}",
+    )
     result = enumerate_mapping_allowlist_sync(
         fixture["address"],
         fixture["specs"],
+        chain_id=chain_id,
         timeout_s=timeout_s,
         max_pages=max_pages,
-        bearer_token=bearer_token,
     )
     elapsed = time.monotonic() - t0
     return {
         "label": fixture["label"],
         "address": fixture["address"],
+        "chain_id": chain_id,
         "elapsed_s": round(elapsed, 1),
         "status": result["status"],
         "pages_fetched": result["pages_fetched"],
@@ -130,11 +138,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    bearer_token = os.getenv("ENVIO_API_TOKEN") or ""
-    if not bearer_token:
-        print("ERROR: ENVIO_API_TOKEN not set. Run: set -a; source .env; set +a", file=sys.stderr)
-        sys.exit(2)
-
     print(f"timeout_s={args.timeout_s}  max_pages={args.max_pages}\n")
     rows = []
     for fixture in FIXTURES:
@@ -146,7 +149,6 @@ def main() -> None:
                 fixture,
                 timeout_s=args.timeout_s,
                 max_pages=args.max_pages,
-                bearer_token=bearer_token,
             )
         except Exception as exc:
             row = {

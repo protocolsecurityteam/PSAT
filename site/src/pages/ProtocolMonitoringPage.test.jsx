@@ -18,7 +18,7 @@ function makeContract(overrides = {}) {
   return {
     id: `c-${Math.random().toString(36).slice(2, 8)}`,
     address: `0x${"0".repeat(39)}1`,
-    chain: "ethereum",
+    chain_id: 1,
     contract_type: "regular",
     monitoring_config: {},
     last_known_state: {},
@@ -142,8 +142,8 @@ describe("ProtocolMonitoringPage contract names", () => {
       makeContract({ id: "proxy-weeth", address: weeth, contract_type: "proxy" }),
     ];
     const addresses = [
-      { address: eeth, name: "UUPSProxy", implementation_name: "EETH", is_proxy: true, chain: "ethereum" },
-      { address: weeth, name: "UUPSProxy", implementation_name: "WeETH", is_proxy: true, chain: "ethereum" },
+      { address: eeth, name: "UUPSProxy", implementation_name: "EETH", is_proxy: true, chain_id: 1 },
+      { address: weeth, name: "UUPSProxy", implementation_name: "WeETH", is_proxy: true, chain_id: 1 },
     ];
 
     mountWith(contracts, addresses);

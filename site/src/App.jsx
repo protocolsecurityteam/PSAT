@@ -66,7 +66,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(() => parseLocationPath(window.location.pathname).tab);
   const [job, setJob] = useState(null);
   const [activeJobs, setActiveJobs] = useState([]);
-  const [form, setForm] = useState({ target: "", name: "", chain: "", analyzeLimit: "5" });
+  const [form, setForm] = useState({ target: "", name: "", chainId: "", analyzeLimit: "5" });
   const [formOpen, setFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const analysesRef = useRef([]);
@@ -108,14 +108,19 @@ export default function App() {
 
   async function loadAnalysis(runId, options = {}) {
     try {
-      const payload = await api(`/api/analyses/${encodeURIComponent(runId)}`);
+      const chainId = Number.parseInt(options.chainId, 10);
+      const query = isAddress(runId) && Number.isInteger(chainId) && chainId > 0
+        ? `?chain_id=${encodeURIComponent(chainId)}`
+        : "";
+      const payload = await api(`/api/analyses/${encodeURIComponent(runId)}${query}`);
       const nextTab = normalizeTab(options.tab ?? activeTabRef.current);
       setSelectedRun(runId);
       setSelectedDetail(payload);
       setActiveTab(nextTab);
       setViewMode("run");
       const address = payload?.address || payload?.contract_analysis?.subject?.address;
-      const path = buildLocationPath(runId, address, nextTab);
+      const payloadChainId = payload?.contract?.chain_id ?? payload?.chain_id ?? null;
+      const path = buildLocationPath(runId, address, nextTab, payloadChainId);
       window.history[options.history === "replace" ? "replaceState" : "pushState"]({}, "", path);
       return payload;
     } catch (err) {
@@ -141,13 +146,7 @@ export default function App() {
         setCompanyTab(route.companyTab || "overview");
       } else if (route.mode === "run" || route.mode === "address") {
         setCompanyName(null);
-        // For /address/<x> we pass the address directly: /api/analyses/<name>
-        // falls back to a by-address lookup and returns the run whose primary
-        // address is <x>. This bypasses the merged /api/analyses list — which
-        // hides the proxy run behind the impl run and would otherwise cause
-        // /address/<proxy>/upgrades to load the impl's detail (where the
-        // impl run's upgrade_history doesn't include its own proxy chain).
-        loadAnalysis(route.value, { tab: route.tab, history: "replace" });
+        loadAnalysis(route.value, { tab: route.tab, chainId: route.chainId, history: "replace" });
       } else {
         setCompanyName(null);
       }
@@ -159,7 +158,7 @@ export default function App() {
       setCompanyName(route.value);
       setCompanyTab(route.companyTab || "overview");
     } else if (route.mode === "run" || route.mode === "address") {
-      loadAnalysis(route.value, { tab: route.tab, history: "replace" });
+      loadAnalysis(route.value, { tab: route.tab, chainId: route.chainId, history: "replace" });
     }
 
     window.addEventListener("popstate", handlePopState);
@@ -225,11 +224,13 @@ export default function App() {
     setLoading(true);
     try {
       const target = form.target.trim();
+      const chainId = Number.parseInt(form.chainId, 10);
+      const chainPayload = Number.isInteger(chainId) && chainId > 0 ? { chain_id: chainId } : {};
       const payload = isAddress(target)
-        ? { address: target, name: form.name.trim() || null }
+        ? { address: target, name: form.name.trim() || null, ...chainPayload }
         : {
             company: target,
-            chain: form.chain.trim() || null,
+            ...chainPayload,
             analyze_limit: Number.parseInt(form.analyzeLimit, 10) || 5,
           };
       const nextJob = await api("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -250,7 +251,8 @@ export default function App() {
     const nextTab = normalizeTab(tab);
     setActiveTab(nextTab);
     const address = selectedDetail?.address || selectedDetail?.contract_analysis?.subject?.address;
-    const path = buildLocationPath(selectedRun, address, nextTab);
+    const chainId = selectedDetail?.contract?.chain_id ?? selectedDetail?.chain_id ?? null;
+    const path = buildLocationPath(selectedRun, address, nextTab, chainId);
     window.history.pushState({}, "", path);
   }
 
@@ -269,7 +271,11 @@ export default function App() {
     graph: <GraphTab detail={selectedDetail} />,
     dependencies: (
       <Suspense fallback={<LoadingFallback label="Loading graph..." />}>
-        <DependencyGraphTab data={selectedDetail?.dependency_graph_viz} runName={selectedRun} />
+        <DependencyGraphTab
+          data={selectedDetail?.dependency_graph_viz}
+          runName={selectedRun}
+          chainId={selectedDetail?.contract?.chain_id ?? selectedDetail?.chain_id ?? null}
+        />
       </Suspense>
     ),
     upgrades: <UpgradesTab detail={selectedDetail} />,
@@ -312,7 +318,7 @@ export default function App() {
           <form className="submit-form" onSubmit={submit}>
             <label><span>Address or company</span><input value={form.target} onChange={(e) => setForm((c) => ({ ...c, target: e.target.value }))} placeholder="0x... or etherfi" required /></label>
             <label><span>Run name</span><input value={form.name} onChange={(e) => setForm((c) => ({ ...c, name: e.target.value }))} placeholder="Optional" /></label>
-            <label><span>Chain</span><input value={form.chain} onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))} placeholder="Optional" /></label>
+            <label><span>Chain ID</span><input type="number" min="1" value={form.chainId} onChange={(e) => setForm((c) => ({ ...c, chainId: e.target.value }))} placeholder="Auto" /></label>
             <label><span>Analyze limit</span><input type="number" min="1" max="200" value={form.analyzeLimit} onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))} /></label>
             <button type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
           </form>

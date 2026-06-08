@@ -93,10 +93,12 @@ export default function ProductHero({ form, setForm, onSubmit, loading }) {
             />
           </label>
           <label className="ph-field">
-            <span>Chain</span>
+            <span>Chain ID</span>
             <input
-              value={form.chain}
-              onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))}
+              type="number"
+              min="1"
+              value={form.chainId}
+              onChange={(e) => setForm((c) => ({ ...c, chainId: e.target.value }))}
               placeholder="auto"
             />
           </label>

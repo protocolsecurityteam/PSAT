@@ -14,14 +14,14 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
-from db.queue import HEARTBEAT_EVENT_INDEXER, record_heartbeat
+from db.models import ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
+from db.queue import HEARTBEAT_EVENT_INDEXER, record_heartbeat, require_contract_for_job
 from services.artifacts import get_artifact_field
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
-from utils.etherscan import get_contract_creation_block
 from utils.logging import log_timed_phase
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.onchain import get_contract_creation_block
+from utils.rpc import default_rpc_url, require_supported_chain_id, supported_chain_ids
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -119,10 +119,11 @@ def enroll_event_cursor(
     topic0: str,
     start_block: int = 0,
 ) -> bool:
+    effective_chain_id = _require_indexer_chain_id(chain_id, context="event cursor enrollment")
     stmt = (
         pg_insert(IndexedEventCursor)
         .values(
-            chain_id=chain_id,
+            chain_id=effective_chain_id,
             event_address=event_address.lower(),
             topic0=topic0.lower(),
             last_indexed_block=start_block,
@@ -146,9 +147,10 @@ def index_event_log_step(
     max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> IndexStepResult:
+    effective_chain_id = _require_indexer_chain_id(chain_id, context="event index step")
     cursor = session.execute(
         select(IndexedEventCursor)
-        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(IndexedEventCursor.chain_id == effective_chain_id)
         .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
         .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
         .with_for_update()
@@ -172,7 +174,7 @@ def index_event_log_step(
             rewind_to = max(0, last - confirmation_depth)
             session.execute(
                 delete(IndexedEventLog)
-                .where(IndexedEventLog.chain_id == chain_id)
+                .where(IndexedEventLog.chain_id == effective_chain_id)
                 .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
                 .where(IndexedEventLog.block_number > rewind_to)
             )
@@ -190,7 +192,7 @@ def index_event_log_step(
         to_block=window_end,
     )
     inserted = _bulk_insert_logs(
-        session, chain_id, event_address.lower(), topic0.lower(), logs, batch_size=insert_batch_size
+        session, effective_chain_id, event_address.lower(), topic0.lower(), logs, batch_size=insert_batch_size
     )
     cursor.last_indexed_block = window_end
     cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(window_end)
@@ -219,21 +221,38 @@ def scan_enrolled_events(
     windows_scanned = 0
     caught_up_cursors = 0
     for chain_id, event_address, topic0 in rows:
-        fetcher = fetchers.get(chain_id)
-        head_fetcher = head_fetchers.get(chain_id)
-        block_hash_fetcher = block_hash_fetchers.get(chain_id)
-        if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
-            continue
+        effective_chain_id = _require_indexer_chain_id(chain_id, context="event index cursor")
+        fetcher = fetchers.get(effective_chain_id)
+        head_fetcher = head_fetchers.get(effective_chain_id)
+        block_hash_fetcher = block_hash_fetchers.get(effective_chain_id)
+        missing = []
+        if fetcher is None:
+            missing.append("log_fetcher")
+        if head_fetcher is None:
+            missing.append("head_fetcher")
+        if block_hash_fetcher is None:
+            missing.append("block_hash_fetcher")
+        if missing:
+            logger.error(
+                "event indexer missing %s for chain_id=%s cursor address=%s topic0=%s",
+                ",".join(missing),
+                effective_chain_id,
+                event_address,
+                topic0,
+            )
+            raise RuntimeError(
+                f"event indexer missing {','.join(missing)} for chain_id={effective_chain_id}"
+            )
         # Walk several windows per pass so a cold cursor backfills in a handful
         # of passes, but cap it so one high-volume address can't starve the
         # rest. Commit per window: each transaction (and INSERT) stays small,
         # progress is durable, and a mid-backfill failure on one cursor doesn't
         # roll back the windows it already landed.
-        try:
-            for _ in range(max(1, max_windows_per_cursor)):
+        for _ in range(max(1, max_windows_per_cursor)):
+            try:
                 result = index_event_log_step(
                     session,
-                    chain_id=chain_id,
+                    chain_id=effective_chain_id,
                     event_address=event_address,
                     topic0=topic0,
                     fetcher=fetcher,
@@ -244,19 +263,23 @@ def scan_enrolled_events(
                     insert_batch_size=insert_batch_size,
                 )
                 session.commit()
-                inserted += result.inserted
-                windows_scanned += 1
-                if result.caught_up:
-                    caught_up_cursors += 1
-                    break
-        except Exception:
-            session.rollback()
-            logger.exception(
-                "event indexer pass failed for chain=%s address=%s topic0=%s",
-                chain_id,
-                event_address,
-                topic0,
-            )
+            except Exception as exc:
+                session.rollback()
+                logger.exception(
+                    "event indexer pass failed for chain_id=%s address=%s topic0=%s",
+                    effective_chain_id,
+                    event_address,
+                    topic0,
+                )
+                raise RuntimeError(
+                    f"event indexer pass failed for chain_id={effective_chain_id} "
+                    f"address={event_address} topic0={topic0}"
+                ) from exc
+            inserted += result.inserted
+            windows_scanned += 1
+            if result.caught_up:
+                caught_up_cursors += 1
+                break
     return ScanSummary(
         inserted=inserted,
         windows_scanned=windows_scanned,
@@ -281,36 +304,48 @@ def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
     )
 
 
-def _seed_block(address: str, cache: dict[str, int | None], *, chain_id: int = 1) -> int | None:
+def _seed_block(address: str, cache: dict[str, int], *, chain_id: int) -> int:
     """The ``last_indexed_block`` a new cursor should start at: one below the
     event address's creation block, so the first scan window begins at the
     deploy block and the ~20M empty pre-deployment blocks are never fetched.
 
-    Returns ``None`` when the creation block can't be determined, so the caller
-    defers enrollment to a later pass (retrying once it resolves) instead of
-    seeding at genesis: a single transient Etherscan failure must never pin a
-    cursor to a full-chain backfill. Cached per pass (one lookup per address).
+    Provider failures and missing creation blocks are hard failures. A cursor
+    must never be written from a guessed block on an unsupported or unhealthy
+    chain. Cached per pass (one lookup per address).
     """
     key = address.lower()
     if key in cache:
         return cache[key]
-    seed: int | None = None
-    try:
-        created = get_contract_creation_block(key, chain_id=chain_id)
-        if isinstance(created, int) and created > 0:
-            seed = created - 1
-    except Exception as exc:
-        logger.warning(
-            "creation-block lookup failed for %s; deferring enrollment to a later pass",
+    created = get_contract_creation_block(key, chain_id=chain_id)
+    if created <= 0:
+        logger.error(
+            "creation-block lookup returned no usable block for %s on chain_id=%s",
             key,
-            extra={"address": key, "chain_id": chain_id, "exc_type": type(exc).__name__},
+            chain_id,
+            extra={"address": key, "chain_id": chain_id},
         )
-        seed = None
+        raise RuntimeError(f"creation-block lookup returned no usable block for {key} on chain_id={chain_id}")
+    seed = created - 1
     cache[key] = seed
     return seed
 
 
-def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: int = 500) -> int:
+def _require_indexer_chain_id(chain_id: object, *, context: str) -> int:
+    try:
+        return require_supported_chain_id(chain_id=chain_id, context=context)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise
+
+
+def _job_chain_id(job: Job) -> int:
+    if job.chain_id is None:
+        logger.error("event indexer completed address job %s is missing chain_id", job.id)
+        raise RuntimeError(f"event indexer completed address job {job.id} requires chain_id")
+    return _require_indexer_chain_id(job.chain_id, context=f"event indexer job {job.id}")
+
+
+def enroll_from_completed_jobs(session: Session, *, chain_id: int, limit: int = 500) -> int:
     jobs = session.execute(
         select(Job)
         .where(Job.status == JobStatus.completed)
@@ -319,8 +354,10 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
         .limit(limit)
     ).scalars()
     inserted = 0
-    seed_cache: dict[str, int | None] = {}
+    seed_cache: dict[str, int] = {}
     for job in jobs:
+        if _job_chain_id(job) != chain_id:
+            continue
         artifact = get_artifact_field(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
@@ -330,38 +367,33 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 topic0 = hint.get("topic0")
                 if not isinstance(topic0, str) or not topic0.startswith("0x"):
                     continue
-                address = _event_address_for_descriptor(descriptor, hint, job, values)
+                address = _event_address_for_descriptor(descriptor, hint, values)
                 if not _is_enrollable_event_address(address):
                     continue
                 start_block = _seed_block(address, seed_cache, chain_id=chain_id)
-                if start_block is None:
-                    # Creation block not yet known — enroll on a later pass at the
-                    # real deploy block rather than backfilling from genesis.
-                    continue
                 if enroll_event_cursor(
                     session, chain_id=chain_id, event_address=address, topic0=topic0, start_block=start_block
                 ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
-                # Resolve the authority strictly from authority_contract — never
-                # the job.address fallback. The RolesAuthority events are emitted
-                # by the authority, not by the protected contract, so enrolling
-                # them at job.address would scan an address that can't emit them.
+                # Resolve the authority strictly from authority_contract. The
+                # RolesAuthority events are emitted by the authority, not by the
+                # protected contract, so enrolling them at job.address would scan
+                # an address that can't emit them.
                 # If the authority isn't resolved yet, skip; a later pass enrolls
                 # it once its ControllerValue is captured.
-                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+                authority = _event_address_for_descriptor(descriptor, {}, values)
                 if _is_enrollable_event_address(authority):
                     start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
-                    if start_block is not None:
-                        for topic0 in _SOLMATE_ROLE_TOPICS:
-                            if enroll_event_cursor(
-                                session,
-                                chain_id=chain_id,
-                                event_address=authority,
-                                topic0=topic0,
-                                start_block=start_block,
-                            ):
-                                inserted += 1
+                    for topic0 in _SOLMATE_ROLE_TOPICS:
+                        if enroll_event_cursor(
+                            session,
+                            chain_id=chain_id,
+                            event_address=authority,
+                            topic0=topic0,
+                            start_block=start_block,
+                        ):
+                            inserted += 1
     session.commit()
     return inserted
 
@@ -429,9 +461,7 @@ def _walk_descriptors(node: Any) -> list[dict[str, Any]]:
 
 
 def _state_var_values_for_job(session: Session, job: Job) -> dict[str, str]:
-    contract = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-    if contract is None:
-        return {}
+    contract = require_contract_for_job(session, job, context=f"event indexer state-var lookup for {job.id}")
     rows = session.execute(select(ControllerValue).where(ControllerValue.contract_id == contract.id)).scalars()
     out: dict[str, str] = {}
     for row in rows:
@@ -444,10 +474,7 @@ def _state_var_values_for_job(session: Session, job: Job) -> dict[str, str]:
 def _event_address_for_descriptor(
     descriptor: dict[str, Any],
     hint: dict[str, Any],
-    job: Job,
     state_var_values: dict[str, str],
-    *,
-    allow_job_fallback: bool = True,
 ) -> str | None:
     raw = hint.get("event_address")
     if isinstance(raw, str) and raw.startswith("0x") and len(raw) == 42:
@@ -462,9 +489,7 @@ def _event_address_for_descriptor(
         value = state_var_values.get(name) if isinstance(name, str) else None
         if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
             return value.lower()
-    if not allow_job_fallback:
-        return None
-    return job.address.lower() if job.address and len(job.address) == 42 else None
+    return None
 
 
 def run_event_log_indexer_loop(
@@ -485,7 +510,8 @@ def run_event_log_indexer_loop(
         with SessionLocal() as session:
             try:
                 with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                    enrolled = enroll_from_completed_jobs(session)
+                    for chain_id in fetchers:
+                        enrolled += enroll_from_completed_jobs(session, chain_id=chain_id)
                     ph["enrolled"] = enrolled
                 with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                     summary = scan_enrolled_events(
@@ -501,15 +527,33 @@ def run_event_log_indexer_loop(
             except Exception:
                 session.rollback()
                 logger.exception("event log indexer pass failed")
-                status = "error"
+                record_heartbeat(
+                    HEARTBEAT_EVENT_INDEXER,
+                    status="error",
+                    detail={
+                        "enrolled_last_pass": enrolled,
+                        "inserted_last_pass": summary.inserted,
+                        "windows_scanned": summary.windows_scanned,
+                        "caught_up_cursors": summary.caught_up_cursors,
+                        "total_cursors": summary.total_cursors,
+                        "reenqueued_deferred_resolutions": reenqueued,
+                    },
+                )
+                raise RuntimeError("event log indexer pass failed")
             # Self-heal index-cold capability deferrals whose authority just
             # finished backfilling (this is the pass that flips backfill_complete,
             # so it's the timely place to re-resolve). Isolated try: a reconcile
             # failure must not mark the indexing pass itself as errored.
             try:
                 with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
-                    reenqueued = reconcile_deferred_resolutions(session)
+                    reenqueued_by_chain: dict[int, int] = {}
+                    for chain_id in fetchers:
+                        chain_reenqueued = reconcile_deferred_resolutions(session, chain_id=chain_id)
+                        if chain_reenqueued:
+                            reenqueued_by_chain[chain_id] = chain_reenqueued
+                            reenqueued += chain_reenqueued
                     ph["reenqueued"] = reenqueued
+                    ph["reenqueued_by_chain"] = reenqueued_by_chain
                 if reenqueued:
                     logger.info("deferred-resolution reconciler re-enqueued %d job(s)", reenqueued)
             except Exception:
@@ -533,6 +577,24 @@ def run_event_log_indexer_loop(
         stop_event.wait(interval)
 
 
+def _indexer_chain_ids() -> list[int]:
+    """Return the explicit chain ids the event indexer should serve."""
+    raw = os.getenv("PSAT_INDEXER_CHAIN_IDS")
+    if raw is None or not raw.strip():
+        chain_ids = sorted(supported_chain_ids())
+    else:
+        chain_ids = []
+        for item in raw.split(","):
+            text = item.strip()
+            if not text:
+                continue
+            chain_ids.append(require_supported_chain_id(chain_id=text, context="event log indexer"))
+    if not chain_ids:
+        logger.error("event log indexer requires at least one supported chain id")
+        raise RuntimeError("event log indexer requires at least one supported chain id")
+    return sorted(set(chain_ids))
+
+
 def main() -> None:
     from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
 
@@ -550,10 +612,17 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
-    fetchers = {1: RpcEventLogFetcher(rpc_url)}
-    head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
-    block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}
+    chain_ids = _indexer_chain_ids()
+    fetchers = {}
+    head_fetchers = {}
+    block_hash_fetchers = {}
+    for chain_id in chain_ids:
+        effective_chain_id = _require_indexer_chain_id(chain_id, context="event log indexer")
+        rpc_url = default_rpc_url(chain_id=effective_chain_id)
+        fetchers[effective_chain_id] = RpcEventLogFetcher(rpc_url, chain_id=effective_chain_id)
+        head_fetchers[effective_chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=effective_chain_id)
+        block_hash_fetchers[effective_chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=effective_chain_id)
+    logger.info("event log indexer configured for chain_ids=%s", chain_ids)
     run_event_log_indexer_loop(
         fetchers=fetchers,
         head_fetchers=head_fetchers,

@@ -2,9 +2,16 @@ import { shortAddr } from "../../format.js";
 import { matchingWebhookCountForConfig } from "./helpers.js";
 import { MonitorEventIcons, MonitorWebhookIndicator } from "./icons.jsx";
 
+function identityKey(address, chainId) {
+  const addr = String(address || "").toLowerCase();
+  const parsedChainId = Number.parseInt(chainId, 10);
+  if (!addr || !Number.isInteger(parsedChainId) || parsedChainId <= 0) return null;
+  return `${parsedChainId}:${addr}`;
+}
+
 export function AlertsTable({
   alerts,
-  machineByAddress,
+  machineByIdentity,
   subscriptions,
   busyId,
   emptyLabel = "No active alerts.",
@@ -18,7 +25,7 @@ export function AlertsTable({
   return (
     <div className="ps-monitor-alert-table">
       {alerts.map((contract) => {
-        const machine = machineByAddress.get(contract.address?.toLowerCase());
+        const machine = machineByIdentity.get(identityKey(contract.address, contract.chain_id));
         const webhookCount = matchingWebhookCountForConfig(contract.monitoring_config || {}, subscriptions);
         return (
           <div

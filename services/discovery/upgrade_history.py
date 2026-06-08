@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch upgrade history for proxy contracts via Etherscan event logs.
+"""Fetch upgrade history for proxy contracts via eRPC event logs.
 
 For each proxy in dependencies.json, queries Upgraded(address),
 AdminChanged(address,address), and BeaconUpgraded(address) events across
@@ -8,18 +8,21 @@ the contract's lifetime.  Produces a timeline of implementation changes.
 Designed to run *after* dependencies.json is written so that proxy
 metadata (type, current implementation) is already available.
 
-Uses Etherscan's getLogs endpoint which is indexed by address+topic
-and returns results in <1s regardless of chain history length.
+Uses bounded ``eth_getLogs`` windows through the configured eRPC endpoint.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from schemas.common import make_contract
 from services.discovery.static_dependencies import normalize_address
+from utils.rpc import default_rpc_url, require_supported_chain_id, rpc_request
 
 logger = logging.getLogger(__name__)
+_LOG_BLOCK_RANGE = int(os.getenv("PSAT_UPGRADE_HISTORY_BLOCK_RANGE", "10000"))
+_MAX_LOG_WINDOWS = int(os.getenv("PSAT_UPGRADE_HISTORY_MAX_LOG_WINDOWS", "5000"))
 
 # ---------------------------------------------------------------------------
 # EIP-1967 event topic0 hashes (keccak256 of signature)
@@ -72,6 +75,8 @@ EVENT_TOPICS = {
 def _hex_to_int(value: str | int) -> int:
     if isinstance(value, int):
         return value
+    if not isinstance(value, str):
+        raise ValueError(f"malformed integer value: {value!r}")
     if value in ("0x", "0x0", ""):
         return 0
     return int(value, 16) if value.startswith("0x") else int(value)
@@ -79,13 +84,27 @@ def _hex_to_int(value: str | int) -> int:
 
 def _topic_to_address(topic: str) -> str:
     """Extract a 20-byte address from a 32-byte log topic."""
-    raw = topic.replace("0x", "").zfill(64)
+    if not isinstance(topic, str) or not topic.startswith("0x") or len(topic) != 66:
+        raise ValueError(f"malformed address topic: {topic!r}")
+    raw = topic[2:]
+    try:
+        bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError(f"malformed address topic hex: {topic!r}") from exc
     return normalize_address("0x" + raw[-40:])
 
 
 def _data_to_addresses(data: str, count: int) -> list[str]:
     """Decode *count* consecutive ABI-encoded addresses from log data."""
-    raw = data.replace("0x", "").zfill(64 * count)
+    if not isinstance(data, str) or not data.startswith("0x"):
+        raise ValueError(f"malformed address data: {data!r}")
+    raw = data[2:]
+    if len(raw) < 64 * count or len(raw) % 64 != 0:
+        raise ValueError(f"malformed address data length: {data!r}")
+    try:
+        bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError("malformed address data hex") from exc
     addresses = []
     for i in range(count):
         chunk = raw[i * 64 : (i + 1) * 64]
@@ -94,10 +113,12 @@ def _data_to_addresses(data: str, count: int) -> list[str]:
 
 
 def parse_upgrade_log(log: dict) -> dict | None:
-    """Parse an Etherscan log entry into an UpgradeEvent dict."""
+    """Parse a JSON-RPC log entry into an UpgradeEvent dict."""
     topics = log.get("topics", [])
-    if not topics:
-        return None
+    if not isinstance(topics, list) or not topics:
+        raise ValueError(f"upgrade log has malformed topics: {topics!r}")
+    if any(not isinstance(topic, str) or not topic.startswith("0x") for topic in topics):
+        raise ValueError(f"upgrade log has malformed topic value: {topics!r}")
 
     topic0 = topics[0].lower()
     event_type = EVENT_TOPICS.get(topic0)
@@ -111,7 +132,7 @@ def parse_upgrade_log(log: dict) -> dict | None:
         "log_index": _hex_to_int(log.get("logIndex", "0x0")),
     }
 
-    # Etherscan getLogs returns timeStamp as hex
+    # Some explorer-backed logs include timeStamp as hex; JSON-RPC logs do not.
     ts = log.get("timeStamp")
     if ts:
         event["timestamp"] = _hex_to_int(ts)
@@ -128,14 +149,16 @@ def parse_upgrade_log(log: dict) -> dict | None:
             # Some proxies (e.g. OZ legacy) emit Upgraded(address) with the
             # implementation as a non-indexed parameter, stored in data.
             data = log.get("data", "0x")
-            if data and data != "0x" and len(data.replace("0x", "")) >= 40:
+            if data and data != "0x":
                 addrs = _data_to_addresses(data, 1)
                 event["implementation"] = addrs[0]
+            else:
+                raise ValueError("Upgraded log missing implementation address")
 
     elif event_type == "admin_changed":
         # Standard: both addresses in data (non-indexed)
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 128:
+        if data and data != "0x":
             addrs = _data_to_addresses(data, 2)
             event["previous_admin"] = addrs[0]
             event["new_admin"] = addrs[1]
@@ -143,124 +166,220 @@ def parse_upgrade_log(log: dict) -> dict | None:
             # Variant: indexed parameters in topics
             event["previous_admin"] = _topic_to_address(topics[1])
             event["new_admin"] = _topic_to_address(topics[2])
+        else:
+            raise ValueError("AdminChanged log missing admin addresses")
 
     elif event_type == "beacon_upgraded":
         if len(topics) >= 2 and topics[1]:
             event["beacon"] = _topic_to_address(topics[1])
         else:
-            # Fallback: non-indexed parameter in data
+            # Alternate encoding: non-indexed parameter in data
             data = log.get("data", "0x")
-            if data and data != "0x" and len(data.replace("0x", "")) >= 40:
+            if data and data != "0x":
                 addrs = _data_to_addresses(data, 1)
                 event["beacon"] = addrs[0]
+            else:
+                raise ValueError("BeaconUpgraded log missing beacon address")
 
     elif event_type == "changed_master_copy":
         # GnosisSafe: single non-indexed address in data
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 40:
+        if data and data != "0x":
             addrs = _data_to_addresses(data, 1)
             event["implementation"] = addrs[0]
+        else:
+            raise ValueError("ChangedMasterCopy log missing implementation address")
 
     elif event_type == "new_implementation":
         # Compound: two ABI-encoded addresses in data (old impl, new impl)
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 128:
+        if data and data != "0x":
             addrs = _data_to_addresses(data, 2)
             event["old_implementation"] = addrs[0]
             event["implementation"] = addrs[1]
+        else:
+            raise ValueError("NewImplementation log missing implementation addresses")
 
     elif event_type == "new_pending_implementation":
         # Compound: two ABI-encoded addresses in data (old pending impl, new pending impl)
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 128:
+        if data and data != "0x":
             addrs = _data_to_addresses(data, 2)
             event["implementation"] = addrs[1]
+        else:
+            raise ValueError("NewPendingImplementation log missing implementation addresses")
 
     elif event_type == "target_updated":
         # Synthetix: single non-indexed address in data
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 40:
+        if data and data != "0x":
             addrs = _data_to_addresses(data, 1)
             event["implementation"] = addrs[0]
+        else:
+            raise ValueError("TargetUpdated log missing implementation address")
 
     elif event_type == "upgraded_revision":
         # Aave V2: uint256 revision number in data — NOT an implementation address
         data = log.get("data", "0x")
-        if data and data != "0x" and len(data.replace("0x", "")) >= 2:
+        if data and data != "0x":
             event["revision"] = _hex_to_int(data)
+        else:
+            raise ValueError("Upgraded revision log missing revision data")
 
     elif event_type == "diamond_cut":
         # EIP-2535 DiamondCut: ABI-encoded FacetCut[] + _init address + _calldata
         # Extract facet addresses from the FacetCut[] array, filtering out Remove actions.
+        data = log.get("data", "0x")
+        if not isinstance(data, str) or not data.startswith("0x"):
+            raise ValueError(f"DiamondCut log has malformed data: {data!r}")
+        raw = data[2:]
         try:
-            data = log.get("data", "0x")
-            raw = data.replace("0x", "")
-            if len(raw) >= 192:  # minimum: 3 words (offsets) + at least array length
-                # bytes 0-63: offset to FacetCut[] array
-                array_offset = int(raw[0:64], 16) * 2  # convert byte offset to hex-char offset
-                # At array_offset: uint256 count of FacetCut entries
-                count_start = array_offset
-                if len(raw) >= count_start + 64:
-                    count = int(raw[count_start : count_start + 64], 16)
-                    if count > 1000:  # cap to prevent DoS from crafted events
-                        count = 0
-                    # After count: `count` uint256 offsets (relative to array_offset)
-                    entry_offsets_start = count_start + 64
-                    facets: list[str] = []
-                    for i in range(count):
-                        off_pos = entry_offsets_start + i * 64
-                        if len(raw) < off_pos + 64:
-                            break
-                        entry_offset = int(raw[off_pos : off_pos + 64], 16) * 2
-                        # Entry is relative to array_offset
-                        entry_start = array_offset + entry_offset
-                        # Each FacetCut entry: address (32 bytes) + action (32 bytes) + ...
-                        if len(raw) < entry_start + 128:
-                            break
-                        facet_addr = normalize_address("0x" + raw[entry_start + 24 : entry_start + 64])
-                        action = int(raw[entry_start + 64 : entry_start + 128], 16)
-                        # action: 0=Add, 1=Replace, 2=Remove — skip Remove
-                        if action != 2 and facet_addr != normalize_address("0x" + "0" * 40):
-                            facets.append(facet_addr)
-                    if facets:
-                        event["implementation"] = facets[0]
-                        event["facets"] = facets
-        except (ValueError, IndexError):
-            pass  # malformed data — return event without implementation
+            bytes.fromhex(raw)
+        except ValueError as exc:
+            raise ValueError("DiamondCut log data is non-hex") from exc
+        if len(raw) < 192:
+            raise ValueError("DiamondCut log data is too short")
+
+        # bytes 0-63: offset to FacetCut[] array
+        array_offset = int(raw[0:64], 16) * 2  # convert byte offset to hex-char offset
+        count_start = array_offset
+        if len(raw) < count_start + 64:
+            raise ValueError("DiamondCut log missing facet count")
+
+        count = int(raw[count_start : count_start + 64], 16)
+        if count > 1000:
+            raise ValueError(f"DiamondCut log facet count is too large: {count}")
+        entry_offsets_start = count_start + 64
+        facets: list[str] = []
+        for i in range(count):
+            off_pos = entry_offsets_start + i * 64
+            if len(raw) < off_pos + 64:
+                raise ValueError("DiamondCut log truncated before facet offset")
+            entry_offset = int(raw[off_pos : off_pos + 64], 16) * 2
+            entry_start = array_offset + entry_offset
+            if len(raw) < entry_start + 128:
+                raise ValueError("DiamondCut log truncated before facet entry")
+            facet_addr = normalize_address("0x" + raw[entry_start + 24 : entry_start + 64])
+            action = int(raw[entry_start + 64 : entry_start + 128], 16)
+            if action not in {0, 1, 2}:
+                raise ValueError(f"DiamondCut log has invalid facet action: {action}")
+            # action: 0=Add, 1=Replace, 2=Remove — skip Remove
+            if action != 2 and facet_addr != normalize_address("0x" + "0" * 40):
+                facets.append(facet_addr)
+        if not facets:
+            raise ValueError("DiamondCut log has no added/replaced facets")
+        event["implementation"] = facets[0]
+        event["facets"] = facets
 
     return event
 
 
 # ---------------------------------------------------------------------------
-# Etherscan getLogs fetching
+# eRPC getLogs fetching
 # ---------------------------------------------------------------------------
 
 
-def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0) -> list[dict]:
-    """Fetch all logs for a given address and topic0 via Etherscan getLogs."""
-    from utils.etherscan import get
-
+def _head_block(rpc_url: str, *, chain_id: int) -> int:
+    raw = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        logger.error("Upgrade history eth_blockNumber returned invalid payload: %r", raw)
+        raise RuntimeError("upgrade history eth_blockNumber returned invalid payload")
     try:
-        data = get(
-            "logs",
-            "getLogs",
-            address=proxy_address,
-            topic0=topic0,
-            fromBlock=str(from_block),
-            toBlock="99999999",
-        )
-        result = data.get("result", [])
-        return result if isinstance(result, list) else []
-    except RuntimeError:
+        return int(raw, 16)
+    except ValueError as exc:
+        logger.error("Upgrade history eth_blockNumber returned malformed hex: %r", raw)
+        raise RuntimeError("upgrade history eth_blockNumber returned malformed hex") from exc
+
+
+def _fetch_upgrade_logs_erpc(proxy_addresses: list[str], *, chain_id: int, from_block: int = 0) -> list[dict]:
+    """Fetch upgrade logs for the address/topic set via configured eRPC."""
+    normalized_addresses = [normalize_address(addr) for addr in proxy_addresses]
+    if not normalized_addresses:
+        return []
+    rpc_url = default_rpc_url(chain_id=chain_id)
+    head_block = _head_block(rpc_url, chain_id=chain_id)
+    if from_block > head_block:
         return []
 
+    topic0s = sorted(EVENT_TOPICS)
+    out: list[dict] = []
+    current_from = from_block
+    windows = 0
+    while current_from <= head_block:
+        if windows >= _MAX_LOG_WINDOWS:
+            logger.error(
+                "Upgrade history eRPC getLogs hit max windows chain_id=%s from_block=%s head_block=%s max_windows=%s",
+                chain_id,
+                current_from,
+                head_block,
+                _MAX_LOG_WINDOWS,
+            )
+            raise RuntimeError(f"upgrade history eRPC getLogs hit max windows for chain_id={chain_id}")
+        current_to = min(head_block, current_from + _LOG_BLOCK_RANGE - 1)
+        filter_params = {
+            "address": normalized_addresses if len(normalized_addresses) > 1 else normalized_addresses[0],
+            "topics": [topic0s],
+            "fromBlock": hex(current_from),
+            "toBlock": hex(current_to),
+        }
+        try:
+            logs = rpc_request(rpc_url, "eth_getLogs", [filter_params], chain_id=chain_id)
+        except Exception as exc:
+            logger.error(
+                "Upgrade history eRPC getLogs failed chain_id=%s blocks=%d-%d addresses=%d: %s",
+                chain_id,
+                current_from,
+                current_to,
+                len(normalized_addresses),
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"upgrade history eRPC getLogs failed for chain_id={chain_id}") from exc
+        if not isinstance(logs, list):
+            logger.error(
+                "Upgrade history eRPC getLogs returned invalid payload chain_id=%s blocks=%d-%d: %r",
+                chain_id,
+                current_from,
+                current_to,
+                logs,
+            )
+            raise RuntimeError(f"upgrade history eRPC getLogs returned invalid payload for chain_id={chain_id}")
+        for log in logs:
+            if not isinstance(log, dict):
+                logger.error(
+                    "Upgrade history eRPC getLogs returned malformed log chain_id=%s blocks=%d-%d: %r",
+                    chain_id,
+                    current_from,
+                    current_to,
+                    log,
+                )
+                raise RuntimeError(f"upgrade history eRPC getLogs returned malformed log for chain_id={chain_id}")
+            topics = log.get("topics")
+            if (
+                not isinstance(topics, list)
+                or not topics
+                or not isinstance(topics[0], str)
+                or topics[0].lower() not in EVENT_TOPICS
+            ):
+                logger.error(
+                    "Upgrade history eRPC getLogs returned unexpected topic chain_id=%s blocks=%d-%d: %r",
+                    chain_id,
+                    current_from,
+                    current_to,
+                    topics,
+                )
+                raise RuntimeError(f"upgrade history eRPC getLogs returned unexpected topic for chain_id={chain_id}")
+            out.append(log)
+        windows += 1
+        current_from = current_to + 1
+    return out
 
-def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0) -> list[dict]:
-    """Fetch all EIP-1967 upgrade events for proxy addresses via Etherscan.
+
+def fetch_upgrade_events(proxy_addresses: list[str], *, chain_id: int, from_block: int = 0) -> list[dict]:
+    """Fetch all EIP-1967 upgrade events for proxy addresses via eRPC.
 
     Queries each proxy for all three event types (Upgraded, AdminChanged,
     BeaconUpgraded). Returns a chronologically sorted list of parsed events.
-    Rate-limited centrally by ``utils.etherscan``.
 
     Args:
         proxy_addresses: List of proxy contract addresses to query.
@@ -269,35 +388,22 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0) -> lis
     """
     all_events: list[dict] = []
 
-    # Flatten the address × topic matrix into one task list. Each
-    # ``_fetch_logs_etherscan`` call goes through the global Etherscan rate
-    # lock so threading only stacks RTTs — the limiter still serialises wire
-    # calls.
-    tasks: list[tuple[str, str]] = []
-    for addr in proxy_addresses:
-        addr = normalize_address(addr)
-        for topic0 in EVENT_TOPICS:
-            tasks.append((addr, topic0))
-
-    if tasks:
-        from utils.etherscan import parallel_get
-
-        calls = {
-            f"{addr}|{topic0}": (lambda a=addr, t=topic0: _fetch_logs_etherscan(a, t, from_block=from_block))
-            for addr, topic0 in tasks
-        }
-        results = parallel_get(calls)
-
-        # Iterate tasks in their original (addr, topic) order so the parsed
-        # events list is reconstructed deterministically before sorting.
-        for addr, topic0 in tasks:
-            raw_logs = results.get(f"{addr}|{topic0}", [])
-            if isinstance(raw_logs, BaseException) or not isinstance(raw_logs, list):
-                continue
-            for log in raw_logs:
-                event = parse_upgrade_log(log)
-                if event:
-                    all_events.append(event)
+    for log in _fetch_upgrade_logs_erpc(proxy_addresses, chain_id=chain_id, from_block=from_block):
+        try:
+            event = parse_upgrade_log(log)
+        except Exception as exc:
+            logger.error(
+                "Upgrade history failed to parse eRPC log chain_id=%s log=%r: %s",
+                chain_id,
+                log,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"upgrade history failed to parse eRPC log for chain_id={chain_id}") from exc
+        if not event:
+            logger.error("Upgrade history eRPC log did not parse chain_id=%s log=%r", chain_id, log)
+            raise RuntimeError(f"upgrade history eRPC log did not parse for chain_id={chain_id}")
+        all_events.append(event)
 
     all_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
     return all_events
@@ -338,13 +444,14 @@ def _build_implementation_timeline(
     return records
 
 
-def _stamp_implementation_contracts(implementations: list[dict]) -> None:
+def _stamp_implementation_contracts(implementations: list[dict], *, chain_id: int) -> None:
     for impl in implementations:
         address = impl.get("address")
         if not isinstance(address, str) or not address:
             continue
         impl["contract"] = make_contract(
             address=address,
+            chain_id=chain_id,
             name=impl.get("contract_name"),
         )
 
@@ -354,29 +461,14 @@ def _stamp_implementation_contracts(implementations: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _enrich_implementations(implementations: list[dict], known_names: dict[str, str]) -> None:
-    """Add contract names to historical implementations not already named in dependencies.json."""
-    from utils.etherscan import get_contract_info, parallel_get
-
-    addrs_to_fetch = sorted({impl["address"] for impl in implementations if impl["address"] not in known_names})
-    fetched: dict[str, str | None] = {}
-    if addrs_to_fetch:
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in addrs_to_fetch}
-        results = parallel_get(calls)
-        for addr in addrs_to_fetch:
-            value = results.get(addr)
-            if isinstance(value, tuple) and len(value) == 2:
-                fetched[addr] = value[0]
-            else:
-                fetched[addr] = None
+def _enrich_implementations(implementations: list[dict], known_names: dict[str, str], *, chain_id: int) -> None:
+    """Add already-known contract names to historical implementations."""
+    del chain_id
 
     for impl in implementations:
         addr = impl["address"]
         if addr in known_names:
             impl["contract_name"] = known_names[addr]
-            continue
-        if fetched.get(addr):
-            impl["contract_name"] = fetched[addr]
 
 
 def _extract_proxies_from_dependencies(
@@ -412,7 +504,7 @@ def _extract_proxies_from_dependencies(
         proxy_meta[target] = (proxy_type, current_impl)
 
     # Still harvest known names from dependencies so historical impl
-    # enrichment can reuse them without extra Etherscan calls.
+    # enrichment can reuse them without fetching external metadata.
     for addr, info in deps.get("dependencies", {}).items():
         if info.get("contract_name"):
             known_names[normalize_address(addr)] = info["contract_name"]
@@ -433,18 +525,17 @@ def _strip_internal(event: dict) -> dict:
     return {k: v for k, v in event.items() if not k.startswith("_")}
 
 
-def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block: int = 0) -> dict:
+def build_upgrade_history(dependencies: dict, *, chain_id: int, enrich: bool = True, from_block: int = 0) -> dict:
     """Build upgrade history for all proxy contracts in a unified deps dict.
 
     Args:
         dependencies: Unified dependency payload as produced by
             ``services.discovery.unified_dependencies.build_unified_dependencies``.
-        enrich: If True (default), resolve contract names for historical
-            implementations via Etherscan.  Set to False for faster runs
-            when names are not needed.
+        enrich: Retained for compatibility; no external metadata fetch is
+            performed. Historical implementation names are populated only
+            from names already present in the dependency payload.
         from_block: Only fetch events from this block number onwards.
-            Defaults to 0 (fetch all history).  Used for incremental
-            fetching when previous upgrade history is available.
+            Defaults to 0, which fetches the full history.
 
     Returns:
         UpgradeHistoryOutput dict with per-proxy upgrade timelines.
@@ -454,14 +545,14 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     if not proxy_meta:
         return {
             "schema_version": "0.1",
-            "contract": make_contract(address=target_address),
+            "contract": make_contract(address=target_address, chain_id=chain_id),
             "target_address": target_address,
             "proxies": {},
             "total_upgrades": 0,
         }
 
-    # Etherscan getLogs — indexed by address+topic, <1s per query
-    all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block)
+    # eRPC getLogs — bounded windows over the address/topic set.
+    all_events = fetch_upgrade_events(list(proxy_meta.keys()), chain_id=chain_id, from_block=from_block)
 
     # Group events by emitting proxy address
     events_by_proxy: dict[str, list[dict]] = {addr: [] for addr in proxy_meta}
@@ -482,6 +573,7 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         proxies[addr] = {
             "contract": make_contract(
                 address=addr,
+                chain_id=chain_id,
                 is_proxy=True,
                 proxy_address=addr,
                 implementation_addresses=[current_impl] if current_impl else [],
@@ -499,16 +591,12 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         total_upgrades += len(upgrade_events)
         all_implementations.extend(implementations)
 
-    # Resolve names: always apply already-known names from dependencies.json.
-    # When enrich=True, also call Etherscan for historical unknowns.
-    if enrich:
-        _enrich_implementations(all_implementations, known_names)
-    else:
-        # Still apply names we already have — zero extra API calls
-        for impl in all_implementations:
-            if impl["address"] in known_names:
-                impl["contract_name"] = known_names[impl["address"]]
-    _stamp_implementation_contracts(all_implementations)
+    del enrich
+
+    # Apply already-known names from dependencies.json. Unknown names stay
+    # absent; upgrade history does not make metadata enrichment calls.
+    _enrich_implementations(all_implementations, known_names, chain_id=chain_id)
+    _stamp_implementation_contracts(all_implementations, chain_id=chain_id)
 
     target_proxy_type, target_current_impl = proxy_meta.get(target_address, ("unknown", None))
 
@@ -516,6 +604,7 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         "schema_version": "0.1",
         "contract": make_contract(
             address=target_address,
+            chain_id=chain_id,
             is_proxy=target_address in proxy_meta,
             proxy_address=target_address if target_address in proxy_meta else None,
             implementation_addresses=[target_current_impl] if target_current_impl else [],
@@ -531,15 +620,14 @@ def project_to_events(
     session,
     *,
     subject_contract_id: int,
-    subject_chain: str | None,
+    subject_chain_id: int,
     artifact_data: dict,
 ) -> dict:
     """Project an ``upgrade_history`` artifact into ``UpgradeEvent`` rows.
 
-    Forward direction of the artifact ⇄ rows pair (the inverse is
-    ``synthesize_from_events`` below). Idempotent: deletes existing
-    ``UpgradeEvent`` rows for each proxy contract (and the subject, as
-    legacy cleanup) before re-inserting from the artifact. Caller commits.
+    Idempotent: deletes existing ``UpgradeEvent`` rows for each proxy contract
+    (and the subject, as legacy cleanup) before re-inserting from the artifact.
+    Caller commits.
 
     Returns counters useful for logging; ``impl_addrs`` is the set of
     historical impl addresses encountered, suitable for feeding to the
@@ -574,11 +662,10 @@ def project_to_events(
         # UpgradeEvent.contract_id must point at the PROXY's row, not the
         # subject's — the artifact can describe any proxy in the dependency
         # graph, not just the subject's own.
-        chain_filter = Contract.chain == subject_chain if subject_chain is not None else Contract.chain.is_(None)
         proxy_contract = session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == proxy_addr.lower(),
-                chain_filter,
+                Contract.chain_id == subject_chain_id,
             )
         ).scalar_one_or_none()
         if proxy_contract is None:
@@ -618,10 +705,11 @@ def backfill_historical_impl_contracts(
     session,
     *,
     protocol_id: int,
-    chain: str | None,
+    chain_id: int,
     impl_addrs: set[str],
     parent_proxy_sources: list[str] | None,
     parent_proxy_current_impl_address: str | None = None,
+    known_names: dict[str, str] | None = None,
 ) -> None:
     """Ensure a Contract row exists for each historical impl address.
 
@@ -652,8 +740,8 @@ def backfill_historical_impl_contracts(
 
     For each address, three cases (when ownership IS asserted):
       1. No Contract row exists → create one tagged
-         ``discovery_source='upgrade_history'`` with Etherscan-resolved
-         name. Normal path for newly-surfaced impls.
+         ``discovery_source='upgrade_history'``. Normal path for
+         newly-surfaced impls.
       2. Row exists with ``protocol_id`` NULL or equal to ours → adopt.
          Sets the upgrade_history tag if empty, sets protocol_id. Keeps
          existing name/analysis fields intact.
@@ -666,19 +754,23 @@ def backfill_historical_impl_contracts(
     from the new row and branch (2) becomes a no-op (orphan adoption
     is the leak we're closing). Branch (3) is unchanged.
 
-    Etherscan name resolution uses the shared ``get_contract_info`` cache,
-    so re-analyzing a protocol re-hits only new impls. Per-address errors
-    are swallowed so one flaky lookup doesn't wreck the whole backfill.
+    ``known_names`` maps implementation addresses to names already present
+    in the upgrade artifact. This path does not perform explorer metadata
+    calls for enrichment.
     """
     from sqlalchemy import func, select
 
     from db.models import Contract
     from services.discovery.ranking import CURRENT_IMPLEMENTATION_SOURCE
     from services.discovery.source_confidence import asserts_ownership
-    from utils.etherscan import get_contract_info, parallel_get
 
+    chain_id = require_supported_chain_id(
+        chain_id=chain_id,
+        context=f"historical implementation backfill protocol {protocol_id}",
+    )
     if not impl_addrs:
         return
+    known_names = {addr.lower(): name for addr, name in (known_names or {}).items() if addr and name}
 
     # The proxy's CURRENT impl appears in its own last ``Upgraded`` event, so it
     # lands in ``impl_addrs`` alongside genuinely-superseded impls. Tag it as the
@@ -702,13 +794,12 @@ def backfill_historical_impl_contracts(
     # source in the LRTSquare* shape (LOW-adopted UUPSProxy with
     # HIGH-sourced LRTSquaredCore implementation). Belt-and-suspenders
     # mismatch guard: if the impl belongs to a different protocol, the
-    # chain isn't ours — leave the historical impls orphan.
+    # chain_id isn't ours — leave the historical impls orphan.
     if not parent_owns and parent_proxy_current_impl_address:
-        chain_filter_impl = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
         impl_row = session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == parent_proxy_current_impl_address.lower(),
-                chain_filter_impl,
+                Contract.chain_id == chain_id,
             )
         ).scalar_one_or_none()
         if (
@@ -721,33 +812,18 @@ def backfill_historical_impl_contracts(
     owns = asserts_ownership(None, parent_owns=parent_owns, parent_relationship="implementation")
     owning_protocol_id = protocol_id if owns else None
 
-    # Match the natural (address, chain) uniqueness grain. Cross-chain
+    # Match the natural (address, chain_id) uniqueness grain. Cross-chain
     # protocols (rare but real — CREATE2 / deterministic deployments can
     # put the same impl address on Ethereum and Polygon) would otherwise
     # look like cross-protocol collisions and get skipped incorrectly.
-    chain_filter = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
     existing_rows = {
         row.address.lower(): row
-        for row in session.execute(select(Contract).where(Contract.address.in_(impl_addrs), chain_filter))
+        for row in session.execute(
+            select(Contract).where(Contract.address.in_(impl_addrs), Contract.chain_id == chain_id)
+        )
         .scalars()
         .all()
     }
-
-    # Batch Etherscan name lookups for new addresses; sequential calls block
-    # for N round-trips when re-analyzing a protocol with many historical impls.
-    new_addrs = [addr for addr in impl_addrs if addr not in existing_rows]
-    name_results: dict[str, str | None] = {}
-    if new_addrs:
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in new_addrs}
-        fetched = parallel_get(calls)
-        for addr in new_addrs:
-            value = fetched.get(addr)
-            if isinstance(value, tuple) and len(value) == 2:
-                name_results[addr] = value[0]
-            else:
-                if isinstance(value, BaseException):
-                    logger.warning("Etherscan name fetch failed for historical impl %s: %s", addr, value)
-                name_results[addr] = None
 
     created = 0
     adopted = 0
@@ -791,18 +867,16 @@ def backfill_historical_impl_contracts(
                 )
             continue
 
-        name = name_results.get(addr)
-
         new_row = Contract(
             protocol_id=owning_protocol_id,
             address=addr,
-            chain=chain,
-            contract_name=name or "UnknownImpl",
+            chain_id=chain_id,
+            contract_name=known_names.get(addr),
             is_proxy=False,
             job_id=None,
             # Current impl → live marker (stays analyzable); superseded → anchor.
             discovery_sources=[CURRENT_IMPLEMENTATION_SOURCE] if is_current else ["upgrade_history"],
-            source_verified=bool(name),
+            source_verified=False,
         )
         session.add(new_row)
         created += 1
@@ -836,7 +910,7 @@ def backfill_historical_impl_contracts(
                 # get their coverage links written here; the verdict
                 # promotion to ``reviewed_commit`` arrives a few seconds-
                 # to-minutes later instead of synchronously. Holding verify
-                # inline fanned out 4-way Etherscan + GitHub bursts per
+                # inline fanned out 4-way explorer + GitHub bursts per
                 # backfilled impl, which 429'd the global rate-limit and
                 # cascaded into Resolution / Static (#82).
                 refreshed += upsert_coverage_for_contract(
@@ -845,14 +919,13 @@ def backfill_historical_impl_contracts(
                     verify_source_equivalence=False,
                 )
             except Exception as exc:
-                # One flaky match shouldn't poison the rest; admin
-                # refresh_coverage can fill in what we missed.
-                logger.warning(
+                logger.error(
                     "Coverage refresh failed for backfilled impl contract_id=%s: %s",
                     contract_id,
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
+                raise RuntimeError(f"coverage refresh failed for backfilled impl contract_id={contract_id}") from exc
         session.commit()
         if refreshed:
             logger.info(
@@ -861,106 +934,3 @@ def backfill_historical_impl_contracts(
                 refreshed,
                 len(refresh_ids),
             )
-
-
-def synthesize_from_events(session, contract) -> dict | None:
-    """Rebuild the ``upgrade_history`` artifact shape from ``UpgradeEvent`` rows.
-
-    Used as a fallback when the artifact is missing or unreachable in object
-    storage. The relational ``UpgradeEvent`` table is the source of truth for
-    the count + last-block badges already shown in the company overview, so
-    deriving the per-proxy detail view from the same data keeps the two
-    consistent. Returns None when there are no events for this contract.
-    """
-    from sqlalchemy import select
-
-    from db.models import Contract, UpgradeEvent
-
-    rows = (
-        session.execute(
-            select(UpgradeEvent)
-            .where(UpgradeEvent.contract_id == contract.id)
-            .order_by(UpgradeEvent.block_number.asc().nullslast(), UpgradeEvent.id.asc())
-        )
-        .scalars()
-        .all()
-    )
-    if not rows:
-        return None
-
-    events: list[dict] = []
-    for ev in rows:
-        if not ev.new_impl:
-            continue
-        # The canonical artifact (worker-built) stores ts as unix epoch
-        # seconds — see services/discovery/upgrade_history.parse_upgrade_log
-        # at the _hex_to_int(ts) call. The frontend formatTimestamp does
-        # `new Date(ts * 1000)`, so anything else (ISO string) renders as
-        # "Invalid Date". Match the canonical shape.
-        events.append(
-            {
-                "event_type": "upgraded",
-                "block_number": ev.block_number,
-                "timestamp": int(ev.timestamp.timestamp()) if ev.timestamp else None,
-                "tx_hash": ev.tx_hash,
-                "implementation": ev.new_impl.lower(),
-            }
-        )
-    if not events:
-        return None
-
-    current_impl = (contract.implementation or events[-1]["implementation"]).lower()
-    implementations = _build_implementation_timeline(events, current_impl)
-
-    impl_addrs = {impl["address"] for impl in implementations}
-    if impl_addrs:
-        name_rows = session.execute(
-            select(Contract.address, Contract.contract_name).where(Contract.address.in_(list(impl_addrs)))
-        ).all()
-        names = {addr.lower(): name for addr, name in name_rows if name}
-        for impl in implementations:
-            n = names.get(impl["address"].lower())
-            if n:
-                impl["contract_name"] = n
-    _stamp_implementation_contracts(implementations)
-
-    proxy_addr = (contract.address or "").lower()
-    proxy = {
-        "contract": make_contract(
-            address=proxy_addr,
-            name=contract.contract_name,
-            is_proxy=True,
-            proxy_address=proxy_addr,
-            implementation_addresses=[current_impl] if current_impl else [],
-            admin_addresses=[contract.admin] if contract.admin else [],
-            beacon_addresses=[contract.beacon] if contract.beacon else [],
-            deployer_address=contract.deployer,
-            proxy_type=contract.proxy_type,
-        ),
-        "proxy_address": proxy_addr,
-        "proxy_type": contract.proxy_type or "unknown",
-        "current_implementation": current_impl,
-        "upgrade_count": len(events),
-        "first_upgrade_block": events[0]["block_number"],
-        "last_upgrade_block": events[-1]["block_number"],
-        "implementations": implementations,
-        "events": events,
-    }
-    return {
-        "schema_version": "0.1",
-        "contract": make_contract(
-            address=proxy_addr,
-            name=contract.contract_name,
-            is_proxy=True,
-            proxy_address=proxy_addr,
-            implementation_addresses=[current_impl] if current_impl else [],
-            admin_addresses=[contract.admin] if contract.admin else [],
-            beacon_addresses=[contract.beacon] if contract.beacon else [],
-            deployer_address=contract.deployer,
-            proxy_type=contract.proxy_type,
-        ),
-        "target_address": proxy_addr,
-        "proxies": {proxy_addr: proxy},
-        "total_upgrades": len(events),
-        "synthesized": True,
-    }

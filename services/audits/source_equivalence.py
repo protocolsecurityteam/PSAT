@@ -1,13 +1,12 @@
 """Prove an audit reviewed the code currently deployed at an impl address.
 
 Forensic complement to temporal matching: if the audit PDF mentions commit
-X and commit X's source is byte-identical to the impl's Etherscan-verified
-source, the audit's coverage of that impl is proven. Source-text equality
+X and commit X's source is byte-identical to the impl source persisted by
+the pipeline, the audit's coverage of that impl is proven. Source-text equality
 is sufficient — no compilation step needed.
 
-Impl source: DB ``SourceFile`` rows first (populated by the static worker),
-Etherscan ``getsourcecode`` fallback. Audit source: GitHub raw, keyed on
-``source_repo`` + ``reviewed_commits``.
+Impl source: DB ``SourceFile`` rows populated by the discovery/static pipeline.
+Audit source: GitHub raw, keyed on ``source_repo`` + ``reviewed_commits``.
 
 Verification returns an ``EquivalenceOutcome`` that distinguishes
 "proven" from each of several failure modes, so callers can persist a
@@ -32,9 +31,9 @@ import requests
 from services.audits.types import (
     EquivalenceMatch,
     EquivalenceOutcome,
-    EtherscanFetch,
     GithubFetch,
     GithubHashResult,
+    SourceFetch,
     VerifiedSource,
 )
 
@@ -79,8 +78,7 @@ EQUIVALENCE_STATUSES = frozenset(
         "hash_mismatch",  # ✗ files fetched on both sides, content differs
         "commit_not_found_in_repo",  # audit's commit doesn't exist in source_repo
         "candidate_path_missing",  # commit exists; our path guess missed (may be flattened source)
-        "etherscan_unverified",  # deployed contract has no verified source
-        "etherscan_fetch_failed",  # transient — Etherscan returned 5xx / timeout
+        "source_missing",  # no persisted source files for the contract row
         "github_fetch_failed",  # transient — GitHub returned 5xx / timeout
         "no_reviewed_commit",  # audit text had no commit SHA — cannot verify
         "no_source_repo",  # audit.source_repo is NULL — can't look it up
@@ -100,7 +98,7 @@ EQUIVALENCE_STATUSES = frozenset(
 # rate-limit failures). The rest are semantic — hash_mismatch stays
 # hash_mismatch until code changes on one side, no_reviewed_commit stays
 # until the PDF text is re-extracted, etc.
-TRANSIENT_STATUSES = frozenset({"etherscan_fetch_failed", "github_fetch_failed"})
+TRANSIENT_STATUSES = frozenset({"github_fetch_failed"})
 
 
 # ---------------------------------------------------------------------------
@@ -245,75 +243,47 @@ def extract_reviewed_commits(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Etherscan source fetch
-# ---------------------------------------------------------------------------
-
-
 def _hash_source_text(text: str) -> str:
     """Stable hash of a source file's content for equality comparison."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def fetch_etherscan_source_files(address: str) -> EtherscanFetch:
-    """Return parsed verified-source for ``address`` as file-path→sha256.
-
-    Delegates parsing to ``services.discovery.fetch.parse_sources`` — the
-    same function the discovery worker uses when persisting source to the
-    DB. Distinguishes three outcomes: parsed (``ok``), contract-not-verified
-    (``unverified``), transport/API failure (``fetch_failed``).
-    """
-    from services.discovery.fetch import parse_sources
-    from utils.etherscan import get
-
-    try:
-        data = get("contract", "getsourcecode", address=address)
-        result = data["result"][0]
-    except Exception as exc:
-        return EtherscanFetch(source=None, status="fetch_failed", detail=f"etherscan api error: {exc}")
-
-    contract_name = (result.get("ContractName") or "").strip() or None
-    compiler_version = (result.get("CompilerVersion") or "").strip() or None
-    files = parse_sources(result)
-    if not files:
-        # Etherscan returns empty SourceCode when the address has no verified
-        # source. This is a permanent status until someone submits verification.
-        return EtherscanFetch(
-            source=None,
-            status="unverified",
-            detail=f"etherscan has no verified source for {address}",
-        )
-    hashed = {path: _hash_source_text(content) for path, content in files.items()}
-    return EtherscanFetch(
-        source=VerifiedSource(
-            contract_name=contract_name,
-            compiler_version=compiler_version,
-            files=hashed,
-        ),
-        status="ok",
-        detail="",
-    )
-
-
 def fetch_db_source_files(session: Any, contract_id: int) -> VerifiedSource | None:
     """Return a Contract's verified source from ``SourceFile`` rows.
 
-    Reuses what the discovery worker already persisted (keyed on
-    ``Contract.job_id``) to avoid an Etherscan round-trip. Returns ``None``
-    when the contract hasn't been analyzed yet — caller falls back to
-    ``fetch_etherscan_source_files``.
+    Reuses what the discovery worker already persisted for the latest
+    source-bearing job with the contract's canonical ``(address, chain_id)``
+    identity. Returns ``None`` when the contract hasn't been analyzed yet.
     """
-    from db.models import Contract
+    from sqlalchemy import func, select
+
+    from db.models import Contract, Job, JobStatus, SourceFile
     from db.queue import get_source_files
+    from utils.rpc import require_supported_chain_id
 
     contract = session.get(Contract, contract_id)
-    if contract is None or contract.job_id is None:
+    if contract is None or not contract.address:
+        return None
+    chain_id = require_supported_chain_id(
+        chain_id=contract.chain_id,
+        context=f"source equivalence contract {contract_id}",
+    )
+    source_job_id = session.execute(
+        select(Job.id)
+        .join(SourceFile, SourceFile.job_id == Job.id)
+        .where(
+            func.lower(Job.address) == contract.address.lower(),
+            Job.chain_id == chain_id,
+            ~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)),
+        )
+        .order_by(Job.updated_at.desc(), Job.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if source_job_id is None:
         return None
     try:
-        files = get_source_files(session, contract.job_id)
+        files = get_source_files(session, source_job_id)
     except Exception as exc:
-        # Caller falls back to fetch_etherscan_source_files; the empty return is a
-        # clean miss, not a degraded outcome — level audit only, no record_degraded.
         logger.warning(
             "DB source file fetch failed for contract %s: %s",
             contract_id,
@@ -331,26 +301,29 @@ def fetch_db_source_files(session: Any, contract_id: int) -> VerifiedSource | No
     )
 
 
-def fetch_contract_source(session: Any, contract_id: int) -> EtherscanFetch:
-    """DB-first resolver: try ``SourceFile`` rows, fall back to Etherscan.
+def fetch_contract_source(session: Any, contract_id: int) -> SourceFetch:
+    """Return persisted source files for a contract without external fallback.
 
-    Wraps the DB result in the same ``EtherscanFetch`` envelope the
-    Etherscan call returns so the orchestrator handles one shape. DB-hit
-    becomes ``status='ok'`` with ``detail=''``.
+    The envelope shape is retained for existing callers, but a DB miss is a
+    first-class ``source_missing`` status instead of an Etherscan fetch.
     """
     from db.models import Contract
 
     db_source = fetch_db_source_files(session, contract_id)
     if db_source is not None:
-        return EtherscanFetch(source=db_source, status="ok", detail="")
+        return SourceFetch(source=db_source, status="ok", detail="")
     contract = session.get(Contract, contract_id)
     if contract is None or not contract.address:
-        return EtherscanFetch(
+        return SourceFetch(
             source=None,
-            status="fetch_failed",
+            status="source_missing",
             detail=f"contract {contract_id} has no address",
         )
-    return fetch_etherscan_source_files(contract.address)
+    return SourceFetch(
+        source=None,
+        status="source_missing",
+        detail=f"no persisted source files for contract {contract_id}",
+    )
 
 
 # Kept for backwards compatibility with callers expecting the old
@@ -520,15 +493,15 @@ def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) 
 # ---------------------------------------------------------------------------
 
 
-def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str]:
-    """Paths in Etherscan's source that plausibly correspond to ``name``.
+def _candidate_paths_for_name(name: str, source_paths: list[str]) -> list[str]:
+    """Paths in the persisted impl source that plausibly correspond to ``name``.
 
-    Prefers Etherscan paths verbatim (they carry the project's actual
-    layout); falls back to conventional ``src/`` / ``contracts/`` when the
-    bundle doesn't include a matching name (flattened verification).
+    Prefers persisted source paths verbatim because they carry the project's
+    actual layout; adds conventional ``src/`` / ``contracts/`` candidates when
+    the bundle doesn't include a matching name.
     """
     name_lc = name.lower()
-    matches = [p for p in etherscan_paths if p.rsplit("/", 1)[-1].lower() in (f"{name_lc}.sol", f"{name_lc}.vy")]
+    matches = [p for p in source_paths if p.rsplit("/", 1)[-1].lower() in (f"{name_lc}.sol", f"{name_lc}.vy")]
     if matches:
         return matches
     return [f"src/{name}.sol", f"contracts/{name}.sol"]
@@ -656,7 +629,7 @@ def _verify_single_repo(
     """
     if not impl_source.files:
         return EquivalenceOutcome(
-            status="etherscan_unverified",
+            status="source_missing",
             reason="impl source has no files",
         )
     if not scope_name:
@@ -665,8 +638,8 @@ def _verify_single_repo(
             reason="no scope_name provided",
         )
 
-    etherscan_paths = list(impl_source.files.keys())
-    candidate_paths = _candidate_paths_for_name(scope_name, etherscan_paths)
+    source_paths = list(impl_source.files.keys())
+    candidate_paths = _candidate_paths_for_name(scope_name, source_paths)
 
     # Accumulate evidence across (commit, path) attempts. We can prove on
     # the first match and short-circuit; otherwise we need to summarize
@@ -681,7 +654,7 @@ def _verify_single_repo(
     # Each ``fetch_github_source_hash`` is an independent HTTP call; the
     # prior nested loop walked the cross-product serially so a wide audit
     # paid one RTT per pair (5 commits × 20 paths = 100 sequential GitHub
-    # round-trips per scope name). Skips pairs whose Etherscan path is
+    # round-trips per scope name). Skips pairs whose persisted source path is
     # missing so ``candidate_path_missing`` stays accurate.
     from utils.concurrency import parallel_map
 
@@ -710,8 +683,8 @@ def _verify_single_repo(
         commit_had_transient = False
         commit_had_404 = False
         for path in candidate_paths:
-            etherscan_hash = impl_source.files.get(path)
-            if not etherscan_hash:
+            source_hash = impl_source.files.get(path)
+            if not source_hash:
                 continue
             raw_outcome = fetch_results.get((commit, path))
             if isinstance(raw_outcome, BaseException):
@@ -725,18 +698,18 @@ def _verify_single_repo(
             gh = _coerce_github_hash_result(raw_outcome)
             if gh.status == "ok" and gh.sha256 is not None:
                 commit_hit_anything = True
-                if gh.sha256 == etherscan_hash:
+                if gh.sha256 == source_hash:
                     matches.append(
                         EquivalenceMatch(
                             commit=commit,
                             scope_name=scope_name,
-                            etherscan_path=path,
-                            source_sha256=etherscan_hash,
+                            source_path=path,
+                            source_sha256=source_hash,
                         )
                     )
                 else:
                     any_hash_mismatch = True
-                    details.append(f"{commit[:8]} {path}: github={gh.sha256[:8]} etherscan={etherscan_hash[:8]}")
+                    details.append(f"{commit[:8]} {path}: github={gh.sha256[:8]} source={source_hash[:8]}")
             elif gh.status == "http_404":
                 commit_had_404 = True
             elif gh.status in ("http_5xx", "transport_error"):
@@ -785,7 +758,7 @@ def _verify_single_repo(
         )
 
     # Commits resolve, but our candidate paths for ``scope_name`` never hit.
-    # Most common cause: Etherscan's layout doesn't match GitHub's, or the
+    # Most common cause: the persisted source layout doesn't match GitHub's, or the
     # contract is in a subpath our heuristic doesn't guess.
     return EquivalenceOutcome(
         status="candidate_path_missing",
@@ -880,13 +853,11 @@ def verify_audit_row_covers_contract(
         return EquivalenceOutcome(status="no_reviewed_commit", reason="no matched_name and empty scope")
 
     fetch = fetch_contract_source(session, contract_id)
-    if fetch.status == "unverified":
-        return EquivalenceOutcome(status="etherscan_unverified", reason=fetch.detail)
-    if fetch.status == "fetch_failed":
-        return EquivalenceOutcome(status="etherscan_fetch_failed", reason=fetch.detail)
+    if fetch.status != "ok":
+        return EquivalenceOutcome(status="source_missing", reason=fetch.detail)
     if fetch.source is None:
         # Belt-and-suspenders: ok status should always carry a source.
-        return EquivalenceOutcome(status="etherscan_fetch_failed", reason="empty source")
+        return EquivalenceOutcome(status="source_missing", reason="empty source")
 
     return verify_audit_covers_impl(
         reviewed_commits=commits,

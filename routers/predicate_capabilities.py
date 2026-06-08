@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 
 from db.models import Job, JobStatus, Protocol
 from services.artifacts import get_artifact_field
+from utils.rpc import default_rpc_url, require_supported_chain_id
 
 from . import deps
 
@@ -47,8 +48,8 @@ def _prune_probe_rate_state(now: float) -> None:
             _probe_rate_state.pop(key, None)
 
 
-def _probe_rate_check(admin_key: str | None, address: str) -> None:
-    """Raise HTTPException(429) when the (admin_key, address) sliding
+def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> None:
+    """Raise HTTPException(429) when the (admin_key, chain_id, address) sliding
     window has hit its limit. No-op when the limit is 0 (env override
     for testing / disabled-by-default flag use)."""
     if _PROBE_RATE_LIMIT <= 0:
@@ -58,7 +59,7 @@ def _probe_rate_check(admin_key: str | None, address: str) -> None:
 
     now = _time.time()
     _prune_probe_rate_state(now)
-    key = (admin_key or "<no-key>", address.lower())
+    key = (admin_key or "<no-key>", f"{chain_id}:{address.lower()}")
     state = _probe_rate_state.get(key)
     if state is None:
         state = _collections.deque()
@@ -122,7 +123,7 @@ class _ProbeMembershipRequest(BaseModel):
     function_signature: str = Field(..., description="Full signature, e.g. 'grantRole(bytes32,address)'")
     predicate_index: int = Field(..., ge=0, description="DFS-order leaf index in the function's predicate tree")
     member: str = Field(..., description="Address being tested for membership in the leaf's set")
-    chain_id: int = Field(default=1, description="Chain id for repo lookups (defaults to ethereum mainnet)")
+    chain_id: int = Field(..., ge=1, description="Chain id for repo lookups")
     block: int | None = Field(default=None, description="Optional block number for point-in-time probes")
 
     @field_validator("member")
@@ -144,7 +145,7 @@ class _ProbeSignatureRequest(BaseModel):
             "whether this address is in the leaf's allowed-signer set."
         ),
     )
-    chain_id: int = Field(default=1)
+    chain_id: int = Field(..., ge=1)
     block: int | None = Field(default=None)
 
     @field_validator("recovered_signer")
@@ -185,6 +186,14 @@ def _compute_data_freshness(session, address: str, chain_id: int) -> dict[str, A
     }
 
 
+def _supported_chain_id_or_400(chain_id: int, *, context: str) -> int:
+    try:
+        return require_supported_chain_id(chain_id=chain_id, context=context)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -208,7 +217,8 @@ def probe_contract_membership(
     from the semantic capability rendering.
     """
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    chain_id = _supported_chain_id_or_400(req.chain_id, context=f"membership probe for {addr}")
+    _probe_rate_check(x_psat_admin_key, addr, chain_id)
 
     # Lazy-import the resolver bits so the probe route doesn't impose
     # its dependency surface on the rest of the API.
@@ -220,13 +230,14 @@ def probe_contract_membership(
     with deps.SessionLocal() as session:
         job = session.execute(
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
+            .where(Job.chain_id == chain_id)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         ).scalar_one_or_none()
         if job is None:
-            raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
+            raise HTTPException(status_code=404, detail=f"No completed analysis job found for {chain_id}:{addr}")
 
         artifact = get_artifact_field(session, job.id, "predicate_trees")
         if artifact is None:
@@ -262,8 +273,10 @@ def probe_contract_membership(
 
         registry = AdapterRegistry()
         registry.register(EventIndexedAdapter)
+        rpc_url = default_rpc_url(chain_id=chain_id)
         ctx = EvaluationContext(
-            chain_id=req.chain_id,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
             contract_address=addr,
             block=req.block,
             event_log_repo=PostgresEventLogRepo(session),
@@ -297,17 +310,19 @@ def probe_contract_signature(
     from services.resolution.repos import PostgresEventLogRepo
 
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    chain_id = _supported_chain_id_or_400(req.chain_id, context=f"signature probe for {addr}")
+    _probe_rate_check(x_psat_admin_key, addr, chain_id)
     with deps.SessionLocal() as session:
         job = session.execute(
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
+            .where(Job.chain_id == chain_id)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         ).scalar_one_or_none()
         if job is None:
-            raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
+            raise HTTPException(status_code=404, detail=f"No completed analysis job found for {chain_id}:{addr}")
         artifact = get_artifact_field(session, job.id, "predicate_trees")
         if artifact is None:
             raise HTTPException(
@@ -330,8 +345,10 @@ def probe_contract_signature(
 
         registry = AdapterRegistry()
         registry.register(EventIndexedAdapter)
+        rpc_url = default_rpc_url(chain_id=chain_id)
         ctx = EvaluationContext(
-            chain_id=req.chain_id,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
             contract_address=addr,
             block=req.block,
             event_log_repo=PostgresEventLogRepo(session),
@@ -349,7 +366,7 @@ def probe_contract_signature(
 @router.get("/api/contract/{address}/capabilities")
 def get_contract_capabilities(
     address: str,
-    chain_id: int = 1,
+    chain_id: int,
     block: int | None = None,
 ) -> dict[str, Any]:
     """Return semantic capabilities per externally-callable function on
@@ -382,44 +399,34 @@ def get_contract_capabilities(
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     addr = deps._normalize_address_or_400(address)
+    chain_id = _supported_chain_id_or_400(chain_id, context=f"contract capabilities for {addr}")
     cache_key = (addr, chain_id, block)
     cached = _capabilities_cache_get(cache_key)
     if cached is not None:
         return cached
 
     with deps.SessionLocal() as session:
-        # Resolve the chain string from the most recent completed Job's
-        # request so ``_load_state_var_values`` can scope ``Contract``
-        # by (address, chain). The resolver itself defaults from the
-        # job's request when chain is None, but doing it here too keeps
-        # cache and direct resolver lookups aligned.
-        chain_str: str | None = None
         latest_job = session.execute(
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
+            .where(Job.chain_id == chain_id)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         ).scalar_one_or_none()
-        if latest_job is not None and isinstance(latest_job.request, dict):
-            req_chain = latest_job.request.get("chain")
-            if isinstance(req_chain, str) and req_chain:
-                chain_str = req_chain
         capabilities = resolve_contract_capabilities(
             session,
             address=addr,
             chain_id=chain_id,
             block=block,
             job_id=latest_job.id if latest_job is not None else None,
-            chain=chain_str,
         )
         if capabilities is None:
             raise HTTPException(
                 status_code=404,
                 detail=(
                     "No semantic capabilities for this address — either no completed "
-                    "analysis exists or the predicate-tree artifact is missing. Fall "
-                    "back to /api/company/* or /api/jobs?address=..."
+                    "analysis exists or the predicate-tree artifact is missing."
                 ),
             )
         freshness = _compute_data_freshness(session, addr, chain_id)
@@ -451,26 +458,31 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
         {
           "company": "<name>",
           "contracts": {
-            "0xab...": {
-              "guardedFn()": {
-                "kind": "finite_set", "members": [...],
-                "membership_quality": "exact",
-                "confidence": "enumerable", ...
-              },
-              ...
+            "1:0xab...": {
+              "address": "0xab...",
+              "chain_id": 1,
+              "capabilities": {
+                "guardedFn()": {
+                  "kind": "finite_set", "members": [...],
+                  "membership_quality": "exact",
+                  "confidence": "enumerable", ...
+                },
+                ...
+              }
             },
-            "0xcd...": {...},
-            "0xef...": null
+            "8453:0xab...": {
+              "address": "0xab...",
+              "chain_id": 8453,
+              "capabilities": null
+            }
           },
           "missing_semantic_count": <int>
         }
 
-    A contract with no predicate-tree artifact maps to ``null`` so consumers can
-    distinguish "not yet semantically analyzed" from "semantically analyzed and has no
-    guarded functions" (the latter maps to ``{}``).
-
-    NOT admin-gated — read-only / idempotent, the same shape contract
-    as ``/api/contract/{addr}/capabilities``.
+    A contract with no predicate-tree artifact has ``capabilities: null`` so
+    consumers can distinguish "not yet semantically analyzed" from
+    "semantically analyzed and has no guarded functions" (the latter maps
+    ``capabilities`` to ``{}``).
     """
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -479,59 +491,58 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        addresses = sorted(
-            {
-                (job.address or "").lower()
-                for job in session.execute(
-                    select(Job).where(
-                        Job.protocol_id == protocol_row.id,
-                        Job.status == JobStatus.completed,
-                        Job.address.isnot(None),
-                    )
-                ).scalars()
-                if job.address
-            }
-        )
+        jobs = session.execute(
+            select(Job).where(
+                Job.protocol_id == protocol_row.id,
+                Job.status == JobStatus.completed,
+                Job.address.isnot(None),
+                Job.chain_id.isnot(None),
+            )
+            .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
+        ).scalars()
+        latest_by_identity: dict[tuple[int, str], Job] = {}
+        for job in jobs:
+            if not job.address or job.chain_id is None:
+                continue
+            addr = job.address.lower()
+            chain_id = _supported_chain_id_or_400(
+                job.chain_id,
+                context=f"company semantic capabilities for {company_name} job {job.id}",
+            )
+            key = (chain_id, addr)
+            if key not in latest_by_identity:
+                latest_by_identity[key] = job
 
         contracts: dict[str, Any] = {}
         missing = 0
-        for addr in addresses:
-            # Find the latest completed Job for this (protocol, address)
-            # so the resolver can scope ControllerValue lookups by
-            # (job_id, chain). Without this the resolver hits the
-            # address-only fallback path and warn-logs once per address.
-            latest_job = session.execute(
-                select(Job)
-                .where(Job.protocol_id == protocol_row.id)
-                .where(Job.address == addr)
-                .where(Job.status == JobStatus.completed)
-                .order_by(Job.updated_at.desc(), Job.created_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-            chain_str: str | None = None
-            if latest_job is not None and isinstance(latest_job.request, dict):
-                req_chain = latest_job.request.get("chain")
-                if isinstance(req_chain, str) and req_chain:
-                    chain_str = req_chain
+        for (chain_id, addr), latest_job in sorted(latest_by_identity.items()):
             try:
                 caps = resolve_contract_capabilities(
                     session,
                     address=addr,
-                    job_id=latest_job.id if latest_job is not None else None,
-                    chain=chain_str,
+                    job_id=latest_job.id,
+                    chain_id=chain_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "semantic capability resolution failed for %s in company %s: %s",
+                logger.error(
+                    "semantic capability resolution failed for chain_id=%s address=%s in company %s: %s",
+                    chain_id,
                     addr,
                     company_name,
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
-                caps = None
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"semantic capability resolution failed for {chain_id}:{addr}",
+                ) from exc
             if caps is None:
                 missing += 1
-            contracts[addr] = caps
+            contracts[f"{chain_id}:{addr}"] = {
+                "address": addr,
+                "chain_id": chain_id,
+                "capabilities": caps,
+            }
 
         return {
             "company": company_name,

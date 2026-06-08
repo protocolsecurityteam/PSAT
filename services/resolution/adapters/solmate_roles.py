@@ -20,12 +20,15 @@ a present-set keyed by one member; it cannot express this two-event join
 
 from __future__ import annotations
 
+import logging
 from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
 from ..capabilities import CapabilityExpr, Condition, Confidence, ExternalCheck, MembershipQuality
 from . import EvaluationContext
+
+logger = logging.getLogger(__name__)
 
 
 def _t0(signature: str) -> str:
@@ -117,8 +120,17 @@ class SolmateRolesAuthorityAdapter:
 
         try:
             rows = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=ctx.block)
-        except Exception:
-            return _check_only(authority, descriptor, ["event_log_backend_error"])
+        except Exception as exc:
+            logger.error(
+                "Solmate RolesAuthority event-log backend failed chain_id=%s authority=%s: %s",
+                ctx.chain_id,
+                authority,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(
+                f"Solmate RolesAuthority event-log backend failed chain_id={ctx.chain_id} authority={authority}"
+            ) from exc
 
         roles_for_target_sig: set[int] = set()
         public = False
@@ -218,9 +230,19 @@ def _safe_has_selector(repo: Any, ctx: EvaluationContext, address: str, selector
     if not callable(fn):
         return False
     try:
-        return bool(fn(chain_id=getattr(ctx, "chain_id", 1), contract_address=address, selector=selector))
-    except Exception:
-        return False
+        return bool(fn(chain_id=ctx.chain_id, contract_address=address, selector=selector))
+    except Exception as exc:
+        logger.error(
+            "Solmate RolesAuthority bytecode selector check failed chain_id=%s address=%s selector=%s: %s",
+            ctx.chain_id,
+            address,
+            selector,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(
+            f"Solmate RolesAuthority bytecode selector check failed chain_id={ctx.chain_id} address={address}"
+        ) from exc
 
 
 def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str | None:
@@ -259,8 +281,17 @@ def _min_indexed_block(repo: Any, chain_id: int, event_address: str) -> int | No
         return None
     try:
         value = getter(chain_id=chain_id, event_address=event_address, topic0s=_ROLE_TOPICS)
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.error(
+            "Solmate RolesAuthority min indexed block lookup failed chain_id=%s address=%s: %s",
+            chain_id,
+            event_address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        raise RuntimeError(
+            f"Solmate RolesAuthority min indexed block lookup failed chain_id={chain_id} address={event_address}"
+        ) from exc
     return value if isinstance(value, int) else None
 
 

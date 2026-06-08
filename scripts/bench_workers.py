@@ -326,7 +326,7 @@ def main() -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force a cold-path run by skipping discovery's static-cache shortcut.",
+        help="Force a re-run cascade with proxy implementation dedupe scoped to this run.",
     )
     parser.add_argument(
         "--follow-all-jobs",

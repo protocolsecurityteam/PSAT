@@ -16,9 +16,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from db.models import AuditReport, Contract
+from db.models import AuditReport, Contract, Job, JobStatus
 from services.chat.data import (
     contract_brief,
     list_protocol_principals,
@@ -27,6 +27,7 @@ from services.chat.data import (
     role_holders,
     upgrade_summary,
 )
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger("services.chat.tools")
 
@@ -40,12 +41,12 @@ def _get_protocol_info(session, ctx, **_kwargs) -> dict[str, Any]:
     return protocol_brief(session, ctx.company)
 
 
-def _get_contract_info(session, ctx, address: str | None = None, chain: str | None = None, **_kw) -> dict[str, Any]:
+def _get_contract_info(session, ctx, address: str | None = None, chain_id: int | None = None, **_kw) -> dict[str, Any]:
     addr = address or ctx.selected_address
-    chn = chain if chain is not None else ctx.selected_chain
+    chain_id = _effective_chain_id(ctx, chain_id, context=f"chat contract info for {addr or 'selected contract'}")
     if not addr:
         return {"error": "address is required (or select a contract on the canvas)"}
-    return contract_brief(session, addr, chn)
+    return contract_brief(session, addr, chain_id=chain_id)
 
 
 def _source_row_content(row) -> str:
@@ -68,65 +69,70 @@ def _source_row_content(row) -> str:
     return ""
 
 
-def _etherscan_sources(address: str) -> dict[str, str]:
-    """Live-fetch verified source from Etherscan as a fallback when DB
-    rows have no inline content (typical when source bodies live in
-    object storage and the storage backend is unreachable).
-    Returns ``{path: content}`` (empty on failure)."""
-    try:
-        from services.discovery.fetch import parse_sources
-        from utils.etherscan import get_source
+def _source_rows_for_contract(session, source_file_model, contract: Contract) -> list[Any]:
+    chain_id = require_supported_chain_id(
+        chain_id=contract.chain_id,
+        context=f"chat source lookup for contract {contract.id}",
+    )
+    source_job_id = session.execute(
+        select(Job.id)
+        .join(source_file_model, source_file_model.job_id == Job.id)
+        .where(
+            func.lower(Job.address) == contract.address.lower(),
+            Job.chain_id == chain_id,
+            ~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)),
+        )
+        .order_by(Job.updated_at.desc(), Job.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if source_job_id is None:
+        return []
+    return list(session.execute(select(source_file_model).where(source_file_model.job_id == source_job_id)).scalars())
 
-        result = get_source(address)
-        return parse_sources(result) or {}
-    except Exception as exc:
-        logger.warning("etherscan source fetch failed for %s: %s", address, exc)
-        return {}
+
+def _effective_chain_id(ctx: Any, chain_id: int | None = None, *, context: str = "chat tool") -> int | None:
+    if chain_id is not None:
+        return require_supported_chain_id(chain_id=chain_id, context=context)
+    selected = getattr(ctx, "selected_chain_id", None)
+    if selected is not None:
+        return require_supported_chain_id(chain_id=selected, context=f"{context} selected contract")
+    return None
 
 
 def _get_contract_source(
-    session, ctx, address: str | None = None, chain: str | None = None, file: str | None = None, **_kw
+    session, ctx, address: str | None = None, chain_id: int | None = None, file: str | None = None, **_kw
 ) -> dict[str, Any]:
     """Return verified source code for a contract.
 
-    Strategy:
-      1. Read indexed ``SourceFile`` rows for the contract's job. If a
-         row has inline ``content`` we use it directly; otherwise we
-         fetch the body from object storage via ``storage_key``.
-      2. If every row resolves to empty (typical when MinIO/S3 is down
-         or no rows are indexed), live-fetch from Etherscan as a
-         fallback. This keeps the tool useful in environments where the
-         DB only stores hashes/keys.
+    Reads indexed ``SourceFile`` rows for the contract's job. If a row has
+    inline ``content`` we use it directly; otherwise we fetch the body from
+    object storage via ``storage_key``. Missing indexed source is reported as
+    unavailable instead of fetching from a secondary source.
     """
     from db.models import SourceFile
 
     addr = address or ctx.selected_address
-    chn = chain if chain is not None else ctx.selected_chain
+    chain_id = _effective_chain_id(ctx, chain_id, context=f"chat source lookup for {addr or 'selected contract'}")
     if not addr:
         return {"error": "address is required"}
+    try:
+        chain_id = require_supported_chain_id(chain_id=chain_id, context=f"chat source lookup for {addr}")
+    except RuntimeError as exc:
+        return {"error": str(exc), "address": addr}
 
-    from sqlalchemy import func as _func
-
-    stmt = select(Contract).where(_func.lower(Contract.address) == addr.lower())
-    if chn is not None:
-        stmt = stmt.where(Contract.chain == chn)
+    stmt = select(Contract).where(func.lower(Contract.address) == addr.lower(), Contract.chain_id == chain_id)
     contract = session.execute(stmt.limit(1)).scalar_one_or_none()
+    if contract is None:
+        return {"error": f"contract not found: {addr} on chain_id={chain_id}"}
 
-    rows = []
-    if contract is not None and contract.job_id is not None:
-        rows = session.execute(select(SourceFile).where(SourceFile.job_id == contract.job_id)).scalars().all()
+    rows = _source_rows_for_contract(session, SourceFile, contract)
 
-    # Materialize (path, content) pairs from DB. If every body resolves
-    # empty, fall through to Etherscan.
-    db_files: list[tuple[str, str]] = [(r.path, _source_row_content(r)) for r in rows]
-    if not db_files or not any(body for _, body in db_files):
-        es_files = _etherscan_sources(addr)
-        files = list(es_files.items())
-    else:
-        files = db_files
-
+    if not rows:
+        return {"error": f"no indexed source rows available for {addr} on chain_id={chain_id}"}
+    files: list[tuple[str, str]] = [(r.path, body) for r in rows if (body := _source_row_content(r))]
     if not files:
-        return {"error": f"no verified source available for {addr}"}
+        logger.warning("indexed source content unavailable for %s chain_id=%s", addr, chain_id)
+        return {"error": f"indexed source content unavailable for {addr} on chain_id={chain_id}"}
 
     file_list = [{"name": p, "size": len(b) if b else None} for p, b in files]
 
@@ -155,6 +161,7 @@ def _search_source(
     ctx,
     pattern: str = "",
     address: str | None = None,
+    chain_id: int | None = None,
     max_results: int = 50,
     case_sensitive: bool = False,
     **_kw,
@@ -180,10 +187,15 @@ def _search_source(
     if target_addr:
         from sqlalchemy import func as _func
 
-        chain_filter = Contract.chain == ctx.selected_chain if ctx.selected_chain else None
-        stmt = select(Contract).where(_func.lower(Contract.address) == target_addr.lower())
-        if chain_filter is not None:
-            stmt = stmt.where(chain_filter)
+        chain_id = _effective_chain_id(ctx, chain_id, context=f"chat source search for {target_addr}")
+        try:
+            chain_id = require_supported_chain_id(chain_id=chain_id, context=f"chat source search for {target_addr}")
+        except RuntimeError as exc:
+            return {"error": str(exc), "pattern": pattern, "matches": [], "summary": [], "scope_contracts": 0}
+        stmt = select(Contract).where(
+            _func.lower(Contract.address) == target_addr.lower(),
+            Contract.chain_id == chain_id,
+        )
         c = session.execute(stmt.limit(1)).scalar_one_or_none()
         if c is not None:
             contracts = [c]
@@ -203,9 +215,7 @@ def _search_source(
     contracts_with_no_source = 0
 
     for contract in contracts:
-        if contract.job_id is None:
-            continue
-        rows = session.execute(select(SourceFile).where(SourceFile.job_id == contract.job_id)).scalars().all()
+        rows = _source_rows_for_contract(session, SourceFile, contract)
         if not rows:
             contracts_with_no_source += 1
             continue
@@ -254,17 +264,23 @@ def _search_source(
     }
 
 
-def _get_contract_overview(session, ctx, address: str | None = None, chain: str | None = None, **_kw) -> dict[str, Any]:
+def _get_contract_overview(
+    session,
+    ctx,
+    address: str | None = None,
+    chain_id: int | None = None,
+    **_kw,
+) -> dict[str, Any]:
     """One-shot fetch combining identity, controls, upgrade summary, and
     verified source. Saves a tool round-trip when the agent wants the
     full picture of a single contract."""
     addr = address or ctx.selected_address
-    chn = chain if chain is not None else ctx.selected_chain
+    chain_id = _effective_chain_id(ctx, chain_id, context=f"chat contract overview for {addr or 'selected contract'}")
     if not addr:
         return {"error": "address is required"}
-    info = contract_brief(session, addr, chn)
-    upgrades = upgrade_summary(session, addr, chn) if not info.get("error") else None
-    src = _get_contract_source(session, ctx, address=addr, chain=chn)
+    info = contract_brief(session, addr, chain_id=chain_id)
+    upgrades = upgrade_summary(session, addr, chain_id=chain_id) if not info.get("error") else None
+    src = _get_contract_source(session, ctx, address=addr, chain_id=chain_id)
     # Strip the source body from the bulk result — the agent gets file
     # listing + main file path, then can request the full body via
     # get_contract_source(file=...) if needed. Keeps the bulk response
@@ -279,16 +295,34 @@ def _get_contract_overview(session, ctx, address: str | None = None, chain: str 
     }
 
 
-def _get_upgrade_history(session, ctx, address: str | None = None, chain: str | None = None, **_kw) -> dict[str, Any]:
+def _get_upgrade_history(
+    session,
+    ctx,
+    address: str | None = None,
+    chain_id: int | None = None,
+    **_kw,
+) -> dict[str, Any]:
     addr = address or ctx.selected_address
-    chn = chain if chain is not None else ctx.selected_chain
+    chain_id = _effective_chain_id(ctx, chain_id, context=f"chat upgrade history for {addr or 'selected contract'}")
     if not addr:
         return {"error": "address is required"}
-    return upgrade_summary(session, addr, chn)
+    return upgrade_summary(session, addr, chain_id=chain_id)
 
 
-def _get_audit_findings(session, ctx, address: str | None = None, **_kw) -> dict[str, Any]:
-    return live_findings(session, address=address, company=ctx.company, limit=10)
+def _get_audit_findings(
+    session,
+    ctx,
+    address: str | None = None,
+    chain_id: int | None = None,
+    **_kw,
+) -> dict[str, Any]:
+    return live_findings(
+        session,
+        address=address,
+        chain_id=_effective_chain_id(ctx, chain_id, context=f"chat audit findings for {address}") if address else None,
+        company=ctx.company,
+        limit=10,
+    )
 
 
 def _list_principals(session, ctx, **_kw) -> dict[str, Any]:
@@ -358,8 +392,11 @@ def _addr_param() -> dict[str, Any]:
     }
 
 
-def _chain_param() -> dict[str, Any]:
-    return {"type": "string", "description": "Chain name (e.g. 'mainnet'). Optional."}
+def _chain_id_param() -> dict[str, Any]:
+    return {
+        "type": "integer",
+        "description": "EIP-155 chain id. Required unless the selected contract already supplies one.",
+    }
 
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -378,7 +415,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": "Identity, proxy status, controls, last upgrade for a single contract.",
             "parameters": {
                 "type": "object",
-                "properties": {"address": _addr_param(), "chain": _chain_param()},
+                "properties": {"address": _addr_param(), "chain_id": _chain_id_param()},
                 "required": [],
             },
         },
@@ -395,7 +432,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "address": _addr_param(),
-                    "chain": _chain_param(),
+                    "chain_id": _chain_id_param(),
                     "file": {"type": "string", "description": "Specific source filename to return (optional)."},
                 },
                 "required": [],
@@ -433,6 +470,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "boolean",
                         "description": "Default false. Set true for exact-case match.",
                     },
+                    "chain_id": _chain_id_param(),
                 },
                 "required": ["pattern"],
             },
@@ -448,7 +486,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"address": _addr_param(), "chain": _chain_param()},
+                "properties": {"address": _addr_param(), "chain_id": _chain_id_param()},
                 "required": [],
             },
         },
@@ -460,7 +498,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": "Per-impl upgrade timeline + audit-coverage status for a proxy.",
             "parameters": {
                 "type": "object",
-                "properties": {"address": _addr_param(), "chain": _chain_param()},
+                "properties": {"address": _addr_param(), "chain_id": _chain_id_param()},
                 "required": [],
             },
         },
@@ -471,11 +509,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "get_audit_findings",
             "description": (
                 "Audit findings still affecting current code (status != 'fixed'). Filter by address or "
-                "fall back to protocol-wide."
+                "return protocol-wide findings."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"address": _addr_param()},
+                "properties": {"address": _addr_param(), "chain_id": _chain_id_param()},
                 "required": [],
             },
         },

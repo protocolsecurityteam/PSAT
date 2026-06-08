@@ -223,9 +223,11 @@ def selector_for(target_name: str) -> str:
 def decode_poll_value(raw: str | None, type_kind: str | None, type_str: str | None) -> object | None:
     """Decode a raw RPC return value for a polling entry.
 
-    Returns ``None`` for absent / short / zero-32-byte responses so the
+    Returns ``None`` for explicit empty or zero-address responses so the
     poll loop's "old_value=None means first observation" rule still
-    distinguishes "didn't read anything useful" from "read False".
+    distinguishes "no address value" from "read False". Malformed successful
+    RPC payloads raise; the poller must not silently skip a requested
+    chain-scoped read.
 
     Shapes handled:
       * ``address`` / ``contract`` — right-20-byte address; zero-address
@@ -237,17 +239,25 @@ def decode_poll_value(raw: str | None, type_kind: str | None, type_str: str | No
     """
     if raw is None:
         return None
-    raw_str = raw if isinstance(raw, str) else ""
-    if not raw_str or raw_str == "0x":
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise ValueError(f"expected hex RPC poll value, got {raw!r}")
+    raw_str = raw
+    if raw_str in {"0x", "0x0"}:
         return None
+    body = raw_str[2:]
+    if len(body) % 2 != 0:
+        raise ValueError(f"expected even-length hex RPC poll value, got {raw!r}")
+    try:
+        bytes.fromhex(body)
+    except ValueError as exc:
+        raise ValueError(f"malformed hex RPC poll value: {raw!r}") from exc
 
     kind = (type_kind or "").lower()
     if kind in ("address", "contract"):
         # parse_address_result lives in utils.rpc but its shape is
         # tiny — inlined here to keep this module decoupled.
-        body = raw_str[2:] if raw_str.startswith("0x") else raw_str
-        if len(body) < 40:
-            return None
+        if len(body) != 64:
+            raise ValueError(f"expected 32-byte ABI address poll value, got {raw!r}")
         addr = "0x" + body[-40:]
         if addr == "0x" + "0" * 40:
             return None
@@ -255,18 +265,15 @@ def decode_poll_value(raw: str | None, type_kind: str | None, type_str: str | No
 
     if kind == "primitive":
         t = (type_str or "").lower().strip()
-        body = raw_str[2:] if raw_str.startswith("0x") else raw_str
+        if len(body) != 64:
+            raise ValueError(f"expected 32-byte ABI primitive poll value, got {raw!r}")
         if t == "bool":
-            if not body:
-                return None
-            # bool encodes as 32-byte word — non-zero anywhere in the
-            # word means True. Match the existing poller semantics.
-            return any(c != "0" for c in body)
+            value = int(body, 16)
+            if value not in (0, 1):
+                raise ValueError(f"expected ABI bool poll value 0 or 1, got {raw!r}")
+            return bool(value)
         if t.startswith("uint") or t.startswith("int"):
-            try:
-                return int(raw_str, 16)
-            except (ValueError, TypeError):
-                return None
+            return int(raw_str, 16)
 
     return None
 

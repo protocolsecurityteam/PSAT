@@ -155,9 +155,8 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
-    # Replace this deployment's effective_functions wholesale, sweeping any
-    # legacy untagged (NULL) rows. FunctionPrincipal rows are removed by the
-    # DB-level ON DELETE CASCADE on function_principals.function_id.
+    # Replace this deployment's effective_functions wholesale. FunctionPrincipal
+    # rows are removed by the DB-level ON DELETE CASCADE on function_principals.function_id.
     session.query(EffectiveFunction).filter(
         EffectiveFunction.contract_id == contract_id,
         deployment_scope(EffectiveFunction.deployment_address, deployment_address),

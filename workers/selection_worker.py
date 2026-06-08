@@ -10,16 +10,14 @@ inventory, DApp-crawl, and DefiLlama evidence together.
 
 Readiness gating mirrors ``CoverageWorker``: a claim fires only when no
 sibling ``dapp_crawl`` or ``defillama_scan`` job under the same root is
-still queued or processing. A stuck-sibling escape hatch unblocks the
-job after a timeout so one wedged crawl can't strand the whole protocol.
+still queued or processing.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
@@ -39,30 +37,27 @@ from services.discovery.ranking import (
     rank_contract_rows,
 )
 from utils.logging import log_timed_phase, record_stage_metric
+from utils.rpc import require_supported_chain_id
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.selection_worker")
 
-# Bypass the sibling-readiness gate after this many seconds queued (default 30 min) so a wedged crawl doesn't strand the
-# protocol.
-_STUCK_SELECTION_TIMEOUT = int(os.getenv("PSAT_SELECTION_STUCK_TIMEOUT", "1800"))
 
-
-def _existing_in_same_cascade(session: Session, addr: str, chain: str | None, root_job_id: str) -> bool:
+def _existing_in_same_cascade(session: Session, addr: str, chain_id: int, root_job_id: str) -> bool:
     """True if a job for ``addr`` already exists with the same root_job_id; suppresses within-cascade proxy re-queueing
     under --force."""
+    effective_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"selection cascade lookup for {addr}")
     stmt = select(Job.id).where(
-        Job.address == addr,
+        func.lower(Job.address) == addr.lower(),
+        Job.chain_id == effective_chain_id,
         Job.request["root_job_id"].as_string() == root_job_id,
     )
-    if chain is not None:
-        stmt = stmt.where(Job.request["chain"].as_string() == chain)
     stmt = stmt.limit(1)
     return session.execute(stmt).scalar_one_or_none() is not None
 
 
 class SelectionWorker(BaseWorker):
-    """Drains the ``selection`` stage with a readiness-gated two-phase claim."""
+    """Drains the ``selection`` stage with a readiness-gated claim."""
 
     stage = JobStage.selection
     next_stage = JobStage.done
@@ -71,8 +66,8 @@ class SelectionWorker(BaseWorker):
     # -- Claim ------------------------------------------------------------
 
     def _claim_job(self, session: Session) -> Job | None:
-        """Primary readiness-gated claim OR stuck-sibling fallback."""
-        return self._claim_ready_job(session) or self._claim_stuck_job(session)
+        """Claim only when DApp/DefiLlama sibling jobs have settled."""
+        return self._claim_ready_job(session)
 
     def _claim_ready_job(self, session: Session) -> Job | None:
         """Claim a selection job whose DApp/DefiLlama siblings have settled (matched by ``request->>'root_job_id'``)."""
@@ -105,39 +100,6 @@ class SelectionWorker(BaseWorker):
         session.refresh(job)
         return job
 
-    def _claim_stuck_job(self, session: Session) -> Job | None:
-        """Bypass readiness and claim a job that's been queued too long."""
-        claim_id = session.execute(
-            text(
-                """
-                SELECT j.id
-                FROM jobs j
-                WHERE j.stage = 'selection' AND j.status = 'queued'
-                  AND j.updated_at < (NOW() - (:timeout * INTERVAL '1 second'))
-                ORDER BY j.updated_at ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            ),
-            {"timeout": _STUCK_SELECTION_TIMEOUT},
-        ).scalar_one_or_none()
-        if claim_id is None:
-            return None
-        job = session.get(Job, claim_id)
-        if job is None:
-            return None
-        logger.warning(
-            "Worker %s: claiming stuck selection job %s past %ss timeout — DApp/DefiLlama sibling(s) did not settle",
-            self.worker_id,
-            job.id,
-            _STUCK_SELECTION_TIMEOUT,
-        )
-        job.status = JobStatus.processing
-        job.worker_id = self.worker_id
-        session.commit()
-        session.refresh(job)
-        return job
-
     # -- Process ----------------------------------------------------------
 
     def process(self, session: Session, job: Job) -> None:
@@ -160,17 +122,23 @@ class SelectionWorker(BaseWorker):
         # Skip superseded historical impls (audit-coverage anchors only); the
         # current live impl of a proxy is kept (it carries the live marker).
         # Single source of truth for the anchor predicate: services/discovery/ranking.
-        candidates = (
+        candidate_rows = (
             session.execute(
                 select(Contract).where(
                     Contract.protocol_id == job.protocol_id,
-                    Contract.job_id.is_(None),
                     not_superseded_impl_clause(Contract.discovery_sources),
                 )
             )
             .scalars()
             .all()
         )
+        candidates: list[Contract] = []
+        for row in candidate_rows:
+            chain_id = require_supported_chain_id(chain_id=row.chain_id, context=f"selection candidate {row.address}")
+            existing = find_existing_job_for_address(session, row.address, chain_id=chain_id)
+            if existing is not None and not is_known_proxy(session, row.address, chain_id=chain_id):
+                continue
+            candidates.append(row)
 
         if not candidates:
             logger.info("Selection job %s: no unanalyzed candidates", job.id)
@@ -209,9 +177,11 @@ class SelectionWorker(BaseWorker):
             ph["count"] = len(eligible_rows)
 
         # Persist rank_score onto the row so UI listings see the same ordering the selector picked.
-        by_key: dict[tuple[str, str | None], dict] = {(d["__row_address"], d["__row_chain"]): d for d in ranked_dicts}
+        by_key: dict[tuple[str, int | None], dict] = {
+            (d["__row_address"], d["__row_chain_id"]): d for d in ranked_dicts
+        }
         for row in eligible_rows:
-            entry = by_key.get((row.address, row.chain))
+            entry = by_key.get((row.address, row.chain_id))
             if entry is None:
                 continue
             rank = entry.get("rank_score")
@@ -260,10 +230,10 @@ class SelectionWorker(BaseWorker):
             if len(selected) >= remaining:
                 break
             addr = entry["__row_address"]
-            chain = entry["__row_chain"]
-            existing = find_existing_job_for_address(session, addr, chain=chain)
+            chain_id = entry["__row_chain_id"]
+            existing = find_existing_job_for_address(session, addr, chain_id=chain_id)
             if existing is not None:
-                if not is_known_proxy(session, addr, chain=chain):
+                if not is_known_proxy(session, addr, chain_id=chain_id):
                     logger.info(
                         "Selection job %s: address %s already has job %s, skipping",
                         job.id,
@@ -271,7 +241,7 @@ class SelectionWorker(BaseWorker):
                         existing.id,
                     )
                     continue
-                if force and _existing_in_same_cascade(session, addr, chain, root_job_id):
+                if force and _existing_in_same_cascade(session, addr, chain_id, root_job_id):
                     logger.info(
                         "Selection job %s: proxy %s already has job %s in this cascade, "
                         "skipping (--force in-cascade dedupe)",
@@ -292,20 +262,18 @@ class SelectionWorker(BaseWorker):
         company = job.company
         for entry in selected:
             addr = entry["__row_address"]
-            chain = entry["__row_chain"]
+            chain_id = entry["__row_chain_id"]
             name = entry.get("name") or (f"{company}_{addr[2:10]}" if company else f"sel_{addr[2:10]}")
             sources = entry.get("discovery_sources") or []
             child_request = {
                 "address": addr,
                 "name": name,
-                "chain": chain,
-                "rpc_url": request.get("rpc_url"),
+                "chain_id": chain_id,
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "rank_score": entry.get("rank_score"),
                 "confidence": entry.get("confidence"),
                 "discovery_sources": list(sources),
-                "chains": entry.get("chains"),
                 "protocol_id": job.protocol_id,
             }
             if company:
@@ -315,7 +283,7 @@ class SelectionWorker(BaseWorker):
                 {
                     "job_id": str(child_job.id),
                     "address": addr,
-                    "chain": chain,
+                    "chain_id": chain_id,
                     "name": name,
                     "rank_score": entry.get("rank_score"),
                     "discovery_sources": list(sources),
@@ -342,7 +310,7 @@ class SelectionWorker(BaseWorker):
         summary_ranked = [
             {
                 "address": entry["__row_address"],
-                "chain": entry["__row_chain"],
+                "chain_id": entry.get("__row_chain_id"),
                 "name": entry.get("name"),
                 "discovery_sources": entry.get("discovery_sources"),
                 "confidence": entry.get("confidence"),

@@ -23,9 +23,9 @@ Usage::
     # actual backfill, default chunk size 50
     uv run python -m scripts.backfill_contract_materializations_to_blob
 
-    # tune chunk size / scope to one chain
+    # tune chunk size / scope to one chain id
     uv run python -m scripts.backfill_contract_materializations_to_blob \
-        --chunk-size 25 --chain ethereum
+        --chunk-size 25 --chain-id 1
 
 The script does NOT clear the inline JSONB columns by default —
 ``--clear-jsonb`` opts in. Recommended sequence:
@@ -54,8 +54,13 @@ from sqlalchemy.orm import Session
 from db.contract_materializations import _blob_key
 from db.models import ContractMaterialization, SessionLocal
 from db.storage import JSON_CONTENT_TYPE, StorageError, get_storage_client
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
+
+
+def _require_backfill_chain_id(chain_id: int | None, *, context: str) -> int:
+    return require_supported_chain_id(chain_id=chain_id, context=context)
 
 
 def _serialize(payload: dict[str, Any]) -> bytes:
@@ -77,11 +82,12 @@ def _backfill_row(
     """
     blobs_written = 0
     bytes_uploaded = 0
+    chain_id = _require_backfill_chain_id(row.chain_id, context=f"materialization blob backfill row {row.id}")
 
     updates: dict[str, Any] = {}
 
     if row.analysis_blob_key is None and row.analysis is not None:
-        key = _blob_key(row.chain, row.bytecode_keccak, "analysis")
+        key = _blob_key(chain_id, row.bytecode_keccak, "analysis")
         body = _serialize(row.analysis)
         if not dry_run:
             client.put(key, body, JSON_CONTENT_TYPE)
@@ -92,7 +98,7 @@ def _backfill_row(
         bytes_uploaded += len(body)
 
     if row.tracking_plan_blob_key is None and row.tracking_plan is not None:
-        key = _blob_key(row.chain, row.bytecode_keccak, "tracking_plan")
+        key = _blob_key(chain_id, row.bytecode_keccak, "tracking_plan")
         body = _serialize(row.tracking_plan)
         if not dry_run:
             client.put(key, body, JSON_CONTENT_TYPE)
@@ -106,7 +112,7 @@ def _backfill_row(
         session.execute(
             update(ContractMaterialization)
             .where(
-                ContractMaterialization.chain == row.chain,
+                ContractMaterialization.chain_id == row.chain_id,
                 ContractMaterialization.bytecode_keccak == row.bytecode_keccak,
             )
             .values(**updates)
@@ -120,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="Report what would be written; no Tigris/DB writes.")
     ap.add_argument("--chunk-size", type=int, default=50, help="Rows per DB query batch (default 50).")
-    ap.add_argument("--chain", default=None, help="Restrict to one chain (default: all chains).")
+    ap.add_argument("--chain-id", type=int, default=None, help="Restrict to one chain id (default: all chains).")
     ap.add_argument(
         "--clear-jsonb",
         action="store_true",
@@ -131,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    chain_id_filter = (
+        _require_backfill_chain_id(args.chain_id, context="materialization blob backfill --chain-id")
+        if args.chain_id is not None
+        else None
+    )
 
     client = get_storage_client()
     if client is None and not args.dry_run:
@@ -150,24 +162,24 @@ def main(argv: list[str] | None = None) -> int:
         # Iterate by primary key with LIMIT/OFFSET-style chunking via
         # last-seen-keccak — avoids holding a server-side cursor open
         # across slow blob uploads.
-        last_chain: str | None = None
+        last_chain_id: int | None = None
         last_keccak: str | None = None
         while True:
             stmt = select(ContractMaterialization).where(
                 ContractMaterialization.status == "ready",
             )
-            if args.chain:
-                stmt = stmt.where(ContractMaterialization.chain == args.chain.lower())
-            if last_chain is not None and last_keccak is not None:
+            if chain_id_filter is not None:
+                stmt = stmt.where(ContractMaterialization.chain_id == chain_id_filter)
+            if last_chain_id is not None and last_keccak is not None:
                 stmt = stmt.where(
-                    (ContractMaterialization.chain > last_chain)
+                    (ContractMaterialization.chain_id > last_chain_id)
                     | (
-                        (ContractMaterialization.chain == last_chain)
+                        (ContractMaterialization.chain_id == last_chain_id)
                         & (ContractMaterialization.bytecode_keccak > last_keccak)
                     )
                 )
             stmt = stmt.order_by(
-                ContractMaterialization.chain,
+                ContractMaterialization.chain_id,
                 ContractMaterialization.bytecode_keccak,
             ).limit(args.chunk_size)
 
@@ -177,9 +189,9 @@ def main(argv: list[str] | None = None) -> int:
 
             for row in rows:
                 total_rows += 1
-                last_chain = row.chain
+                last_chain_id = row.chain_id
                 last_keccak = row.bytecode_keccak
-                row_id = f"{row.chain}:{row.bytecode_keccak[:18]}"
+                row_id = f"{row.chain_id}:{row.bytecode_keccak[:18]}"
 
                 # Skip rows that have nothing to move.
                 if (row.analysis_blob_key is not None or row.analysis is None) and (

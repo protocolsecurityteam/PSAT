@@ -42,8 +42,9 @@ Common env vars:
 - `ETHERSCAN_API_KEY`
 - `ERPC_BASE_URL` — eRPC base URL for chain-aware RPC routing
 - `ERPC_SECRET` — optional eRPC secret header value
-- `ETH_RPC` — optional legacy/single-chain RPC override
-- `ENVIO_API_TOKEN` — for HyperSync policy backfill
+- `PSAT_SUPPORTED_CHAIN_IDS` — optional comma-separated EIP-155 chain id allowlist for discovery, monitor, and indexer eRPC routing
+- `PSAT_INDEXER_CHAIN_IDS` — optional comma-separated subset for the event indexer
+- `PSAT_RPC_FANOUT` — optional eRPC batch fanout limit
 - `DATABASE_URL` — PostgreSQL connection string
 - `TAVILY_API_KEY`
 - `OPEN_ROUTER_KEY`
@@ -94,8 +95,8 @@ The site supports deep links by address and tab.
 
 Examples:
 
-- `http://127.0.0.1:5173/address/0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C/summary`
-- `http://127.0.0.1:5173/address/0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C/graph`
+- `http://127.0.0.1:5173/address/0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C/1/summary`
+- `http://127.0.0.1:5173/address/0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C/1/graph`
 - `http://127.0.0.1:5173/runs/BoringVault_08c6F91e/graph`
 
 Tabs:
@@ -108,15 +109,17 @@ Tabs:
 
 ## Running The Pipeline
 
-Submit an address via the API (`POST /api/analyze` with `{"address": "0x..."}`)
-or a protocol via `POST /api/protocols/{name}/discover`. The API enqueues
-a job in Postgres; the worker pool (see `start_workers.sh`) advances it
-through the stages defined in `db.models.JobStage`:
+Submit an address via the API (`POST /api/analyze` with
+`{"address": "0x...", "chain_id": 1}` when you know the chain, or omit
+`chain_id` to probe all supported eRPC chains) or a company with
+`{"company": "etherfi"}`. The API enqueues a job in Postgres; the worker pool
+(see `start_workers.sh`) advances it through the stages defined in
+`db.models.JobStage`:
 
 1. `discovery` — fetch verified source, scaffold Foundry project, seed dependency graph
 2. `static` — Slither + `contract_analysis.json` structured analysis
 3. `resolution` — `control_tracking_plan.json`, `control_snapshot.json`, `resolved_control_graph.json`
-4. `policy` — HyperSync policy backfill, `effective_permissions.json`, `principal_labels.json`
+4. `policy` — event-indexed/eRPC-backed policy resolution, `effective_permissions.json`, `principal_labels.json`
 5. `coverage` — link contracts to their audit reports
 6. `done`
 

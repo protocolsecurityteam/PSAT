@@ -33,7 +33,7 @@ def build_artifact_payload(
     ``scope_section_text`` is what the LLM actually saw — the merged
     header/content-pattern slice, or the winning chunk for chunk-scan.
     Capped at 20k chars. ``scope_entries`` (Phase F) is the structured
-    per-entry (name, address, commit, chain) list when the PDF had a
+    per-entry (name, address, commit, chain_id) list when the PDF had a
     scope table with addresses; empty otherwise. ``classified_commits``
     (Phase C) is the LLM-labeled commit list with roles.
     """

@@ -15,21 +15,20 @@ from services.resolution.types import (
     EnumeratedKeyValue,
     EnumeratedPrincipal,
     EnumerationValueResult,
+    FetchedEventLog,
     MappingEnumerationResult,
 )
-from services.static.contract_analysis_pipeline.pipeline_types import (
-    WriterEventSpec,
-)
+from services.static.contract_analysis_pipeline.pipeline_types import WriterEventSpec
+from utils.rpc import default_rpc_url, require_supported_chain_id, rpc_request
 from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_HYPERSYNC_URL = "https://eth.hypersync.xyz"
 
 # Pagination bounds (default 60s / 50 pages); without these caps a 2017-deployed contract can wedge a worker for ~80
 # min. Read once at import — bounds aren't expected to change at runtime.
 _TIMEOUT_S = float(os.getenv("PSAT_MAPPING_ENUMERATION_TIMEOUT_S", "60"))
 _MAX_PAGES = int(os.getenv("PSAT_MAPPING_ENUMERATION_MAX_PAGES", "50"))
+_MAX_BLOCK_RANGE = int(os.getenv("PSAT_MAPPING_ENUMERATION_BLOCK_RANGE", "10000"))
 
 
 def _cache_ttl_s() -> float:
@@ -58,20 +57,176 @@ def _event_topic0(signature: str) -> str:
     return _normalize_hex("0x" + digest)
 
 
-def _build_query(hypersync_module, contract_address: str, topic0s: list[str], from_block: int, to_block: int | None):
-    return hypersync_module.Query(
-        from_block=from_block,
-        to_block=to_block,
-        logs=[
-            hypersync_module.LogSelection(
-                address=[contract_address.lower()],
-                topics=[topic0s],
-            )
-        ],
-        field_selection=hypersync_module.FieldSelection(
-            log=[field.value for field in hypersync_module.LogField],
-        ),
+def _hex_int(raw: Any) -> int:
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise TypeError(raw)
+    return int(raw, 16)
+
+
+def _hex_to_bytes(raw: Any, size: int) -> bytes | None:
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        return None
+    body = raw[2:]
+    if len(body) != size * 2:
+        return None
+    try:
+        return bytes.fromhex(body)
+    except ValueError:
+        return None
+
+
+def _split_data_words(raw: Any) -> list[str] | None:
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        return None
+    body = raw[2:]
+    if len(body) % 64 != 0:
+        return None
+    try:
+        bytes.fromhex(body)
+    except ValueError:
+        return None
+    return ["0x" + body[i : i + 64].lower() for i in range(0, len(body), 64)]
+
+
+def _decode_rpc_log(raw: Any) -> FetchedEventLog | None:
+    if not isinstance(raw, dict):
+        return None
+    topics = raw.get("topics")
+    if not isinstance(topics, list) or not topics:
+        return None
+    if any(not isinstance(topic, str) or not topic.startswith("0x") or len(topic) != 66 for topic in topics):
+        return None
+    tx_hash = _hex_to_bytes(raw.get("transactionHash"), 32)
+    block_hash = _hex_to_bytes(raw.get("blockHash"), 32)
+    if tx_hash is None or block_hash is None:
+        return None
+    try:
+        log_index = _hex_int(raw.get("logIndex"))
+        block_number = _hex_int(raw.get("blockNumber"))
+        transaction_index = _hex_int(raw.get("transactionIndex"))
+    except (TypeError, ValueError):
+        return None
+    data_words = _split_data_words(raw.get("data"))
+    if data_words is None:
+        return None
+    return FetchedEventLog(
+        tx_hash=tx_hash,
+        log_index=log_index,
+        block_number=block_number,
+        block_hash=block_hash,
+        transaction_index=transaction_index,
+        topics=[str(t).lower() for t in topics],
+        data_words=data_words,
     )
+
+
+def _head_block(rpc_url: str, *, chain_id: int) -> int:
+    raw = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        logger.error("mapping_enumerator: eth_blockNumber returned invalid payload: %r", raw)
+        raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
+    try:
+        return int(raw, 16)
+    except ValueError as exc:
+        logger.error("mapping_enumerator: eth_blockNumber returned malformed hex: %r", raw)
+        raise RuntimeError(f"Unexpected malformed eth_blockNumber result: {raw!r}") from exc
+
+
+def _fetch_logs_via_erpc(
+    *,
+    chain_id: int,
+    contract_address: str,
+    topic0s: list[str],
+    from_block: int,
+    to_block: int | None,
+    timeout_s: float,
+    max_pages: int,
+) -> tuple[list[FetchedEventLog], int, int]:
+    if not topic0s:
+        return [], 0, from_block
+    rpc_url = default_rpc_url(chain_id=chain_id)
+    effective_to_block = int(to_block) if to_block is not None else _head_block(rpc_url, chain_id=chain_id)
+    if from_block > effective_to_block:
+        return [], 0, effective_to_block
+
+    logs: list[FetchedEventLog] = []
+    current_from = from_block
+    page_count = 0
+    started = time.monotonic()
+    normalized_topics = [topic.lower() for topic in topic0s]
+    while current_from <= effective_to_block:
+        if time.monotonic() - started > timeout_s:
+            logger.error(
+                "mapping_enumerator: eRPC eth_getLogs timed out chain_id=%s address=%s last_block=%d timeout_s=%.1f",
+                chain_id,
+                contract_address,
+                current_from,
+                timeout_s,
+            )
+            raise RuntimeError(f"mapping enumeration timed out for chain_id={chain_id} address={contract_address}")
+        if page_count >= max_pages:
+            logger.error(
+                "mapping_enumerator: eRPC eth_getLogs hit max_pages chain_id=%s address=%s last_block=%d max_pages=%d",
+                chain_id,
+                contract_address,
+                current_from,
+                max_pages,
+            )
+            raise RuntimeError(f"mapping enumeration hit max_pages for chain_id={chain_id} address={contract_address}")
+
+        current_to = min(effective_to_block, current_from + _MAX_BLOCK_RANGE - 1)
+        params = [
+            {
+                "address": contract_address.lower(),
+                "topics": [normalized_topics],
+                "fromBlock": hex(current_from),
+                "toBlock": hex(current_to),
+            }
+        ]
+        try:
+            raw_logs = rpc_request(rpc_url, "eth_getLogs", params, chain_id=chain_id)
+        except Exception as exc:
+            logger.error(
+                "mapping_enumerator: eRPC eth_getLogs failed chain_id=%s address=%s blocks=%d-%d: %s",
+                chain_id,
+                contract_address,
+                current_from,
+                current_to,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"mapping enumeration eRPC scan failed for chain_id={chain_id}") from exc
+        if not isinstance(raw_logs, list):
+            logger.error(
+                "mapping_enumerator: eRPC eth_getLogs returned non-list chain_id=%s address=%s blocks=%d-%d: %r",
+                chain_id,
+                contract_address,
+                current_from,
+                current_to,
+                raw_logs,
+            )
+            raise RuntimeError(f"mapping enumeration eRPC scan returned invalid logs for chain_id={chain_id}")
+        page_count += 1
+        for raw_log in raw_logs:
+            decoded = _decode_rpc_log(raw_log)
+            if decoded is None:
+                logger.error(
+                    "mapping_enumerator: eRPC eth_getLogs returned malformed log chain_id=%s address=%s "
+                    "blocks=%d-%d: %r",
+                    chain_id,
+                    contract_address,
+                    current_from,
+                    current_to,
+                    raw_log,
+                )
+                raise RuntimeError(
+                    f"mapping enumeration eRPC scan returned malformed log for chain_id={chain_id}"
+                )
+            logs.append(decoded)
+        current_from = current_to + 1
+
+    logs.sort(key=lambda log: (log.block_number, log.transaction_index, log.log_index))
+    return logs, page_count, effective_to_block
 
 
 def _topics_from_log(log: Any) -> list[str]:
@@ -84,6 +239,17 @@ def _topics_from_log(log: Any) -> list[str]:
         if isinstance(value, str) and value.startswith("0x") and value not in {"0x", "0x0"}:
             extracted.append(_normalize_hex(value))
     return extracted
+
+
+def _data_hex_from_log(log: Any) -> str:
+    raw = getattr(log, "data", None)
+    if isinstance(raw, str) and raw.startswith("0x"):
+        return raw
+    data_words = getattr(log, "data_words", None)
+    if isinstance(data_words, (list, tuple)):
+        body = "".join(str(word).removeprefix("0x") for word in data_words if isinstance(word, str))
+        return "0x" + body.lower()
+    return "0x"
 
 
 def _decode_address_topic(topic: str) -> str:
@@ -128,7 +294,7 @@ def _extract_value_word(
     if not non_indexed_up_to:
         return ""
     data_rank = len(non_indexed_up_to) - 1
-    raw = getattr(log, "data", "0x") or "0x"
+    raw = _data_hex_from_log(log)
     body = raw[2:] if raw.startswith("0x") else raw
     start = 64 * data_rank
     end = start + 64
@@ -230,7 +396,7 @@ def _extract_key_address(
     non_indexed = [p for p in range(key_position + 1) if p not in indexed_positions]
     if non_indexed:
         data_rank = len(non_indexed) - 1
-        return _decode_address_arg_from_data(getattr(log, "data", "0x") or "0x", data_rank)
+        return _decode_address_arg_from_data(_data_hex_from_log(log), data_rank)
     return ""
 
 
@@ -238,12 +404,9 @@ async def enumerate_mapping_allowlist(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
-    hypersync_url: str = DEFAULT_HYPERSYNC_URL,
-    bearer_token: str | None = None,
+    chain_id: int,
     from_block: int = 0,
     to_block: int | None = None,
-    client: Any = None,
-    hypersync_module: Any = None,
     timeout_s: float | None = None,
     max_pages: int | None = None,
 ) -> EnumerationResult:
@@ -251,6 +414,10 @@ async def enumerate_mapping_allowlist(
     ``EnumerationResult.status``."""
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
+
+    if chain_id is None:
+        raise RuntimeError("mapping enumeration requires explicit chain_id")
+    normalized_chain_id = require_supported_chain_id(chain_id=chain_id, context="mapping enumeration")
 
     if not writer_specs:
         return EnumerationResult(
@@ -277,19 +444,12 @@ async def enumerate_mapping_allowlist(
             principals=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
         )
 
-    if hypersync_module is None:
-        import hypersync as hypersync_module  # type: ignore
-    if client is None:
-        if not bearer_token:
-            raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")
-        client = hypersync_module.HypersyncClient(
-            hypersync_module.ClientConfig(url=hypersync_url, bearer_token=bearer_token)
-        )
-
     topic0s = sorted(topic0_to_specs.keys())
     logger.info(
-        "mapping_enumerator: address=%s from_block=%d to_block=%s timeout=%.1fs max_pages=%d topic0s=%s specs=%s",
+        "mapping_enumerator: eRPC address=%s chain_id=%s from_block=%d to_block=%s "
+        "timeout=%.1fs max_pages=%d topic0s=%s specs=%s",
         contract_address,
+        normalized_chain_id,
         from_block,
         to_block,
         eff_timeout,
@@ -297,96 +457,46 @@ async def enumerate_mapping_allowlist(
         topic0s,
         [(s["event_signature"], s["direction"], s.get("key_position")) for s in writer_specs],
     )
-    query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
+    logs, page_count, last_block_scanned = _fetch_logs_via_erpc(
+        chain_id=normalized_chain_id,
+        contract_address=contract_address,
+        topic0s=topic0s,
+        from_block=from_block,
+        to_block=to_block,
+        timeout_s=eff_timeout,
+        max_pages=eff_max_pages,
+    )
 
     state: dict[tuple[str, str], dict[str, Any]] = {}
-    current_from = from_block
-    page_count = 0
-    started = time.monotonic()
     status: str = "complete"
     error: str | None = None
-    while True:
-        if time.monotonic() - started > eff_timeout:
-            status = "incomplete_timeout"
-            logger.warning(
-                "mapping_enumerator: TIMEOUT after %.1fs at page %d, address=%s last_block=%d",
-                eff_timeout,
-                page_count,
-                contract_address,
-                current_from,
+    for raw_log in logs:
+        topics = _topics_from_log(raw_log)
+        if not topics:
+            continue
+        topic0 = topics[0]
+        matching_specs = topic0_to_specs.get(topic0)
+        if not matching_specs:
+            continue
+        for spec in matching_specs:
+            key_address = _extract_key_address(
+                raw_log,
+                spec["key_position"],
+                indexed_positions=list(spec.get("indexed_positions") or []),
             )
-            break
-        if page_count >= eff_max_pages:
-            status = "incomplete_max_pages"
-            logger.warning(
-                "mapping_enumerator: MAX_PAGES (%d) hit at address=%s last_block=%d",
-                eff_max_pages,
-                contract_address,
-                current_from,
-            )
-            break
-
-        try:
-            result = await client.get(query)
-        except Exception as exc:
-            status = "error"
-            error = str(exc)
-            logger.warning(
-                "mapping_enumerator: RPC error at page %d for address=%s: %s",
-                page_count,
-                contract_address,
-                exc,
-            )
-            break
-
-        page_count += 1
-        data_obj = getattr(result, "data", None)
-        if data_obj is not None and hasattr(data_obj, "logs"):
-            logs = list(getattr(data_obj, "logs", None) or [])
-        elif isinstance(data_obj, list):
-            logs = data_obj
-        else:
-            logs = list(getattr(result, "logs", None) or [])
-        logger.info(
-            "mapping_enumerator page %d: %d logs at from_block=%d, next_block=%s",
-            page_count,
-            len(logs),
-            current_from,
-            getattr(result, "next_block", None),
-        )
-        for raw_log in logs:
-            topics = _topics_from_log(raw_log)
-            if not topics:
+            if not key_address.startswith("0x") or len(key_address) != 42:
                 continue
-            topic0 = topics[0]
-            matching_specs = topic0_to_specs.get(topic0)
-            if not matching_specs:
-                continue
-            for spec in matching_specs:
-                key_address = _extract_key_address(
-                    raw_log,
-                    spec["key_position"],
-                    indexed_positions=list(spec.get("indexed_positions") or []),
-                )
-                if not key_address.startswith("0x") or len(key_address) != 42:
-                    continue
-                block = int(getattr(raw_log, "block_number", 0) or 0)
-                entry = state.setdefault(
-                    (spec["mapping_name"], key_address),
-                    {"present": False, "history": [], "last_block": 0},
-                )
-                if spec["direction"] == "add":
-                    entry["present"] = True
-                else:
-                    entry["present"] = False
-                entry["history"].append(spec["direction"])
-                entry["last_block"] = max(entry["last_block"], block)
-
-        next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
-            break
-        current_from = next_from
-        query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
+            block = int(getattr(raw_log, "block_number", 0) or 0)
+            entry = state.setdefault(
+                (spec["mapping_name"], key_address),
+                {"present": False, "history": [], "last_block": 0},
+            )
+            if spec["direction"] == "add":
+                entry["present"] = True
+            else:
+                entry["present"] = False
+            entry["history"].append(spec["direction"])
+            entry["last_block"] = max(entry["last_block"], block)
 
     out: list[EnumeratedPrincipal] = []
     for (mapping_name, addr), entry in state.items():
@@ -404,7 +514,7 @@ async def enumerate_mapping_allowlist(
         principals=out,
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=last_block_scanned,
         error=error,
     )
 
@@ -413,7 +523,7 @@ def enumerate_mapping_allowlist_sync(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
-    chain: str | None = None,
+    chain_id: int,
     **kwargs: Any,
 ) -> EnumerationResult:
     """Sync wrapper with two-tier TTL cache.
@@ -422,15 +532,20 @@ def enumerate_mapping_allowlist_sync(
     repeats. L2 is ``db.mapping_enumeration_cache`` — Postgres-backed and
     cross-process, so the resolution stage and the policy stage of the
     same job (which run in different worker processes since 9ce6fa3) hit
-    each other's results instead of re-paying the 60s hypersync scan.
+    each other's results instead of re-paying the bounded event scan.
 
     On miss we run the underlying enumeration, then write back to L2
-    first so other processes see it, then to L1. ``incomplete_*`` and
+    first so other processes see it, then to L1. If the enabled L2 cache cannot
+    be read or written, the failure is logged and raised rather than masked by
+    a different scan path. ``incomplete_*`` and
     ``error`` results are cached at both tiers — re-running them inside
     the TTL would just hit the same bound; the caller sees the
     ``status`` field and decides whether to act on partial data.
     """
-    cache_key = contract_address.lower()
+    if chain_id is None:
+        raise ValueError("mapping enumeration requires explicit chain_id")
+    normalized_chain_id = require_supported_chain_id(chain_id=chain_id, context="mapping enumeration")
+    cache_key = f"{normalized_chain_id}:{contract_address.lower()}"
     now = time.monotonic()
 
     with _CACHE_LOCK:
@@ -455,19 +570,22 @@ def enumerate_mapping_allowlist_sync(
 
             specs_hash = _db_cache.specs_fingerprint(specs_as_dicts)
             db_hit = _db_cache.find_fresh(
-                chain=chain,
+                chain_id=normalized_chain_id,
                 address=contract_address,
                 specs_hash=specs_hash,
                 ttl_s=_cache_ttl_s(),
             )
         except Exception as exc:
-            logger.warning(
-                "mapping_enumerator: L2 read failed for %s, falling through to scan: %s",
+            logger.error(
+                "mapping_enumerator: L2 read failed for %s chain_id=%s: %s",
                 contract_address,
+                normalized_chain_id,
                 exc,
+                extra={"exc_type": type(exc).__name__},
             )
-            db_hit = None
-            specs_hash = None
+            raise RuntimeError(
+                f"mapping enumeration L2 cache read failed for {contract_address} chain_id={normalized_chain_id}"
+            ) from exc
         else:
             if db_hit is not None:
                 logger.info(
@@ -483,24 +601,31 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
-    result = asyncio.run(enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs))
+    result = asyncio.run(
+        enumerate_mapping_allowlist(contract_address, writer_specs, chain_id=normalized_chain_id, **kwargs)
+    )
 
     if specs_hash is not None:
         try:
             from db import mapping_enumeration_cache as _db_cache
 
             _db_cache.upsert(
-                chain=chain,
+                chain_id=normalized_chain_id,
                 address=contract_address,
                 specs_hash=specs_hash,
                 result=dict(result),
             )
         except Exception as exc:
-            logger.warning(
-                "mapping_enumerator: L2 write failed for %s: %s",
+            logger.error(
+                "mapping_enumerator: L2 write failed for %s chain_id=%s: %s",
                 contract_address,
+                normalized_chain_id,
                 exc,
+                extra={"exc_type": type(exc).__name__},
             )
+            raise RuntimeError(
+                f"mapping enumeration L2 cache write failed for {contract_address} chain_id={normalized_chain_id}"
+            ) from exc
 
     with _CACHE_LOCK:
         _CACHE[cache_key] = (result, now)
@@ -524,12 +649,9 @@ async def enumerate_mapping_values(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
-    hypersync_url: str = DEFAULT_HYPERSYNC_URL,
-    bearer_token: str | None = None,
+    chain_id: int,
     from_block: int = 0,
     to_block: int | None = None,
-    client: Any = None,
-    hypersync_module: Any = None,
     timeout_s: float | None = None,
     max_pages: int | None = None,
 ) -> EnumerationValueResult:
@@ -544,6 +666,10 @@ async def enumerate_mapping_values(
     """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
+
+    if chain_id is None:
+        raise RuntimeError("mapping value enumeration requires explicit chain_id")
+    normalized_chain_id = require_supported_chain_id(chain_id=chain_id, context="mapping value enumeration")
 
     if not writer_specs:
         return EnumerationValueResult(
@@ -563,77 +689,46 @@ async def enumerate_mapping_values(
         topic0 = _event_topic0(spec["event_signature"])
         topic0_to_specs.setdefault(topic0, []).append(spec)
 
-    if hypersync_module is None:
-        import hypersync as hypersync_module  # type: ignore
-    if client is None:
-        if not bearer_token:
-            raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")
-        client = hypersync_module.HypersyncClient(
-            hypersync_module.ClientConfig(url=hypersync_url, bearer_token=bearer_token)
-        )
-
     topic0s = sorted(topic0_to_specs.keys())
-    query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
+    logs, page_count, last_block_scanned = _fetch_logs_via_erpc(
+        chain_id=normalized_chain_id,
+        contract_address=contract_address,
+        topic0s=topic0s,
+        from_block=from_block,
+        to_block=to_block,
+        timeout_s=eff_timeout,
+        max_pages=eff_max_pages,
+    )
 
     # state: (mapping_name, key) -> (value_hex, last_block, last_log_index)
     state: dict[tuple[str, str], tuple[str, int, int]] = {}
-    current_from = from_block
-    page_count = 0
-    started = time.monotonic()
     status = "complete"
     error: str | None = None
-    while True:
-        if time.monotonic() - started > eff_timeout:
-            status = "incomplete_timeout"
-            break
-        if page_count >= eff_max_pages:
-            status = "incomplete_max_pages"
-            break
-        try:
-            result = await client.get(query)
-        except Exception as exc:
-            status = "error"
-            error = str(exc)
-            break
-        page_count += 1
-        data_obj = getattr(result, "data", None)
-        if data_obj is not None and hasattr(data_obj, "logs"):
-            logs = list(getattr(data_obj, "logs", None) or [])
-        elif isinstance(data_obj, list):
-            logs = data_obj
-        else:
-            logs = list(getattr(result, "logs", None) or [])
-        for raw_log in logs:
-            topics = _topics_from_log(raw_log)
-            if not topics:
+    for raw_log in logs:
+        topics = _topics_from_log(raw_log)
+        if not topics:
+            continue
+        topic0 = topics[0]
+        matching_specs = topic0_to_specs.get(topic0)
+        if not matching_specs:
+            continue
+        for spec in matching_specs:
+            indexed = list(spec.get("indexed_positions") or [])
+            key_str = _extract_key_address(raw_log, spec["key_position"], indexed_positions=indexed)
+            if not key_str:
                 continue
-            topic0 = topics[0]
-            matching_specs = topic0_to_specs.get(topic0)
-            if not matching_specs:
+            value_pos = spec.get("value_position")
+            if value_pos is None:
                 continue
-            for spec in matching_specs:
-                indexed = list(spec.get("indexed_positions") or [])
-                key_str = _extract_key_address(raw_log, spec["key_position"], indexed_positions=indexed)
-                if not key_str:
-                    continue
-                value_pos = spec.get("value_position")
-                if value_pos is None:
-                    continue
-                value_hex = _extract_value_word(raw_log, int(value_pos), indexed_positions=indexed)
-                if not value_hex:
-                    continue
-                block = int(getattr(raw_log, "block_number", 0) or 0)
-                log_idx = int(getattr(raw_log, "log_index", 0) or 0)
-                key_tuple = (spec["mapping_name"], key_str.lower())
-                prior = state.get(key_tuple)
-                if prior is None or (block, log_idx) > (prior[1], prior[2]):
-                    state[key_tuple] = (value_hex, block, log_idx)
-
-        next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
-            break
-        current_from = next_from
-        query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
+            value_hex = _extract_value_word(raw_log, int(value_pos), indexed_positions=indexed)
+            if not value_hex:
+                continue
+            block = int(getattr(raw_log, "block_number", 0) or 0)
+            log_idx = int(getattr(raw_log, "log_index", 0) or 0)
+            key_tuple = (spec["mapping_name"], key_str.lower())
+            prior = state.get(key_tuple)
+            if prior is None or (block, log_idx) > (prior[1], prior[2]):
+                state[key_tuple] = (value_hex, block, log_idx)
 
     entries: list[EnumeratedKeyValue] = [
         {
@@ -649,7 +744,7 @@ async def enumerate_mapping_values(
         entries=entries,
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=last_block_scanned,
         error=error,
     )
 
@@ -663,7 +758,7 @@ def enumerate_mapping_values_sync(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
-    chain: str | None = None,
+    chain_id: int,
     value_predicate: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> EnumerationValueResult:
@@ -677,7 +772,7 @@ def enumerate_mapping_values_sync(
     serializing ``EnumerationValueResult`` into the existing
     columns, so value-aware replay remains an in-process cache path.
 
-    ``chain``, ``value_predicate``, and the dict-converted writer
+    ``chain_id``, ``value_predicate``, and the dict-converted writer
     specs are accepted for forward-compatibility — the
     ``specs_fingerprint`` extension at
     ``db/mapping_enumeration_cache.py:51`` already accepts a
@@ -685,7 +780,10 @@ def enumerate_mapping_values_sync(
     fingerprint will key on it. Until then they're pass-through
     arguments only.
     """
-    cache_key = contract_address.lower()
+    if chain_id is None:
+        raise ValueError("mapping value enumeration requires explicit chain_id")
+    normalized_chain_id = require_supported_chain_id(chain_id=chain_id, context="mapping value enumeration")
+    cache_key = f"{normalized_chain_id}:{contract_address.lower()}"
     now = time.monotonic()
 
     with _CACHE_LOCK:
@@ -698,7 +796,9 @@ def enumerate_mapping_values_sync(
 
     specs_as_dicts = [dict(s) for s in writer_specs]
 
-    result = asyncio.run(enumerate_mapping_values(contract_address, writer_specs, **kwargs))
+    result = asyncio.run(
+        enumerate_mapping_values(contract_address, writer_specs, chain_id=normalized_chain_id, **kwargs)
+    )
 
     with _CACHE_LOCK:
         _VALUE_CACHE[cache_key] = (result, now)
@@ -706,7 +806,7 @@ def enumerate_mapping_values_sync(
     # deferred — the L2 schema is keyed on EnumerationResult shape, not
     # EnumerationValueResult, so persisting requires a schema change
     # we'll do alongside the durable indexer (D.3).
-    _ = (chain, value_predicate, specs_as_dicts)
+    _ = (chain_id, value_predicate, specs_as_dicts)
     return result
 
 

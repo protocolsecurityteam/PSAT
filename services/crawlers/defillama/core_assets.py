@@ -4,7 +4,10 @@ token addresses organized by chain.
 """
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def load_core_assets(repo_path: Path) -> dict[str, dict[str, str]]:
@@ -18,9 +21,14 @@ def load_core_assets(repo_path: Path) -> dict[str, dict[str, str]]:
     """
     path = repo_path / "projects" / "helper" / "coreAssets.json"
     if not path.exists():
-        return {}
+        logger.error("DefiLlama coreAssets.json not found at %s", path)
+        raise FileNotFoundError(f"DefiLlama coreAssets.json not found at {path}")
 
-    raw = json.loads(path.read_text())
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Failed to load DefiLlama coreAssets.json at %s: %s", path, exc)
+        raise RuntimeError(f"Failed to load DefiLlama coreAssets.json at {path}") from exc
 
     result = {}
     for chain, assets in raw.items():

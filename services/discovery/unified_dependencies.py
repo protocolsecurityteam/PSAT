@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from utils.etherscan import get_contract_info
+import logging
 
 from .static_dependencies import normalize_address
+
+logger = logging.getLogger(__name__)
 
 _CLS_KEYS = ("proxy_type", "implementation", "beacon", "admin", "proxies", "facets", "needs_polling")
 
@@ -18,10 +20,9 @@ def build_unified_dependencies(
 ) -> dict:
     """Merge static deps, dynamic deps, and classifications into one output.
 
-    *target_classification* is an optional fallback from an earlier
-    ``classify_single`` call.  When ``classifications`` is ``None`` (e.g.
-    because ``classify_contracts`` was skipped or failed), this ensures the
-    target's proxy type still reaches the unified output.
+    *target_classification* carries an explicit result from an earlier
+    ``classify_single`` call.  That preserves the target's proxy type when
+    dependency classification is not part of the current pass.
     """
     target = normalize_address(address)
 
@@ -108,48 +109,24 @@ def build_unified_dependencies(
 
 def enrich_dependency_metadata(
     unified: dict,
+    *,
+    chain_id: int,
     info_cache: dict[str, tuple[str | None, dict[str, str]]] | None = None,
 ) -> dict:
-    """Resolve contract names and selectors in-place for a unified dependency output.
+    """Apply already-known contract names and selectors to a unified dependency output.
 
-    If *info_cache* is provided it is used as a pre-populated lookup and is
-    **mutated in-place** — newly fetched entries are added so the caller can
-    persist the updated cache.
+    ``info_cache`` is intentionally read-only here. Earlier versions fetched
+    missing dependency metadata from an explorer; eRPC-only mode leaves unknown
+    names/selectors absent instead of making a non-eRPC enrichment call.
     """
+    del chain_id
     deps = unified.get("dependencies", {})
     if not isinstance(deps, dict) or not deps:
         return unified
 
     keyed_graph = unified.get("dependency_graph", {})
 
-    addrs_to_fetch: set[str] = set(deps.keys())
-    for info in deps.values():
-        if not isinstance(info, dict):
-            continue
-        implementation = info.get("implementation")
-        if isinstance(implementation, dict):
-            addrs_to_fetch.add(implementation["address"])
-        elif isinstance(implementation, str):
-            addrs_to_fetch.add(implementation)
-
-    if info_cache is None:
-        info_cache = {}
-    missing = sorted(addr for addr in addrs_to_fetch if addr not in info_cache)
-    if missing:
-        from utils.etherscan import parallel_get
-
-        # Each ``get_contract_info`` call still routes through the shared
-        # _rate_lock — parallel_get only stacks the inter-call dead time.
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in missing}
-        results = parallel_get(calls)
-        for addr in missing:
-            value = results.get(addr)
-            if isinstance(value, BaseException) or not isinstance(value, tuple):
-                # ``get_contract_info`` already swallows Etherscan failures and
-                # returns ``(None, {})``; a raised exception here is unexpected.
-                info_cache[addr] = (None, {})
-            else:
-                info_cache[addr] = value  # type: ignore[assignment]
+    info_cache = info_cache or {}
 
     for addr, info in deps.items():
         if not isinstance(info, dict):

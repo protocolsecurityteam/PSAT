@@ -9,13 +9,15 @@ Given a company/protocol name or domain, this module:
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from typing import Any
 
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.rpc import require_supported_chain_id
 
 from .deployer import expand_from_deployers
 from .inventory_domain import (
+    CHAIN_IDS,
     CHAIN_SORT_ORDER,
     SearchFn,
     _debug_log,
@@ -26,6 +28,10 @@ from .inventory_domain import (
 )
 from .inventory_extract import extract_inventory_entries_from_pages
 from .ranking import score_inventory_evidence
+
+logger = logging.getLogger(__name__)
+
+_CHAIN_LABEL_BY_ID = {chain_id: label for label, chain_id in CHAIN_IDS.items()}
 
 
 def _collect_source_urls(evidence: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
@@ -64,41 +70,39 @@ def _register_sources(
     return source_ids
 
 
-def _collapse_unknown_chain_entries(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Merge unknown-chain evidence per address while preserving multi-chain evidence."""
+def _group_entries_by_address(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group evidence per address without guessing a chain for unknown evidence."""
     by_address: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries:
-        chain = canonical_chain(entry.get("chain")) or "unknown"
-        by_address[entry["address"]].append({**entry, "chain": chain})
-
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for address, items in by_address.items():
-        specific = {item["chain"] for item in items if item["chain"] != "unknown"}
-        remapped_chain = next(iter(specific)) if len(specific) == 1 else None
-        for item in items:
-            chain = item["chain"]
-            if chain == "unknown" and remapped_chain:
-                chain = remapped_chain
-            grouped[address].append({**item, "chain": chain})
-    return grouped
+        by_address[entry["address"]].append(entry)
+    return by_address
 
 
-def _sorted_chains(chains: set[str]) -> list[str]:
-    return sorted(chains, key=lambda chain: (CHAIN_SORT_ORDER.get(chain, 50), chain))
+def _chain_sort_key(chain_id: int) -> tuple[int, int]:
+    label = _CHAIN_LABEL_BY_ID.get(chain_id)
+    return (CHAIN_SORT_ORDER.get(label or "unknown", 50), chain_id)
 
 
-def _select_chain_summary(evidence: list[dict[str, Any]]) -> tuple[str, list[str]]:
-    specific = _sorted_chains(
-        {chain for item in evidence if (chain := (canonical_chain(item.get("chain")) or "unknown")) != "unknown"}
-    )
-    if specific:
-        if len(specific) == 1:
-            return specific[0], specific
-        return "multiple", specific
+def _chain_label_for_chain_id(chain_id: int | None) -> str | None:
+    if chain_id is None:
+        return None
+    return _CHAIN_LABEL_BY_ID.get(chain_id)
 
-    if any(item.get("chain") == "unknown" for item in evidence):
-        return "unknown", ["unknown"]
-    return "unknown", []
+
+def _select_chain_ids(evidence: list[dict[str, Any]]) -> list[int]:
+    chain_ids: list[int] = []
+    for item in evidence:
+        raw_chain_id = item.get("chain_id")
+        if raw_chain_id is None:
+            continue
+        chain_id = require_supported_chain_id(
+            chain_id=raw_chain_id,
+            context=f"inventory discovery evidence for {item.get('address')}",
+        )
+        if chain_id not in chain_ids:
+            chain_ids.append(chain_id)
+    chain_ids.sort(key=_chain_sort_key)
+    return chain_ids
 
 
 def _select_name(evidence: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
@@ -136,13 +140,13 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
     Returns (contracts, sources_map) where sources_map is ``{url: id}``
     and each contract references source IDs instead of full URLs.
     """
-    grouped = _collapse_unknown_chain_entries(entries)
+    grouped = _group_entries_by_address(entries)
     sources_map: dict[str, str] = {}  # url → id
     contracts: list[dict[str, Any]] = []
     for address, evidence in grouped.items():
-        _chain, chains = _select_chain_summary(evidence)
+        chain_ids = _select_chain_ids(evidence)
         name, aliases = _select_name(evidence)
-        confidence, evidence_counts = score_inventory_evidence(_chain, evidence)
+        confidence, evidence_counts = score_inventory_evidence(chain_ids[0] if chain_ids else None, evidence)
         page_urls, explorer_urls = _collect_source_urls(evidence)
         if not page_urls and not explorer_urls:
             continue
@@ -155,7 +159,7 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
         contract: dict[str, Any] = {
             "name": name,
             "address": address,
-            "chains": chains,
+            "chain_ids": chain_ids,
             "confidence": confidence,
             "source": source_types,
             "evidence": evidence_counts,
@@ -171,7 +175,7 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
             -float(item["confidence"]),
             item["name"] is None,
             str(item.get("name") or ""),
-            CHAIN_SORT_ORDER.get(item["chains"][0] if item["chains"] else "unknown", 50),
+            _chain_sort_key(item["chain_ids"][0]) if item["chain_ids"] else (50, 0),
             item["address"],
         ),
     )[:limit]
@@ -211,8 +215,8 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
         # Use the highest-confidence entry as the base.
         group.sort(key=lambda c: -c.get("confidence", 0))
         base = group[0].copy()
-        all_chains: list[str] = []
-        seen_chains: set[str] = set()
+        all_chain_ids: list[int] = []
+        seen_chain_ids: set[int] = set()
         deployments: list[dict[str, Any]] = []
         all_source_ids: list[str] = []
         seen_source_ids: set[str] = set()
@@ -220,12 +224,18 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
 
         for contract in group:
             dep: dict[str, Any] = {"address": contract["address"]}
-            dep_chains = canonical_chain_list(contract.get("chains", ["unknown"])) or ["unknown"]
-            dep["chains"] = dep_chains
-            for ch in dep_chains:
-                if ch not in seen_chains:
-                    all_chains.append(ch)
-                    seen_chains.add(ch)
+            dep_chain_ids = [
+                require_supported_chain_id(
+                    chain_id=chain_id,
+                    context=f"inventory grouping for {contract['address']}",
+                )
+                for chain_id in contract.get("chain_ids", [])
+            ]
+            dep["chain_ids"] = dep_chain_ids
+            for chain_id in dep_chain_ids:
+                if chain_id not in seen_chain_ids:
+                    all_chain_ids.append(chain_id)
+                    seen_chain_ids.add(chain_id)
             if contract.get("activity"):
                 dep["activity"] = contract["activity"]
             if contract.get("rank_score") is not None:
@@ -237,7 +247,7 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
                     all_source_ids.append(sid)
                     seen_source_ids.add(sid)
 
-        base["chains"] = canonical_chain_list(all_chains) or []
+        base["chain_ids"] = sorted(all_chain_ids, key=_chain_sort_key)
         base["confidence"] = max_confidence
         base["source_ids"] = all_source_ids
         base["deployments"] = deployments
@@ -252,7 +262,7 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
             -float(item.get("rank_score", item.get("confidence", 0))),
             item.get("name") is None,
             str(item.get("name") or ""),
-            CHAIN_SORT_ORDER.get(item["chains"][0] if item.get("chains") else "unknown", 50),
+            _chain_sort_key(item["chain_ids"][0]) if item.get("chain_ids") else (50, 0),
             item.get("address", ""),
         ),
     )
@@ -263,7 +273,7 @@ def search_protocol_inventory(
     company: str,
     *,
     search_fn: SearchFn,
-    chain: str | None = None,
+    chain_id: int | None = None,
     limit: int = 500,
     max_queries: int = 4,
     run_deployer: bool = True,
@@ -275,7 +285,19 @@ def search_protocol_inventory(
     if limit < 1:
         raise ValueError("limit must be >= 1")
 
-    requested_chain = canonical_chain(chain) if isinstance(chain, str) and chain.strip() else None
+    requested_chain_id = (
+        require_supported_chain_id(chain_id=chain_id, context=f"inventory discovery for {clean_company}")
+        if chain_id is not None
+        else None
+    )
+    requested_chain = _chain_label_for_chain_id(requested_chain_id)
+    if requested_chain_id is not None and requested_chain is None:
+        message = (
+            f"inventory discovery for {clean_company} requires a known discovery label for "
+            f"chain_id={requested_chain_id}"
+        )
+        logger.error(message)
+        raise RuntimeError(message)
     errors: list[dict[str, Any]] = []
     notes: list[str] = []
     queries_used = [0]
@@ -285,7 +307,7 @@ def search_protocol_inventory(
         debug,
         (
             "Starting inventory discovery: "
-            f"company={clean_company!r}, chain={requested_chain or 'any'}, "
+            f"company={clean_company!r}, chain_id={requested_chain_id or 'any'}, "
             f"limit={limit}, max_queries={max_queries}"
         ),
     )
@@ -311,14 +333,9 @@ def search_protocol_inventory(
         notes.append(f"Domain candidates: {', '.join(domain_candidates[:5])}")
     official_domain, extra_domains = _llm_select_domain(broad_results, clean_company, debug=debug)
     if not official_domain:
-        if hint_domain:
-            official_domain = hint_domain
-            extra_domains = [d for d in domain_candidates if d != hint_domain][:3]
-            notes.append(f"LLM didn't select a domain; using provided domain: {official_domain}")
-        elif len(domain_candidates) == 1:
-            official_domain = domain_candidates[0]
-            extra_domains = []
-            notes.append(f"Falling back to sole domain candidate: {official_domain}")
+        message = f"Inventory discovery could not identify an official domain for {clean_company}"
+        logger.error("%s; candidates=%s", message, domain_candidates[:5])
+        raise RuntimeError(message)
     # Ensure the hint is at least a companion so site-scoped search still
     # covers the provided domain, even if the LLM preferred a gitbook/github host.
     if official_domain and hint_domain and hint_domain != official_domain:
@@ -326,21 +343,6 @@ def search_protocol_inventory(
         if hint_domain not in extras:
             extras.insert(0, hint_domain)
         extra_domains = extras
-
-    if not official_domain:
-        notes.append("Could not identify an official domain")
-        notes.append(f"Search queries used: {queries_used[0]}/{max_queries}")
-        return {
-            "company": clean_company,
-            "chain": requested_chain or "any",
-            "official_domain": None,
-            "domain_candidates": domain_candidates if "domain_candidates" in locals() else [],
-            "pages_considered": [],
-            "pages_selected": [],
-            "contracts": [],
-            "errors": errors[:12],
-            "notes": notes[:12],
-        }
 
     notes.append(f"Official domain: {official_domain}")
     page_results, selected_urls = _discover_contract_inventory_pages(
@@ -359,9 +361,9 @@ def search_protocol_inventory(
         str(result.get("url", "")).strip() for result in page_results if str(result.get("url", "")).strip()
     ]
     if not selected_urls:
-        selected_urls = considered_urls[:3]
-        if selected_urls:
-            notes.append("LLM page selection unavailable; fell back to top in-domain page candidates")
+        message = f"Inventory discovery selected no contract inventory pages for {clean_company}"
+        logger.error("%s; considered=%s", message, considered_urls[:5])
+        raise RuntimeError(message)
 
     if selected_urls:
         notes.append(f"Selected pages: {len(selected_urls)}")
@@ -369,14 +371,38 @@ def search_protocol_inventory(
 
     deployer_entries: list[dict[str, Any]] = []
     if run_deployer and page_entries:
-        seed_addresses = sorted({e["address"] for e in page_entries})
-        _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
-        try:
-            deployer_entries = expand_from_deployers(seed_addresses, debug=debug)
-            notes.append(f"Deployer expansion: {len(deployer_entries)} contract(s)")
-        except Exception as exc:
-            _debug_log(debug, f"Deployer expansion failed: {exc!r}")
-            notes.append(f"Deployer expansion failed: {exc}")
+        seeds_by_chain_id: dict[int, set[str]] = defaultdict(set)
+        for entry in page_entries:
+            raw_chain_id = entry.get("chain_id") if entry.get("chain_id") is not None else requested_chain_id
+            if raw_chain_id is None:
+                continue
+            seed_chain_id = require_supported_chain_id(
+                chain_id=raw_chain_id,
+                context=f"deployer expansion seed for {entry.get('address')}",
+            )
+            seeds_by_chain_id[seed_chain_id].add(entry["address"])
+
+        if not seeds_by_chain_id:
+            notes.append("Deployer expansion skipped: no chain-specific seed contracts")
+        sorted_seed_groups = sorted(seeds_by_chain_id.items(), key=lambda item: _chain_sort_key(item[0]))
+        for chain_id, seed_set in sorted_seed_groups:
+            seed_addresses = sorted(seed_set)
+            _debug_log(
+                debug,
+                f"Running deployer expansion on chain_id={chain_id} with {len(seed_addresses)} seed(s)",
+            )
+            try:
+                chain_entries = expand_from_deployers(
+                    seed_addresses,
+                    chain_id=chain_id,
+                    debug=debug,
+                )
+                deployer_entries.extend(chain_entries)
+                notes.append(f"Deployer expansion (chain_id={chain_id}): {len(chain_entries)} contract(s)")
+            except Exception as exc:
+                logger.error("Deployer expansion failed for chain_id=%s: %s", chain_id, exc)
+                _debug_log(debug, f"Deployer expansion failed for chain_id={chain_id}: {exc!r}")
+                raise
 
     entries = page_entries + deployer_entries
     contracts, sources_map = _build_contracts(entries, limit=limit)
@@ -408,7 +434,7 @@ def search_protocol_inventory(
 
     return {
         "company": clean_company,
-        "chain": requested_chain or "any",
+        "chain_id": requested_chain_id,
         "official_domain": official_domain,
         "domain_candidates": domain_candidates,
         "pages_considered": considered_urls[:10],
@@ -423,85 +449,3 @@ def search_protocol_inventory(
             "verify critical addresses against the protocol's canonical documentation."
         ),
     }
-
-
-# ---------------------------------------------------------------------------
-# Inventory merge (append-only with confidence decay)
-# ---------------------------------------------------------------------------
-
-# Confidence decay factor applied to contracts not rediscovered on re-run.
-CONFIDENCE_DECAY = 0.8
-
-# Confidence floor — entries below this are dropped entirely.
-CONFIDENCE_FLOOR = 0.1
-
-
-def merge_inventory(prev: dict, new: dict) -> dict:
-    """Merge a previous inventory with a new one (append-only with confidence decay).
-
-    Contracts present in both use the new entry but keep the higher confidence.
-    Contracts only in the previous inventory are retained with decayed confidence
-    (multiplied by :data:`CONFIDENCE_DECAY` each time they are not rediscovered).
-    Contracts that decay below :data:`CONFIDENCE_FLOOR` are dropped.
-    """
-    prev_contracts = {c["address"].lower(): c for c in prev.get("contracts", []) if c.get("address")}
-    new_contracts = {c["address"].lower(): c for c in new.get("contracts", []) if c.get("address")}
-
-    merged: dict[str, dict] = {}
-
-    # Addresses in new (possibly also in prev)
-    for addr, entry in new_contracts.items():
-        if addr not in prev_contracts:
-            merged[addr] = entry
-        else:
-            # In both — use new entry, keep higher confidence
-            prev_conf = prev_contracts[addr].get("confidence", 0) or 0
-            new_conf = entry.get("confidence", 0) or 0
-            merged_entry = dict(entry)
-            merged_entry["confidence"] = max(prev_conf, new_conf)
-            merged[addr] = merged_entry
-
-    # Addresses only in prev — decay confidence
-    for addr, entry in prev_contracts.items():
-        if addr not in new_contracts:
-            decayed_entry = dict(entry)
-            prev_conf = entry.get("confidence", 0) or 0
-            decayed_conf = prev_conf * CONFIDENCE_DECAY
-            if decayed_conf < CONFIDENCE_FLOOR:
-                continue
-            decayed_entry["confidence"] = decayed_conf
-            merged[addr] = decayed_entry
-
-    sorted_contracts = sorted(merged.values(), key=lambda c: c.get("confidence", 0) or 0, reverse=True)
-
-    result: dict = {
-        "contracts": sorted_contracts,
-        "company": new.get("company", prev.get("company")),
-        "chain": new.get("chain", prev.get("chain")),
-        "official_domain": new.get("official_domain") or prev.get("official_domain"),
-        "errors": new.get("errors"),
-        "notes": new.get("notes"),
-    }
-
-    # Union pages by URL
-    for key in ("pages_considered", "pages_selected"):
-        prev_pages = prev.get(key, []) or []
-        new_pages = new.get(key, []) or []
-        seen_urls: set[str] = set()
-        deduped: list = []
-        for page in new_pages + prev_pages:
-            url = page.get("url", "") if isinstance(page, dict) else str(page)
-            if url not in seen_urls:
-                seen_urls.add(url)
-                deduped.append(page)
-        result[key] = deduped
-
-    # Merge sources dicts
-    prev_sources = prev.get("sources") or {}
-    new_sources = new.get("sources") or {}
-    if isinstance(prev_sources, dict) and isinstance(new_sources, dict):
-        result["sources"] = {**prev_sources, **new_sources}
-    else:
-        result["sources"] = new_sources or prev_sources
-
-    return result

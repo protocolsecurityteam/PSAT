@@ -41,6 +41,7 @@ from utils.memory import (
     current_rss_bytes,
     mb,
 )
+from utils.rpc import require_supported_chain_id
 from workers.retry_policy import classify, compute_next_attempt, max_retries
 
 logger = logging.getLogger(__name__)
@@ -285,15 +286,14 @@ class BaseWorker:
         """
         # ``getattr`` defaults guard the test stubs that pass a bare
         # ``SimpleNamespace`` job without a request/trace_id field.
-        raw_request = getattr(job, "request", None)
-        request = raw_request if isinstance(raw_request, dict) else {}
+        chain_id = getattr(job, "chain_id", None)
         with bind_trace_context(
             trace_id=getattr(job, "trace_id", None),
             job_id=str(job.id),
             stage=self.stage.value,
             worker_id=self.worker_id,
             address=getattr(job, "address", None),
-            chain=request.get("chain"),
+            chain_id=chain_id,
         ):
             # Per-job accumulator for ``record_degraded`` calls. Reset
             # alongside ``bind_trace_context`` so K>1 jobs running in
@@ -907,16 +907,16 @@ class BaseWorker:
         propagating; the success path of stage advancement should not be
         blocked by a dependency-bookkeeping bug.
         """
-        chain = self._provider_chain_for(job)
         addr = (getattr(job, "address", None) or "").lower()
         if not addr:
             return 0
+        chain_id = self._provider_chain_id_for(job)
         try:
             stage_order = [s.value for s in JobStage]
             completed_idx = stage_order.index(completed_stage.value)
             satisfied_stages = {s for s in JobStage if stage_order.index(s.value) <= completed_idx}
             stmt = select(JobDependency).where(
-                JobDependency.provider_chain == chain,
+                JobDependency.provider_chain_id == chain_id,
                 JobDependency.provider_address == addr,
                 JobDependency.status == "pending",
                 JobDependency.required_stage.in_(satisfied_stages),
@@ -953,13 +953,13 @@ class BaseWorker:
         ``external_check_only`` rather than block forever. Same
         non-committing semantics as ``_satisfy_dependencies``.
         """
-        chain = self._provider_chain_for(job)
         addr = (getattr(job, "address", None) or "").lower()
         if not addr:
             return 0
+        chain_id = self._provider_chain_id_for(job)
         try:
             stmt = select(JobDependency).where(
-                JobDependency.provider_chain == chain,
+                JobDependency.provider_chain_id == chain_id,
                 JobDependency.provider_address == addr,
                 JobDependency.status == "pending",
             )
@@ -987,19 +987,18 @@ class BaseWorker:
             return 0
 
     @staticmethod
-    def _provider_chain_for(job: Job) -> str | None:
-        """Pull the provider's chain identifier out of the job's request
-        payload. Mirrors the convention ``_queue_discovered_contracts``
-        uses when stamping ``request['chain']`` on spawned children.
+    def _provider_chain_id_for(job: Job) -> int:
+        """Pull and validate the provider's supported chain id from the job row.
 
         ``getattr`` over direct attribute access so test doubles
-        (SimpleNamespace fakes that omit ``request``) don't trigger
+        (SimpleNamespace fakes that omit ``chain_id``) don't trigger
         AttributeError on the dependency hooks."""
-        request = getattr(job, "request", None)
-        if not isinstance(request, dict):
-            return None
-        chain = request.get("chain")
-        return chain if isinstance(chain, str) and chain else None
+        job_id = getattr(job, "id", "<unknown>")
+        chain_id = getattr(job, "chain_id", None)
+        if chain_id is None:
+            logger.error("dependency provider job %s is missing chain_id", job_id)
+            raise RuntimeError(f"dependency provider job {job_id} requires chain_id")
+        return require_supported_chain_id(chain_id=chain_id, context=f"dependency provider job {job_id}")
 
     def _persist_stage_errors(self, job: Job, errors: list[StageError]) -> None:
         """Write the ``stage_errors`` artifact via a fresh session, merging

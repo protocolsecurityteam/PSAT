@@ -18,6 +18,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright  # pyrig
 from services.crawlers.dapp.inject import build_provider_script
 from services.crawlers.dapp.interaction_log import InteractionLog
 from services.crawlers.dapp.wallet import HoneypotWallet
+from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,12 @@ class DAppCrawler:
     def __init__(
         self,
         wallet: HoneypotWallet,
-        chain_id: int = 1,
+        chain_id: int,
         eth_balance: str = "0x3635C9ADC5DEA00000",
         token_balance: str = "0x84595161401484A000000",
         headless: bool = True,
     ):
+        chain_id = require_supported_chain_id(chain_id=chain_id, context="DApp crawler")
         self.wallet = wallet
         self.chain_id = chain_id
         self.eth_balance = eth_balance

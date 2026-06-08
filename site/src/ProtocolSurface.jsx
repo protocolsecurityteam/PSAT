@@ -110,10 +110,10 @@ export default function ProtocolSurface({
   // interface is the most useful entry point on first load. A canvas
   // click switches to Detail in both modes (handlers below).
   const [sidebarMode, setSidebarMode] = useState("agent");
-  // Per-proxy upgrade history cache, keyed by job_id. Server's
+  // Per-proxy upgrade history cache, keyed by analysis_job_id. Server's
   // /api/company/{name} returns upgrade_count=null for protocols whose
   // chain monitor hasn't ingested events yet (the static-analysis blob in
-  // /api/analyses/{job_id} has the real numbers). We populate this lazily
+  // /api/analyses/{analysis_job_id} has the real numbers). We populate this lazily
   // each time the user opens a proxy in the Upgrades tab so subsequent
   // visits skip the round-trip and the global proxy list can show real
   // counts for already-opened proxies.
@@ -437,14 +437,23 @@ export default function ProtocolSurface({
   const navigateToPrincipal = useCallback((target) => {
     let principal = visiblePrincipals.find((p) => p.address?.toLowerCase() === target.address?.toLowerCase());
     if (!principal) {
+      const controls = machines
+        .filter((m) => m.owner?.toLowerCase() === target.address?.toLowerCase())
+        .map((m) => m.address);
+      const chainIds = [...new Set(
+        machines
+          .filter((m) => controls.some((addr) => addr?.toLowerCase() === m.address?.toLowerCase()))
+          .map((m) => m.chain_id)
+          .filter(Boolean),
+      )].sort((a, b) => a - b);
       principal = {
         address: target.address,
         type: target.type,
         label: target.label || target.type,
         details: target.details || {},
-        controls: machines
-          .filter((m) => m.owner?.toLowerCase() === target.address?.toLowerCase())
-          .map((m) => m.address),
+        controls,
+        chain_ids: chainIds,
+        chain_id: chainIds.length === 1 ? chainIds[0] : null,
       };
     }
     setSelectedPrincipal(principal);
@@ -830,8 +839,13 @@ export default function ProtocolSurface({
                 // into highlightedAddresses. The canvas's existing
                 // audit-overlay dim path then dims everything else.
                 triggerFocus(addr);
+                const focusChainId = selectedMachine?.chain_id;
+                if (!focusChainId) {
+                  setHighlightedAddresses(new Set([lc]));
+                  return;
+                }
                 api(
-                  `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}`,
+                  `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}&chain_id=${encodeURIComponent(focusChainId)}`,
                 )
                   .then((data) => {
                     const set = new Set([lc]);

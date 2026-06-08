@@ -30,7 +30,7 @@ Level contract:
                  completion, child-job spawn. One per real event, not
                  per loop iteration.
     ``DEBUG``    Per-RPC / per-iteration noise: individual ``eth_getCode``
-                 / Etherscan batch tracebacks, per-future thread-pool
+                 / source-provider batch tracebacks, per-future thread-pool
                  timings, per-page PDF parse failures, etc.
 
 Notes on ``logger.exception``: it's just ``logger.error`` with
@@ -63,14 +63,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
-    from schemas.stage_errors import StageError, StageErrorSeverity
+    from schemas.stage_errors import StageError
 
 trace_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_trace_id", default=None)
 job_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_job_id", default=None)
 stage_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_stage", default=None)
 worker_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_worker_id", default=None)
 address_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_address", default=None)
-chain_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_chain", default=None)
+chain_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("psat_chain_id", default=None)
 
 # Per-job accumulator for degraded-but-continuing failures. ``BaseWorker``
 # binds a fresh list at the start of every ``_execute_job`` and drains it
@@ -134,7 +134,7 @@ class JsonFormatter(logging.Formatter):
     """Render each ``LogRecord`` as a single-line JSON object.
 
     Pulls ``trace_id`` / ``job_id`` / ``stage`` / ``worker_id`` /
-    ``address`` / ``chain`` from the matching :mod:`contextvars` and any
+    ``address`` / ``chain_id`` from the matching :mod:`contextvars` and any
     user-supplied ``extra={...}`` keys (e.g. ``duration_ms``) directly
     off the record. Unset context fields are omitted rather than
     serialized as ``null`` so log shippers don't index empty cardinality.
@@ -146,7 +146,7 @@ class JsonFormatter(logging.Formatter):
         ("stage", stage_var),
         ("worker_id", worker_id_var),
         ("address", address_var),
-        ("chain", chain_var),
+        ("chain_id", chain_id_var),
     )
 
     def format(self, record: logging.LogRecord) -> str:
@@ -216,7 +216,7 @@ def bind_trace_context(
     stage: str | None = None,
     worker_id: str | None = None,
     address: str | None = None,
-    chain: str | None = None,
+    chain_id: int | str | None = None,
 ) -> Iterator[None]:
     """Bind logging context for the duration of a ``with`` block.
 
@@ -232,7 +232,7 @@ def bind_trace_context(
         (stage_var, stage),
         (worker_id_var, worker_id),
         (address_var, address),
-        (chain_var, chain),
+        (chain_id_var, str(chain_id) if chain_id is not None else None),
     )
     for var, value in bindings:
         if value is not None:
@@ -271,7 +271,7 @@ def record_degraded(
     # touches pydantic which transitively pulls in things we don't want
     # ``utils.logging`` to require at import time (notably during pytest's
     # very-early plugin discovery).
-    from schemas.stage_errors import StageError
+    from schemas.stage_errors import StageError, StageErrorSeverity
     from utils.secrets import sanitize_obj, sanitize_string
 
     job_id = job_id_var.get() or "0"
@@ -385,5 +385,5 @@ __all__ = [
     "stage_var",
     "worker_id_var",
     "address_var",
-    "chain_var",
+    "chain_id_var",
 ]

@@ -29,12 +29,16 @@ Layers:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
 
 from db.models import Contract
+from utils.rpc import require_supported_chain_id
 
 from .activity import enrich_with_activity
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -164,7 +168,7 @@ def effective_confidence(
 
 
 def score_inventory_evidence(
-    chain: str,
+    chain_id: int | None,
     evidence: list[dict[str, Any]],
 ) -> tuple[float, dict[str, Any]]:
     """Score an inventory entry from its supporting evidence.
@@ -179,7 +183,7 @@ def score_inventory_evidence(
         - the presence of a human-readable name
         - strong evidence kinds (tables > links > free-form text)
         - deployer / explorer corroboration
-        - a known chain (vs ``unknown``)
+        - a validated supported chain id
 
     Cap at 0.99 so a perfect-score inventory row still leaves room
     for on-chain activity in the ranking blend.
@@ -206,7 +210,8 @@ def score_inventory_evidence(
     confidence += min(0.12, max(0, page_count - 1) * 0.06)
     if explorer_count:
         confidence += 0.06
-    if chain != "unknown":
+    if chain_id is not None:
+        require_supported_chain_id(chain_id=chain_id, context="inventory evidence scoring")
         confidence += 0.05
     confidence = min(confidence, 0.99)
 
@@ -250,18 +255,18 @@ def rank_contract_rows(rows: Iterable[Contract]) -> list[dict[str, Any]]:
     Returns a list of dicts sorted by ``rank_score`` descending, each
     carrying:
 
-        - ``address``, ``chains``, ``confidence``, ``name``,
-          ``discovery_sources`` (input fields; confidence is the
-          effective value fed to the ranker)
+        - ``address``, ``chain_id``, ``confidence``, ``name``,
+          ``discovery_sources`` (input fields; confidence is the effective
+          value fed to the ranker)
         - ``activity`` (set by ``enrich_with_activity``)
         - ``rank_score`` (set by ``enrich_with_activity``)
-        - ``__row_address`` / ``__row_chain`` (back-refs to identify
+        - ``__row_address`` / ``__row_chain_id`` (back-refs to identify
           the originating Contract row; the name + underscore prefix
           avoids any collision with real keys)
     """
     shimmed: list[dict[str, Any]] = []
     for row in rows:
-        chains = _resolve_chains(row)
+        chain_id = _require_row_chain_id(row)
         sources = list(row.discovery_sources or [])
         # Cast Decimal → float here so ``effective_confidence`` always
         # sees a float; ``Contract.confidence`` is ``NUMERIC(10,4)`` and
@@ -271,9 +276,9 @@ def rank_contract_rows(rows: Iterable[Contract]) -> list[dict[str, Any]]:
         shimmed.append(
             {
                 "__row_address": row.address,
-                "__row_chain": row.chain,
+                "__row_chain_id": chain_id,
                 "address": row.address,
-                "chains": chains,
+                "chain_id": chain_id,
                 "confidence": confidence,
                 "name": row.contract_name,
                 "discovery_sources": sources,
@@ -282,19 +287,20 @@ def rank_contract_rows(rows: Iterable[Contract]) -> list[dict[str, Any]]:
     return enrich_with_activity(shimmed)
 
 
-def _resolve_chains(row: Contract) -> list[str]:
-    """Pick the chains list ``enrich_with_activity`` expects.
-
-    A Contract row may carry ``chains`` (multi-chain inventory
-    deployments) or just the scalar ``chain``. Activity ranking only
-    reads the first element, but we pass the full list when available
-    so the shim stays lossless for downstream consumers.
-    """
-    if row.chains:
-        return list(row.chains)
-    if row.chain:
-        return [row.chain]
-    return ["unknown"]
+def _require_row_chain_id(row: Contract) -> int:
+    try:
+        return require_supported_chain_id(
+            chain_id=row.chain_id,
+            context=f"selection ranking for contract id={row.id} address={row.address}",
+        )
+    except RuntimeError:
+        logger.exception(
+            "selection ranking failed for contract id=%s address=%s chain_id=%s",
+            row.id,
+            row.address,
+            row.chain_id,
+        )
+        raise
 
 
 __all__ = [

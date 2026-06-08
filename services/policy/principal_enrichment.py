@@ -13,6 +13,7 @@ from services.policy.types import PrincipalLabels, PrincipalPermission, Principa
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric
+from utils.rpc import require_configured_erpc_url
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ def build_principal_labels(
     effective_permissions: dict,
     *,
     resolved_control_graph: dict | None = None,
-    rpc_url: str | None = None,
+    rpc_url: str,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
 ) -> PrincipalLabels:
     """Construct principal records for every authority address.
@@ -328,22 +329,26 @@ def build_principal_labels(
     target_address = effective_permissions["contract_address"].lower()
     contract_name = effective_permissions["contract_name"]
     raw_contract = effective_permissions.get("contract")
-    contract = (
-        make_contract(
-            address=str(raw_contract.get("address")),
-            chain_id=raw_contract.get("chain_id"),
-            name=raw_contract.get("name"),
-            label=raw_contract.get("label"),
-            is_proxy=bool(raw_contract.get("is_proxy")),
-            proxy_address=raw_contract.get("proxy_address"),
-            implementation_addresses=raw_contract.get("implementation_addresses"),
-            admin_addresses=raw_contract.get("admin_addresses"),
-            beacon_addresses=raw_contract.get("beacon_addresses"),
-            deployer_address=raw_contract.get("deployer_address"),
-            proxy_type=raw_contract.get("proxy_type"),
-        )
-        if isinstance(raw_contract, dict) and raw_contract.get("address")
-        else make_contract(address=target_address, name=contract_name)
+    if not isinstance(raw_contract, dict) or not raw_contract.get("address"):
+        raise RuntimeError("effective_permissions artifact missing contract")
+    contract = make_contract(
+        address=str(raw_contract.get("address")),
+        chain_id=raw_contract.get("chain_id"),
+        name=raw_contract.get("name"),
+        label=raw_contract.get("label"),
+        is_proxy=bool(raw_contract.get("is_proxy")),
+        proxy_address=raw_contract.get("proxy_address"),
+        implementation_addresses=raw_contract.get("implementation_addresses"),
+        admin_addresses=raw_contract.get("admin_addresses"),
+        beacon_addresses=raw_contract.get("beacon_addresses"),
+        deployer_address=raw_contract.get("deployer_address"),
+        proxy_type=raw_contract.get("proxy_type"),
+    )
+    contract_chain_id = contract["chain_id"]
+    rpc_url = require_configured_erpc_url(
+        rpc_url,
+        context=f"principal label classification for chain_id={contract_chain_id}",
+        chain_id=contract_chain_id,
     )
     # The per-job classify_cache is shared read+write across worker threads.
     # Fast path is the cache hit (artifact pre-populated by resolution stage),
@@ -364,7 +369,7 @@ def build_principal_labels(
         resolved_type = str(node.get("resolved_type", "unknown")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
 
-        if resolved_type == "unknown" and rpc_url:
+        if resolved_type == "unknown":
             cache_key = address.lower()
             cached: tuple[str, dict[str, object]] | None = None
             if classify_cache is not None:
@@ -378,7 +383,11 @@ def build_principal_labels(
             else:
                 with classify_cache_lock:
                     classify_stats["misses"] += 1
-                resolved_type, details, cacheable = classify_resolved_address_with_status(rpc_url, address)
+                resolved_type, details, cacheable = classify_resolved_address_with_status(
+                    rpc_url,
+                    address,
+                    chain_id=contract_chain_id,
+                )
                 # Skip per-job cache write if any underlying probe errored —
                 # otherwise a transient blip during labeling would persist
                 # a wrong "contract" classification for the rest of the job.

@@ -1,4 +1,4 @@
-"""Fetch verified smart contract source code from Etherscan and scaffold a Foundry project."""
+"""Fetch verified smart contract source code and scaffold a Foundry project."""
 
 from __future__ import annotations
 
@@ -7,16 +7,16 @@ import re
 import textwrap
 from pathlib import Path
 
-from utils.etherscan import get_source
+from utils.verified_source import fetch_verified_source
 
 
-def fetch(address: str) -> dict:
-    """Fetch verified source from Etherscan. Returns the raw result dict."""
-    return get_source(address)
+def fetch(address: str, *, chain_id: int) -> dict:
+    """Fetch verified source from the configured source provider."""
+    return fetch_verified_source(address, chain_id=chain_id)
 
 
 def _parse_source_code(raw: str) -> dict | None:
-    """Parse Etherscan's SourceCode field into a dict when possible."""
+    """Parse the source-provider SourceCode field into a dict when possible."""
     if not isinstance(raw, str):
         return None
 
@@ -49,7 +49,7 @@ def is_vyper_result(result: dict) -> bool:
 
 
 def parse_sources(result: dict) -> dict[str, str]:
-    """Parse Etherscan response into {filepath: source_code} mapping."""
+    """Parse a verified-source response into {filepath: source_code} mapping."""
     bundle = parse_verification_bundle(result)
     contract_name = result.get("ContractName", "Contract")
 
@@ -124,7 +124,7 @@ def _project_src_dir(sources: dict[str, str]) -> str:
     return "."
 
 
-def scaffold(address: str, result: dict, project_dir: Path) -> Path:
+def scaffold(address: str, result: dict, project_dir: Path, *, chain_id: int) -> Path:
     """Write source files into the given Foundry project dir and return the path.
 
     The caller owns ``project_dir`` — typically a tempdir. This function does
@@ -162,7 +162,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         (project_dir / "remappings.txt").write_text("\n".join(remappings) + "\n")
 
     if bundle:
-        (project_dir / "etherscan_standard_input.json").write_text(json.dumps(bundle, indent=2) + "\n")
+        (project_dir / "verified_source_standard_input.json").write_text(json.dumps(bundle, indent=2) + "\n")
 
     # source files — relax exact pragmas so a single solc_version satisfies all
     sources = _relax_pragmas(sources)
@@ -174,7 +174,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     # metadata
     meta = {
         "address": address,
-        "chain_id": 1,
+        "chain_id": chain_id,
         "contract_name": result.get("ContractName", ""),
         "label": None,
         "compiler_version": result.get("CompilerVersion", ""),
