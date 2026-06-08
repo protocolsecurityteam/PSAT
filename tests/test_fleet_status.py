@@ -9,10 +9,11 @@ reconciler and event-log indexer.
 from __future__ import annotations
 
 import sys
+import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -303,27 +304,57 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
 
 
 def test_event_indexer_loop_records_heartbeat(monkeypatch):
+    # The backfill thread publishes its scan summary; the main loop folds it into
+    # the heartbeat alongside the reconcile re-enqueue count. (Backfill and
+    # reconcile run on separate threads now, so wait for a heartbeat that reflects
+    # the published scan — the very first beat can predate the first scan.)
     from workers import event_log_indexer as idx
 
     stop = Event()
     beats: list[tuple[str, dict]] = []
+    beat_lock = Lock()
 
     def fake_scan(_session, **_kw):
-        stop.set()  # one pass only
         return idx.ScanSummary(inserted=5, windows_scanned=3, caught_up_cursors=1, total_cursors=2)
+
+    def record(process, **kw):
+        with beat_lock:
+            beats.append((process, kw))
 
     monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 2)
     monkeypatch.setattr(idx, "scan_enrolled_events", fake_scan)
-    # The same pass runs the deferred-resolution self-heal; its re-enqueue count
-    # rides along in the heartbeat for the fleet view.
     monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session: 4)
-    monkeypatch.setattr(idx, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
+    monkeypatch.setattr(idx, "record_heartbeat", record)
 
-    idx.run_event_log_indexer_loop(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0, stop_event=stop)
+    t = Thread(
+        target=idx.run_event_log_indexer_loop,
+        kwargs=dict(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.01, stop_event=stop),
+        daemon=True,
+    )
+    t.start()
+    try:
+        match = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with beat_lock:
+                match = next(
+                    (
+                        (p, kw)
+                        for p, kw in beats
+                        if p == HEARTBEAT_EVENT_INDEXER and kw["detail"].get("inserted_last_pass") == 5
+                    ),
+                    None,
+                )
+            if match:
+                break
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        t.join(timeout=5)
 
-    assert len(beats) == 1
-    process, kw = beats[0]
+    assert match is not None, "no heartbeat reflected the published scan summary"
+    process, kw = match
     assert process == HEARTBEAT_EVENT_INDEXER
     assert kw["status"] == "running"
     assert kw["detail"] == {
@@ -334,6 +365,73 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
         "total_cursors": 2,
         "deferred_reenqueued_last_pass": 4,
     }
+
+
+def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
+    """Regression pin for the reconciler-starvation bug.
+
+    The old loop ran enroll → scan → reconcile → heartbeat serially, so a scan
+    that blocked on a cold from-scratch backfill (the LayerZero endpoint cursor
+    grinding for hours) starved both the deferred-resolution reconcile and the
+    fleet heartbeat — completed etherfi jobs whose authorities had already warmed
+    sat un-reconciled the entire time. The fix runs backfill on its own thread, so
+    reconcile + heartbeat fire every ``interval`` no matter how long scan blocks.
+
+    Block scan indefinitely and assert reconcile + heartbeat still run. On the old
+    serial loop the ``reconcile_called`` wait times out (reconcile is unreachable
+    while scan blocks); on the fix it fires within an interval.
+    """
+    from workers import event_log_indexer as idx
+
+    stop = Event()
+    scan_entered = Event()
+    release_scan = Event()
+    reconcile_called = Event()
+    beats: list[tuple[str, dict]] = []
+    beat_lock = Lock()
+
+    def blocking_scan(_session, **_kw):
+        scan_entered.set()
+        release_scan.wait(timeout=10)  # bounded so a wiring bug can't hang the suite
+        return idx.ScanSummary()
+
+    def fake_reconcile(_session):
+        reconcile_called.set()
+        return 0
+
+    def record(process, **kw):
+        with beat_lock:
+            beats.append((process, kw))
+
+    monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
+    monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 0)
+    monkeypatch.setattr(idx, "scan_enrolled_events", blocking_scan)
+    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", fake_reconcile)
+    monkeypatch.setattr(idx, "record_heartbeat", record)
+
+    t = Thread(
+        target=idx.run_event_log_indexer_loop,
+        kwargs=dict(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.01, stop_event=stop),
+        daemon=True,
+    )
+    t.start()
+    try:
+        assert scan_entered.wait(timeout=5), "backfill thread never entered scan"
+        # Scan is now blocked. These two are the whole point of the fix.
+        assert reconcile_called.wait(timeout=5), "reconcile was starved while scan was blocked (regression)"
+        beat_deadline = time.monotonic() + 5
+        while time.monotonic() < beat_deadline:
+            with beat_lock:
+                if any(p == HEARTBEAT_EVENT_INDEXER for p, _ in beats):
+                    break
+            time.sleep(0.01)
+        with beat_lock:
+            assert any(p == HEARTBEAT_EVENT_INDEXER for p, _ in beats), "heartbeat was starved while scan was blocked"
+    finally:
+        release_scan.set()
+        stop.set()
+        t.join(timeout=5)
+    assert not t.is_alive()
 
 
 # ── audit serializer error fields ────────────────────────────────────────────

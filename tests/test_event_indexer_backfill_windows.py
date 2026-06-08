@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select, update  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events  # noqa: E402
@@ -209,3 +210,101 @@ def test_unbounded_span_wedges_the_cursor_at_zero(session):
     assert summary.inserted == 0
     assert _cursor_block(session, _AUTHORITY) == 0  # wedged, never advanced
     assert _log_count(session, _AUTHORITY) == 0
+
+
+class _OrderRecordingFetcher:
+    """Records the order of event addresses the scan asks it to fetch."""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+
+    def fetch_logs(self, *, event_address: str, topic0: str, from_block: int, to_block: int) -> list[FetchedEventLog]:
+        self.order.append(event_address.lower())
+        return []
+
+
+def _set_last_run_at(session, address: str, when: datetime) -> None:
+    # Explicit timestamp via Core update: an explicit value in the SET clause
+    # suppresses the column's onupdate=func.now(), and a literal avoids the
+    # transaction-constant now() collapsing distinct rows to the same instant.
+    from db.models import IndexedEventCursor
+
+    session.execute(
+        update(IndexedEventCursor)
+        .where(func.lower(IndexedEventCursor.event_address) == address.lower())
+        .values(last_run_at=when)
+    )
+
+
+@requires_postgres
+def test_scan_visits_least_recently_run_cursor_first(session):
+    """Fair rotation: cursors are scanned least-recently-run first, so a
+    high-volume authority that was just scanned can't keep jumping ahead of one
+    that's been waiting. Without this a single hog cursor monopolizes successive
+    passes and a freshly-enrolled deferred authority starves behind hours of
+    someone else's backfill."""
+    older = "0x" + "a1" * 20  # last scanned long ago → must be visited first
+    newer = "0x" + "b2" * 20  # scanned recently → goes to the back
+    enroll_event_cursor(session, chain_id=1, event_address=older, topic0=_TOPIC)
+    enroll_event_cursor(session, chain_id=1, event_address=newer, topic0=_TOPIC)
+    _set_last_run_at(session, older, datetime(2020, 1, 1, tzinfo=timezone.utc))
+    _set_last_run_at(session, newer, datetime(2024, 1, 1, tzinfo=timezone.utc))
+    session.commit()
+
+    fetcher = _OrderRecordingFetcher()
+    scan_enrolled_events(
+        session,
+        fetchers={1: fetcher},
+        head_fetchers={1: _FixedHead()},
+        block_hash_fetchers={1: _DeterministicBlockHash()},
+        confirmation_depth=_CONFIRMATIONS,
+        max_block_span=_MAX_SAFE_SPAN,
+        max_windows_per_cursor=1,  # one window each, so order == cursor visit order
+    )
+
+    assert fetcher.order, "scan never fetched"
+    assert fetcher.order[0] == older
+    assert fetcher.order.index(older) < fetcher.order.index(newer)
+
+
+@requires_postgres
+def test_caught_up_cursor_stamps_last_run_at(session):
+    """An already-warm cursor returns caught_up WITHOUT fetching and WITHOUT
+    flipping backfill_complete — so nothing else marks the row dirty and the
+    column's onupdate never fires. The scan must still re-stamp last_run_at
+    explicitly, else the warm cursor's stale timestamp keeps re-sorting it ahead
+    of cold cursors that actually need windows, defeating the rotation."""
+    from db.models import IndexedEventCursor
+
+    addr = "0x" + "c3" * 20
+    enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC, start_block=_TARGET)
+    # Already backfilled and stamped in the past: only an explicit re-stamp on the
+    # no-fetch caught_up visit can advance it (backfill_complete True→True is a
+    # no-op update).
+    session.execute(
+        update(IndexedEventCursor)
+        .where(func.lower(IndexedEventCursor.event_address) == addr)
+        .values(backfill_complete=True, last_run_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    )
+    session.commit()
+    before = session.execute(
+        select(IndexedEventCursor.last_run_at).where(func.lower(IndexedEventCursor.event_address) == addr)
+    ).scalar_one()
+
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    scan_enrolled_events(
+        session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        confirmation_depth=_CONFIRMATIONS,
+        max_block_span=_MAX_SAFE_SPAN,
+        max_windows_per_cursor=5,
+    )
+
+    assert not fetcher.requested_spans, "a caught-up cursor must not fetch"
+    after = session.execute(
+        select(IndexedEventCursor.last_run_at).where(func.lower(IndexedEventCursor.event_address) == addr)
+    ).scalar_one()
+    assert after > before  # re-stamped on the no-fetch visit so rotation moves it to the back
