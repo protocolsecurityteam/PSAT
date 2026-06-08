@@ -41,10 +41,17 @@ OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 
 
 class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
+    def __init__(
+        self,
+        rpc_url: str | None,
+        contract_address: str | None,
+        block: int | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
         self.rpc_url = rpc_url
         self.contract_address = contract_address
         self.block = block
+        self.meta = meta
 
 
 class _Adapter:
@@ -319,3 +326,117 @@ def test_oz_v5_namespaced_owner_without_rpc_stays_placeholder(monkeypatch: pytes
     assert cap.members == []
     assert cap.membership_quality == "lower_bound"
     assert recorder == []
+
+
+# --------------------------------------------------------------------------
+# Within-pass live-getter memo: owner()/governor() reads are deterministic at a
+# fixed block, so N functions gating on the same getter need ONE read. The memo
+# rides on the resolver's contract-scoped meta['live_read_memo']; only SUCCESSFUL
+# reads are cached, so a failure is never poisoned across the pass. Resolution
+# results are identical — only the RPC count drops.
+# --------------------------------------------------------------------------
+
+
+def _ctx_with_memo(memo: dict, rpc_url: str = "http://rpc.test") -> EvaluationContext:
+    # meta is the contract-scoped carrier the resolver wires (meta['live_read_memo']).
+    outer = _Outer(rpc_url, CONTRACT, meta={"live_read_memo": memo})
+    return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(outer))
+
+
+def test_live_getter_memo_dedups_repeat_reads_in_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder: list = []
+    _stub_rpc(monkeypatch, OWNER, recorder=recorder)
+    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
+    memo: dict = {}
+    ctx = _ctx_with_memo(memo)
+
+    cap1 = evaluate_tree(tree, ctx)
+    cap2 = evaluate_tree(tree, ctx)
+
+    assert cap1.members == cap2.members == [OWNER]
+    assert cap1.membership_quality == cap2.membership_quality == "exact"
+    assert len(recorder) == 1, "the second gated function must be served from the pass memo"
+
+
+def test_live_getter_memo_does_not_cache_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reverting/transient read is never memoized, so each gated function still reads/retries
+    independently — a blip on the first function can't drop principals for the rest of the pass."""
+    recorder: list = []
+    _stub_rpc(monkeypatch, None, recorder=recorder)  # rpc_request raises every time
+    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
+    memo: dict = {}
+    ctx = _ctx_with_memo(memo)
+
+    cap1 = evaluate_tree(tree, ctx)
+    cap2 = evaluate_tree(tree, ctx)
+
+    assert cap1.members == cap2.members == []
+    assert len(recorder) == 2, "failed reads must not be cached — each function reads independently"
+
+
+def test_live_getter_memo_zero_address_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A renounced getter (zero address) is a deterministic SUCCESS, so it is memoized as the
+    'exact empty' set and reused — identical to the un-memoized result, one fewer read."""
+    recorder: list = []
+    _stub_rpc(monkeypatch, "0x" + "00" * 20, recorder=recorder)
+    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
+    memo: dict = {}
+    ctx = _ctx_with_memo(memo)
+
+    cap1 = evaluate_tree(tree, ctx)
+    cap2 = evaluate_tree(tree, ctx)
+
+    assert cap1.members == cap2.members == []
+    assert cap1.membership_quality == cap2.membership_quality == "exact"
+    assert len(recorder) == 1
+
+
+def test_static_external_operand_memo_dedups(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.resolution import predicate_evaluator as pe
+
+    recorder: list = []
+
+    def fake(_url: str, _method: str, params: list, **_: Any) -> str:
+        recorder.append(params)
+        return "0x" + "11" * 32
+
+    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    operand = {"source": "external_call", "callee_signature": "someGetter()", "callee_selector": "0x12345678"}
+    memo: dict = {}
+
+    r1 = pe._resolve_static_external_call_operand(
+        operand, callee_contract_address="0x" + "22" * 20, rpc_url="http://rpc", block=None, memo=memo
+    )
+    r2 = pe._resolve_static_external_call_operand(
+        operand, callee_contract_address="0x" + "22" * 20, rpc_url="http://rpc", block=None, memo=memo
+    )
+
+    assert r1 == r2 == {"source": "constant", "constant_value": "0x" + "11" * 32}
+    assert len(recorder) == 1, "the second identical operand read is served from the pass memo"
+
+
+def test_static_external_operand_failure_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.resolution import predicate_evaluator as pe
+
+    calls = {"n": 0}
+
+    def flaky(_url: str, _method: str, _params: list, **_: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return "0x" + "11" * 32
+
+    monkeypatch.setattr("utils.rpc.rpc_request", flaky)
+    operand = {"source": "external_call", "callee_signature": "someGetter()", "callee_selector": "0x12345678"}
+    memo: dict = {}
+
+    r1 = pe._resolve_static_external_call_operand(
+        operand, callee_contract_address="0x" + "22" * 20, rpc_url="http://rpc", block=None, memo=memo
+    )
+    r2 = pe._resolve_static_external_call_operand(
+        operand, callee_contract_address="0x" + "22" * 20, rpc_url="http://rpc", block=None, memo=memo
+    )
+
+    assert r1 is None, "first attempt failed"
+    assert r2 == {"source": "constant", "constant_value": "0x" + "11" * 32}, "retry succeeded — failure not poisoned"
+    assert calls["n"] == 2

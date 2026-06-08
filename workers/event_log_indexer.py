@@ -211,9 +211,12 @@ def scan_enrolled_events(
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> ScanSummary:
-    rows = session.execute(
+    all_rows = session.execute(
         select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
     ).all()
+    # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
+    # never emit logs, so scanning it just burns one RPC round-trip every pass.
+    rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
     inserted = 0
     windows_scanned = 0
     caught_up_cursors = 0

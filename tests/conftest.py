@@ -381,6 +381,28 @@ def _bypass_admin_key():
         _api.app.dependency_overrides.pop(require_admin_key, None)
 
 
+@pytest.fixture(autouse=True)
+def _force_resolution_multicall_off(monkeypatch):
+    """Keep the offline suite hermetic against the resolution Multicall3 read-collapse.
+
+    The three flags default ON in code so real runs (local + prod) need no env, but
+    offline tests stub only the per-call wire (``tracking._rpc_request`` /
+    ``_rpc_batch_request_with_status``) — NOT ``utils.rpc.rpc_request``, which
+    ``multicall3_aggregate3`` calls. With the default ON, in-process resolution tests
+    would fire REAL aggregate3 eth_calls and then fall back: non-hermetic, slow, flaky.
+    Forcing the constants False routes the general suite through the stubbed per-call
+    path. The dedicated parity tests (test_classify_batch_parity, test_control_tracker,
+    test_external_check_materializer) set these True inside the test body — which runs
+    after this fixture — so they still exercise the ON path.
+    """
+    for target in (
+        "services.resolution.tracking._CLASSIFY_MULTICALL_ENABLED",
+        "services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED",
+        "services.resolution.external_check_materializer._EXTERNAL_CHECK_MULTICALL_ENABLED",
+    ):
+        monkeypatch.setattr(target, False)
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 
