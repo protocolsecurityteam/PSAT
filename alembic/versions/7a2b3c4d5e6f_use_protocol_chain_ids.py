@@ -20,27 +20,6 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def _chain_label_sql(expr: str) -> str:
-    return f"""
-    CASE {expr}
-      WHEN 1 THEN 'ethereum'
-      WHEN 42161 THEN 'arbitrum'
-      WHEN 10 THEN 'optimism'
-      WHEN 8453 THEN 'base'
-      WHEN 137 THEN 'polygon'
-      WHEN 43114 THEN 'avalanche'
-      WHEN 56 THEN 'bsc'
-      WHEN 59144 THEN 'linea'
-      WHEN 534352 THEN 'scroll'
-      WHEN 324 THEN 'zksync'
-      WHEN 81457 THEN 'blast'
-      WHEN 34443 THEN 'mode'
-      WHEN 80094 THEN 'berachain'
-      ELSE NULL
-    END
-    """
-
-
 def upgrade() -> None:
     op.execute(
         sa.text(
@@ -54,7 +33,7 @@ def upgrade() -> None:
                   AND array_length(chains, 1) IS NOT NULL
                   AND array_length(chains, 1) > 0
               ) THEN
-                RAISE EXCEPTION 'protocols.chains legacy labels are not migrated; write numeric chain_ids instead';
+                RAISE EXCEPTION 'protocols.chains is unsupported; write numeric chain_ids instead';
               END IF;
             END $$;
             """
@@ -73,29 +52,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.add_column(
-        "protocols",
-        sa.Column(
-            "chains",
-            postgresql.ARRAY(sa.String(length=100)),
-            nullable=True,
-            server_default=sa.text("'{}'::varchar[]"),
-        ),
-    )
-    op.execute(
-        sa.text(
-            f"""
-            UPDATE protocols
-            SET chains = (
-              SELECT COALESCE(array_agg(DISTINCT label), ARRAY[]::varchar[])
-              FROM unnest(chain_ids) AS chain_item(raw_chain_id)
-              CROSS JOIN LATERAL (
-                SELECT {_chain_label_sql("chain_item.raw_chain_id")} AS label
-              ) AS mapped
-              WHERE label IS NOT NULL
-            )
-            WHERE chain_ids IS NOT NULL
-            """
-        )
-    )
-    op.drop_column("protocols", "chain_ids")
+    raise NotImplementedError("Downgrade from numeric protocol chain identity is unsupported.")

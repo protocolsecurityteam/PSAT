@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from typing_extensions import NotRequired, TypedDict
 
 from schemas.common import Address, JsonObject, ServiceBoundaryMetadata, StageArtifact, StageContext
-from utils.rpc import require_chain_id_for_evidence_label
 
 
 @dataclass
@@ -55,50 +54,25 @@ class InteractionLog:
         return sorted(addresses)
 
     def get_address_details(self) -> list[dict]:
-        explorer_chain_labels = {
-            "etherscan": "ethereum",
-            "arbiscan": "arbitrum",
-            "basescan": "base",
-            "polygonscan": "polygon",
-            "bscscan": "bsc",
-            "scrollscan": "scroll",
-            "optimistic.etherscan": "optimism",
-            "snowtrace": "avalanche",
-        }
-
         by_addr: dict[str, dict] = {}
         for item in self.interactions:
             if not item.to:
                 continue
             addr = item.to.lower()
             if addr not in by_addr:
-                by_addr[addr] = {"source_urls": set(), "sources": set(), "chain_ids": set(), "raw_chain_labels": set()}
+                by_addr[addr] = {"source_urls": set(), "sources": set()}
             entry = by_addr[addr]
             if item.url:
                 entry["source_urls"].add(item.url)
             source = item.data or ""
             if source:
                 entry["sources"].add(source)
-            for candidate in (item.url, source):
-                if not candidate or not candidate.startswith(("http://", "https://")):
-                    continue
-                for explorer, raw_chain_label in explorer_chain_labels.items():
-                    if explorer in candidate:
-                        entry["raw_chain_labels"].add(raw_chain_label)
-                        entry["chain_ids"].add(
-                            require_chain_id_for_evidence_label(
-                                raw_chain_label,
-                                context=f"DApp crawler explorer URL {candidate}",
-                            )
-                        )
 
         return [
             {
                 "address": addr,
                 "source_urls": sorted(info["source_urls"]),
                 "sources": sorted(info["sources"]),
-                "chain_ids": sorted(info["chain_ids"]),
-                "raw_chain_labels": sorted(info["raw_chain_labels"]),
             }
             for addr, info in sorted(by_addr.items())
         ]

@@ -7,6 +7,7 @@ const ADDRESS_EXPLORERS_BY_CHAIN_ID = {
   42161: "https://arbiscan.io/address/",
   534352: "https://scrollscan.com/address/",
   81457: "https://blastscan.io/address/",
+  999: "https://hyperevmscan.io/address/",
 };
 
 export function blockExplorerAddressUrl(address, chainId) {

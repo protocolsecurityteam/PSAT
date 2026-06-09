@@ -13,12 +13,7 @@ import logging
 from collections import Counter, defaultdict
 from typing import Any
 
-from utils.rpc import require_supported_chain_id
-
-from .deployer import expand_from_deployers
 from .inventory_domain import (
-    CHAIN_IDS,
-    CHAIN_SORT_ORDER,
     SearchFn,
     _debug_log,
     _discover_contract_inventory_pages,
@@ -30,8 +25,6 @@ from .inventory_extract import extract_inventory_entries_from_pages
 from .ranking import score_inventory_evidence
 
 logger = logging.getLogger(__name__)
-
-_CHAIN_LABEL_BY_ID = {chain_id: label for label, chain_id in CHAIN_IDS.items()}
 
 
 def _collect_source_urls(evidence: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
@@ -78,33 +71,6 @@ def _group_entries_by_address(entries: list[dict[str, Any]]) -> dict[str, list[d
     return by_address
 
 
-def _chain_sort_key(chain_id: int) -> tuple[int, int]:
-    label = _CHAIN_LABEL_BY_ID.get(chain_id)
-    return (CHAIN_SORT_ORDER.get(label or "unknown", 50), chain_id)
-
-
-def _chain_label_for_chain_id(chain_id: int | None) -> str | None:
-    if chain_id is None:
-        return None
-    return _CHAIN_LABEL_BY_ID.get(chain_id)
-
-
-def _select_chain_ids(evidence: list[dict[str, Any]]) -> list[int]:
-    chain_ids: list[int] = []
-    for item in evidence:
-        raw_chain_id = item.get("chain_id")
-        if raw_chain_id is None:
-            continue
-        chain_id = require_supported_chain_id(
-            chain_id=raw_chain_id,
-            context=f"inventory discovery evidence for {item.get('address')}",
-        )
-        if chain_id not in chain_ids:
-            chain_ids.append(chain_id)
-    chain_ids.sort(key=_chain_sort_key)
-    return chain_ids
-
-
 def _select_name(evidence: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
     names = [str(item["name"]).strip() for item in evidence if item.get("name")]
     if not names:
@@ -144,9 +110,8 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
     sources_map: dict[str, str] = {}  # url → id
     contracts: list[dict[str, Any]] = []
     for address, evidence in grouped.items():
-        chain_ids = _select_chain_ids(evidence)
         name, aliases = _select_name(evidence)
-        confidence, evidence_counts = score_inventory_evidence(chain_ids[0] if chain_ids else None, evidence)
+        confidence, evidence_counts = score_inventory_evidence(evidence)
         page_urls, explorer_urls = _collect_source_urls(evidence)
         if not page_urls and not explorer_urls:
             continue
@@ -159,7 +124,6 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
         contract: dict[str, Any] = {
             "name": name,
             "address": address,
-            "chain_ids": chain_ids,
             "confidence": confidence,
             "source": source_types,
             "evidence": evidence_counts,
@@ -175,18 +139,18 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
             -float(item["confidence"]),
             item["name"] is None,
             str(item.get("name") or ""),
-            _chain_sort_key(item["chain_ids"][0]) if item["chain_ids"] else (50, 0),
             item["address"],
         ),
     )[:limit]
     return sorted_contracts, sources_map
 
 
-def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group contracts that share the same name and appear on multiple chains.
+def _group_named_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group contracts that share the same name and have multiple addresses.
 
-    Contracts with the same name but different addresses across chains are
-    collapsed into a single entry with a ``deployments`` array.
+    Contracts with the same name but different addresses are collapsed into a
+    single entry with a ``deployments`` array. Chain IDs are intentionally not
+    part of source evidence; materialization probes each address later.
     """
     # Index by lowercase name — only group named contracts.
     by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -215,8 +179,6 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
         # Use the highest-confidence entry as the base.
         group.sort(key=lambda c: -c.get("confidence", 0))
         base = group[0].copy()
-        all_chain_ids: list[int] = []
-        seen_chain_ids: set[int] = set()
         deployments: list[dict[str, Any]] = []
         all_source_ids: list[str] = []
         seen_source_ids: set[str] = set()
@@ -224,18 +186,6 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
 
         for contract in group:
             dep: dict[str, Any] = {"address": contract["address"]}
-            dep_chain_ids = [
-                require_supported_chain_id(
-                    chain_id=chain_id,
-                    context=f"inventory grouping for {contract['address']}",
-                )
-                for chain_id in contract.get("chain_ids", [])
-            ]
-            dep["chain_ids"] = dep_chain_ids
-            for chain_id in dep_chain_ids:
-                if chain_id not in seen_chain_ids:
-                    all_chain_ids.append(chain_id)
-                    seen_chain_ids.add(chain_id)
             if contract.get("activity"):
                 dep["activity"] = contract["activity"]
             if contract.get("rank_score") is not None:
@@ -247,7 +197,6 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
                     all_source_ids.append(sid)
                     seen_source_ids.add(sid)
 
-        base["chain_ids"] = sorted(all_chain_ids, key=_chain_sort_key)
         base["confidence"] = max_confidence
         base["source_ids"] = all_source_ids
         base["deployments"] = deployments
@@ -262,7 +211,6 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
             -float(item.get("rank_score", item.get("confidence", 0))),
             item.get("name") is None,
             str(item.get("name") or ""),
-            _chain_sort_key(item["chain_ids"][0]) if item.get("chain_ids") else (50, 0),
             item.get("address", ""),
         ),
     )
@@ -273,10 +221,8 @@ def search_protocol_inventory(
     company: str,
     *,
     search_fn: SearchFn,
-    chain_id: int | None = None,
     limit: int = 500,
     max_queries: int = 4,
-    run_deployer: bool = True,
     debug: bool = False,
 ) -> dict[str, Any]:
     clean_company = company.strip()
@@ -285,19 +231,6 @@ def search_protocol_inventory(
     if limit < 1:
         raise ValueError("limit must be >= 1")
 
-    requested_chain_id = (
-        require_supported_chain_id(chain_id=chain_id, context=f"inventory discovery for {clean_company}")
-        if chain_id is not None
-        else None
-    )
-    requested_chain = _chain_label_for_chain_id(requested_chain_id)
-    if requested_chain_id is not None and requested_chain is None:
-        message = (
-            f"inventory discovery for {clean_company} requires a known discovery label for "
-            f"chain_id={requested_chain_id}"
-        )
-        logger.error(message)
-        raise RuntimeError(message)
     errors: list[dict[str, Any]] = []
     notes: list[str] = []
     queries_used = [0]
@@ -307,8 +240,7 @@ def search_protocol_inventory(
         debug,
         (
             "Starting inventory discovery: "
-            f"company={clean_company!r}, chain_id={requested_chain_id or 'any'}, "
-            f"limit={limit}, max_queries={max_queries}"
+            f"company={clean_company!r}, limit={limit}, max_queries={max_queries}"
         ),
     )
 
@@ -367,44 +299,9 @@ def search_protocol_inventory(
 
     if selected_urls:
         notes.append(f"Selected pages: {len(selected_urls)}")
-    page_entries = extract_inventory_entries_from_pages(selected_urls, requested_chain, debug=debug)
+    page_entries = extract_inventory_entries_from_pages(selected_urls, debug=debug)
 
-    deployer_entries: list[dict[str, Any]] = []
-    if run_deployer and page_entries:
-        seeds_by_chain_id: dict[int, set[str]] = defaultdict(set)
-        for entry in page_entries:
-            raw_chain_id = entry.get("chain_id") if entry.get("chain_id") is not None else requested_chain_id
-            if raw_chain_id is None:
-                continue
-            seed_chain_id = require_supported_chain_id(
-                chain_id=raw_chain_id,
-                context=f"deployer expansion seed for {entry.get('address')}",
-            )
-            seeds_by_chain_id[seed_chain_id].add(entry["address"])
-
-        if not seeds_by_chain_id:
-            notes.append("Deployer expansion skipped: no chain-specific seed contracts")
-        sorted_seed_groups = sorted(seeds_by_chain_id.items(), key=lambda item: _chain_sort_key(item[0]))
-        for chain_id, seed_set in sorted_seed_groups:
-            seed_addresses = sorted(seed_set)
-            _debug_log(
-                debug,
-                f"Running deployer expansion on chain_id={chain_id} with {len(seed_addresses)} seed(s)",
-            )
-            try:
-                chain_entries = expand_from_deployers(
-                    seed_addresses,
-                    chain_id=chain_id,
-                    debug=debug,
-                )
-                deployer_entries.extend(chain_entries)
-                notes.append(f"Deployer expansion (chain_id={chain_id}): {len(chain_entries)} contract(s)")
-            except Exception as exc:
-                logger.error("Deployer expansion failed for chain_id=%s: %s", chain_id, exc)
-                _debug_log(debug, f"Deployer expansion failed for chain_id={chain_id}: {exc!r}")
-                raise
-
-    entries = page_entries + deployer_entries
+    entries = page_entries
     contracts, sources_map = _build_contracts(entries, limit=limit)
 
     # Activity ranking intentionally does NOT run here. The worker
@@ -414,8 +311,8 @@ def search_protocol_inventory(
     # DefiLlama — on equal footing. Doing it here would re-rank
     # inventory contracts the selection stage is about to rank again.
 
-    # Group multi-chain deployments of the same contract.
-    contracts = _group_multi_deployments(contracts)
+    # Group multiple address deployments of the same named contract.
+    contracts = _group_named_deployments(contracts)
 
     if not contracts:
         notes.append("No inventory contracts extracted from selected pages")
@@ -434,7 +331,6 @@ def search_protocol_inventory(
 
     return {
         "company": clean_company,
-        "chain_id": requested_chain_id,
         "official_domain": official_domain,
         "domain_candidates": domain_candidates,
         "pages_considered": considered_urls[:10],

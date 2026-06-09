@@ -12,8 +12,6 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
-from utils.chains import canonical_chain
-
 logger = logging.getLogger(__name__)
 
 JSON_RPC_TIMEOUT_SECONDS = 10
@@ -24,24 +22,24 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-COMMON_CHAIN_IDS = {
-    "ethereum": 1,
-    "mainnet": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "scroll": 534352,
-    "zksync": 324,
-    "blast": 81457,
-    "mode": 34443,
-    "bera": 80094,
-    "berachain": 80094,
-}
-DEFAULT_SUPPORTED_CHAIN_IDS = frozenset(COMMON_CHAIN_IDS.values())
+DEFAULT_SUPPORTED_CHAIN_IDS = frozenset(
+    {
+        1,
+        10,
+        56,
+        137,
+        324,
+        999,
+        8453,
+        34443,
+        42161,
+        43114,
+        59144,
+        80094,
+        81457,
+        534352,
+    }
+)
 
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
 _GETCODE_CACHE: dict[tuple[str, int, str], tuple[str, str, float]] = {}
@@ -369,32 +367,14 @@ def require_supported_chain_id(
     raise RuntimeError(message)
 
 
-def require_chain_id_for_evidence_label(chain_label: str | None, *, context: str = "chain evidence") -> int:
-    """Resolve a human chain label from source evidence into a supported chain id.
-
-    Callers should only use this for evidence parsing. Runtime identity and RPC
-    routing must already carry numeric ``chain_id``.
-    """
-    normalized = canonical_chain(chain_label)
-    if not normalized or normalized == "unknown":
-        logger.error("%s requires explicit supported chain_id, got chain label %r", context, chain_label)
-        raise RuntimeError(f"{context} requires explicit supported chain_id, got chain label {chain_label!r}")
-
-    chain_id = COMMON_CHAIN_IDS.get(normalized)
-    if chain_id is None:
-        logger.error("%s encountered unsupported chain label %r normalized=%r", context, chain_label, normalized)
-        raise RuntimeError(f"{context} encountered unsupported chain label {chain_label!r}")
-    return require_supported_chain_id(chain_id=chain_id, context=f"{context} chain label {normalized!r}")
-
-
 def default_rpc_url(
     *,
     chain_id: int | str | None = None,
 ) -> str:
     """Resolve the eRPC URL PSAT should use for a job.
 
-    Chain id must be explicit. Legacy explicit URLs, fallback URLs, chain-label
-    resolution, and public mainnet fallback are intentionally unsupported.
+    Chain id must be explicit. Legacy explicit URLs, fallback URLs, and public
+    mainnet fallback are intentionally unsupported.
     """
     try:
         effective_chain_id = require_supported_chain_id(chain_id=chain_id, context="RPC URL resolution")

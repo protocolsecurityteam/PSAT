@@ -1,7 +1,7 @@
 """HTML parsing and contract entry extraction for the inventory pipeline.
 
-Fetches official protocol pages and extracts contract records (name, address,
-chain_id) from tables, lists, explorer links, and prose text.  Called by
+Fetches official protocol pages and extracts contract records (name, address)
+from tables, lists, explorer links, and prose text.  Called by
 inventory.py after inventory_domain.py identifies the pages.
 """
 
@@ -11,8 +11,6 @@ import html as _html
 import re
 from typing import Any
 
-from utils.rpc import require_chain_id_for_evidence_label
-
 from .inventory_domain import (
     ADDRESS_RE,
     TAG_RE,
@@ -21,9 +19,7 @@ from .inventory_domain import (
     _extract_addresses,
     _fetch_page,
     _get_domain,
-    _infer_chain,
     _is_explorer_domain,
-    _resolve_chain,
 )
 from .static_dependencies import normalize_address as _normalize_address
 
@@ -54,38 +50,11 @@ _HEADER_ROLE_BY_LABEL = {
     "asset": "name",
     "token": "name",
     "name": "name",
-    "chain": "chain",
-    "network": "chain",
+    "chain": "ignore",
+    "network": "ignore",
     "address": "address",
     "contract address": "address",
     "token address": "address",
-}
-_CHAIN_ALIASES = {
-    "mainnet": "ethereum",
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum",
-    "optimism": "optimism",
-    "polygon": "polygon",
-    "base": "base",
-    "avalanche": "avalanche",
-    "blast": "blast",
-    "berachain": "berachain",
-    "bsc": "bsc",
-    "binance smart chain": "bsc",
-    "hyperevm": "hyperevm",
-    "ink": "ink",
-    "katana": "katana",
-    "linea": "linea",
-    "mode": "mode",
-    "monad": "monad",
-    "morph": "morph",
-    "scroll": "scroll",
-    "sonic": "sonic",
-    "swell": "swell",
-    "unichain": "unichain",
-    "zksync": "zksync",
-    "zk sync": "zksync",
-    "corn": "corn",
 }
 _GENERIC_SECTION_HEADINGS = {
     "deployed contracts",
@@ -128,15 +97,6 @@ def _html_to_lines(page_text: str) -> list[str]:
     return lines
 
 
-def _looks_like_chain_label(value: str) -> bool:
-    text = value.strip().lower()
-    if not text:
-        return False
-    if not _parse_chain_values(text):
-        return False
-    return len(text.split()) <= 3
-
-
 def _clean_label(value: str) -> str | None:
     text = value
     for raw_url in URL_RE.findall(text):
@@ -149,8 +109,6 @@ def _clean_label(value: str) -> str | None:
     if not re.search(r"[A-Za-z]", text):
         return None
     if text.lower() in _GENERIC_LABELS:
-        return None
-    if _looks_like_chain_label(text):
         return None
     return text
 
@@ -172,30 +130,10 @@ def _header_role(value: str) -> str | None:
     return _HEADER_ROLE_BY_LABEL.get(_normalize_label(value))
 
 
-def _parse_chain_values(value: str) -> list[str]:
-    text = _normalize_label(value)
-    if not text:
+def _split_row_cells(value: str) -> list[str]:
+    if "|" not in value:
         return []
-
-    chains: list[str] = []
-    seen: set[str] = set()
-    for part in re.split(r"[,/]| and ", text):
-        clean = _normalize_label(part)
-        if not clean:
-            continue
-        chain = _CHAIN_ALIASES.get(clean)
-        if not chain:
-            inferred = _infer_chain("", clean)
-            chain = inferred if inferred != "unknown" else None
-        if chain and chain not in seen:
-            seen.add(chain)
-            chains.append(chain)
-
-    if chains:
-        return chains
-
-    inferred = _infer_chain("", text)
-    return [inferred] if inferred != "unknown" else []
+    return [segment.strip() for segment in value.split("|") if segment.strip()]
 
 
 def _default_name_from_heading(heading: str | None) -> str | None:
@@ -207,46 +145,13 @@ def _default_name_from_heading(heading: str | None) -> str | None:
     return heading
 
 
-def _resolve_candidate_chain_ids(
-    chain_value: str | None,
-    line_chain: str,
-    requested_chain: str | None,
-) -> list[tuple[int | None, bool]]:
-    explicit = _parse_chain_values(chain_value or "")
-    candidates = explicit or ([line_chain] if line_chain != "unknown" else [])
-    if not candidates:
-        candidates = ["unknown"]
-
-    resolved: list[tuple[int | None, bool]] = []
-    seen: set[int | None] = set()
-    for candidate in candidates:
-        final_chain, hinted = _resolve_chain(candidate, requested_chain)
-        if final_chain is None:
-            continue
-        chain_id = (
-            None
-            if final_chain == "unknown"
-            else require_chain_id_for_evidence_label(
-                final_chain,
-                context="inventory extraction evidence",
-            )
-        )
-        if chain_id in seen:
-            continue
-        seen.add(chain_id)
-        resolved.append((chain_id, hinted))
-    return resolved
-
-
 def _build_entries_from_table_row(
     schema_roles: list[str],
     row_cells: list[str],
     url: str,
     current_heading: str | None,
-    current_chain: str,
-    requested_chain: str | None,
 ) -> list[dict[str, Any]]:
-    cell_by_role: dict[str, list[str]] = {"name": [], "chain": [], "address": []}
+    cell_by_role: dict[str, list[str]] = {"name": [], "address": []}
     for role, cell in zip(schema_roles, row_cells):
         cell_by_role.setdefault(role, []).append(cell)
 
@@ -259,24 +164,18 @@ def _build_entries_from_table_row(
         (clean for clean in (_clean_label(cell) for cell in cell_by_role.get("name", [])) if clean),
         _default_name_from_heading(current_heading),
     )
-    chain_value = " ".join(cell_by_role.get("chain", [])) if cell_by_role.get("chain") else None
-    resolved_chains = _resolve_candidate_chain_ids(chain_value, current_chain, requested_chain)
-
     entries: list[dict[str, Any]] = []
     for address in addresses:
         explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-        for chain_id, chain_from_hint in resolved_chains:
-            entries.append(
-                {
-                    "name": name,
-                    "address": address,
-                    "chain_id": chain_id,
-                    "kind": "official_inventory_table",
-                    "url": url,
-                    "explorer_url": explorer_url,
-                    "chain_from_hint": chain_from_hint,
-                }
-            )
+        entries.append(
+            {
+                "name": name,
+                "address": address,
+                "kind": "official_inventory_table",
+                "url": url,
+                "explorer_url": explorer_url,
+            }
+        )
     return entries
 
 
@@ -351,18 +250,14 @@ def _line_is_only_locator(line: str) -> bool:
 def extract_inventory_entries_from_page_text(
     url: str,
     page_text: str,
-    requested_chain: str | None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract address records from a single official page."""
     lines = _html_to_lines(page_text)
-    plain_page = TAG_RE.sub(" ", page_text)
-    page_chain = _infer_chain(url, plain_page[:4000])
-    current_chain = page_chain
     current_heading: str | None = None
     pending_label: str | None = None
     entries: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str | None, str, str]] = set()
+    seen: set[tuple[str, str | None, str, str]] = set()
     schema_roles: list[str] | None = None
     i = 0
 
@@ -371,15 +266,21 @@ def extract_inventory_entries_from_page_text(
         if line.startswith("__HEADING__ "):
             heading = line[len("__HEADING__ ") :].strip()
             current_heading = heading
-            heading_chain = _infer_chain("", heading)
-            if heading_chain != "unknown":
-                current_chain = heading_chain
             schema_roles = None
             pending_label = None
             i += 1
             continue
 
         if schema_roles is None:
+            row_header_cells = _split_row_cells(line)
+            if row_header_cells:
+                row_header_roles = [_header_role(cell) for cell in row_header_cells]
+                if len(row_header_roles) >= 2 and "address" in row_header_roles and any(row_header_roles):
+                    schema_roles = [role or "ignore" for role in row_header_roles]
+                    pending_label = None
+                    i += 1
+                    continue
+
             header_roles: list[str] = []
             j = i
             while j < len(lines):
@@ -397,6 +298,30 @@ def extract_inventory_entries_from_page_text(
                 continue
 
         if schema_roles is not None:
+            row_cells = _split_row_cells(line)
+            if row_cells and len(row_cells) == len(schema_roles):
+                row_entries = _build_entries_from_table_row(
+                    schema_roles,
+                    row_cells,
+                    url,
+                    current_heading,
+                )
+                if row_entries:
+                    for entry in row_entries:
+                        signature = (
+                            entry["address"],
+                            entry["name"],
+                            entry["kind"],
+                            entry["url"],
+                        )
+                        if signature in seen:
+                            continue
+                        seen.add(signature)
+                        entries.append(entry)
+                    pending_label = None
+                    i += 1
+                    continue
+
             row_len = len(schema_roles)
             if i + row_len <= len(lines):
                 row_cells = lines[i : i + row_len]
@@ -406,13 +331,10 @@ def extract_inventory_entries_from_page_text(
                         row_cells,
                         url,
                         current_heading,
-                        current_chain,
-                        requested_chain,
                     )
                     if row_entries:
                         for entry in row_entries:
                             signature = (
-                                entry["chain_id"],
                                 entry["address"],
                                 entry["name"],
                                 entry["kind"],
@@ -435,27 +357,11 @@ def extract_inventory_entries_from_page_text(
 
         addresses, explorer_links = _extract_addresses_and_links(line)
         if not addresses:
-            context_chains = _parse_chain_values(line)
-            if context_chains and any(token in line.lower() for token in ("deploy", "mainnet", "chain")):
-                current_chain = context_chains[0]
-                pending_label = None
-                i += 1
-                continue
             clean_label = _clean_label(line)
             if clean_label:
                 pending_label = clean_label
             i += 1
             continue
-
-        line_chain = current_chain
-        if explorer_links:
-            linked_chain = _infer_chain(explorer_links[0], "")
-            if linked_chain != "unknown":
-                line_chain = linked_chain
-        if line_chain == "unknown":
-            inferred = _infer_chain("", line)
-            if inferred != "unknown":
-                line_chain = inferred
 
         name = _extract_name_from_line(line)
         if not name and pending_label and _line_is_only_locator(line):
@@ -467,22 +373,19 @@ def extract_inventory_entries_from_page_text(
 
         for address in addresses:
             explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-            for chain_id, chain_from_hint in _resolve_candidate_chain_ids(None, line_chain, requested_chain):
-                signature = (chain_id, address, name, kind, url)
-                if signature in seen:
-                    continue
-                seen.add(signature)
-                entries.append(
-                    {
-                        "name": name,
-                        "address": address,
-                        "chain_id": chain_id,
-                        "kind": kind,
-                        "url": url,
-                        "explorer_url": explorer_url,
-                        "chain_from_hint": chain_from_hint,
-                    }
-                )
+            signature = (address, name, kind, url)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            entries.append(
+                {
+                    "name": name,
+                    "address": address,
+                    "kind": kind,
+                    "url": url,
+                    "explorer_url": explorer_url,
+                }
+            )
 
         i += 1
 
@@ -492,7 +395,6 @@ def extract_inventory_entries_from_page_text(
 
 def extract_inventory_entries_from_pages(
     urls: list[str],
-    requested_chain: str | None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch selected pages and aggregate extracted inventory entries.
@@ -513,5 +415,5 @@ def extract_inventory_entries_from_pages(
             message = f"Inventory page fetch returned empty body for {url}"
             _debug_log(debug, message)
             raise RuntimeError(message)
-        out.extend(extract_inventory_entries_from_page_text(url, page_text, requested_chain, debug=debug))
+        out.extend(extract_inventory_entries_from_page_text(url, page_text, debug=debug))
     return out

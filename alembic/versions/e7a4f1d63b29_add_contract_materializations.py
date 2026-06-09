@@ -14,9 +14,9 @@ Schema notes:
   - PRIMARY KEY (chain, bytecode_keccak): the dedup key. Two contracts
     deployed at different addresses with byte-identical bytecode (every
     OZ ERC1967Proxy, every Gnosis Safe singleton) share one row.
-  - UNIQUE (chain, address): supports address-keyed lookups for the
-    legacy address-cache code path. NULL chains map to 'ethereum' at
-    insert time so the unique constraint is well-defined.
+  - UNIQUE (chain, address): supports address-keyed lookups in the
+    historical schema. A later migration replaces string chain identity
+    with numeric ``chain_id``.
   - status: 'pending' marks a row whose builder is in flight (someone
     holds the advisory lock); 'ready' marks a usable cache row;
     'failed' marks a row whose last build threw — kept for ops triage,

@@ -121,7 +121,13 @@ def _root_artifacts(
     }
 
 
-def _load_nested_artifacts(session: Session, job_id, *, chain_id: int) -> dict[str, LoadedArtifacts]:
+def _load_nested_artifacts(
+    session: Session,
+    job_id,
+    *,
+    chain_id: int,
+    root_address: str | None = None,
+) -> dict[str, LoadedArtifacts]:
     """Hydrate ``recursive.*`` artifacts written by the resolution stage.
 
     Resolution writes only the runtime-state slices (snapshot,
@@ -139,6 +145,7 @@ def _load_nested_artifacts(session: Session, job_id, *, chain_id: int) -> dict[s
     from db.models import Artifact
 
     prefix = f"{KEY_PREFIX}."
+    root_address_norm = root_address.lower() if isinstance(root_address, str) else None
     rows = (
         session.execute(select(Artifact).where(Artifact.job_id == job_id, Artifact.name.like(f"{prefix}%")))
         .scalars()
@@ -150,6 +157,8 @@ def _load_nested_artifacts(session: Session, job_id, *, chain_id: int) -> dict[s
         if parsed is None:
             continue
         address, kind = parsed
+        if root_address_norm is not None and address.lower() == root_address_norm:
+            continue
         if kind not in ARTIFACT_KINDS:
             continue
         payload = get_artifact(session, job_id, row.name)
@@ -331,7 +340,14 @@ class PolicyWorker(BaseWorker):
         if not isinstance(control_snapshot, dict):
             raise RuntimeError("resolution_artifact missing control_snapshot")
 
-        nested_artifacts = _load_nested_artifacts(session, job.id, chain_id=chain_id)
+        subject = contract_analysis.get("subject")
+        root_address = subject.get("address") if isinstance(subject, dict) else None
+        nested_artifacts = _load_nested_artifacts(
+            session,
+            job.id,
+            chain_id=chain_id,
+            root_address=root_address if isinstance(root_address, str) else None,
+        )
 
         # Determine nested controller context for effective-permission enrichment.
         authority_snapshot: dict | None = None

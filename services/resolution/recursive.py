@@ -721,7 +721,13 @@ def resolve_control_graph(
     initial_graph: ResolvedControlGraph | None = None,
     heartbeat: Callable[[], None] | None = None,
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
-    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place."""
+    """BFS the control chain.
+
+    The returned ``nested_artifacts_by_address`` contains only contracts found
+    below the root. The root's artifacts are already owned by the current job's
+    static/resolution outputs, so persisting it as ``recursive.<root>.*`` makes
+    policy treat the root as a nested materialization.
+    """
     effective_chain_id = require_supported_chain_id(
         chain_id=chain_id,
         context="recursive control graph",
@@ -767,7 +773,11 @@ def resolve_control_graph(
     queued = {root_address}
     processed: set[str] = set()
     _classify_cache: dict[str, tuple[str, dict[str, object]]] = classify_cache if classify_cache is not None else {}
-    nested_artifacts: dict[str, LoadedArtifacts] = dict(nested_artifacts_override or {})
+    nested_artifacts: dict[str, LoadedArtifacts] = {
+        addr.lower(): artifacts
+        for addr, artifacts in (nested_artifacts_override or {}).items()
+        if addr.lower() != root_address
+    }
 
     classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
@@ -900,7 +910,7 @@ def resolve_control_graph(
                 )
                 raise RuntimeError(f"recursive materialization failed for {address} depth={depth}: {err_text}")
 
-            if address not in nested_artifacts:
+            if depth > 0 and address not in nested_artifacts:
                 nested_artifacts[address] = artifacts
 
             processed.add(address)

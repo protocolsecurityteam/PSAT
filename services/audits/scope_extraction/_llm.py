@@ -105,9 +105,9 @@ contract name with an address. Never guess, never invent an address.
 contract (e.g. in a "commit" column of the scope table, or in a single \
 "reviewed at commit abc1234" line that applies to all entries), put it \
 in ``commit``. Otherwise set commit to null.
-- If the scope section indicates a chain for the entry (e.g. "Ethereum \
-mainnet", "Arbitrum", "Scroll"), emit the numeric EVM chain_id. Default \
-to null when unspecified; never guess a chain id from the address alone.
+- Set ``chain_id`` only when the scope section explicitly lists a numeric EVM \
+chain ID for the entry. Default to null when unspecified; never infer a chain \
+ID from chain names, explorer links, or the address alone.
 - If no addresses are present in the scope section, return an empty \
 array for ``scope_entries``. This is the normal case for audits whose \
 scope is prose or a flat name list.
@@ -268,10 +268,6 @@ def _parse_scope_entry(raw: Any) -> dict[str, Any] | None:
             chain_id=raw.get("chain_id"),
             context=f"audit scope entry {name} {address}",
         )
-    elif isinstance(raw.get("chain"), str) and raw["chain"].strip():
-        raw_chain_label = raw["chain"].strip().lower()
-        logger.error("Audit scope entry returned legacy chain label instead of chain_id: %r", raw_chain_label)
-        raise RuntimeError(f"Audit scope entry requires chain_id, got legacy chain label {raw_chain_label!r}")
     return {
         "name": name,
         "address": address,

@@ -87,16 +87,30 @@ def fetch_contract_transactions(address: str, *, chain_id: int, limit: int = 30,
 
     Automatic address transaction-history lookup is unsupported in eRPC-only
     mode because plain JSON-RPC does not expose an address transaction index.
-    Callers that need dynamic dependencies must pass explicit ``tx_hashes`` so
-    transaction metadata and traces can be fetched through eRPC.
+    Return an empty list rather than querying explorer txlist or guessing.
+    Callers that need dynamic dependencies can pass explicit ``tx_hashes`` so
+    transaction metadata and traces are fetched through eRPC.
     """
     del limit, start_block
     message = (
         f"dynamic dependency transaction discovery for {address} on chain_id={chain_id} requires an "
-        "eRPC-backed address transaction index; explorer txlist is disabled"
+        "eRPC-backed address transaction index; returning no dynamic dependencies because explorer txlist is disabled"
     )
-    logger.error("%s", message)
-    raise RuntimeError(message)
+    logger.warning("%s", message)
+    return []
+
+
+def _empty_dynamic_dependencies(address: str, *, reason: str) -> dict:
+    return {
+        "address": address,
+        "transactions_analyzed": [],
+        "trace_methods": [],
+        "dependencies": [],
+        "provenance": {},
+        "dependency_graph": [],
+        "trace_errors": [],
+        "degraded_reason": reason,
+    }
 
 
 def pick_representative_transactions(address: str, transactions: list[dict], max_txs: int = 5) -> list[dict]:
@@ -339,7 +353,9 @@ def find_dynamic_dependencies(
         selected_txs = pick_representative_transactions(tx_source, txs, max_txs=tx_limit)
 
     if not selected_txs:
-        raise NoNewTransactionsError(f"No representative transactions found for {tx_source}")
+        reason = f"No representative transactions found for {tx_source}"
+        logger.warning("%s", reason)
+        return _empty_dynamic_dependencies(target, reason=reason)
 
     from utils.concurrency import parallel_map
 

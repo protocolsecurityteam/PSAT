@@ -1,8 +1,8 @@
 """Domain selection, page discovery, and shared utilities for contract inventory.
 
 This module provides the infrastructure layer for the inventory discovery pipeline:
-  - Shared constants: regex patterns, blockchain explorer mappings, trust lists
-  - Utility helpers: domain matching, chain inference, address extraction, page fetching
+  - Shared constants: regex patterns, blockchain explorer domains, trust lists
+  - Utility helpers: domain matching, address extraction, page fetching
   - Explicit search backend integration with query budget management
   - LLM-based official domain identification and page selection
 """
@@ -30,17 +30,21 @@ URL_RE = re.compile(r"https?://[^\s\"'<>)]+")
 DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+$", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
 
-EXPLORER_CHAINS = {
-    "etherscan.io": "ethereum",
-    "eth.blockscout.com": "ethereum",
-    "arbiscan.io": "arbitrum",
-    "arbitrum.blockscout.com": "arbitrum",
-    "optimistic.etherscan.io": "optimism",
-    "optimism.blockscout.com": "optimism",
-    "polygonscan.com": "polygon",
-    "polygon.blockscout.com": "polygon",
-    "basescan.org": "base",
-    "base.blockscout.com": "base",
+EXPLORER_DOMAINS = {
+    "etherscan.io",
+    "eth.blockscout.com",
+    "arbiscan.io",
+    "arbitrum.blockscout.com",
+    "optimistic.etherscan.io",
+    "optimism.blockscout.com",
+    "polygonscan.com",
+    "polygon.blockscout.com",
+    "basescan.org",
+    "base.blockscout.com",
+    "bscscan.com",
+    "scrollscan.com",
+    "snowtrace.io",
+    "hyperevmscan.io",
 }
 
 LOW_TRUST_DOMAINS = {
@@ -56,24 +60,6 @@ LOW_TRUST_DOMAINS = {
     "wikipedia.org",
     "reddit.com",
 }
-
-CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "base": 4, "unknown": 99}
-
-# EVM chain IDs for chains the inventory pipeline can discover.
-CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "scroll": 534352,
-    "zksync": 324,
-    "blast": 81457,
-}
-
 
 class SearchFn(Protocol):
     """Search callable used by discovery functions."""
@@ -132,7 +118,7 @@ def _domain_matches(domain: str, known: str) -> bool:
 
 
 def _is_explorer_domain(domain: str) -> bool:
-    return any(_domain_matches(domain, k) for k in EXPLORER_CHAINS)
+    return any(_domain_matches(domain, k) for k in EXPLORER_DOMAINS)
 
 
 def _is_low_trust_domain(domain: str) -> bool:
@@ -150,33 +136,6 @@ def _extract_addresses(*values: str) -> set[str]:
             for match in ADDRESS_RE.findall(value):
                 out.add(_normalize_address(match))
     return out
-
-
-def _infer_chain(url: str, text: str) -> str:
-    domain = _get_domain(url)
-    for known, chain in EXPLORER_CHAINS.items():
-        if _domain_matches(domain, known):
-            return chain
-    lowered = text.lower()
-    if "arbitrum" in lowered:
-        return "arbitrum"
-    if "optimism" in lowered or "optimistic" in lowered:
-        return "optimism"
-    if "polygon" in lowered or "matic" in lowered:
-        return "polygon"
-    if "base" in lowered:
-        return "base"
-    if "ethereum" in lowered or "mainnet" in lowered:
-        return "ethereum"
-    return "unknown"
-
-
-def _resolve_chain(inferred: str, requested: str | None) -> tuple[str | None, bool]:
-    if not requested:
-        return inferred, False
-    if inferred not in {requested, "unknown"}:
-        return None, False
-    return requested, inferred == "unknown"
 
 
 def _fetch_page(url: str, debug: bool = False) -> str:

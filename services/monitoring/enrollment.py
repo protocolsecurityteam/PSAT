@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.contract_materializations import find_by_address, hydrate_tracking_plan
@@ -20,6 +20,7 @@ from db.models import (
     MonitoredContract,
     WatchedProxy,
 )
+from services.artifacts import get_artifact_field
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
@@ -203,7 +204,11 @@ def enroll_protocol_contracts(
         # feeds the watcher's event dispatcher, and the raw plan feeds
         # ``build_polling_plan`` which projects pollable getters /
         # storage slots from the analyzer's tracked_controllers.
-        tracked_topics, tracking_plan = _load_tracking_plan_artifacts(session, contract)
+        tracked_topics, tracking_plan = _load_tracking_plan_artifacts(
+            session,
+            contract,
+            current_job_id=calling_job_id,
+        )
 
         polling_plan = build_polling_plan(
             contract_type=contract_type,
@@ -364,6 +369,8 @@ _EVENT_BASED_PROXY_TYPES = {"eip1967", "eip1167", "eip1822"}
 def _load_tracking_plan_artifacts(
     session: Session,
     contract: Contract,
+    *,
+    current_job_id: Any = None,
 ) -> tuple[list[dict], dict | None]:
     """Hydrate the analysis ``tracking_plan`` for *contract* once and
     return both projections the enrollment path needs:
@@ -381,6 +388,20 @@ def _load_tracking_plan_artifacts(
     if contract.chain_id is None:
         logger.error("Tracking plan hydration requires chain_id for contract %s", contract.address)
         raise RuntimeError(f"tracking_plan hydration requires chain_id for contract {contract.id}")
+    plan = _load_tracking_plan_from_analysis_job(session, contract, current_job_id=current_job_id)
+    if plan is not None:
+        try:
+            return extract_governance_topics(plan), plan
+        except Exception as exc:
+            logger.error(
+                "Tracking plan job artifact failed for %s chain_id=%s: %s",
+                contract.address,
+                contract.chain_id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            raise RuntimeError(f"tracking_plan job artifact failed for contract {contract.id}") from exc
+
     row = find_by_address(session, chain_id=contract.chain_id, address=contract.address)
     if row is None:
         logger.error(
@@ -402,6 +423,58 @@ def _load_tracking_plan_artifacts(
         )
         raise RuntimeError(f"tracking_plan hydration failed for contract {contract.id}") from exc
     return topics, plan
+
+
+def _load_tracking_plan_from_analysis_job(
+    session: Session,
+    contract: Contract,
+    *,
+    current_job_id: Any = None,
+) -> dict | None:
+    checked: set[Any] = set()
+
+    def load_from_job(job: Job | None) -> dict | None:
+        if job is None or job.id in checked:
+            return None
+        checked.add(job.id)
+        if not job.address or job.address.lower() != contract.address.lower() or job.chain_id != contract.chain_id:
+            return None
+        plan = get_artifact_field(session, job.id, "control_tracking_plan")
+        if not isinstance(plan, dict):
+            logger.error(
+                "Tracking plan job artifact missing for job_id=%s contract=%s chain_id=%s",
+                job.id,
+                contract.address,
+                contract.chain_id,
+            )
+            raise RuntimeError(f"tracking_plan job artifact missing for contract {contract.id}")
+        return plan
+
+    if current_job_id is not None:
+        plan = load_from_job(session.get(Job, current_job_id))
+        if plan is not None:
+            return plan
+
+    if contract.job_id is not None:
+        plan = load_from_job(session.get(Job, contract.job_id))
+        if plan is not None:
+            return plan
+
+    latest_job = (
+        session.execute(
+            select(Job)
+            .where(
+                func.lower(Job.address) == contract.address.lower(),
+                Job.chain_id == contract.chain_id,
+                Job.status == JobStatus.completed,
+            )
+            .order_by(Job.updated_at.desc(), Job.created_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return load_from_job(latest_job)
 
 
 def _build_monitoring_config(

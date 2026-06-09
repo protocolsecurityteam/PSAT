@@ -420,12 +420,14 @@ class PredicateEvaluationContext:
     def __init__(
         self,
         *,
+        chain_id: ChainId,
         contract_address: Address | None = None,
         adapter: PredicateEvaluatorSetAdapter | None = None,
         block: int | None = None,
         state_var_values: dict[str, str] | None = None,
         call_frame: Any = None,
     ) -> None:
+        self.chain_id = require_supported_chain_id(chain_id=chain_id, context="predicate evaluation context")
         self.contract_address = contract_address
         self.adapter: PredicateEvaluatorSetAdapter = adapter or _NullPredicateEvaluatorAdapter()
         self.block = block

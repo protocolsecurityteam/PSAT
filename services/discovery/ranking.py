@@ -146,9 +146,9 @@ def effective_confidence(
 ) -> float:
     """Confidence for ranking purposes: stored value + corroboration boost.
 
-    The stored ``Contract.confidence`` is the "raw" score one discovery
-    pipeline assigned (inventory evidence scoring, or NULL for sources
-    that don't score). The effective value is what the selection stage
+    The stored ``Contract.confidence`` is the raw score one discovery
+    pipeline assigned, or NULL for sources that don't score. The
+    effective value is what the selection stage
     ranks on — raw, plus a boost per extra corroborating source, capped
     so a thin-evidence row can't rocket past well-evidenced ones on
     corroboration alone.
@@ -167,23 +167,19 @@ def effective_confidence(
     return min(_MAX_CONFIDENCE, max(0.0, base + boost))
 
 
-def score_inventory_evidence(
-    chain_id: int | None,
-    evidence: list[dict[str, Any]],
-) -> tuple[float, dict[str, Any]]:
+def score_inventory_evidence(evidence: list[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
     """Score an inventory entry from its supporting evidence.
 
     ``evidence`` is the list of page-level observations the inventory
     extractor gathered for a single address. Each observation carries a
     ``kind`` label (``official_inventory_table``, ``deployer_expansion``,
-    etc.) and optional metadata (``name``, ``url``, ``explorer_url``,
-    ``chain_from_hint``). Confidence rises with:
+    etc.) and optional metadata (``name``, ``url``, ``explorer_url``).
+    Confidence rises with:
 
         - distinct pages the address appears on
         - the presence of a human-readable name
         - strong evidence kinds (tables > links > free-form text)
         - deployer / explorer corroboration
-        - a validated supported chain id
 
     Cap at 0.99 so a perfect-score inventory row still leaves room
     for on-chain activity in the ranking blend.
@@ -210,9 +206,6 @@ def score_inventory_evidence(
     confidence += min(0.12, max(0, page_count - 1) * 0.06)
     if explorer_count:
         confidence += 0.06
-    if chain_id is not None:
-        require_supported_chain_id(chain_id=chain_id, context="inventory evidence scoring")
-        confidence += 0.05
     confidence = min(confidence, 0.99)
 
     evidence_counts: dict[str, Any] = {"official": page_count, "named": named_count}
@@ -226,9 +219,6 @@ def score_inventory_evidence(
         evidence_counts["deployer"] = deployer_count
     if explorer_count:
         evidence_counts["explorer"] = explorer_count
-    if any(item.get("chain_from_hint") for item in evidence):
-        evidence_counts["chain_hinted"] = True
-
     return round(confidence, 4), evidence_counts
 
 

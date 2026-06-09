@@ -33,7 +33,15 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
     # rapid re-renders avoid a network round-trip for the multi-MB payload.
     response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     with deps.SessionLocal() as session:
-        stmt = select(Job).where(Job.status == JobStatus.completed).order_by(Job.updated_at.desc())
+        stmt = (
+            select(Job)
+            .where(
+                Job.status == JobStatus.completed,
+                Job.address.is_not(None),
+                Job.chain_id.is_not(None),
+            )
+            .order_by(Job.updated_at.desc())
+        )
         jobs = session.execute(stmt).scalars().all()
 
         jobs_by_id = {str(job.id): job for job in jobs}

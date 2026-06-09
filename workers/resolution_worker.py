@@ -396,9 +396,9 @@ class ResolutionWorker(BaseWorker):
         target_address = request.get("proxy_address") or address
 
         self.update_detail(session, job, "Fetching token balances")
-        # Native balance is eRPC-backed. Token enumeration requires an indexed
-        # token universe; without one the helper raises so this stage does not
-        # persist partial/empty balances.
+        # Native balance is eRPC-backed and required. Token enumeration and
+        # pricing need indexer/oracle support; when unavailable, persist the
+        # native balance without inventing token rows or USD values.
         calls: dict[str, Callable[[], object]] = {
             "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
             "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
@@ -424,27 +424,34 @@ class ResolutionWorker(BaseWorker):
 
         eth_wei_raw = results.get("eth_wei")
         tokens_raw = results.get("tokens")
-        if isinstance(eth_wei_raw, BaseException) or isinstance(tokens_raw, BaseException):
-            primary_exc = eth_wei_raw if isinstance(eth_wei_raw, BaseException) else tokens_raw
-            assert isinstance(primary_exc, BaseException)
+        if isinstance(eth_wei_raw, BaseException):
             record_degraded(
                 phase="balance_fetch",
-                exc=primary_exc,
+                exc=eth_wei_raw,
                 context={
                     "address": target_address,
-                    "eth_failed": isinstance(eth_wei_raw, BaseException),
+                    "eth_failed": True,
                     "tokens_failed": isinstance(tokens_raw, BaseException),
                 },
             )
             logger.error(
-                "Job %s: balance fetch failed: eth=%r tokens=%r",
+                "Job %s: native balance fetch failed: eth=%r tokens=%r",
                 job.id,
                 eth_wei_raw,
                 tokens_raw,
             )
-            raise RuntimeError(f"balance fetch failed for {target_address}") from primary_exc
+            raise RuntimeError(f"balance fetch failed for {target_address}") from eth_wei_raw
         eth_wei = cast(int, eth_wei_raw)
-        tokens = cast(list, tokens_raw)
+        if isinstance(tokens_raw, BaseException):
+            record_degraded(
+                phase="token_balance_fetch",
+                exc=tokens_raw,
+                context={"address": target_address},
+            )
+            logger.warning("Job %s: token balance fetch unavailable for %s: %s", job.id, target_address, tokens_raw)
+            tokens = []
+        else:
+            tokens = cast(list, tokens_raw)
 
         # Clear old balances
         session.query(ContractBalance).filter(ContractBalance.contract_id == contract_row.id).delete()
@@ -460,8 +467,8 @@ class ResolutionWorker(BaseWorker):
                     exc=eth_price_raw,
                     context={"address": target_address},
                 )
-                logger.error("Job %s: ETH price fetch failed: %s", job.id, eth_price_raw)
-                raise RuntimeError(f"ETH price fetch failed for {target_address}") from eth_price_raw
+                logger.warning("Job %s: ETH price unavailable for %s: %s", job.id, target_address, eth_price_raw)
+                eth_price = None
             else:
                 eth_price = cast(float, eth_price_raw)
                 eth_usd = (eth_wei / 1e18) * eth_price

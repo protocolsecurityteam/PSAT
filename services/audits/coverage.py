@@ -339,12 +339,7 @@ def _scope_entry_chain_id(entry: dict) -> int | None:
             chain_id=entry.get("chain_id"),
             context=f"audit scope entry {entry.get('name') or entry.get('address')}",
         )
-    if entry.get("raw_chain_label") or entry.get("chain"):
-        raw_chain_label = entry.get("raw_chain_label") or entry.get("chain")
-        logger.error("Audit scope entry uses legacy chain label instead of chain_id: %r", raw_chain_label)
-        raise RuntimeError(f"Audit scope entry requires chain_id, got legacy chain label {raw_chain_label!r}")
-    if not entry.get("chain_id"):
-        return None
+    return None
 
 
 _AddressRowCache = dict[tuple[int, str, int], Contract | None]

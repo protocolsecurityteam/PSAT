@@ -1414,6 +1414,9 @@ class StaticWorker(BaseWorker):
             "predicate_trees": predicate_trees if isinstance(predicate_trees, dict) else None,
             "effects": effects if isinstance(effects, dict) else None,
         }
+        if contract_row.job_id != job.id:
+            contract_row.job_id = job.id
+            session.flush()
         artifact = make_stage_artifact(
             kind=STATIC_ANALYSIS_ARTIFACT,
             stage="static",

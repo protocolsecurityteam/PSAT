@@ -15,9 +15,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from services.crawlers.defillama.core_assets import build_address_to_chain_map, load_core_assets
 from services.crawlers.defillama.extract import extract_addresses_from_file, extract_protocol
-from utils.rpc import require_chain_id_for_evidence_label
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +109,13 @@ def scan_protocol(
     no_clone: bool = False,
     progress: ProgressCallback | None = None,
 ) -> dict:
-    """Scan a single protocol's adapters and return discovered addresses with chain-id context.
+    """Scan a single protocol's adapters and return discovered addresses.
 
     Returns:
         {
             "protocol": "aave",
             "addresses": ["0x...", ...],
-            "address_details": [{"address": "0x...", "chain_id": 1, "raw_chain_label": "ethereum", "source": "..."}],
+            "address_details": [{"address": "0x...", "source": "..."}],
             "scan_time": 1.2,
         }
     """
@@ -129,10 +127,6 @@ def scan_protocol(
     projects_dir = repo_path / "projects"
     if not projects_dir.exists():
         raise FileNotFoundError(f"Projects directory not found: {projects_dir}")
-
-    _emit_progress(progress, "Loading DefiLlama core assets")
-    core_assets = load_core_assets(repo_path)
-    addr_to_chain = build_address_to_chain_map(core_assets)
 
     # Find the matching protocol directory
     protocol_dirs = _discover_protocols(projects_dir)
@@ -152,23 +146,11 @@ def scan_protocol(
         result = {
             "protocol": proto_path.stem,
             "files_scanned": 1,
-            "addresses": [
-                {"address": a, "chain_id": None, "raw_chain_label": None, "source": proto_path.name} for a in addrs
-            ],
+            "addresses": [{"address": a, "source": proto_path.name} for a in addrs],
         }
     else:
         _emit_progress(progress, f"Scanning {proto_path.name} adapter files")
         result = extract_protocol(proto_path)
-
-    # Enrich chain info from core assets
-    for entry in result["addresses"]:
-        if entry.get("chain_id") is None and entry["address"] in addr_to_chain:
-            raw_chain_label = addr_to_chain[entry["address"]]
-            entry["raw_chain_label"] = raw_chain_label
-            entry["chain_id"] = require_chain_id_for_evidence_label(
-                raw_chain_label,
-                context=f"DefiLlama core assets {entry['address']}",
-            )
 
     elapsed = time.time() - start
     unique_addrs = sorted({e["address"] for e in result["addresses"]})
@@ -187,7 +169,7 @@ def scan_all_protocols(
 ) -> dict:
     """Scan all protocols in the DefiLlama-Adapters repo.
 
-    Returns the full scan results dict with protocols, chain_summary, etc.
+    Returns the full scan results dict with protocols and address counts.
     """
     repo_path = repo_path or DEFAULT_REPO_PATH
 
@@ -197,9 +179,6 @@ def scan_all_protocols(
     projects_dir = repo_path / "projects"
     if not projects_dir.exists():
         raise FileNotFoundError(f"Projects directory not found: {projects_dir}")
-
-    core_assets = load_core_assets(repo_path)
-    addr_to_chain = build_address_to_chain_map(core_assets)
 
     protocol_dirs = _discover_protocols(projects_dir)
     logger.info("Found %d protocols to scan", len(protocol_dirs))
@@ -214,21 +193,12 @@ def scan_all_protocols(
             result = {
                 "protocol": proto_path.stem,
                 "files_scanned": 1,
-                "addresses": [
-                    {"address": a, "chain_id": None, "raw_chain_label": None, "source": proto_path.name} for a in addrs
-                ],
+                "addresses": [{"address": a, "source": proto_path.name} for a in addrs],
             }
         else:
             result = extract_protocol(proto_path)
 
         for entry in result["addresses"]:
-            if entry.get("chain_id") is None and entry["address"] in addr_to_chain:
-                raw_chain_label = addr_to_chain[entry["address"]]
-                entry["raw_chain_label"] = raw_chain_label
-                entry["chain_id"] = require_chain_id_for_evidence_label(
-                    raw_chain_label,
-                    context=f"DefiLlama core assets {entry['address']}",
-                )
             all_unique.add(entry["address"])
 
         if result["addresses"]:
@@ -239,17 +209,10 @@ def scan_all_protocols(
 
     elapsed = time.time() - start
 
-    chain_id_counts: dict[str, int] = {}
-    for proto in all_protocols:
-        for entry in proto["addresses"]:
-            key = str(entry.get("chain_id") or "unknown")
-            chain_id_counts[key] = chain_id_counts.get(key, 0) + 1
-
     return {
         "scan_time": elapsed,
         "protocols_scanned": len(protocol_dirs),
         "protocols_with_addresses": len(all_protocols),
         "unique_addresses": len(all_unique),
-        "chain_id_summary": chain_id_counts,
         "protocols": all_protocols,
     }

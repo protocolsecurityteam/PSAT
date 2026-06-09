@@ -98,7 +98,7 @@ class DefiLlamaWorker(BaseWorker):
         if addresses and not address_details:
             logger.error("DefiLlama scan found addresses but no address_details for job %s", job.id)
             raise RuntimeError("DefiLlama scan found addresses but no address_details")
-        seen_entries: set[tuple[str, str | None]] = set()
+        seen_entries: set[str] = set()
         for detail in address_details:
             if not isinstance(detail, dict):
                 logger.error("DefiLlama scan returned invalid address detail for job %s: %r", job.id, detail)
@@ -108,18 +108,15 @@ class DefiLlamaWorker(BaseWorker):
                 logger.error("DefiLlama scan returned address detail without address for job %s: %r", job.id, detail)
                 raise RuntimeError("DefiLlama scan returned address detail without address")
             normalized = raw_address.lower()
-            raw_chain_id = detail.get("chain_id")
-            key = (normalized, str(raw_chain_id) if raw_chain_id is not None else None)
-            if key in seen_entries:
+            if normalized in seen_entries:
                 continue
-            seen_entries.add(key)
-            entry = {
-                "address": normalized,
-                "new_sources": ["defillama"],
-            }
-            if raw_chain_id is not None:
-                entry["chain_id"] = raw_chain_id
-            bulk_entries.append(entry)
+            seen_entries.add(normalized)
+            bulk_entries.append(
+                {
+                    "address": normalized,
+                    "new_sources": ["defillama"],
+                }
+            )
         bulk_entries = expand_entries_by_resolved_chains(bulk_entries)
         bulk_upsert_discovered_contracts(session, protocol_id=protocol_id, entries=bulk_entries)
         session.commit()

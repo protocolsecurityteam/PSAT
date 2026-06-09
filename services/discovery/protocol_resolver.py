@@ -39,7 +39,6 @@ def _make_result(primary: dict, siblings: list[dict]) -> dict:
         "slug": primary.get("slug"),
         "url": primary.get("url"),
         "name": primary.get("name"),
-        "chains": primary.get("chains", []),
         "all_slugs": [s.get("slug") for s in siblings if s.get("slug")],
         # Display names for every sibling — used by ``get_or_create_protocol``
         # to find pre-resolver duplicate rows that share a family. Keep the
@@ -151,17 +150,17 @@ def resolve_protocol(name: str) -> dict:
     protocols sharing the same ``parentProtocol`` (e.g. "etherfi" returns
     ether.fi-stake, ether.fi-liquid, etherfi-cash-liquid, etc.).
 
-    Returns {"slug", "url", "name", "chains", "all_slugs"}.
+    Returns {"slug", "url", "name", "all_slugs", "all_names"}.
     """
     try:
         protocols = _fetch_protocols()
     except Exception as exc:
         logger.warning("Failed to fetch DefiLlama protocols: %s", exc)
-        return {"slug": None, "url": None, "name": None, "chains": [], "all_slugs": [], "all_names": []}
+        return {"slug": None, "url": None, "name": None, "all_slugs": [], "all_names": []}
 
     match = _match_protocol(name, protocols)
     if not match:
-        return {"slug": None, "url": None, "name": None, "chains": [], "all_slugs": [], "all_names": []}
+        return {"slug": None, "url": None, "name": None, "all_slugs": [], "all_names": []}
 
     siblings = _find_siblings(match, protocols)
     result = _make_result(match, siblings)

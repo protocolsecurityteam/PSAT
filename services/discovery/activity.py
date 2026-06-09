@@ -1,9 +1,10 @@
 """On-chain activity scoring for contract inventory ranking.
 
-Activity ranking requires address-level transaction history. PSAT now runs in
-eRPC-only mode for on-chain calls, and plain JSON-RPC does not expose an
-address transaction index. Until an eRPC-backed indexer exists, this stage
-fails explicitly instead of querying an explorer or assigning guessed activity.
+Activity ranking can use address-level transaction history when an eRPC-backed
+index exists. PSAT now runs in eRPC-only mode for on-chain calls, and plain
+JSON-RPC does not expose an address transaction index. Until that index exists,
+this stage assigns an explicit neutral activity score instead of querying an
+explorer or guessing a timestamp.
 
 Scoring
 -------
@@ -53,15 +54,15 @@ def _fetch_last_active_ts(
     chain_id: int,
     debug: bool = False,
 ) -> float | None:
-    """Return the Unix timestamp of the most recent transaction, or fail."""
+    """Return the Unix timestamp of the most recent transaction, if available."""
     resolved_chain_id = require_supported_chain_id(chain_id=chain_id, context=f"activity scoring for {address}")
     message = (
         f"activity scoring for {address} on chain_id={resolved_chain_id} requires an eRPC-backed "
-        "address transaction index; explorer txlist is disabled"
+        "address transaction index; using neutral activity score because explorer txlist is disabled"
     )
-    logger.error("%s", message)
+    logger.warning("%s", message)
     _debug_log(debug, message)
-    raise RuntimeError(message)
+    return None
 
 
 def _activity_score(last_active_ts: float | None) -> float:
@@ -107,9 +108,8 @@ def enrich_with_activity(
     Mutates the contract dicts in-place (adds ``activity`` and ``rank_score``
     keys) and returns the list sorted by ``rank_score`` descending.
 
-    Requires an eRPC-backed address transaction index. Without one, this
-    function raises instead of querying an explorer or assigning guessed
-    activity.
+    Uses a neutral activity score when an eRPC-backed address transaction index
+    is unavailable. It does not query explorer APIs or guess a timestamp.
     """
     if not contracts:
         return contracts

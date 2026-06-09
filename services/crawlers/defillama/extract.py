@@ -6,14 +6,11 @@ Handles multiple patterns:
   - Object values: { contract: "0xAbC..." }
   - Function args: staking("0xAbC...", ...)
   - Array entries: markets: ["0xAbC...", "0xDeF..."]
-  - coreAssets.json references (resolved separately)
 """
 
 import logging
 import re
 from pathlib import Path
-
-from utils.rpc import require_chain_id_for_evidence_label
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +26,6 @@ IGNORE_ADDRS = {
     "0x000000000000000000000000000000000000dead",
     "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "0xffffffffffffffffffffffffffffffffffffffff",
-}
-
-# Known chain identifiers from directory names and code patterns
-CHAIN_ALIASES = {
-    "avax": "avalanche",
-    "bsc": "bsc",
-    "xdai": "gnosis",
-    "okexchain": "okx",
-    "heco": "heco",
-    "matic": "polygon",
 }
 
 
@@ -63,53 +50,6 @@ def extract_addresses_from_file(filepath: Path) -> list[str]:
     return result
 
 
-def infer_chain_from_context(filepath: Path, text: str, addr: str) -> str | None:
-    """
-    Try to figure out which chain an address belongs to based on
-    surrounding code context.
-    """
-    # Find all occurrences of this address and look at nearby code
-    for m in re.finditer(re.escape(addr), text, re.IGNORECASE):
-        start = max(0, m.start() - 300)
-        end = min(len(text), m.end() + 100)
-        context = text[start:end].lower()
-
-        # Check for chain name in the surrounding context
-        chain_keywords = {
-            "ethereum": "ethereum",
-            "arbitrum": "arbitrum",
-            "optimism": "optimism",
-            "polygon": "polygon",
-            "matic": "polygon",
-            "avax": "avalanche",
-            "avalanche": "avalanche",
-            "bsc": "bsc",
-            "fantom": "fantom",
-            "base": "base",
-            "gnosis": "gnosis",
-            "xdai": "gnosis",
-            "moonbeam": "moonbeam",
-            "moonriver": "moonriver",
-            "celo": "celo",
-            "harmony": "harmony",
-            "cronos": "cronos",
-            "aurora": "aurora",
-            "metis": "metis",
-            "linea": "linea",
-            "scroll": "scroll",
-            "zksync": "zksync",
-            "blast": "blast",
-            "mantle": "mantle",
-            "manta": "manta",
-            "solana": "solana",
-        }
-        for keyword, chain in chain_keywords.items():
-            if keyword in context:
-                return chain
-
-    return None
-
-
 def extract_protocol(project_dir: Path) -> dict:
     """
     Extract all addresses from a protocol's adapter directory.
@@ -119,7 +59,7 @@ def extract_protocol(project_dir: Path) -> dict:
             "protocol": "aave",
             "files_scanned": 3,
             "addresses": [
-                {"address": "0x...", "chain_id": 1, "raw_chain_label": "ethereum", "source": "index.js:12"},
+                {"address": "0x...", "source": "index.js:12"},
                 ...
             ]
         }
@@ -151,16 +91,6 @@ def extract_protocol(project_dir: Path) -> dict:
                 continue
             seen.add(lower)
 
-            raw_chain_label = infer_chain_from_context(filepath, text, addr)
-            chain_id = (
-                require_chain_id_for_evidence_label(
-                    raw_chain_label,
-                    context=f"DefiLlama adapter {project_dir.name}/{rel_path} {lower}",
-                )
-                if raw_chain_label
-                else None
-            )
-
             # Find line number
             line_num = None
             for i, line in enumerate(text.splitlines(), 1):
@@ -171,8 +101,6 @@ def extract_protocol(project_dir: Path) -> dict:
             addresses.append(
                 {
                     "address": lower,
-                    "chain_id": chain_id,
-                    "raw_chain_label": raw_chain_label,
                     "source": f"{rel_path}:{line_num}" if line_num else str(rel_path),
                 }
             )

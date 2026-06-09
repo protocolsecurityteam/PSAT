@@ -28,7 +28,6 @@ from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
 from services.discovery.inventory_domain import SearchFn
 from utils import exa, llm
-from utils.rpc import require_supported_chain_id
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +120,9 @@ class _Budget:
         if self.estimated_cost_usd > BUDGET_CIRCUIT_BREAKER_USD:
             raise RuntimeError(f"cost circuit breaker tripped at ${self.estimated_cost_usd:.2f}")
 
+    def remaining_research_calls(self) -> int:
+        return max(0, MAX_RESEARCH_CALLS_PER_PROTOCOL - self.research_calls)
+
 
 def _make_exa_search_fn(mode: str, budget: _Budget) -> SearchFn:
     """Return a discovery search function routed through Exa."""
@@ -159,8 +161,8 @@ def _audit_research_instructions(protocol: str) -> str:
 def _address_research_instructions(protocol: str) -> str:
     return (
         f"Find the main deployed smart contract addresses for the {protocol} protocol. "
-        f"List core production contracts with their names and 0x-prefixed on-chain addresses "
-        f"and the numeric EVM chain_id each is deployed on."
+        f"List core production contracts with their names and 0x-prefixed on-chain addresses. "
+        f"Do not infer or emit chain IDs; the pipeline probes addresses across supported networks."
     )
 
 
@@ -201,13 +203,12 @@ _ADDRESS_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "required": ["name", "address"],
                 "additionalProperties": False,
-                    "properties": {
-                        "name": {"type": "string"},
-                        "address": {"type": "string"},
-                        "chain_id": {"type": "integer"},
-                        "role": {"type": "string"},
-                    },
+                "properties": {
+                    "name": {"type": "string"},
+                    "address": {"type": "string"},
+                    "role": {"type": "string"},
                 },
+            },
         }
     },
 }
@@ -245,7 +246,6 @@ def _dependency_classifier_evidence(contracts: list[dict], audits: list[dict]) -
             {
                 "name": name,
                 "address": address,
-                "chain_ids": contract.get("chain_ids") or ([contract["chain_id"]] if contract.get("chain_id") else []),
                 "source": contract.get("source") or [],
             }
         )
@@ -363,9 +363,24 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
         logger.error("dep pass 1 failed for %s: %s", protocol, exc)
         raise RuntimeError(f"dependency research pass 1 failed for {protocol}") from exc
     components = r1.get("data", {}).get("components", []) or []
+    remaining = budget.remaining_research_calls()
+    if remaining <= 0:
+        logger.warning(
+            "dependency research skipped follow-up audit searches for %s: research budget exhausted",
+            protocol,
+        )
+        return []
+    selected_components = components[:remaining]
+    if len(components) > len(selected_components):
+        logger.warning(
+            "dependency research truncated follow-up audit searches for %s: components=%d remaining_budget=%d",
+            protocol,
+            len(components),
+            remaining,
+        )
 
     dep_audits: list[dict] = []
-    for c in components[:5]:  # cap at 5 components for cost control
+    for c in selected_components:
         inst = f"Find smart contract security audit reports for {c.get('name')} by {c.get('author')}."
         try:
             budget.charge_research()
@@ -425,17 +440,12 @@ def _apply_spa_overrides(protocol: str, inventory_result: dict, audit_result: di
         )
 
 
-def run_discovery(protocol: str, *, official_domain: str | None = None, chain_id: int | None = None) -> dict[str, Any]:
+def run_discovery(protocol: str, *, official_domain: str | None = None) -> dict[str, Any]:
     """Premium+Deps discovery for one protocol.
 
     Returns ``{audits: <search_audit_reports shape>, addresses: <search_protocol_inventory shape>,
     meta: {...}}`` so existing workers can slot it in with minimal plumbing changes.
     """
-    requested_chain_id = (
-        require_supported_chain_id(chain_id=chain_id, context=f"discovery for {protocol}")
-        if chain_id is not None
-        else None
-    )
     budget = _Budget()
     started_at = time.monotonic()
 
@@ -482,10 +492,8 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain_id
     inventory_result = inventory_mod.search_protocol_inventory(
         protocol,
         search_fn=_make_exa_search_fn("auto", budget),
-        chain_id=requested_chain_id,
         limit=500,
         max_queries=4,
-        run_deployer=True,
         debug=False,
     )
 
@@ -501,14 +509,6 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain_id
                 {
                     "name": item.get("name"),
                     "address": addr,
-                    "chain_ids": [
-                        require_supported_chain_id(
-                            chain_id=item.get("chain_id"),
-                            context=f"deep research address discovery for {protocol} {addr}",
-                        )
-                    ]
-                    if item.get("chain_id") is not None
-                    else [],
                     "confidence": 1.0,
                     "source": ["exa_deep_research"],
                     "evidence": {"deep_research": 1},

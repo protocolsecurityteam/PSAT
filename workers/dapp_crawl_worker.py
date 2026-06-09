@@ -129,7 +129,6 @@ class DAppCrawlWorker(BaseWorker):
             bulk_entries.append(
                 {
                     "address": normalized,
-                    "chain_id": chain_id,
                     "new_sources": ["dapp_crawl"],
                     "discovery_url": source_urls[0] if source_urls else None,
                 }

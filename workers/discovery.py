@@ -261,7 +261,7 @@ class DiscoveryWorker(BaseWorker):
         from services.discovery.run_discovery import run_discovery
 
         with log_timed_phase(logger, "unified_discovery") as ph:
-            unified = run_discovery(company, chain_id=chain_id)
+            unified = run_discovery(company)
             inventory = unified["addresses"]
             audit_result_raw: dict = unified["audits"]
             discovery_meta = unified["meta"]
@@ -342,37 +342,12 @@ class DiscoveryWorker(BaseWorker):
             for deployment in deployment_entries:
                 if not isinstance(deployment, dict) or not deployment.get("address"):
                     raise ValueError(f"Discovered deployment entry missing address: {deployment!r}")
-                raw_chain_ids = deployment.get("chain_ids") or []
-                if not isinstance(raw_chain_ids, list):
-                    raise ValueError(f"Discovered deployment entry has invalid chain_ids: {deployment!r}")
-                chain_ids: list[int] = []
-                for raw_chain_id in raw_chain_ids:
-                    try:
-                        parsed_chain_id = require_supported_chain_id(
-                            chain_id=raw_chain_id,
-                            context=f"discovered deployment entry for {deployment.get('address')}",
-                        )
-                    except RuntimeError as exc:
-                        raise ValueError(
-                            f"Discovered deployment entry requires supported chain_id: {deployment!r}"
-                        ) from exc
-                    chain_ids.append(parsed_chain_id)
-                if chain_ids:
-                    for deployment_chain_id in chain_ids:
-                        bulk_entries.append(
-                            {
-                                **base_entry,
-                                "address": str(deployment["address"]),
-                                "chain_id": deployment_chain_id,
-                            }
-                        )
-                else:
-                    bulk_entries.append(
-                        {
-                            **base_entry,
-                            "address": str(deployment["address"]),
-                        }
-                    )
+                bulk_entries.append(
+                    {
+                        **base_entry,
+                        "address": str(deployment["address"]),
+                    }
+                )
         record_stage_metric("contracts_discovered", len(bulk_entries))
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff

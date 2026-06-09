@@ -28,7 +28,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.rpc import default_rpc_url, get_code_batch, require_supported_chain_id, supported_chain_ids
+from utils.rpc import default_rpc_url, get_code_batch, supported_chain_ids
 
 from .inventory_domain import _debug_log
 from .static_dependencies import has_deployed_code, normalize_address
@@ -153,73 +153,31 @@ def expand_entries_by_resolved_chains(
 ) -> list[dict[str, Any]]:
     """Expand discovery write entries into one DB row per verified chain.
 
-    Entries with explicit ``chain_id`` evidence are verified only on that chain.
-    Entries without chain evidence are probed across all supported chains.
+    Every address is probed across all supported chains, and rows are emitted
+    only where deployed bytecode exists.
     """
-    unknown_chain_addresses: list[str] = []
-    explicit_by_chain: dict[int, list[str]] = {}
-    explicit_entry_chains: dict[int, int] = {}
+    addresses: list[str] = []
     normalized_by_entry: dict[int, str] = {}
-    seen_unknown: set[str] = set()
-    seen_explicit_by_chain: dict[int, set[str]] = {}
+    seen_addresses: set[str] = set()
 
     for idx, entry in enumerate(entries):
         address = _normalize_probe_address(entry.get("address"))
         normalized_by_entry[idx] = address
-        raw_chain_id = entry.get("chain_id")
-        if raw_chain_id is None:
-            if address not in seen_unknown:
-                seen_unknown.add(address)
-                unknown_chain_addresses.append(address)
-            continue
+        if address not in seen_addresses:
+            seen_addresses.add(address)
+            addresses.append(address)
 
-        chain_id = require_supported_chain_id(
-            chain_id=raw_chain_id,
-            context=f"chain materialization for {address}",
-        )
-        explicit_entry_chains[idx] = chain_id
-        seen_for_chain = seen_explicit_by_chain.setdefault(chain_id, set())
-        if address not in seen_for_chain:
-            seen_for_chain.add(address)
-            explicit_by_chain.setdefault(chain_id, []).append(address)
-
-    chain_map = resolve_address_chain_ids(unknown_chain_addresses, debug=debug) if unknown_chain_addresses else {}
-    explicit_hits_by_chain: dict[int, set[str]] = {}
-    for chain_id, addresses in explicit_by_chain.items():
-        try:
-            explicit_hits_by_chain[chain_id] = _probe_chain_batch(addresses, chain_id, debug=debug)
-        except Exception as exc:
-            logger.exception("Explicit chain materialization probe failed for chain_id=%s", chain_id)
-            raise RuntimeError(f"Explicit chain materialization probe failed for chain_id={chain_id}") from exc
+    chain_map = resolve_address_chain_ids(addresses, debug=debug) if addresses else {}
 
     expanded: list[dict[str, Any]] = []
+    skipped_addresses: set[str] = set()
 
     for idx, entry in enumerate(entries):
         address = normalized_by_entry[idx]
-        explicit_chain_id = explicit_entry_chains.get(idx)
-        if explicit_chain_id is not None:
-            if address not in explicit_hits_by_chain.get(explicit_chain_id, set()):
-                logger.error(
-                    "Chain materialization found no deployed code for explicit address=%s chain_id=%s",
-                    address,
-                    explicit_chain_id,
-                )
-                raise RuntimeError(
-                    f"Chain materialization found no deployed code for explicit address={address} "
-                    f"chain_id={explicit_chain_id}"
-                )
-            chain_ids = [explicit_chain_id]
-        else:
-            chain_ids = chain_map.get(address, [])
-            if not chain_ids:
-                logger.error(
-                    "Chain materialization found no deployed code on supported chains for address=%s",
-                    address,
-                )
-                raise RuntimeError(
-                    "Chain materialization found no deployed code on supported chains "
-                    f"for address={address}"
-                )
+        chain_ids = chain_map.get(address, [])
+        if not chain_ids:
+            skipped_addresses.add(address)
+            continue
 
         for chain_id in chain_ids:
             materialized = dict(entry)
@@ -230,5 +188,17 @@ def expand_entries_by_resolved_chains(
             materialized.pop("chain_ids", None)
             expanded.append(materialized)
 
-    _debug_log(debug, f"Chain materialization: expanded {len(entries)} entry/entries to {len(expanded)} chain row(s)")
+    if skipped_addresses:
+        sample = ", ".join(sorted(skipped_addresses)[:10])
+        logger.warning(
+            "Chain materialization skipped %s address(es) with no deployed code on supported chains: %s",
+            len(skipped_addresses),
+            sample,
+        )
+    _debug_log(
+        debug,
+        "Chain materialization: expanded "
+        f"{len(entries)} entry/entries to {len(expanded)} chain row(s); "
+        f"skipped {len(skipped_addresses)} address(es)",
+    )
     return expanded
