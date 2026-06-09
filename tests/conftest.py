@@ -21,6 +21,16 @@ from sqlalchemy.orm import Session
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# The offline suite is hermetic: route every RPC resolution to a stub eRPC URL so
+# no test depends on a real ERPC_BASE_URL. Prod default_rpc_url() has no public
+# fallback, so with no route require_rpc_url() raises -- and CI has no .env for the
+# import-time load_dotenv() to read, so the var is simply absent there. The wire
+# itself is stubbed per-test and fenced by local_netguard, so this URL is never
+# dialed. A real ERPC_BASE_URL already in the environment (e.g. the live CI job)
+# still wins.
+if not os.environ.get("ERPC_BASE_URL"):
+    os.environ["ERPC_BASE_URL"] = "http://erpc.invalid"
+
 _STORAGE_ENV_KEYS = (
     "ARTIFACT_STORAGE_ENDPOINT",
     "ARTIFACT_STORAGE_BUCKET",
