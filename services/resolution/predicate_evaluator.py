@@ -342,6 +342,39 @@ def _is_caller_keyed_time_allowlist(leaf: LeafPredicate) -> bool:
     return op in ("lt", "lte")
 
 
+def _is_caller_keyed_membership_allowlist(leaf: LeafPredicate) -> bool:
+    """True iff the leaf is a positive (``truthy``) membership test keyed on the
+    caller — ``require(allowed[msg.sender])`` — i.e. an ALLOWLIST: only the
+    addresses the contract recorded may proceed; an unset caller (mapping default
+    ``false``) is DENIED. That authorizes a caller SET, so it must stay gated (an
+    unenumerable external check), never open to ``conditional_universal``/public.
+
+    Polarity is the discriminator, mirroring ``_is_caller_keyed_time_allowlist``.
+    The two membership shapes that legitimately open and must NOT be caught:
+      * a DENYLIST / claim-once (``require(!registered[msg.sender])`` → operator
+        ``falsy``): the default-``false`` caller is ALLOWED, so anyone not yet
+        listed may call — deliberately public (the self-registration path the
+        cofinite refactor preserves).
+      * a non-caller-keyed membership (``require(allowedToken[token])``): keyed on
+        a parameter, not the caller — a business precondition, not an authority.
+    Only the positive + caller-keyed combination is an allowlist, so this re-gates
+    exactly the false-opens and nothing that is genuinely permissionless.
+
+    A 1-key caller membership is classified ``business`` on the static side (it
+    can't be told from a claim flag by shape alone, see
+    ``_classify_authority_membership``) and so reaches the side-condition block;
+    multi-key permission tables are ``caller_authority`` and resolve through the
+    membership branch instead, untouched.
+    """
+    if leaf.get("kind") != "membership":
+        return False
+    if leaf.get("operator") != "truthy":
+        return False
+    descriptor = leaf.get("set_descriptor") or {}
+    keys = descriptor.get("key_sources") or []
+    return any(k.get("source") in _CALLER_SOURCES for k in keys)
+
+
 def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
     basis = leaf.get("basis") or []
     if "bool-return predicate" not in basis:
@@ -406,6 +439,22 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     target_call_selector=None,
                     extra={
                         "basis": ["caller_keyed_time_allowlist"],
+                        "expression": leaf.get("expression"),
+                    },
+                )
+            )
+        if _is_caller_keyed_membership_allowlist(leaf):
+            # ``require(allowed[msg.sender])`` — a positive caller allowlist. Only
+            # recorded addresses pass, so it's a gated external check, never the
+            # ``conditional_universal``/public a side-condition would emit. The
+            # denylist/claim-once (``falsy``) sibling deliberately falls through to
+            # open below. Mirrors the time-allowlist arm above.
+            return CapabilityExpr.external_check_only(
+                ExternalCheck(
+                    target_address=None,
+                    target_call_selector=None,
+                    extra={
+                        "basis": ["caller_keyed_membership_allowlist"],
                         "expression": leaf.get("expression"),
                     },
                 )
@@ -1204,6 +1253,29 @@ def _resolve_equality_principal(
     if src == "signature_recovery":
         # Already handled via signature_auth leaf kind, but defensive.
         return CapabilityExpr.signature_witness(CapabilityExpr.unsupported("signer_unresolved"))
+
+    if src == "external_call":
+        # ``msg.sender == otherContract.someGetter()`` — the authority lives in
+        # another contract (PauserRegistry.unpauser(), avsNodeRunner(), …). The
+        # operand carries the callee selector but not the target address (the
+        # callee's host is a state var of the contract under analysis), so we
+        # can't enumerate it offline. Surface a query-only external check: the
+        # caller must equal the getter's return. This is GATED (external_check_only
+        # → residual, zero principal rows), never public — the whole point of
+        # recognizing it as caller_authority rather than letting it fall to a
+        # business side-condition that opens the function.
+        selector = op.get("callee_selector")
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=None,
+                target_call_selector=selector if isinstance(selector, str) else None,
+                extra={
+                    "basis": ["caller_equals_external_getter"],
+                    "callee": op.get("callee"),
+                    "callee_signature": op.get("callee_signature"),
+                },
+            )
+        )
 
     if src == "computed":
         return CapabilityExpr.unsupported(f"equality_operand_computed_{op.get('computed_kind')}")

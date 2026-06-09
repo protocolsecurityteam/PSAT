@@ -159,7 +159,14 @@ def _ir_is_require(ir: Any) -> bool:
         return False
     fn = getattr(ir, "function", None)
     name = getattr(fn, "name", None) or str(fn or "")
-    return name in ("require(bool)", "require(bool,string)")
+    # ``require(bool,error)`` is the Solidity >=0.8.26 custom-error form
+    # (``require(cond, MyError())``). Slither lowers it to a SolidityCall
+    # named exactly that, with the condition as the first argument — the
+    # same shape ``_gate_from_solidity_call`` already consumes. Omitting it
+    # silently dropped the gate, leaving the predicate tree empty and the
+    # function defaulting to public; it must be recognized like the other
+    # two forms.
+    return name in ("require(bool)", "require(bool,string)", "require(bool,error)")
 
 
 def _ir_is_assert(ir: Any) -> bool:
@@ -199,6 +206,11 @@ class RevertDetector:
         # node. Each gate found inside a helper records this chain
         # so the predicate builder can build parameter bindings.
         self._call_chain_irs: list[Any] = []
+        # Every node we walked (this function + recursed helpers), so the
+        # coverage invariant in ``run`` can tell a node that produced a gate
+        # apart from one carrying an unmodeled require/assert (the fail-safe
+        # against silent-public on a require form we don't structurally lift).
+        self._scanned_nodes: list[Any] = []
 
     def run(self) -> list[RevertGate]:
         # Walk the function's own body. Modifier-call IRs and
@@ -218,6 +230,22 @@ class RevertDetector:
                     expression_text="<inline assembly with unresolved revert>",
                 )
             )
+        # Coverage invariant (fail-safe): a require()/assert() SolidityCall we
+        # walked but did NOT lift into a gate means a revert *form* we don't
+        # model (a future require variant, a shape the lifter rejected). Letting
+        # it slip leaves the tree empty and the function defaults to public —
+        # exactly the silent open-on-extraction-gap this detector must never
+        # produce. Surface it as ``unsupported`` so the function resolves gated,
+        # not public. ``require(bool,error)`` is recognized now, so this fires
+        # only on genuinely unmodeled forms — never on the known three.
+        if self._has_unmodeled_require_assert_gate():
+            self._gates.append(
+                RevertGate(
+                    kind="opaque",
+                    unsupported_reason="unmodeled_require_gate",
+                    expression_text="<require/assert form not structurally modeled>",
+                )
+            )
         return self._gates
 
     # ------------------------------------------------------------------
@@ -225,6 +253,7 @@ class RevertDetector:
     # ------------------------------------------------------------------
 
     def _scan_node(self, node: Any, container: Any = None) -> None:
+        self._scanned_nodes.append(node)
         # Case 1-2: require / assert directly in this node.
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if _ir_is_require(ir):
@@ -497,6 +526,31 @@ class RevertDetector:
             if _ir_class(ir) == "InlineAssemblyOperation":
                 code = getattr(ir, "inline_asm", None) or ""
                 if "revert(" in str(code):
+                    return True
+        return False
+
+    def _has_unmodeled_require_assert_gate(self) -> bool:
+        """A ``require(...)`` / ``assert(...)`` SolidityCall we walked that did
+        NOT become a gate.
+
+        ``require``/``assert`` live directly in their own node, so a gate lifted
+        from one has ``gate.node`` == that node. Any scanned node holding a
+        require/assert SolidityCall whose id isn't among the gate nodes is a
+        revert form the structural lifter rejected — the coverage gap that, left
+        silent, defaults the function to public. Matched by name *prefix*
+        (``require(`` / ``assert(``) so an unknown future arity (beyond the three
+        ``_ir_is_require`` recognizes) is still caught rather than dropped.
+        """
+        accounted = {id(g.node) for g in self._gates if g.node is not None}
+        for node in self._scanned_nodes:
+            if id(node) in accounted:
+                continue
+            for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
+                if _ir_class(ir) != "SolidityCall":
+                    continue
+                fn = getattr(ir, "function", None)
+                name = getattr(fn, "name", None) or str(fn or "")
+                if name.startswith("require(") or name.startswith("assert("):
                     return True
         return False
 

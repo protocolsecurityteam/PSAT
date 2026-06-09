@@ -474,6 +474,39 @@ def test_modifier_only_owner_admits(tmp_path):
     assert leaf["authority_role"] == "caller_authority"
 
 
+def test_caller_equals_external_getter_classified_caller_authority(tmp_path):
+    """``require(msg.sender == registry.admin())`` — the non-caller operand is an
+    external call returning ``address`` (Solidity forces it, else the ``==`` won't
+    type-check). It is a caller-authority gate, not a ``business`` side-condition.
+    Dropping it to business lowered the function to ``conditional_universal`` →
+    public (the PauserRegistry.unpauser() / avsNodeRunner() false-open class)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IRegistry { function admin() external view returns (address); }
+        contract C {
+            IRegistry public registry;
+            function f() external view {
+                require(msg.sender == registry.admin());
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    tree = build_predicate_tree(fn)
+    assert tree is not None
+    leaves = _all_leaves(tree)
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "equality"
+    assert leaf["operator"] == "eq"
+    assert leaf["authority_role"] == "caller_authority", (
+        f"caller==external.getter() misclassified as {leaf['authority_role']} "
+        "(should be caller_authority; business lowers it to a public false-open)"
+    )
+
+
 def test_modifier_with_external_bool_call(tmp_path):
     """Modifier body contains an external authority call. Provenance
     runs over the modifier nodes, finds the HighLevelCall whose

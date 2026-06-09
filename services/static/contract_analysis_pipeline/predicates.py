@@ -1725,13 +1725,22 @@ def _sources_from_destination(ir: Any, prov: ProvenanceMap) -> SourceSet:
 
 
 _CALLER_SOURCES = ("msg_sender", "tx_origin", "signature_recovery")
-# Sources that can plausibly carry an Ethereum address. ``computed``,
-# ``external_call``, ``top``, and ``block_context`` are excluded — a
-# `require(msg.sender == X)` against an opaque/non-address X is
-# almost certainly NOT an authorization gate.
+# Sources that can plausibly carry an Ethereum address, used ONLY to qualify the
+# non-caller side of a ``msg.sender == X`` equality as an authorization gate.
+# ``computed``, ``top``, and ``block_context`` stay excluded — those are genuinely
+# opaque (``msg.sender == keccak(...)`` / arithmetic), not authorities.
 _ADDRESS_TYPED_SOURCES = (
     "state_variable",
     "view_call",
+    # An external call result (``msg.sender == pauserRegistry.unpauser()`` /
+    # ``== avsOperators[id].avsNodeRunner()``): for the ``==`` to type-check,
+    # Solidity forces the call's return to be ``address``, so it is necessarily
+    # address-typed AND a caller-authority gate (the authority just lives in
+    # another contract). Excluding it lowered these to ``business`` →
+    # ``conditional_universal`` → public — a false-open on every registry /
+    # cross-contract-authority pattern. The resolver renders an unread external
+    # getter as ``external_check_only`` (gated), never public.
+    "external_call",
     "parameter",
     "signature_recovery",
     # ``address(this)`` self-call gate. Used by Compound Timelock
