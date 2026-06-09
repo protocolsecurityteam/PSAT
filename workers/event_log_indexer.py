@@ -487,6 +487,25 @@ def _state_var_values_for_job(session: Session, job: Job) -> dict[str, str]:
     return out
 
 
+def _job_runtime_address(job: Job) -> str | None:
+    """Address whose events resolution reads for ``job`` — the proxy for a
+    proxy-linked impl job, else ``job.address``.
+
+    Tracks ``capability_resolver``'s ``runtime_addr`` (``request['proxy_address']``
+    when set, else ``job.address``). An impl behind a proxy emits its self-
+    administered role/authority events under the *proxy*; enrolling the cursor at
+    ``job.address`` indexes an address that emits nothing, leaving the proxy —
+    where the fold reads — cold and forcing a per-function HyperSync fallback.
+    """
+    request = getattr(job, "request", None)
+    if not isinstance(request, dict):
+        request = {}
+    proxy = request.get("proxy_address")
+    if isinstance(proxy, str) and proxy.startswith("0x") and len(proxy) == 42:
+        return proxy.lower()
+    return job.address.lower() if job.address and len(job.address) == 42 else None
+
+
 def _event_address_for_descriptor(
     descriptor: dict[str, Any],
     hint: dict[str, Any],
@@ -510,7 +529,7 @@ def _event_address_for_descriptor(
             return value.lower()
     if not allow_job_fallback:
         return None
-    return job.address.lower() if job.address and len(job.address) == 42 else None
+    return _job_runtime_address(job)
 
 
 def _cursor_progress(session: Session) -> tuple[int, int]:
