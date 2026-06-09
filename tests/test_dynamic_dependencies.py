@@ -160,7 +160,7 @@ def test_find_dynamic_dependencies_aggregates_graph(monkeypatch):
     tx2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
@@ -226,7 +226,7 @@ def test_find_dynamic_dependencies_filters_precompiles_and_eoas(monkeypatch):
     tx1 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setattr(ddc, "get_code", lambda _rpc, addr: "0x6000" if addr == contract else "0x")
     monkeypatch.setattr(ddc, "has_deployed_code", lambda code: code not in ("0x", "0x0"))
     monkeypatch.setattr(
@@ -265,7 +265,7 @@ def test_find_dynamic_dependencies_continues_on_single_trace_failure(monkeypatch
     tx2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
@@ -309,7 +309,7 @@ def test_find_dynamic_dependencies_raises_if_all_traces_fail(monkeypatch):
     target = "0x1111111111111111111111111111111111111111"
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
@@ -338,7 +338,7 @@ def test_find_dynamic_dependencies_with_explicit_tx_hashes(monkeypatch):
     target = "0x1111111111111111111111111111111111111111"
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
     fetch_called = []
     monkeypatch.setattr(
@@ -381,23 +381,23 @@ def test_find_dynamic_dependencies_with_explicit_tx_hashes(monkeypatch):
 def test_resolve_trace_rpc_raises_without_rpc(monkeypatch):
     """resolve_trace_rpc raises RuntimeError when no RPC is available."""
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.delenv("ETH_RPC", raising=False)
-    with pytest.raises(RuntimeError, match="requires --dynamic-rpc or ETH_RPC"):
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
+    with pytest.raises(RuntimeError, match="requires --dynamic-rpc or eRPC"):
         ddc.resolve_trace_rpc()
 
 
 def test_resolve_trace_rpc_prefers_arg(monkeypatch):
-    """resolve_trace_rpc returns the explicit argument over ETH_RPC."""
+    """resolve_trace_rpc returns the explicit argument over eRPC."""
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://env.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     assert ddc.resolve_trace_rpc("https://arg.example") == "https://arg.example"
 
 
-def test_resolve_trace_rpc_falls_back_to_env(monkeypatch):
-    """resolve_trace_rpc falls back to ETH_RPC when no argument is given."""
+def test_resolve_trace_rpc_falls_back_to_erpc(monkeypatch):
+    """resolve_trace_rpc falls back to the eRPC mainnet route when no arg is given."""
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://env.example")
-    assert ddc.resolve_trace_rpc() == "https://env.example"
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+    assert ddc.resolve_trace_rpc() == "https://erpc-proxy.example/main/evm/1"
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ def test_fetch_tx_metadata_invalid_response(monkeypatch):
 
 def test_find_dynamic_dependencies_rejects_invalid_tx_limit(monkeypatch):
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://rpc.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     with pytest.raises(RuntimeError, match="tx_limit must be >= 1"):
         ddc.find_dynamic_dependencies("0x" + "11" * 20, tx_limit=0)
 
@@ -487,7 +487,7 @@ def test_proxy_address_fetches_txs_from_proxy_and_rewrites_edges(monkeypatch):
 
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
     fetch_addresses = []
 
@@ -625,7 +625,7 @@ def _trace_parity_helper(monkeypatch, fanout: str):
 
     _mock_code_checks(monkeypatch)
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ETH_RPC", "https://trace.example")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",

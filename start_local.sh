@@ -30,7 +30,8 @@ RECONCILE_PID=""
 missing=()
 [ -z "$DATABASE_URL" ]      && missing+=("DATABASE_URL")
 [ -z "$ETHERSCAN_API_KEY" ] && missing+=("ETHERSCAN_API_KEY")
-[ -z "$ETH_RPC" ]           && missing+=("ETH_RPC")
+[ -z "$ERPC_BASE_URL" ]     && missing+=("ERPC_BASE_URL")
+[ -z "$ERPC_SECRET" ]       && missing+=("ERPC_SECRET")
 [ -z "$ENVIO_API_TOKEN" ]   && missing+=("ENVIO_API_TOKEN")
 [ -z "$TAVILY_API_KEY" ]    && missing+=("TAVILY_API_KEY")
 

@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -174,14 +173,21 @@ def pick_representative_transactions(address: str, transactions: list[dict], max
 
 
 def resolve_trace_rpc(rpc_url: str | None = None) -> str:
-    """Resolve a tracing-capable RPC URL from arg or ETH_RPC."""
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    """Resolve a tracing-capable RPC URL from arg or eRPC.
+
+    eRPC proxies trace methods (debug_traceTransaction), so dynamic dependency
+    discovery routes through it like every other read. Pass an explicit local
+    URL (``--dynamic-rpc``) for an Anvil fork.
+    """
     if rpc_url:
         return rpc_url
-    env_rpc = os.getenv("ETH_RPC")
-    if env_rpc:
-        return env_rpc
-    raise RuntimeError("Dynamic dependency discovery requires --dynamic-rpc or ETH_RPC.")
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    from utils.rpc import default_rpc_url
+
+    resolved = default_rpc_url(chain_id=1)
+    if resolved:
+        return resolved
+    raise RuntimeError("Dynamic dependency discovery requires --dynamic-rpc or eRPC (set ERPC_BASE_URL).")
 
 
 def _fetch_tx_metadata_from_rpc(rpc_url: str, tx_hash: str) -> dict:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -74,14 +73,13 @@ def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, 
     )
 
 
-def _request_rpc_url(request: dict, *, public_fallback: bool = False) -> str | None:
+def _request_rpc_url(request: dict) -> str | None:
     explicit = request.get("rpc_url")
     chain = request.get("chain")
     return default_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
         chain_id=request.get("chain_id"),
         chain=chain if isinstance(chain, str) else None,
-        public_fallback=public_fallback,
     )
 
 
@@ -1581,7 +1579,7 @@ class StaticWorker(BaseWorker):
         # Mirror the resolution order inside find_dependencies /
         # find_dynamic_dependencies so classification hits the same
         # endpoint discovery actually used.
-        resolved_rpc = deps_rpc or dynamic_rpc or os.getenv("ETH_RPC")
+        resolved_rpc = deps_rpc or dynamic_rpc
 
         cls_output = None
         if resolved_rpc:

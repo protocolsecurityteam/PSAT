@@ -897,12 +897,59 @@ def _build_binary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function:
             gate=gate,
         )
         leaf["authority_role"] = _classify_authority_equality(leaf, kind)
+        if kind == "equality" and function is not None:
+            _stamp_param_keyed_authority_mapping(ir, prov, function, leaf)
         return leaf
     # AND/OR at the binary level — these would normally be handled by
     # short-circuit evaluation; for now we treat as unsupported and
     # let the predicate-tree composition layer (week 2) split them
     # into AND/OR tree nodes properly.
     return _unsupported_leaf(reason=f"binary_op_{op_name}_unsupported", expression=str(ir))
+
+
+def _stamp_param_keyed_authority_mapping(ir: Any, prov: ProvenanceMap, function: Any, leaf: LeafPredicate) -> None:
+    """Mark ``msg.sender == mapping[param]`` so resolution enumerates the mapping's
+    VALUE set (claim #3 group C).
+
+    L1BaseSyncPool gates ``onMessageReceived`` on ``msg.sender == receivers[originEid]``
+    — a ``mapping(uint32 => address)`` keyed by a function PARAMETER. There is no
+    single getter to read: the authorized caller is whichever receiver the
+    caller-chosen ``originEid`` maps to, so the principal is the mapping's *value*
+    set, recovered by replaying the mapping's setter events. The builder otherwise
+    collapses ``$.receivers[originEid]`` to the bare storage-accessor ``view_call``
+    operand (ERC-7201 namespaced storage), losing the mapping identity. This stamps
+    ``mapping_name`` onto the non-caller operand so (1) the contract-wide
+    ``apply_mapping_event_hint_pass`` attaches the value-enumeration writer specs and
+    (2) :func:`_resolve_equality_principal` routes to value enumeration.
+
+    Scoped to an ADDRESS-valued mapping keyed by a parameter (never the caller): a
+    caller-keyed mapping is an allowlist *membership* (``allowed[msg.sender]``, a
+    different leaf shape), and a non-address value can't be an authorized caller."""
+    operands = leaf.get("operands") or []
+    if leaf.get("operator") not in ("eq", "ne") or len(operands) != 2:
+        return
+    caller_positions = [i for i, o in enumerate(operands) if o.get("source") in _CALLER_SOURCES]
+    if len(caller_positions) != 1:
+        return
+    non_caller_idx = 1 - caller_positions[0]
+    # operands order mirrors (variable_left, variable_right) in _build_binary_leaf.
+    non_caller_value = ir.variable_left if non_caller_idx == 0 else ir.variable_right
+    defining = _find_defining_ir(non_caller_value, None, function)
+    if not isinstance(defining, Index):
+        return
+    value_type = _value_type_of_index_ir(defining)
+    if value_type != "address" and not value_type.startswith("address"):
+        return
+    base = _find_index_base(defining, function)
+    mapping_name = getattr(base, "name", None)
+    if not isinstance(mapping_name, str) or not mapping_name:
+        return
+    keys = _reconstruct_index_chain(defining, prov, function)
+    if not keys or any(k.get("source") in _CALLER_SOURCES for k in keys):
+        return
+    if not any(k.get("source") == "parameter" for k in keys):
+        return
+    operands[non_caller_idx]["mapping_name"] = mapping_name
 
 
 def _try_membership_via_value_compare(
@@ -1498,6 +1545,8 @@ def _source_to_operand(source: Source) -> Operand:
         op["callee_signature"] = source.callee_signature
     if source.callee_selector is not None:
         op["callee_selector"] = source.callee_selector
+    if getattr(source, "storage_slot", None) is not None:
+        op["storage_slot"] = source.storage_slot
     if source.constant_value is not None:
         op["constant_value"] = source.constant_value
     if getattr(source, "value_type", None) is not None:

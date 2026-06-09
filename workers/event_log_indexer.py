@@ -6,7 +6,7 @@ import logging
 import os
 import signal
 from dataclasses import dataclass
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Any, Mapping, Protocol, TypeGuard
 
 from eth_utils.crypto import keccak
@@ -20,7 +20,7 @@ from services.resolution.deferred_reconciler import reconcile_deferred_resolutio
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
 from utils.logging import log_timed_phase
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import require_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -35,8 +35,24 @@ DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", 
 # at block 0 forever. So: cap the span scanned per step, batch the insert, and
 # let one pass advance a cursor across several windows.
 DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "50000"))
-DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "200"))
+# Two window caps bound how long a single scan pass runs. The per-cursor cap
+# stops one high-volume authority (the LayerZero endpoint) from consuming a whole
+# pass; the per-pass cap makes scan RETURN promptly even with many cold cursors
+# enrolled, so the fleet heartbeat refreshes and the least-recently-run rotation
+# re-prioritizes every pass instead of once per multi-cursor (~tens-of-minutes)
+# backfill. Per-cursor < per-pass so the budget spreads across several cursors
+# each pass; a cold cursor's ~25M-block gap drains over successive passes, with
+# the durable last_run_at ordering as the rotation offset (no separate persisted
+# cursor index needed).
+DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
+DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
+# When a pass stops on its window budget there's more backfill pending, so the
+# backfill loop re-runs after this short pause instead of the full poll interval
+# — a cold fleet drains at throughput rather than idling 60s between every
+# budget-sized pass. Floored (not 0) so a large warm fleet that legitimately
+# fills the budget with cheap catch-up windows can't busy-spin.
+DEFAULT_BACKFILL_BUSY_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_BACKFILL_BUSY_INTERVAL_S", "2"))
 
 # Solmate RolesAuthority canCall: the role events to index at the authority so
 # SolmateRolesAuthorityAdapter can fold them. Enrolled directly off the canCall
@@ -108,6 +124,9 @@ class ScanSummary:
     windows_scanned: int = 0
     caught_up_cursors: int = 0
     total_cursors: int = 0
+    # True when the pass stopped on its per-pass window budget (more cursors were
+    # likely left unserviced) — the backfill loop uses this to re-run sooner.
+    budget_exhausted: bool = False
 
 
 def enroll_event_cursor(
@@ -162,7 +181,11 @@ def index_event_log_step(
         # Cursor is already at (or past) the confirmed head — the historical
         # backfill is done. Record that so resolvers stop treating a cursor
         # seeded at the deploy block as "still cold" and trust the durable index.
+        # Stamp last_run_at on this no-fetch visit too: the scan orders cursors
+        # least-recently-run first, so a warm cursor that skipped its stale
+        # timestamp would keep sorting ahead of cold cursors that need windows.
         cursor.backfill_complete = True
+        cursor.last_run_at = func.now()
         return IndexStepResult(scanned_from=last + 1, scanned_to=target, inserted=0, caught_up=True)
 
     if last > 0 and cursor.last_indexed_block_hash is not None:
@@ -209,10 +232,18 @@ def scan_enrolled_events(
     confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
     max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
+    max_windows_per_pass: int = DEFAULT_MAX_WINDOWS_PER_PASS,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> ScanSummary:
+    # Least-recently-run first (never-run NULLS first) so a single high-volume
+    # cursor (the LayerZero endpoint) can't monopolize successive passes and
+    # starve the rest: each pass advances whichever cursors have waited longest,
+    # so a freshly-enrolled deferred authority warms within a rotation rather than
+    # behind hours of someone else's backfill.
     all_rows = session.execute(
-        select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
+        select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0).order_by(
+            IndexedEventCursor.last_run_at.asc().nullsfirst()
+        )
     ).all()
     # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
     # never emit logs, so scanning it just burns one RPC round-trip every pass.
@@ -220,19 +251,31 @@ def scan_enrolled_events(
     inserted = 0
     windows_scanned = 0
     caught_up_cursors = 0
+    pass_budget = max(1, max_windows_per_pass)
     for chain_id, event_address, topic0 in rows:
+        # Global per-pass budget: stop and return once this pass has scanned
+        # pass_budget windows total, even with cold cursors still unserviced.
+        # They keep their older last_run_at, so the next pass — re-ordered
+        # least-recently-run first — picks them up: fine-grained round-robin with
+        # no separate persisted offset. Without this, one pass walks every cursor
+        # to completion (~tens of minutes on a cold subset), the heartbeat can't
+        # refresh, and cursors late in the order wait the whole pass.
+        if windows_scanned >= pass_budget:
+            break
         fetcher = fetchers.get(chain_id)
         head_fetcher = head_fetchers.get(chain_id)
         block_hash_fetcher = block_hash_fetchers.get(chain_id)
         if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
             continue
-        # Walk several windows per pass so a cold cursor backfills in a handful
-        # of passes, but cap it so one high-volume address can't starve the
-        # rest. Commit per window: each transaction (and INSERT) stays small,
-        # progress is durable, and a mid-backfill failure on one cursor doesn't
-        # roll back the windows it already landed.
+        # Walk several windows per cursor, but cap it (per-cursor) so one
+        # high-volume address can't consume the whole pass budget, and stop at
+        # the global budget mid-cursor. Commit per window: each transaction (and
+        # INSERT) stays small, progress is durable, and a mid-backfill failure on
+        # one cursor doesn't roll back the windows it already landed.
         try:
             for _ in range(max(1, max_windows_per_cursor)):
+                if windows_scanned >= pass_budget:
+                    break
                 result = index_event_log_step(
                     session,
                     chain_id=chain_id,
@@ -264,6 +307,7 @@ def scan_enrolled_events(
         windows_scanned=windows_scanned,
         caught_up_cursors=caught_up_cursors,
         total_cursors=len(rows),
+        budget_exhausted=windows_scanned >= pass_budget,
     )
 
 
@@ -443,6 +487,25 @@ def _state_var_values_for_job(session: Session, job: Job) -> dict[str, str]:
     return out
 
 
+def _job_runtime_address(job: Job) -> str | None:
+    """Address whose events resolution reads for ``job`` — the proxy for a
+    proxy-linked impl job, else ``job.address``.
+
+    Tracks ``capability_resolver``'s ``runtime_addr`` (``request['proxy_address']``
+    when set, else ``job.address``). An impl behind a proxy emits its self-
+    administered role/authority events under the *proxy*; enrolling the cursor at
+    ``job.address`` indexes an address that emits nothing, leaving the proxy —
+    where the fold reads — cold and forcing a per-function HyperSync fallback.
+    """
+    request = getattr(job, "request", None)
+    if not isinstance(request, dict):
+        request = {}
+    proxy = request.get("proxy_address")
+    if isinstance(proxy, str) and proxy.startswith("0x") and len(proxy) == 42:
+        return proxy.lower()
+    return job.address.lower() if job.address and len(job.address) == 42 else None
+
+
 def _event_address_for_descriptor(
     descriptor: dict[str, Any],
     hint: dict[str, Any],
@@ -466,7 +529,26 @@ def _event_address_for_descriptor(
             return value.lower()
     if not allow_job_fallback:
         return None
-    return job.address.lower() if job.address and len(job.address) == 42 else None
+    return _job_runtime_address(job)
+
+
+def _cursor_progress(session: Session) -> tuple[int, int]:
+    """``(caught_up, total)`` enrollable cursors, read straight from the table.
+
+    The fleet heartbeat derives its triad from this rather than the backfill
+    thread's last published ``ScanSummary``: a cold-start scan pass can run for
+    minutes without returning, so the published summary reflects the last
+    *completed* pass (e.g. "3 of 3 caught up") while the table holds far more
+    pending cursors. Reading the table keeps the fleet view honest about an
+    in-progress backfill instead of showing a stale "all caught up".
+    """
+    caught_up, total = session.execute(
+        select(
+            func.count().filter(IndexedEventCursor.backfill_complete),
+            func.count(),
+        ).where(IndexedEventCursor.event_address != _ZERO_ADDRESS)
+    ).one()
+    return int(caught_up or 0), int(total or 0)
 
 
 def run_event_log_indexer_loop(
@@ -477,62 +559,123 @@ def run_event_log_indexer_loop(
     interval: float = DEFAULT_INTERVAL_S,
     stop_event: Event | None = None,
 ) -> None:
+    """Run the durable event-log indexer.
+
+    The indexer is two decoupled jobs that used to share one serial loop:
+
+    * **Backfill** (``enroll`` + ``scan``) — throughput-oriented. Each pass is
+      bounded by a per-pass window budget so it returns within ~a minute even on a
+      cold index; a high-volume authority (the LayerZero endpoint) backfills across
+      several budgeted passes instead of one multi-hour grind.
+    * **Reconcile + heartbeat** — fast, latency-sensitive. The reconcile self-heals
+      index-cold capability deferrals the moment their authority's cursor flips
+      ``backfill_complete``; the heartbeat keeps the fleet view live.
+
+    Run serially, a long backfill pass starved both: the reconcile never ran, so
+    completed jobs whose authorities had *already* warmed (committed mid-scan) sat
+    un-reconciled for the whole cold-start window, and the heartbeat went stale.
+    So backfill runs on its own thread and this loop runs reconcile + heartbeat
+    every ``interval`` — reconcile latency is now ``interval`` regardless of how
+    long any scan pass takes. The thread publishes its last scan summary for the
+    heartbeat to fold in.
+    """
     logger.info("starting event log indexer loop interval=%ss", interval)
     stop_event = stop_event or Event()
-    while not stop_event.is_set():
-        enrolled = 0
-        summary = ScanSummary()
-        reenqueued = 0
-        status = "running"
-        with SessionLocal() as session:
+
+    state_lock = Lock()
+    published: dict[str, Any] = {"summary": ScanSummary(), "enrolled": 0, "status": "running"}
+
+    def backfill_loop() -> None:
+        while not stop_event.is_set():
+            enrolled = 0
+            summary = ScanSummary()
+            status = "running"
             try:
-                with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                    enrolled = enroll_from_completed_jobs(session)
-                    ph["enrolled"] = enrolled
-                with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
-                    summary = scan_enrolled_events(
-                        session,
-                        fetchers=fetchers,
-                        head_fetchers=head_fetchers,
-                        block_hash_fetchers=block_hash_fetchers,
-                    )
-                    ph["windows_scanned"] = summary.windows_scanned
-                    ph["inserted"] = summary.inserted
+                with SessionLocal() as session:
+                    with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
+                        enrolled = enroll_from_completed_jobs(session)
+                        ph["enrolled"] = enrolled
+                    with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
+                        summary = scan_enrolled_events(
+                            session,
+                            fetchers=fetchers,
+                            head_fetchers=head_fetchers,
+                            block_hash_fetchers=block_hash_fetchers,
+                        )
+                        ph["windows_scanned"] = summary.windows_scanned
+                        ph["inserted"] = summary.inserted
                 if enrolled or summary.inserted:
                     logger.info("event log indexer pass: enrolled=%d inserted=%d", enrolled, summary.inserted)
             except Exception:
-                session.rollback()
-                logger.exception("event log indexer pass failed")
+                logger.exception("event log indexer backfill pass failed")
                 status = "error"
-            # Self-heal index-cold capability deferrals whose authority just
-            # finished backfilling (this is the pass that flips backfill_complete,
-            # so it's the timely place to re-resolve). Isolated try: a reconcile
-            # failure must not mark the indexing pass itself as errored.
+            with state_lock:
+                published["summary"] = summary
+                published["enrolled"] = enrolled
+                published["status"] = status
+            # A budget-capped pass that hit its ceiling has more backfill pending:
+            # re-run after a short pause instead of the full interval so a cold
+            # fleet drains at throughput. min() so a sub-interval test cadence
+            # isn't slowed; the floor keeps a warm fleet from busy-spinning.
+            backfill_wait = min(interval, DEFAULT_BACKFILL_BUSY_INTERVAL_S) if summary.budget_exhausted else interval
+            stop_event.wait(backfill_wait)
+
+    backfill = Thread(target=backfill_loop, name="event-indexer-backfill", daemon=True)
+    backfill.start()
+
+    try:
+        while not stop_event.is_set():
+            reenqueued = 0
             try:
-                with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
-                    reenqueued = reconcile_deferred_resolutions(session)
-                    ph["reenqueued"] = reenqueued
+                with SessionLocal() as session:
+                    with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
+                        reenqueued = reconcile_deferred_resolutions(session)
+                        ph["reenqueued"] = reenqueued
                 if reenqueued:
                     logger.info("deferred-resolution reconciler re-enqueued %d job(s)", reenqueued)
             except Exception:
-                session.rollback()
                 logger.exception("deferred-resolution reconcile pass failed")
-        # windows_scanned + caught_up_cursors/total are the throughput triad
-        # for the indexer: "many windows, 0 inserted, caught_up < total" is the
-        # from-0 backfill grind; "caught_up == total" means the fleet is at head.
-        record_heartbeat(
-            HEARTBEAT_EVENT_INDEXER,
-            status=status,
-            detail={
-                "enrolled_last_pass": enrolled,
-                "inserted_last_pass": summary.inserted,
-                "windows_scanned": summary.windows_scanned,
-                "caught_up_cursors": summary.caught_up_cursors,
-                "total_cursors": summary.total_cursors,
-                "deferred_reenqueued_last_pass": reenqueued,
-            },
-        )
-        stop_event.wait(interval)
+            # Read the cursor triad straight from the table, independent of the
+            # backfill thread. A long cold-start scan pass doesn't return for
+            # minutes, so the thread's published summary lags reality ("3 of 3
+            # caught up" while 10 cursors backfill). Isolated try + own session:
+            # a count failure must not blank the rest of the heartbeat.
+            caught_up_cursors = 0
+            total_cursors = 0
+            try:
+                with SessionLocal() as session:
+                    caught_up_cursors, total_cursors = _cursor_progress(session)
+            except Exception:
+                logger.exception("event log indexer cursor-progress count failed")
+            with state_lock:
+                summary = published["summary"]
+                enrolled = published["enrolled"]
+                status = published["status"]
+            # The backfill thread catches its own per-pass exceptions, so a dead
+            # thread means a fatal stall — surface it as an indexer error.
+            if not backfill.is_alive() and not stop_event.is_set():
+                status = "error"
+                logger.error("event log indexer backfill thread is not alive; indexing has stalled")
+            # The cursor triad comes from the live table (caught_up/total/pending),
+            # not the last-completed pass, so the fleet view tracks an in-progress
+            # backfill instead of a stale "all caught up". windows_scanned/inserted
+            # stay per-pass activity from the published summary.
+            record_heartbeat(
+                HEARTBEAT_EVENT_INDEXER,
+                status=status,
+                detail={
+                    "enrolled_last_pass": enrolled,
+                    "inserted_last_pass": summary.inserted,
+                    "windows_scanned": summary.windows_scanned,
+                    "caught_up_cursors": caught_up_cursors,
+                    "total_cursors": total_cursors,
+                    "pending_cursors": max(0, total_cursors - caught_up_cursors),
+                    "deferred_reenqueued_last_pass": reenqueued,
+                },
+            )
+            stop_event.wait(interval)
+    finally:
+        backfill.join(timeout=max(1.0, interval))
 
 
 def main() -> None:
@@ -552,7 +695,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or default_rpc_url(chain_id=1) or PUBLIC_ETH_RPC_URL
+    # PSAT_INDEXER_RPC_URL is the deliberate dedicated lane so the serial
+    # indexer doesn't starve on the shared eRPC proxy under job load; eRPC is
+    # the default when it's unset.
+    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or require_rpc_url(chain_id=1)
     fetchers = {1: RpcEventLogFetcher(rpc_url)}
     head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
     block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}

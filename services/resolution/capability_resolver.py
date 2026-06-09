@@ -52,7 +52,7 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from utils.logging import record_stage_metric
-from utils.rpc import PUBLIC_ETH_RPC_URL, default_rpc_url
+from utils.rpc import require_rpc_url
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
@@ -63,7 +63,6 @@ from .repos import PostgresEventLogRepo
 from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
-DEFAULT_RPC_URL = os.getenv("ETH_RPC", PUBLIC_ETH_RPC_URL)
 
 
 def _capability_function_slow_ms() -> int:
@@ -305,14 +304,10 @@ def resolve_contract_capabilities(
         if isinstance(candidate_job.request.get("rpc_url"), str):
             rpc_url = candidate_job.request["rpc_url"]
             break
-    rpc_url = (
-        default_rpc_url(
-            explicit_rpc_url=rpc_url,
-            chain_id=rpc_chain_id,
-            chain=chain,
-            fallback_url=os.getenv("ETH_RPC") or DEFAULT_RPC_URL,
-        )
-        or DEFAULT_RPC_URL
+    rpc_url = require_rpc_url(
+        explicit_rpc_url=rpc_url,
+        chain_id=rpc_chain_id,
+        chain=chain,
     )
 
     registry = AdapterRegistry()
@@ -697,4 +692,10 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     # can surface it once Part 2 produces such cofinites.
     if cap.blacklist_quality != "exact":
         out["blacklist_quality"] = cap.blacklist_quality
+    # Emit-when-non-default: only labeled empties carry a reason, so populated
+    # sets and pre-existing empties keep their wire shape. Carries the
+    # empty-by-design ceiling / read-failure flavor to the persisted
+    # ``capability_expr`` the policy + surface layers read.
+    if cap.empty_reason is not None:
+        out["empty_reason"] = cap.empty_reason
     return out

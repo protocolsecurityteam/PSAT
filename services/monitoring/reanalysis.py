@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from sqlalchemy import func, select
@@ -156,13 +155,13 @@ def maybe_queue_reanalysis(
     else:
         trigger = event_type
 
-    rpc_url = os.environ.get("ETH_RPC", "https://ethereum-rpc.publicnode.com")
-
+    # No rpc_url is pinned here: the worker resolves eRPC from ``chain`` so
+    # re-analysis routes through the proxy like every other run. Pinning a
+    # direct provider URL is what let a 429 storm bypass eRPC.
     request_dict: dict = {
         "address": mc.address,
         "chain": mc.chain,
         "name": f"Re-analysis ({trigger})",
-        "rpc_url": rpc_url,
         "reanalysis_trigger": trigger,
     }
     if mc.protocol_id:

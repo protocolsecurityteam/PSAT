@@ -31,6 +31,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .predicate_types import PredicateTree
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
@@ -226,6 +227,10 @@ def build_predicate_artifacts_with_pause_info(
         pass_durations_ms["solmate_authority_hints"] = int((time.monotonic() - pass_started) * 1000)
 
         pass_started = time.monotonic()
+        apply_internal_authority_slot_pass(contract, all_trees)
+        pass_durations_ms["internal_authority_slot"] = int((time.monotonic() - pass_started) * 1000)
+
+        pass_started = time.monotonic()
         pause_info = apply_reentrancy_pause_pass(contract, all_trees)
         pass_durations_ms["reentrancy_pause"] = int((time.monotonic() - pass_started) * 1000)
 
@@ -287,8 +292,58 @@ def apply_mapping_event_hint_pass(contract: Any, trees: dict[str, PredicateTree]
     if not specs_by_mapping:
         return
 
+    def attach(leaf: dict[str, Any]) -> None:
+        _attach_hints_to_leaf(leaf, specs_by_mapping)
+        _attach_value_specs_to_param_keyed_operands(leaf, specs_by_mapping)
+
     for tree in trees.values():
-        _walk_tree_leaves(tree, lambda leaf: _attach_hints_to_leaf(leaf, specs_by_mapping))
+        _walk_tree_leaves(tree, attach)
+
+
+def _attach_value_specs_to_param_keyed_operands(
+    leaf: dict[str, Any], specs_by_mapping: dict[str, list[WriterEventSpec]]
+) -> None:
+    """Attach value-enumeration writer specs to a ``msg.sender == mapping[param]``
+    operand (claim #3 group C).
+
+    The builder stamps ``mapping_name`` onto the non-caller operand of such an
+    equality leaf (see ``predicates._stamp_param_keyed_authority_mapping``). Here —
+    where the whole contract's writer events are known — we attach the matching
+    ``set``-direction specs (those carrying a ``value_position``) so resolution can
+    fold the mapping's VALUE set from its setter events. The setter
+    (``setReceiver`` → ``ReceiverSet``) is a *different* function than the gated one,
+    so this evidence is only available at the contract level."""
+    if leaf.get("kind") != "equality":
+        return
+    for op in leaf.get("operands") or []:
+        if not isinstance(op, dict):
+            continue
+        mapping_name = op.get("mapping_name")
+        if not isinstance(mapping_name, str) or not mapping_name:
+            continue
+        value_specs = [
+            _value_writer_spec(spec)
+            for spec in specs_by_mapping.get(mapping_name) or []
+            if spec.get("direction") == "set" and spec.get("value_position") is not None
+        ]
+        if value_specs:
+            op["mapping_writer_specs"] = value_specs
+
+
+def _value_writer_spec(spec: WriterEventSpec) -> dict[str, Any]:
+    """JSON-clean WriterEventSpec subset the value enumerator consumes — the
+    ``int``-keyed ``key_positions_by_index`` (unused by the value fold) is dropped so
+    the spec survives the predicate-tree JSONB round-trip without key coercion."""
+    return {
+        "mapping_name": spec["mapping_name"],
+        "event_signature": spec["event_signature"],
+        "event_name": spec["event_name"],
+        "key_position": int(spec["key_position"]),
+        "indexed_positions": [int(pos) for pos in spec.get("indexed_positions") or []],
+        "direction": "set",
+        "writer_function": spec.get("writer_function") or "",
+        "value_position": int(spec["value_position"]),  # type: ignore[arg-type]
+    }
 
 
 # Solmate ``Auth``/``RolesAuthority``: ``requiresAuth`` authorizes via

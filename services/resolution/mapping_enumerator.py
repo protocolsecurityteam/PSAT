@@ -80,9 +80,10 @@ _CACHE_LOCK = threading.Lock()
 
 
 def clear_enumeration_cache() -> None:
-    """Test helper. Drop all cached enumerations."""
+    """Test helper. Drop all cached enumerations (allowlist present-set + value folds)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+        _VALUE_CACHE.clear()
 
 
 def _event_topic0(signature: str) -> str:

@@ -69,6 +69,7 @@ def test_normalize_address_and_extract_push20():
 # Verifies find_dependencies raises when no RPC is available.
 def test_find_dependencies_raises_without_rpc(monkeypatch):
     monkeypatch.delenv("ETH_RPC", raising=False)
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
 
     with pytest.raises(RuntimeError, match="No RPC URL provided"):
@@ -96,9 +97,10 @@ def test_find_dependencies_uses_explicit_rpc(monkeypatch):
     assert "rpc" not in out, "rpc URL must not be echoed back in the artifact body"
 
 
-# Verifies find_dependencies falls back to ETH_RPC env var when no explicit RPC is given.
-def test_find_dependencies_uses_env_rpc(monkeypatch):
-    monkeypatch.setenv("ETH_RPC", "https://env-rpc.example")
+# Verifies find_dependencies falls back to the eRPC route when no explicit RPC is given.
+def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+    monkeypatch.delenv("ETH_RPC", raising=False)
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
     captured: dict[str, str] = {}
 
@@ -109,7 +111,7 @@ def test_find_dependencies_uses_env_rpc(monkeypatch):
     monkeypatch.setattr(fdc, "discover_dependencies", _fake_discover)
 
     out = fdc.find_dependencies("0x1111111111111111111111111111111111111111")
-    assert captured["rpc"] == "https://env-rpc.example"
+    assert captured["rpc"] == "https://erpc-proxy.example/main/evm/1"
     assert "rpc" not in out
 
 

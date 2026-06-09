@@ -662,7 +662,6 @@ def classify_contracts(
 
 def main():
     import argparse
-    import os
     from pathlib import Path
 
     from dotenv import load_dotenv
@@ -675,9 +674,11 @@ def main():
     parser.add_argument("--deps", nargs="*", default=[], help="Dependency addresses")
     args = parser.parse_args()
 
-    resolved_rpc = args.rpc or os.getenv("ETH_RPC")
+    from utils.rpc import default_rpc_url
+
+    resolved_rpc = args.rpc or default_rpc_url(chain_id=1)
     if not resolved_rpc:
-        raise SystemExit("No RPC URL provided (use --rpc or set ETH_RPC)")
+        raise SystemExit("No RPC URL provided (use --rpc or set ERPC_BASE_URL)")
 
     result = classify_contracts(args.address.strip(), args.deps, resolved_rpc)
     print(json.dumps(result, indent=2))

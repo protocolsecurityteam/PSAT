@@ -629,18 +629,15 @@ class TestResolveUnknownChains:
             {"name": "Unknown1", "address": "0x" + "b" * 40, "chains": ["unknown"]},
             {"name": "Unknown2", "address": "0x" + "c" * 40, "chains": ["unknown"]},
         ]
-        monkeypatch.setattr(
-            "services.discovery.chain_resolver._get_alchemy_key",
-            lambda: "fake-key",
-        )
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
         # Simulate: Unknown1 found on ethereum, Unknown2 found on arbitrum + base
         def fake_batch_get_code(rpc_url, addresses):
-            if "eth-mainnet" in rpc_url:
+            if rpc_url.endswith("/evm/1"):
                 return {addr: ("0x6001" if addr == "0x" + "b" * 40 else "0x") for addr in addresses}
-            if "arb-mainnet" in rpc_url:
+            if rpc_url.endswith("/evm/42161"):
                 return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
-            if "base-mainnet" in rpc_url:
+            if rpc_url.endswith("/evm/8453"):
                 return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
             return {addr: "0x" for addr in addresses}
 
@@ -656,10 +653,10 @@ class TestResolveUnknownChains:
     def test_no_unknowns_is_noop(self, monkeypatch):
         """When all contracts have known chains, nothing is probed."""
         contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
-        # _get_alchemy_key would fail if called — proves no probing happens.
+        # _probe_chains would fail if called — proves no probing happens.
         monkeypatch.setattr(
-            "services.discovery.chain_resolver._get_alchemy_key",
-            lambda: (_ for _ in ()).throw(RuntimeError("should not be called")),
+            "services.discovery.chain_resolver._probe_chains",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("should not be called")),
         )
         result = resolve_unknown_chains(contracts)
         assert result[0]["chains"] == ["ethereum"]
@@ -667,7 +664,7 @@ class TestResolveUnknownChains:
     def test_unresolved_stays_unknown(self, monkeypatch):
         """Address not found on any chain keeps chains=["unknown"]."""
         contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
         monkeypatch.setattr(
             "services.discovery.chain_resolver._batch_get_code",
             lambda rpc_url, addrs: {a: "0x" for a in addrs},
@@ -678,10 +675,10 @@ class TestResolveUnknownChains:
     def test_exa_claimed_chain_corrected_when_code_lives_elsewhere(self, monkeypatch):
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
         def fake_batch_get_code(rpc_url, addresses):
-            if "base-mainnet" in rpc_url:
+            if rpc_url.endswith("/evm/8453"):
                 return {a: "0x6001" for a in addresses}
             return {a: "0x" for a in addresses}
 
@@ -693,7 +690,7 @@ class TestResolveUnknownChains:
     def test_exa_claimed_chain_marked_unknown_when_no_code_found(self, monkeypatch):
         addr = "0x" + "e" * 40
         contracts = [{"name": "AI", "address": addr, "chains": ["Base"], "source": ["exa_deep_research"]}]
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
         monkeypatch.setattr(
             "services.discovery.chain_resolver._batch_get_code",
             lambda rpc_url, addresses: {a: "0x" for a in addresses},
@@ -816,10 +813,10 @@ class TestOrchestratorIntegration:
         monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
 
         # Chain resolver: Bridge found on arbitrum
-        monkeypatch.setattr("services.discovery.chain_resolver._get_alchemy_key", lambda: "fake")
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
         def fake_batch(rpc_url, addrs):
-            if "arb-mainnet" in rpc_url:
+            if rpc_url.endswith("/evm/42161"):
                 return {a: ("0x6001" if a == addr_unknown else "0x") for a in addrs}
             return {a: "0x" for a in addrs}
 

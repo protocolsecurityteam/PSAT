@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils import rpc
@@ -43,23 +45,64 @@ def test_default_rpc_url_prefers_erpc_for_known_chain(monkeypatch):
 
 def test_default_rpc_url_does_not_invent_mainnet_for_unknown_chain(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    monkeypatch.setenv("ETH_RPC", "https://legacy.example")
 
-    assert rpc.default_rpc_url(chain="fantom") == "https://legacy.example"
-
-
-def test_default_rpc_url_can_disable_public_fallback(monkeypatch):
-    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
-    monkeypatch.delenv("ETH_RPC", raising=False)
-
-    assert rpc.default_rpc_url(public_fallback=False) is None
+    # A genuinely-named but unsupported chain has no eRPC route and is never
+    # silently mapped to mainnet — the caller gets None and fails loud.
+    assert rpc.default_rpc_url(chain="fantom") is None
 
 
-def test_default_rpc_url_unknown_chain_without_public_fallback(monkeypatch):
+def test_default_rpc_url_treats_unknown_sentinel_as_mainnet(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    monkeypatch.delenv("ETH_RPC", raising=False)
 
-    assert rpc.default_rpc_url(chain="fantom", public_fallback=False) is None
+    # Discovery's "unknown" chain sentinel (and a hosted rpc_url pin) must fall
+    # back to the mainnet eRPC route — not raise. Regression: a chain="unknown"
+    # job otherwise resolved to no route once the ETH_RPC fallback was removed.
+    assert rpc.default_rpc_url(chain="unknown") == "https://erpc-proxy.example/main/evm/1"
+    assert (
+        rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain="unknown")
+        == "https://erpc-proxy.example/main/evm/1"
+    )
+
+
+def test_default_rpc_url_returns_none_without_erpc(monkeypatch):
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
+
+    # No eRPC configured and no local override → no route. There is no ETH_RPC
+    # or public-node fallback.
+    assert rpc.default_rpc_url() is None
+
+
+def test_default_rpc_url_ignores_hosted_explicit_url_in_favor_of_erpc(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+
+    # Regression: a pinned hosted provider URL must NOT shadow eRPC — that is
+    # exactly what let a direct-Alchemy 429 storm bypass the proxy.
+    assert (
+        rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain_id=1)
+        == "https://erpc-proxy.example/main/evm/1"
+    )
+
+
+def test_default_rpc_url_honors_local_explicit_url(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+
+    # A local node URL (Anvil / test fork) is the one explicit override allowed
+    # to win over eRPC.
+    assert rpc.default_rpc_url(explicit_rpc_url="http://127.0.0.1:8545", chain_id=1) == "http://127.0.0.1:8545"
+
+
+def test_require_rpc_url_raises_without_route(monkeypatch):
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="No eRPC route"):
+        rpc.require_rpc_url()
+
+
+def test_is_local_rpc_url_discriminates_local_from_hosted():
+    assert rpc.is_local_rpc_url("http://127.0.0.1:8545")
+    assert rpc.is_local_rpc_url("http://localhost:8545")
+    assert not rpc.is_local_rpc_url("https://eth-mainnet.g.alchemy.com/v2/key")
+    assert not rpc.is_local_rpc_url(None)
 
 
 def test_rpc_headers_add_erpc_secret_only_for_erpc_url(monkeypatch):

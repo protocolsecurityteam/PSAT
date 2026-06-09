@@ -25,7 +25,9 @@ _ADDR = "0x1111111111111111111111111111111111111111"
 _IMPL_ADDR = "0x3333333333333333333333333333333333333333"
 _FACET1 = "0x4444444444444444444444444444444444444444"
 _FACET2 = "0x5555555555555555555555555555555555555555"
-_RPC = "https://rpc.example"
+# A local (Anvil) URL is the one explicit rpc_url that still propagates to child
+# jobs; a hosted URL is ignored in favor of eRPC (see test_erpc_routing.py).
+_RPC = "http://127.0.0.1:8545"
 
 
 def _job(**overrides):
@@ -341,16 +343,16 @@ def test_no_rpc_stores_classification_skipped(monkeypatch):
     assert created_jobs == []
 
 
-def test_no_rpc_env_fallback_used_when_request_has_no_rpc(monkeypatch):
-    """ETH_RPC env var is used as fallback when request lacks rpc_url."""
+def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
+    """With no rpc_url/chain in the request, the mainnet eRPC route is used (no ETH_RPC fallback)."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
     job = _job(request={})  # no rpc_url in request
 
     store_calls, created_jobs = _capture_store_and_create(monkeypatch)
-    monkeypatch.setenv("ETH_RPC", "https://env-rpc.example")
-    monkeypatch.delenv("ERPC_BASE_URL", raising=False)  # else the eRPC route preempts the ETH_RPC fallback
+    monkeypatch.delenv("ETH_RPC", raising=False)
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
     captured_rpc = []
     monkeypatch.setattr(
@@ -362,7 +364,7 @@ def test_no_rpc_env_fallback_used_when_request_has_no_rpc(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    assert captured_rpc == ["https://env-rpc.example"]
+    assert captured_rpc == ["https://erpc-proxy.example/main/evm/1"]
     assert store_calls[0][1]["is_proxy"] is True
 
 

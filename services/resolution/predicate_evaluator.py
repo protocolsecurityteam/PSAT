@@ -40,6 +40,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
 from .capabilities import (
     CapabilityExpr,
     Condition,
+    EmptyReason,
     ExternalCheck,
     intersect,
     negate,
@@ -651,11 +652,15 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
 
     Returns ``finite_set([addr], exact)`` for a concrete non-zero address,
     ``finite_set([], exact)`` when the getter returns the zero address
-    (genuinely unset / renounced), or ``None`` when nothing could be read — no
-    RPC reachable through the outer context, a malformed selector, or a revert
-    — in which case the caller keeps the ``lower_bound`` placeholder. Gating on
-    a reachable ``rpc_url`` keeps pure-unit evaluations (no RPC) on their
-    existing empty-placeholder behaviour."""
+    (genuinely unset / renounced), a labeled ``finite_set([], lower_bound)``
+    when a read was *attempted but unreadable* (``unreadable_revert`` on a
+    revert, ``unreadable_empty`` on an empty / no-code return), or ``None`` when
+    nothing was attempted — no RPC reachable through the outer context, a
+    malformed selector, or an unusable contract address. The labeled-empty vs
+    ``None`` split lets the caller fall through to a fallback getter (a revert is
+    not a final answer) yet still record *why* the final placeholder is empty.
+    Gating on a reachable ``rpc_url`` keeps pure-unit evaluations (no RPC) on
+    their existing empty-placeholder behaviour."""
     if ctx is None or not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
         return None
     outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
@@ -689,14 +694,111 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         )
     except Exception:
         _bump_resolve_counter(outer, "live_getter_failures")
-        return None
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_revert"
+        )
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
-        return None
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"
+        )
     addr = "0x" + raw[-40:].lower()
     result_addr = "" if (_is_zero_address(addr) or addr == _BURN_ADDRESS) else addr
     if memo is not None:
         memo[memo_key] = result_addr
     return _live_authority_result(result_addr, selector, contract)
+
+
+def _live_resolve_authority_slot(
+    ctx: EvaluationContext | None,
+    slot: str | None,
+    *,
+    zero_empty_reason: EmptyReason | None = "empty_by_design",
+) -> CapabilityExpr | None:
+    """Resolve ``msg.sender == <getter-less slot reader>`` by reading the raw
+    storage slot live.
+
+    Two getter-less authority shapes use this. (1) An internal accessor that
+    ``sload``s a *constant* slot (Governable ``_pendingGovernor`` reads
+    ``keccak256("LRTSquare.pending.governor")``) — a ``view_call`` operand. (2) A
+    *named* address state var declared without ``public`` (ether.fi
+    ``MembershipNFT.membershipManager``) — a ``state_variable`` operand whose slot
+    is its sequential layout position. In both the static stage attaches the slot
+    and this reads it with ``eth_getStorageAt`` against the runtime address — the
+    proxy when the job is proxy-linked, so the *live* value is seen rather than a
+    standalone impl's empty storage.
+
+    Mirrors :func:`_live_resolve_authority`'s contract: ``finite_set([addr],
+    exact)`` for a non-zero slot, ``finite_set([], exact)`` for a confirmed-zero
+    slot, a labeled ``lower_bound`` when the read was attempted but unreadable, or
+    ``None`` when nothing could be attempted. ``zero_empty_reason`` labels the
+    confirmed-zero outcome: ``empty_by_design`` for a pending-transfer accept gate
+    (a read-confirmed ceiling — no transfer queued), ``None`` for a plain
+    authority var that simply reads zero (renounced/unset, like
+    :func:`_live_resolve_authority`'s clean-zero)."""
+    if ctx is None or not isinstance(slot, str) or not slot.startswith("0x") or len(slot) != 66:
+        return None
+    outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
+    rpc_url = getattr(outer, "rpc_url", None)
+    contract = getattr(outer, "contract_address", None) or ctx.contract_address
+    block = getattr(outer, "block", None) if outer is not None else ctx.block
+    if not isinstance(rpc_url, str) or not rpc_url:
+        return None
+    if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
+        return None
+    _bump_resolve_counter(outer, "live_slot_calls")
+    try:
+        from utils.rpc import rpc_request
+
+        raw = rpc_request(
+            rpc_url,
+            "eth_getStorageAt",
+            [contract.lower(), slot, hex(block) if isinstance(block, int) else "latest"],
+            retries=1,
+        )
+    except Exception:
+        _bump_resolve_counter(outer, "live_slot_failures")
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_revert"
+        )
+    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"
+        )
+    addr = "0x" + raw[-40:].lower()
+    if _is_zero_address(addr) or addr == _BURN_ADDRESS:
+        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", empty_reason=zero_empty_reason)
+    return CapabilityExpr.finite_set(
+        [addr],
+        quality="exact",
+        confidence="enumerable",
+        trace=[{"step": "live_slot_resolution", "slot": slot, "contract": contract.lower()}],
+    )
+
+
+def _resolve_authority_via_getters(ctx: EvaluationContext | None, selectors: list[str | None]) -> CapabilityExpr | None:
+    """Read an authority through the first of ``selectors`` that gives a concrete
+    answer.
+
+    Short-circuits only on a *resolved* read (``membership_quality == "exact"`` —
+    a real address, or a confirmed renounced/zero), so a literal getter that
+    reverts still falls through to the canonical/slot getter behind it (the #4
+    internal-accessor and #6 slot-constant fallbacks both depend on this: their
+    first candidate reverts on purpose). When every candidate was attempted but
+    unreadable, returns the last labeled ``lower_bound`` empty (carrying
+    ``unreadable_revert`` / ``unreadable_empty``). Returns ``None`` only when
+    nothing was attempted (no candidate selector, no reachable RPC) so the caller
+    can label the placeholder ``not_read``."""
+    attempted_failure: CapabilityExpr | None = None
+    for selector in selectors:
+        if selector is None:
+            continue
+        live = _live_resolve_authority(ctx, selector)
+        if live is None:
+            continue
+        if live.membership_quality == "exact":
+            return live
+        attempted_failure = live
+    return attempted_failure
 
 
 def _public_getter_selector_for_internal_accessor(signature: str | None) -> str | None:
@@ -752,6 +854,153 @@ def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
     return None
 
 
+# Authority roles whose ``pending`` half names an accept-side 2-step transfer:
+# ``pendingGovernor`` (Governable claimGovernance), ``pendingDefaultAdmin`` /
+# ``pendingAdmin`` (OZ AccessControlDefaultAdminRules acceptDefaultAdminTransfer),
+# ``pendingOwner`` (OZ Ownable2Step). Matched exactly after the ``pending``
+# prefix is stripped, so only these flip to empty-by-design.
+_PENDING_AUTHORITY_BASENAMES = frozenset({"owner", "governor", "authority", "admin", "defaultadmin"})
+
+
+def _pending_authority_base(name: str | None) -> str | None:
+    """The authority role behind a ``pending``-prefixed accessor name, or
+    ``None``. ``_pendingGovernor`` → ``governor``; ``_pendingDefaultAdmin`` →
+    ``defaultadmin``; a non-``pending`` name (plain ``owner``) → ``None``."""
+    if not isinstance(name, str):
+        return None
+    bare = name.lstrip("_").lower()
+    if not bare.startswith("pending"):
+        return None
+    base = bare[len("pending") :]
+    return base if base in _PENDING_AUTHORITY_BASENAMES else None
+
+
+def _is_pending_authority_accessor_operand(op: dict[str, Any]) -> bool:
+    """True when an equality operand reads the *pending* half of a 2-step
+    authority transfer — the accept-side gate (``claimGovernance`` /
+    ``acceptDefaultAdminTransfer``) that is uncallable until a transfer is
+    queued. Covers both shapes seen on-chain: an internal ``_pendingGovernor()``
+    accessor (``view_call``) and an OZ ``_pendingDefaultAdmin.newAdmin`` storage
+    struct member (``state_variable``). Keyed on the ``pending`` prefix so a plain
+    ``owner()`` / ``governor()`` gate is never caught."""
+    src = op.get("source")
+    if src == "view_call":
+        signature = op.get("callee_signature")
+        name = signature[:-2] if isinstance(signature, str) and signature.endswith("()") else signature
+    elif src == "state_variable":
+        name = op.get("state_variable_name")
+    else:
+        return False
+    return _pending_authority_base(name) is not None
+
+
+def _resolve_param_keyed_authority_mapping(op: dict[str, Any], ctx: EvaluationContext | None) -> CapabilityExpr:
+    """``msg.sender == <mapping>[<param>]`` — resolve the parameter-keyed authority
+    mapping to the set of its VALUES (claim #3 group C).
+
+    L1BaseSyncPool gates ``onMessageReceived`` on ``msg.sender == receivers[originEid]``,
+    a ``mapping(uint32 => address)`` keyed by a function parameter. The authorized
+    caller is whichever receiver the (caller-chosen) eid maps to, so the principal is
+    the mapping's value set — there is no single getter to read. Fold those values
+    from the mapping's setter events (``ReceiverSet``) on the runtime address (the
+    proxy when proxy-linked, so the *live* receivers are seen rather than a standalone
+    impl's empty storage). Emit a ``finite_set`` of the folded receivers; when no
+    event source is reachable, no setter spec exists, or the live mapping folds empty,
+    emit an ``external_check_only`` query interface rather than a phantom "nobody"
+    (mirrors :func:`_resolve_view_key_membership`'s ``view_key_membership_unresolved``).
+    ``lower_bound`` because event replay is a lower bound on the live value set."""
+    mapping_name = op.get("mapping_name") or ""
+    writer_specs = op.get("mapping_writer_specs") or []
+    outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None) if ctx is not None else None
+    contract = getattr(outer, "contract_address", None) or (ctx.contract_address if ctx is not None else None)
+
+    def _unresolved(basis: str) -> CapabilityExpr:
+        target = contract.lower() if isinstance(contract, str) and contract.startswith("0x") else None
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=target,
+                target_call_selector=None,
+                extra={"basis": [basis], "mapping_name": mapping_name},
+            )
+        )
+
+    if not writer_specs:
+        return _unresolved("param_keyed_mapping_no_writer_spec")
+    if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
+        return _unresolved("param_keyed_mapping_no_address")
+
+    values = _enumerate_param_keyed_mapping_values(contract, list(writer_specs), outer)
+    if not values:
+        # No event source reachable, or the live mapping folded no receivers (e.g. a
+        # standalone impl whose receivers were set on the proxy): an honest query
+        # interface, never a fabricated empty principal set.
+        return _unresolved("param_keyed_mapping_unresolved")
+    return CapabilityExpr.finite_set(
+        values,
+        quality="lower_bound",
+        confidence="partial",
+        trace=[{"step": "param_keyed_mapping_enumeration", "mapping": mapping_name, "contract": contract.lower()}],
+    )
+
+
+def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict[str, Any]], outer: Any) -> list[str]:
+    """Fold the deduped non-zero address VALUE set of a parameter-keyed mapping from
+    its ``set``-direction setter events via on-demand replay. Returns an empty list
+    when no event source is reachable (no hypersync token / injected client), the
+    scan errors, or the mapping folds empty — the caller surfaces all three as an
+    external check. The hypersync client / module are read from ``outer.meta`` so a
+    test can seed the event source without replacing the enumerator (the wire is the
+    stub seam, mirroring ``rpc_request``)."""
+    import os
+
+    meta = getattr(outer, "meta", None) or {}
+    token = meta.get("hypersync_token") or os.getenv("ENVIO_API_TOKEN")
+    client = meta.get("hypersync_client")
+    module = meta.get("hypersync_module")
+    if not token and client is None:
+        return []
+    block = getattr(outer, "block", None)
+    chain_id = getattr(outer, "chain_id", None)
+    _bump_resolve_counter(outer, "mapping_value_scans")
+    kwargs: dict[str, Any] = {"from_block": 0}
+    if isinstance(block, int):
+        kwargs["to_block"] = block
+    if token:
+        kwargs["bearer_token"] = token
+    if client is not None:
+        kwargs["client"] = client
+    if module is not None:
+        kwargs["hypersync_module"] = module
+    hypersync_url = meta.get("hypersync_url")
+    if isinstance(hypersync_url, str) and hypersync_url:
+        kwargs["hypersync_url"] = hypersync_url
+    try:
+        from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
+
+        scan = enumerate_mapping_values_sync(
+            contract,
+            cast(Any, writer_specs),
+            chain=str(chain_id) if isinstance(chain_id, int) else None,
+            **kwargs,
+        )
+    except Exception:
+        return []
+    if scan["status"] == "error":
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for entry in scan["entries"]:
+        value_hex = entry.get("value_hex") or ""
+        if not isinstance(value_hex, str) or len(value_hex) != 66:
+            continue
+        addr = "0x" + value_hex[-40:].lower()
+        if _is_zero_address(addr) or addr == _BURN_ADDRESS or addr in seen:
+            continue
+        seen.add(addr)
+        values.append(addr)
+    return sorted(values)
+
+
 def _resolve_equality_principal(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
@@ -769,6 +1018,15 @@ def _resolve_equality_principal(
     if len(other) != 1:
         return CapabilityExpr.unsupported("equality_operand_ambiguous")
     op = other[0]
+
+    # ``msg.sender == <mapping>[<param>]`` — the authorized caller is any VALUE in a
+    # parameter-keyed address mapping (claim #3 group C, L1BaseSyncPool
+    # ``receivers[originEid]``). Route to event enumeration before the per-source
+    # getter dispatch: the operand's ``source`` is the bare storage accessor, and the
+    # mapping identity rides on ``mapping_name`` / ``mapping_writer_specs`` (stamped
+    # by the static stage). There is no getter to read here.
+    if op.get("mapping_name") is not None:
+        return _resolve_param_keyed_authority_mapping(cast(dict[str, Any], op), ctx)
 
     src = op["source"]
     if src == "constant":
@@ -792,46 +1050,75 @@ def _resolve_equality_principal(
                     confidence="enumerable",
                 )
         # state_var_values miss. For a bare (non-struct-member) variable the
-        # equality ``msg.sender == X`` names X as the sole authorized caller,
-        # so reading X's getter live recovers the principal the persisted
+        # equality ``msg.sender == X`` names X as the sole authorized caller, so
+        # reading X's getter live recovers the principal the persisted
         # ControllerValue feed didn't carry (or carried under a different key,
-        # e.g. an owner()/governor() gate). Struct members
-        # (``accountantState.payoutAddress``) have no nullary getter and
-        # describe fund destinations, not callers — left as the placeholder so
-        # the FP-only attribution can't re-introduce fee-destination noise.
+        # e.g. an owner()/governor() gate). Three getter candidates are tried in
+        # order until one reads a concrete value:
+        #   1. ``<name>()`` — the auto-getter of a ``public`` state var, named
+        #      after the var itself (``owner``→``owner()``).
+        #   2. the de-underscored canonical getter — an OZ-v4 ``onlyOwner`` lowers
+        #      to ``msg.sender == _owner`` (the private backing var, since the
+        #      trivial ``owner(){return _owner;}`` getter is inlined), and
+        #      ``_owner()`` has no selector of its own, but ``owner()`` reads the
+        #      same storage (``_governor``→``governor()`` likewise). Mirrors the
+        #      view_call branch's internal-accessor fallback and is fail-closed to
+        #      {owner,governor,authority}(+pending), so an arbitrary ``_x`` is left
+        #      alone rather than bound to whatever public ``x()`` returns.
+        #   3. the canonical getter behind a storage-slot *locator* (Solady
+        #      ``_OWNER_SLOT``, OZ-v5 ``OwnableStorageLocation``, ``_GOVERNOR_SLOT``)
+        #      whose own ``<slot>()`` getter reverts.
+        # Struct members are read only for the OZ-v5 namespaced ``_owner``; others
+        # (``accountantState.payoutAddress``) have no nullary getter and describe
+        # fund destinations, not callers.
+        name = op.get("state_variable_name")
+        result: CapabilityExpr | None = None
         if not op.get("member_path"):
-            name = op.get("state_variable_name")
-            live = _live_resolve_authority(ctx, _nullary_getter_selector(name))
-            if live is not None:
-                return live
-            # Storage-slot authority constants (Solady ``_OWNER_SLOT``, OZ-v5
-            # ``OwnableStorageLocation``, ``_GOVERNOR_SLOT``) arrive as a bare
-            # state-var operand naming the slot *locator* — its ``<slot>()``
-            # getter reverts. Fall back to the canonical public getter reading the
-            # same slot (owner()/governor()/authority()); fail-closed otherwise.
-            canonical = _canonical_authority_selector_for_slot(name)
-            if canonical is not None:
-                live = _live_resolve_authority(ctx, canonical)
-                if live is not None:
-                    return live
+            result = _resolve_authority_via_getters(
+                ctx,
+                [
+                    _nullary_getter_selector(name),
+                    _public_getter_selector_for_internal_accessor(f"{name}()") if name else None,
+                    _canonical_authority_selector_for_slot(name),
+                ],
+            )
         elif op.get("member_path") == ["_owner"]:
-            # OZ v5 (ERC-7201) Ownable keeps the owner in a namespaced storage
-            # struct, so ``msg.sender == OwnableStorageLocation._owner`` arrives
-            # as a struct-member operand. Its canonical accessor is the public
-            # ``owner()`` getter (identical to v4) — read it live instead of
-            # treating the slot-pointer constant as a getter (which reverts, the
-            # OZ-v5 owner recall gap). Other struct members (fund destinations
-            # like ``accountantState.payoutAddress``) stay placeholders above.
-            live = _live_resolve_authority(ctx, _OWNER_SELECTOR)
-            if live is not None:
-                return live
-        # Fallback: we know there's a guarding state-var but haven't
-        # enumerated it yet (no ControllerValue row, or non-address
-        # value). UI surfaces this as 'guarded but unresolved'.
+            result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
+        if result is not None and result.membership_quality == "exact":
+            return result
+        # Getter-less internal address var (ether.fi ``MembershipNFT.membershipManager``
+        # is declared without ``public``, so its ``membershipManager()`` getter
+        # reverts on every deployment): the *sequential* storage slot the static
+        # stage carried is AUTHORITATIVE — the value lives in the contract's own
+        # storage, read it directly. A non-zero slot IS the principal; a
+        # confirmed-zero slot is a renounced/unset authority (resolved_empty, like a
+        # clean-zero getter — NOT empty-by-design, hence ``zero_empty_reason=None``);
+        # an unreadable slot stays an honest ``lower_bound``. Only bare address
+        # scalars carry a slot (the static pass excludes mappings/structs/packed
+        # vars), so a non-address word is never misread as a principal.
+        slot = op.get("storage_slot")
+        if isinstance(slot, str) and not op.get("member_path"):
+            slot_result = _live_resolve_authority_slot(ctx, slot, zero_empty_reason=None)
+            if slot_result is not None:
+                return slot_result
+            # Slot present but no read attempted (no reachable RPC) — honest
+            # unknown, not a guess.
+            return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
+        # An accept-side 2-step transfer gate (pending governor / default admin)
+        # that read empty — or, like ``_pendingDefaultAdmin.newAdmin``, has no
+        # getter to read — is uncallable until a transfer is queued. That is
+        # empty-by-design, not an unresolved gap.
+        if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
+            return CapabilityExpr.finite_set([], quality="exact", empty_reason="empty_by_design")
+        if result is not None:
+            return result  # carries unreadable_revert / unreadable_empty
+        # Fallback: a guarding state-var with no getter attempted (struct member /
+        # non-address value). UI surfaces this as 'guarded but unresolved'.
         return CapabilityExpr.finite_set(
             [],
             quality="lower_bound",
             confidence="partial",
+            empty_reason="not_read",
         )
 
     if src == "self_address":
@@ -870,16 +1157,38 @@ def _resolve_equality_principal(
             canonical_selector = _public_getter_selector_for_internal_accessor(signature)
         # Canonical public getter first (when the operand is an internal authority
         # accessor its own selector is dead); otherwise the literal selector.
-        for candidate in dict.fromkeys((canonical_selector, selector)):
-            if candidate is None:
-                continue
-            live = _live_resolve_authority(ctx, candidate)
-            if live is not None:
-                return live
+        result = _resolve_authority_via_getters(ctx, list(dict.fromkeys((canonical_selector, selector))))
+        if result is not None and result.membership_quality == "exact":
+            return result
+        # Getter-less slot-backed accessor (Governable ``_pendingGovernor`` reads a
+        # keccak slot via assembly, no public getter): the slot the static stage
+        # carried is AUTHORITATIVE. A non-zero slot IS the principal — on
+        # Governable ``_changeGovernor`` never clears the pending slot, so after a
+        # completed transfer it stays == governor and the accept gate is
+        # satisfiable by the sitting governor; a confirmed-zero slot is a
+        # read-confirmed accept-side ceiling; an unreadable slot stays an honest
+        # ``lower_bound``. We never downgrade an unreadable slot to a name guess,
+        # so resolved_empty here is always an evidenced (read-confirmed) verdict.
+        slot = op.get("storage_slot")
+        if isinstance(slot, str):
+            slot_result = _live_resolve_authority_slot(ctx, slot)
+            if slot_result is not None:
+                return slot_result
+            # Slot present but no read attempted (no reachable RPC) — honest
+            # unknown, not a guess.
+            return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
+        # No slot to read. A getter-less ``pending``-prefixed accept gate (the OZ
+        # ``_pendingDefaultAdmin.newAdmin`` struct member, which has no nullary
+        # getter) is uncallable until a transfer is queued — empty-by-design.
+        if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
+            return CapabilityExpr.finite_set([], quality="exact", empty_reason="empty_by_design")
+        if result is not None:
+            return result  # carries unreadable_revert / unreadable_empty
         return CapabilityExpr.finite_set(
             [],
             quality="lower_bound",
             confidence="partial",
+            empty_reason="not_read",
         )
 
     if src == "parameter":

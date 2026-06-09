@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import requests
 from eth_utils.crypto import keccak
@@ -22,7 +23,6 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-PUBLIC_ETH_RPC_URL = "https://ethereum-rpc.publicnode.com"
 COMMON_CHAIN_IDS = {
     "ethereum": 1,
     "mainnet": 1,
@@ -276,22 +276,48 @@ def chain_id_for_chain_name(chain: str | None) -> int | None:
     return COMMON_CHAIN_IDS.get(chain.lower().strip())
 
 
+_LOCAL_RPC_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def is_local_rpc_url(url: str | None) -> bool:
+    """True for a localhost/Anvil RPC URL.
+
+    A local URL is the only explicit override allowed to shadow eRPC (local
+    fork tests). A hosted URL never wins over eRPC — a pinned mainnet provider
+    URL doing exactly that is what let a direct-provider 429 storm through.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return False
+    try:
+        host = urlparse(url.strip()).hostname or ""
+    except ValueError:
+        return False
+    return host in _LOCAL_RPC_HOSTS or host.endswith(".local")
+
+
 def default_rpc_url(
     *,
     explicit_rpc_url: str | None = None,
     chain_id: int | str | None = None,
     chain: str | None = None,
-    fallback_url: str | None = None,
     default_chain_id: int | None = 1,
-    public_fallback: bool = True,
 ) -> str | None:
-    """Resolve the RPC URL PSAT should use for a job.
+    """Resolve the RPC URL PSAT should use for a chain — eRPC only.
 
-    Explicit URLs win so local Anvil/tests keep working. Otherwise, use eRPC
-    when a chain id can be resolved, then fall back to the legacy ETH_RPC
-    default. Unknown explicit chain names do not get silently mapped to mainnet.
+    eRPC is the single front door for every hosted read, so rate-limiting,
+    caching, and multi-upstream failover live in one place. Resolution:
+
+    1. An explicit URL wins ONLY when it targets a local node (Anvil / test
+       fork). A hosted explicit URL is ignored in favor of eRPC.
+    2. Otherwise build the eRPC route for the resolved chain id. Unknown
+       explicit chain names are not silently mapped to mainnet.
+
+    Returns None when no eRPC route can be built (``ERPC_BASE_URL`` unset, or an
+    unrecognized chain) so callers fail loud via :func:`require_rpc_url` instead
+    of silently hitting a direct provider. There is intentionally no ``ETH_RPC``
+    or public-node fallback.
     """
-    if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
+    if is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
 
     effective_chain_id = None
@@ -304,20 +330,41 @@ def default_rpc_url(
             effective_chain_id = None
     if effective_chain_id is None:
         effective_chain_id = chain_id_for_chain_name(chain)
-    if effective_chain_id is None and not (isinstance(chain, str) and chain.strip()):
+    # Empty/None or discovery's ``"unknown"`` sentinel falls back to the default
+    # chain (mainnet); a genuinely-named but unsupported chain (e.g. "fantom")
+    # stays unresolved so the caller fails loud instead of guessing mainnet.
+    chain_is_named = isinstance(chain, str) and bool(chain.strip()) and chain.strip().lower() != "unknown"
+    if effective_chain_id is None and not chain_is_named:
         effective_chain_id = default_chain_id
 
-    erpc_url = erpc_url_for_chain_id(effective_chain_id)
-    if erpc_url:
-        return erpc_url
-    if isinstance(fallback_url, str) and fallback_url.strip():
-        return fallback_url
-    env_rpc = os.getenv("ETH_RPC")
-    if env_rpc:
-        return env_rpc
-    if public_fallback:
-        return PUBLIC_ETH_RPC_URL
-    return None
+    return erpc_url_for_chain_id(effective_chain_id)
+
+
+def require_rpc_url(
+    *,
+    explicit_rpc_url: str | None = None,
+    chain_id: int | str | None = None,
+    chain: str | None = None,
+    default_chain_id: int | None = 1,
+) -> str:
+    """:func:`default_rpc_url` that raises instead of returning None.
+
+    Use on pipeline paths where a missing RPC route is a hard configuration
+    error, not something to paper over with a direct-provider fallback.
+    """
+    url = default_rpc_url(
+        explicit_rpc_url=explicit_rpc_url,
+        chain_id=chain_id,
+        chain=chain,
+        default_chain_id=default_chain_id,
+    )
+    if not url:
+        raise RuntimeError(
+            "No eRPC route available: set ERPC_BASE_URL (and ERPC_SECRET) to the eRPC "
+            "proxy, or pass an explicit local rpc_url for Anvil/tests. PSAT routes all "
+            "hosted reads through eRPC; ETH_RPC is no longer consulted."
+        )
+    return url
 
 
 def _is_configured_erpc_url(rpc_url: str) -> bool:

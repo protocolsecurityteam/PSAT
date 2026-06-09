@@ -113,6 +113,11 @@ class Source:
     computed_kind: str | None = None
     block_context_kind: str | None = None
     member_path: tuple[str, ...] = ()
+    # Keccak/constant slot a getter-less internal *address* accessor reads via
+    # inline ``sload(<constant>)`` (Governable ``_pendingGovernor`` →
+    # keccak256("LRTSquare.pending.governor")). Carried so resolution can read
+    # the live value via ``eth_getStorageAt``; ``None`` for everything else.
+    storage_slot: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in SOURCE_KINDS:
@@ -136,6 +141,7 @@ class Source:
             or self.computed_kind is not None
             or self.block_context_kind is not None
             or self.member_path
+            or self.storage_slot is not None
         ):
             raise ValueError("Source(kind='top') must be the bare sentinel — no metadata fields")
 
@@ -167,6 +173,45 @@ def union(a: SourceSet, b: SourceSet) -> SourceSet:
     if is_top(a) or is_top(b):
         return TOP
     return a | b
+
+
+def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
+    """The keccak/constant slot a getter-less internal *address* accessor reads
+    via inline ``sload(<constant>)`` — e.g. ``Governable._pendingGovernor()``
+    reading ``keccak256("LRTSquare.pending.governor")``. Returns the 0x-padded
+    32-byte slot so resolution can ``eth_getStorageAt`` it (the accessor has no
+    public getter to call); ``None`` for anything that isn't an unambiguous
+    single-constant-slot *address* reader. Reuses the split-proxy sload-constant
+    detection — the only existing place this pattern is mined — and is tightened
+    to address returns + exactly one constant slot so a non-address ``sload``
+    (e.g. a bytes32 flag) can't be misread as a 20-byte principal."""
+    if callee is None:
+        return None
+    try:
+        from services.static.contract_analysis_pipeline.secondary_impl import (
+            _SLOT_CONST_TYPES,
+            _any_transitive_ir,
+            _const_slot_value,
+            _ir_is_sload,
+        )
+    except Exception:  # pragma: no cover - import edge
+        return None
+    return_type = getattr(callee, "return_type", None)
+    if not (return_type and len(return_type) == 1 and str(return_type[0]) in ("address", "address payable")):
+        return None
+    if not _any_transitive_ir(callee, _ir_is_sload):
+        return None
+    try:
+        read = list(callee.all_state_variables_read())
+    except Exception:  # pragma: no cover - slither edge
+        return None
+    consts = [v for v in read if getattr(v, "is_constant", False) and str(getattr(v, "type", "")) in _SLOT_CONST_TYPES]
+    if len(consts) != 1:
+        return None
+    val = _const_slot_value(consts[0])
+    if val is None or val < 0:
+        return None
+    return "0x" + format(val, "064x")
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +742,9 @@ class ProvenanceEngine:
             return False
         callee = getattr(ir, "function", None)
         callee_name = getattr(callee, "full_name", None) or getattr(callee, "name", None)
+        # Slot a getter-less address accessor sload()s, so resolution can read
+        # the live value even though the accessor has no public getter.
+        accessor_slot = _constant_storage_slot_for_accessor(callee)
         # Cycle / depth guard.
         call_tag = Source(
             kind="view_call",
@@ -704,6 +752,7 @@ class ProvenanceEngine:
             callee_signature=callee_name,
             callee_selector=_selector_for_signature(callee_name),
             callee_args_digest=_digest(self._union_of_args(getattr(ir, "arguments", ()))),
+            storage_slot=accessor_slot,
         )
         if callee is None or len(self._call_stack) >= self.internal_call_depth or callee_name in self._call_stack:
             args_union = self._union_of_args(getattr(ir, "arguments", ()))
@@ -715,6 +764,7 @@ class ProvenanceEngine:
                         callee_args_digest=_digest(args_union),
                         callee_signature=callee_name,
                         callee_selector=_selector_for_signature(callee_name),
+                        storage_slot=accessor_slot,
                     )
                 }
             )
