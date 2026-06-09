@@ -46,8 +46,6 @@ def _child_argv_for_chain(args: argparse.Namespace, *, chain_id: int) -> list[st
         argv.append("--poll")
     if args.reconcile:
         argv.append("--reconcile")
-    if args.legacy:
-        argv.append("--legacy")
     return argv
 
 
@@ -93,35 +91,6 @@ def _run_monitor_mode(args: argparse.Namespace, *, chain_id: int) -> None:
         interval = args.interval if args.interval is not None else DEFAULT_RECONCILE_INTERVAL_S
         logger.info("Enrollment reconciler starting (chain_id=%s, interval=%ss)", chain_id, interval)
         run_enrollment_reconciler_loop(rpc_url, chain_id=chain_id, interval=interval)
-        return
-
-    if args.legacy:
-        from services.monitoring.proxy_watcher import (
-            DEFAULT_POLL_INTERVAL,
-            DEFAULT_SCAN_INTERVAL,
-            run_poll_loop,
-            run_scan_loop,
-        )
-
-        rpc_for_log = sanitize_url(rpc_url)
-        if args.poll:
-            interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
-            logger.info(
-                "Legacy proxy poll monitor starting (chain_id=%s, rpc=%s, interval=%ss)",
-                chain_id,
-                rpc_for_log,
-                interval,
-            )
-            run_poll_loop(rpc_url, interval, chain_id=chain_id)
-            return
-        interval = args.interval if args.interval is not None else DEFAULT_SCAN_INTERVAL
-        logger.info(
-            "Legacy proxy monitor starting (chain_id=%s, rpc=%s, interval=%ss)",
-            chain_id,
-            rpc_for_log,
-            interval,
-        )
-        run_scan_loop(rpc_url, interval, chain_id=chain_id)
         return
 
     from services.monitoring.unified_watcher import (
@@ -187,11 +156,6 @@ def main():
             "converges with Contract+Job state regardless of how that state changed "
             "(orphan-adoption migrations, deployer-cascade, manual fix-ups, etc.)."
         ),
-    )
-    parser.add_argument(
-        "--legacy",
-        action="store_true",
-        help="Run the legacy proxy-only scanner compatibility mode",
     )
     args = parser.parse_args()
 

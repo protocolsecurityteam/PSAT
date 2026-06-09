@@ -97,11 +97,9 @@ OZ_LEGACY_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee0
 GNOSIS_MASTERCOPY_SLOT = "0x0"
 
 # proxy_type → polling entry that resolves the current implementation.
-# Mirrors ``services/monitoring/proxy_watcher._RESOLVE_BY_TYPE`` but
-# emits the unified poll_plan entry shape. ``custom`` / ``compound`` /
-# ``synthetix`` proxies use an eth_call getter rather than a slot read;
-# those are emitted with ``kind: "getter_call"`` so the poll loop's
-# single dispatcher handles them.
+# ``custom`` / ``compound`` / ``synthetix`` proxies use an eth_call getter
+# rather than a slot read; those are emitted with ``kind: "getter_call"`` so
+# the poll loop's single dispatcher handles them.
 _VENDORED_PROXY_ENTRIES: dict[str, dict[str, Any]] = {
     "eip1967": {
         "field": "implementation",
