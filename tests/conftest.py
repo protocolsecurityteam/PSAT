@@ -412,6 +412,17 @@ def _force_resolution_multicall_off(monkeypatch):
         monkeypatch.setattr(target, False)
 
 
+@pytest.fixture(autouse=True)
+def _force_differential_probe_off(monkeypatch):
+    """Keep the offline suite hermetic against the differential probe (default ON in
+    code, so real runs need no env). With the flag on, in-process resolution tests
+    would issue REAL ``eth_call`` probes during the policy stage: non-hermetic, slow,
+    netguard-tripping. Forcing the env off routes offline resolution through the
+    static path. The dedicated probe tests inject a stubbed ``call_batch`` / set the
+    flag in the test body (which runs after this fixture), so they still exercise it."""
+    monkeypatch.setenv("PSAT_DIFFERENTIAL_PROBE", "0")
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 

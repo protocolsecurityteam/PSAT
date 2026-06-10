@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from typing import Any, Mapping
 
 from sqlalchemy import func, select
@@ -52,12 +52,14 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from utils.logging import record_stage_metric
-from utils.rpc import require_rpc_url
+from utils.rpc import eth_call_batch, require_rpc_url, rpc_request
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.event_indexed import EventIndexedAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
-from .capabilities import CapabilityExpr
+from .capabilities import CapabilityExpr, Condition
+from .differential_probe import ProbeResult, differential_probe_enabled, run_differential_probe
+from .permissionless_shapes import CALLER_GATE_BASIS_TAGS
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
 from .repos.bytecode_rpc import BytecodeSelectorRepo
@@ -349,6 +351,12 @@ def resolve_contract_capabilities(
     # within-pass dedup, never a cross-run/persistent cache, so it cannot serve stale data across runs.
     live_read_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
+    # Differential probe (DIFFERENTIAL_PROBE_PLAN, default OFF). Pin ONE block for
+    # the whole pass so every probed function is observed at the same height (replay
+    # + caching consistency, §6.2). A None block (non-archive node / blocknum read
+    # failure) disables probing for the pass — the probe is strictly additive (§7.1),
+    # so its absence is exactly the current behavior.
+    probe_block: int | None = _resolve_probe_block(rpc_url, block) if differential_probe_enabled() else None
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
             chain_id=chain_id,
@@ -370,6 +378,16 @@ def resolve_contract_capabilities(
         )
         fn_started = time.monotonic()
         cap = evaluate_tree_with_registry(tree, registry, ctx)
+        if probe_block is not None:
+            cap = _maybe_differential_probe(
+                cap,
+                chain_id=chain_id,
+                contract_address=runtime_addr,
+                fn_signature=fn_signature if isinstance(fn_signature, str) else None,
+                canonical_signatures=canonical_signatures,
+                rpc_url=rpc_url,
+                block=probe_block,
+            )
         fn_ms = int((time.monotonic() - fn_started) * 1000)
         out[fn_signature] = capability_to_dict(cap)
         per_function_ms.append((str(fn_signature), fn_ms))
@@ -423,6 +441,144 @@ def _selector_for_signature(
     # params (→ ``address``); enum/struct params can't be recovered from the name
     # alone (no tuple layout, no uint width), which is why the map above exists.
     return "0x" + keccak(text=_abi_signature(signature)).hex()[:8]
+
+
+# ---------------------------------------------------------------------------
+# Differential probe wiring (DIFFERENTIAL_PROBE_PLAN §3.6). Gated behind
+# ``PSAT_DIFFERENTIAL_PROBE`` (default OFF) in the resolution loop above; these
+# helpers run only when the flag is on, so flag-off resolution is byte-identical.
+# ---------------------------------------------------------------------------
+
+# Process-level probe cache (§4): a probe is deterministic given
+# ``(chain, address, selector, block)`` — the random identities are derived from
+# (selector, address) and the block is pinned — so cache the result and skip the
+# wire when the same gated-unknown function is re-resolved in-process. Bounded;
+# only used on the real-wire production path (a stubbed ``call_batch`` bypasses it
+# so tests stay hermetic). Keyed by exact block, never bucketed — a different
+# block may see different allowlist state, so re-probing then is correct.
+_PROBE_CACHE: dict[tuple[int, str, str, int], "ProbeResult"] = {}
+_PROBE_CACHE_MAX = 4096
+
+
+def clear_probe_cache() -> None:
+    """Clear the process-level differential-probe cache (tests / manual reset)."""
+    _PROBE_CACHE.clear()
+
+
+def _probe_cache_put(key: tuple[int, str, str, int], result: "ProbeResult") -> None:
+    if len(_PROBE_CACHE) >= _PROBE_CACHE_MAX:
+        # Cheap FIFO-ish trim: drop an arbitrary quarter when the bound is hit.
+        for stale in list(_PROBE_CACHE.keys())[: _PROBE_CACHE_MAX // 4]:
+            _PROBE_CACHE.pop(stale, None)
+    _PROBE_CACHE[key] = result
+
+
+def _resolve_probe_block(rpc_url: str | None, block: int | None) -> int | None:
+    """Pin a concrete probe height. Prefer the caller's ``block``; else read the
+    head and step back a finality margin. None on any failure (no RPC, blocknum
+    read fails) → probing is skipped for the pass (strictly additive)."""
+    if isinstance(block, int) and block > 0:
+        return block
+    if not rpc_url:
+        return None
+    try:
+        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1), 16)
+    except Exception:
+        return None
+    return max(1, head - 12)
+
+
+def _should_differential_probe(cap: CapabilityExpr) -> bool:
+    """True only for the gated-unknown population the probe targets (§2): a
+    top-level ``external_check_only`` carrying a caller-gate basis tag — exactly
+    ``_is_root_authority_blocker``'s external-check arm. A cold-index self-heal
+    deferral is NEVER probed: overwriting its marker would freeze the cold result
+    (the Veda RolesAuthority race) instead of letting ``deferred_reconciler``
+    converge it once the authority's events backfill."""
+    if cap.kind != "external_check_only" or cap.check is None:
+        return False
+    extra = cap.check.extra or {}
+    if extra.get("deferred_pending_index"):
+        return False
+    basis = extra.get("basis") or []
+    return any(tag in CALLER_GATE_BASIS_TAGS for tag in basis)
+
+
+def _apply_probe_result(cap: CapabilityExpr, result: ProbeResult) -> CapabilityExpr:
+    """Land a probe verdict on the capability (§3.6). Only a confirmed-public
+    verdict CHANGES the static verdict (→ ``conditional_universal``); a gated
+    confirmation/observation and an inconclusive/indeterminate probe keep the
+    static ``external_check_only`` and merely attach the transcript so the verdict
+    is reproducible (§6.1)."""
+    transcript_step = {"step": "differential_probe", **result.transcript}
+    if result.verdict == "public":
+        opened = CapabilityExpr.conditional_universal(
+            Condition(kind="business", description="differential probe: caller-independent (observed open)")
+        )
+        opened.trace = list(cap.trace) + [transcript_step]
+        return opened
+    # Keep the gated verdict; attach the transcript to the check's extra.
+    if cap.check is not None:
+        extra = dict(cap.check.extra or {})
+        extra["differential_probe"] = result.transcript
+        return replace(cap, check=replace(cap.check, extra=extra))
+    out = replace(cap)
+    out.trace = list(cap.trace) + [transcript_step]
+    return out
+
+
+def _maybe_differential_probe(
+    cap: CapabilityExpr,
+    *,
+    chain_id: int,
+    contract_address: str,
+    fn_signature: str | None,
+    canonical_signatures: Mapping[str, str] | None,
+    rpc_url: str | None,
+    block: int,
+    call_batch: Any = None,
+) -> CapabilityExpr:
+    """Probe one resolved capability when it is gated-unknown, applying §3.6.
+    Wrapped in a blanket try/except: a probe failure must never break resolution
+    (strictly additive) — on any error the static verdict stands. ``call_batch`` is
+    injectable for hermetic tests; defaults to the real ``eth_call_batch`` wire."""
+    if not _should_differential_probe(cap):
+        return cap
+    selector = _selector_for_signature(fn_signature, canonical_signatures)
+    if not selector:
+        return cap
+    # Cache only on the real-wire path; an injected (test) batch bypasses it.
+    use_cache = call_batch is None
+    cache_key = (chain_id, contract_address.lower(), selector, block)
+    if use_cache:
+        cached = _PROBE_CACHE.get(cache_key)
+        if cached is not None:
+            return _apply_probe_result(cap, cached)
+    canonical = (canonical_signatures or {}).get(fn_signature) if fn_signature else None
+    canonical = canonical or fn_signature
+    if call_batch is None:
+        if not rpc_url:
+            return cap
+
+        def call_batch(calls: list[dict[str, str]], block_tag: str):  # noqa: ANN202
+            return eth_call_batch(rpc_url, calls, block_tag)
+
+    try:
+        result = run_differential_probe(
+            call_batch=call_batch,
+            chain_id=chain_id,
+            contract_address=contract_address,
+            selector=selector,
+            canonical_signature=canonical,
+            block=block,
+            principal=None,
+        )
+    except Exception:
+        logger.debug("differential probe failed for %s; keeping static verdict", fn_signature, exc_info=True)
+        return cap
+    if use_cache:
+        _probe_cache_put(cache_key, result)
+    return _apply_probe_result(cap, result)
 
 
 def _analysis_lookup_for_runtime_job(

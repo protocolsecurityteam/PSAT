@@ -19,7 +19,12 @@ from sqlalchemy.orm import Session
 from db.models import IndexedEventLog
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.repos.event_logs_pg import _word_to_address
-from utils.rpc import multicall3_aggregate3, rpc_batch_request_with_status
+from utils.rpc import (
+    decode_bool_word,
+    encode_address_word,
+    multicall3_aggregate3,
+    rpc_batch_request_with_status,
+)
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
@@ -42,7 +47,7 @@ def _eval_candidate_calls(
 ) -> list[tuple[Any, bool]]:
     """Probe every candidate's checker call. One Multicall3 aggregate3 (per chunk) when enabled, else/on any
     failure the JSON-RPC array batch. Both return ``[(raw, had_error)]`` with identical decode semantics: a
-    reverting probe → ``had_error=True`` (skipped); a successful probe → its raw bytes for ``_decode_bool``."""
+    reverting probe → ``had_error=True`` (skipped); a successful probe → its raw bytes for ``decode_bool_word``."""
     if _EXTERNAL_CHECK_MULTICALL_ENABLED:
         try:
             mc = multicall3_aggregate3(rpc_url, mc_calls, block_tag)
@@ -116,7 +121,7 @@ def materialize_external_check_from_events(
     block_tag = hex(block) if isinstance(block, int) else "latest"
     for candidate in candidates:
         encoded_args = list(encoded_static_args)
-        encoded_args[caller_index] = _encode_address(candidate)
+        encoded_args[caller_index] = encode_address_word(candidate)
         data = checker_selector + "".join(arg or "" for arg in encoded_args)
         call: dict[str, str] = {"to": checker_address, "data": data}
         calls.append(("eth_call", [call, block_tag]))
@@ -128,7 +133,7 @@ def materialize_external_check_from_events(
     for candidate, (raw, had_error) in zip(ordered_candidates, results, strict=False):
         if had_error:
             continue
-        if _decode_bool(raw):
+        if decode_bool_word(raw):
             allowed.append(candidate)
     if not allowed:
         return None
@@ -162,25 +167,12 @@ def _encode_static_arg(arg: dict[str, Any]) -> str | None:
         return None
     value = raw.lower()
     if value.startswith("0x") and len(value) == 42:
-        return _encode_address(value)
+        return encode_address_word(value)
     if value.startswith("0x") and len(value) == 10:
         return value[2:].ljust(64, "0")
     if value.startswith("0x") and len(value) == 66:
         return value[2:]
     return None
-
-
-def _encode_address(address: str) -> str:
-    return address.lower().removeprefix("0x").rjust(64, "0")
-
-
-def _decode_bool(raw: Any) -> bool:
-    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
-        return False
-    try:
-        return int(raw[-64:], 16) != 0
-    except ValueError:
-        return False
 
 
 def _candidate_addresses_from_events(

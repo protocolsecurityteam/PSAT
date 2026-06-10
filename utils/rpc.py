@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 from urllib.parse import urlparse
 
 import requests
@@ -699,6 +699,123 @@ def rpc_batch_request_with_status(
     return results
 
 
+class EthCallResult(NamedTuple):
+    """One ``eth_call`` outcome, preserving revert DATA (unlike
+    ``rpc_batch_request_with_status``, which collapses any error to a bare
+    ``had_error`` flag and discards the bytes).
+
+      * success            → ``(True,  return_hex, None, None)``
+      * revert WITH data   → ``(False, "0x", revert_hex, message)`` — the revert
+        bytes a differential probe decodes to attribute WHICH gate fired
+      * revert/err NO data → ``(False, "0x", None, message)`` — OOG, transport, or
+        a node that omits ``error.data``: indeterminate, never attributable
+    """
+
+    success: bool
+    return_data: str
+    revert_data: str | None
+    error_message: str | None
+
+
+def _extract_revert_data(data: Any) -> str | None:
+    """Pull raw revert-return hex from a JSON-RPC error ``data`` field. Nodes vary:
+    geth/erigon give a bare ``0x..`` hex string; some providers prefix it
+    (``"Reverted 0x.."``) or nest it (``{"data": "0x.."}``). Returns the
+    ``0x``-prefixed bytes (``"0x"`` for an empty/bare revert — a real, comparable
+    gate), or None when the node gave no decodable payload (a plain
+    ``"execution reverted"`` with no data, OOG) — which a probe treats as
+    indeterminate, never as an attributable gate."""
+    if isinstance(data, str):
+        s = data.strip()
+        if s.startswith("0x"):
+            return s.lower()
+        idx = s.find("0x")
+        if idx != -1:
+            return s[idx:].split()[0].lower()
+        return None
+    if isinstance(data, Mapping):
+        inner = data.get("data")
+        if isinstance(inner, str):
+            return _extract_revert_data(inner)
+    return None
+
+
+def _eth_call_result_from_rpc_item(item: Mapping[str, Any]) -> EthCallResult:
+    error = item.get("error")
+    if error:
+        if isinstance(error, Mapping):
+            raw_msg = error.get("message")
+            message = str(raw_msg) if raw_msg is not None else "error"
+            return EthCallResult(False, "0x", _extract_revert_data(error.get("data")), message)
+        return EthCallResult(False, "0x", None, str(error))
+    result = item.get("result")
+    if isinstance(result, str) and result.startswith("0x"):
+        return EthCallResult(True, result, None, None)
+    return EthCallResult(True, "0x", None, None)
+
+
+def eth_call_batch(
+    rpc_url: str,
+    calls: list[Mapping[str, str]],
+    block_tag: str = "latest",
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> list[EthCallResult]:
+    """Batch N read-only ``eth_call``s — each its own ``{from?, to, data}`` — in one
+    JSON-RPC array request at a single ``block_tag``, returning a per-call
+    :class:`EthCallResult` that PRESERVES revert data (aligned 1:1 with ``calls``).
+
+    Each call varies ``msg.sender`` of the TARGET via its own ``from`` field, which
+    is exactly why a differential caller probe CANNOT use Multicall3: ``aggregate3``
+    makes every sub-call's ``msg.sender`` the Multicall3 contract, erasing the
+    ``from`` the probe must discriminate on. A JSON-RPC array batch keeps per-call
+    ``from`` while still giving one round trip at one block — the same-block,
+    same-node consistency the probe's cross-checks require, without the msg.sender
+    rewrite. On a whole-chunk transport failure every slot in the chunk is flagged
+    ``success=False`` with no revert data (transient → caller withholds, never
+    upgrades)."""
+    if not calls:
+        return []
+
+    results: list[EthCallResult] = [EthCallResult(False, "0x", None, "no_response")] * len(calls)
+    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
+        chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
+        batch = [
+            {"jsonrpc": "2.0", "id": chunk_start + i, "method": "eth_call", "params": [dict(call), block_tag]}
+            for i, call in enumerate(chunk)
+        ]
+        try:
+            response = _get_session().post(
+                rpc_url,
+                json=batch,
+                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
+                headers=rpc_headers(rpc_url, headers),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            from utils.secrets import sanitize_string
+
+            msg = f"transport: {sanitize_string(str(exc))}"
+            for i in range(len(chunk)):
+                results[chunk_start + i] = EthCallResult(False, "0x", None, msg)
+            continue
+
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("id")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
+                continue
+            results[idx] = _eth_call_result_from_rpc_item(item)
+
+    return results
+
+
 # Multicall3 is deployed at the same address on every chain PSAT supports.
 MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
 # Default sub-calls per aggregate3 eth_call. Each aggregate3 is ONE billable
@@ -779,6 +896,27 @@ def parse_address_result(raw: Any) -> str | None:
 
 def selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def encode_address_word(address: str) -> str:
+    """ABI-encode an address as one 32-byte word (64 hex chars, NO ``0x`` prefix),
+    for concatenation into ``eth_call`` calldata. Shared by the external-check
+    materializer and the differential probe so the encoding can't drift between
+    them."""
+    return address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def decode_bool_word(raw: Any) -> bool:
+    """Decode an ABI ``bool`` return word: True iff the trailing 32-byte word is
+    non-zero. Anything too short / non-hex / unparseable is False (a revert or
+    empty return is not a truthy answer). Shared with the external-check
+    materializer."""
+    if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
+        return False
+    try:
+        return int(raw[-64:], 16) != 0
+    except ValueError:
+        return False
 
 
 def normalize_hex(value: str | None) -> str:
