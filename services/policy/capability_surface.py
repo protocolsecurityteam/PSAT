@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
+
 
 @dataclass
 class CapabilitySurface:
@@ -104,14 +106,32 @@ def _project_node(
         # Fold from an empty identity, never a seeded public path: an `anyone` surface must
         # be earned by a conditional_universal child, not minted by AND-ing pure checks.
         surface = CapabilitySurface()
+        blocked = False
         for child in _child_dicts(cap_dict):
             child_surface = _project_node(
                 child,
                 safe_address_lookup=safe_address_lookup,
                 function_signature=function_signature,
             )
+            if earned_public_enabled() and not _has_valid_path(child_surface) and _is_root_authority_blocker(child):
+                blocked = True
             surface = _and_surface(surface, child_surface)
-        return _with_node_conditions(surface, node_conditions)
+        surface = _with_node_conditions(surface, node_conditions)
+        if blocked and surface.public_paths:
+            # Earned-public: an unresolved ROOT-caller authorization is AND-ed
+            # in (an external_check / unsupported gate / a caller-equality
+            # whose authority value couldn't be read). The sibling public
+            # paths are not earned — the function is gated, principals
+            # unknown. Principal rows (already-gated callers) keep folding the
+            # blocker as a side-condition exactly as before; bound-subject
+            # checks (inlined downstream auth) never block — see
+            # ``_is_root_authority_blocker``.
+            surface = CapabilitySurface(
+                principal_rows=list(surface.principal_rows),
+                public_paths=[],
+                residual=list(surface.residual),
+            )
+        return surface
     if kind == "cofinite_blacklist":
         # "Anyone except a finite exclusion" is a PUBLIC path with the denylist as a
         # side-condition, not an unresolved residual. Surface the exclusion so a reviewer
@@ -125,6 +145,59 @@ def _project_node(
         }
         return CapabilitySurface(public_paths=[node_conditions + [denial]])
     return CapabilitySurface(residual=[dict(cap_dict)])
+
+
+def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
+    """Does this capability represent an UNRESOLVED authorization on the
+    root (end-user) caller? Under the earned-public default such a check
+    AND-ed with public side-conditions gates the function — "public" must be
+    earned, and an authority whose principal set couldn't be read/enumerated
+    is still an authority.
+
+    Shapes that block:
+      - ``external_check_only`` carrying a caller-gate basis tag
+        (``CALLER_GATE_BASIS_TAGS`` — the earned-public default's fail-closed
+        verdicts and the subsumed E3/E4 allowlists). A check WITHOUT the tag
+        is a targeted downstream-call probe (the un-inlined Veda teller→vault
+        ``requiresAuth``, a descriptor probe awaiting an adapter) — an
+        intermediate-contract condition that must keep folding as a side
+        condition next to an adapter-earned public capability
+        (PublicCapabilityUpdated) exactly as the legacy path did.
+      - ``unsupported`` — an un-modeled gate (extraction fail-closed, E2).
+      - an EMPTY non-exact ``finite_set`` — a caller equality whose authority
+        value wasn't read (``msg.sender == owner`` with no controller value);
+        exact-empty (provably nobody / empty-by-design) is NOT a blocker —
+        that is resolved, not unresolved.
+      - AND: any blocking child; OR: only if EVERY disjunct blocks (a single
+        genuinely-open disjunct keeps the OR open).
+
+    Bound-subject capabilities never block: an inlined downstream call's
+    authorization is a runtime side-condition on the intermediate contract,
+    not a restriction of the end-user caller (the Veda Teller contract).
+    """
+    if cap_dict.get("subject", "root") != "root":
+        return False
+    kind = cap_dict.get("kind")
+    if kind == "finite_set":
+        if cap_dict.get("members"):
+            return False
+        # Exact-empty / empty-by-design is RESOLVED (provably nobody, or an
+        # accept-side ceiling) — mirrors ``_is_resolved_empty_capability``.
+        if cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design":
+            return False
+        return True
+    if kind == "unsupported":
+        return True
+    if kind == "external_check_only":
+        extra = (cap_dict.get("check") or {}).get("extra") or {}
+        basis = extra.get("basis") or []
+        return any(tag in CALLER_GATE_BASIS_TAGS for tag in basis)
+    if kind == "AND":
+        return any(_is_root_authority_blocker(child) for child in _child_dicts(cap_dict))
+    if kind == "OR":
+        children = _child_dicts(cap_dict)
+        return bool(children) and all(_is_root_authority_blocker(child) for child in children)
+    return False
 
 
 def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:

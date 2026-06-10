@@ -26,7 +26,9 @@ correct, just unfilled.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, Protocol, cast
 
 from eth_utils.crypto import keccak
@@ -45,6 +47,14 @@ from .capabilities import (
     intersect,
     negate,
     union,
+)
+from .permissionless_shapes import (
+    caller_gate_basis,
+    earned_public_enabled,
+    is_caller_keyed_membership_allowlist,
+    is_caller_keyed_time_allowlist,
+    is_permissionless_caller_shape,
+    leaf_is_caller_tainted,
 )
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
@@ -295,84 +305,11 @@ def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
     return any(k.get("source") in _CALLER_SOURCES for k in keys)
 
 
-def _is_caller_keyed_time_allowlist(leaf: LeafPredicate) -> bool:
-    """True iff the leaf is a *deny-by-default* caller-keyed time allowlist:
-    ``if (allowedUntil[msg.sender] < block.timestamp) revert`` — only callers whose
-    stored time is still in the future may proceed, and an unset caller (mapping default
-    0) is DENIED. That is an authorization over a caller set, not a permissionless side-
-    condition, so it must stay gated rather than open to ``conditional_universal``.
-
-    The discriminator is the proceed-relation between the caller's keyed value and
-    ``block.timestamp``: a *lower bound* (``caller_value >= now``) excludes the unset
-    default → allowlist → gate. This is exactly what distinguishes it from the two shapes
-    that legitimately open and must NOT be caught:
-
-      * a share-LOCK (``if (shareUnlockTime[from] > now) revert`` → proceed
-        ``value <= now``): the default 0 is ALLOWED, so it opens once unlocked;
-      * a balance/allowance condition (``balances[msg.sender] >= amount``): compared
-        against a parameter, not ``block.timestamp`` — a permissionless "you can move what
-        you hold" check.
-
-    Both are present across the etherfi set; neither matches (operator direction / non-time
-    RHS), so this discriminator has zero blast radius there — it only catches the
-    deny-by-default time-allowlist shape, which has no instance today.
-    """
-    if leaf.get("kind") != "comparison":
-        return False
-    operands = leaf.get("operands") or []
-    if len(operands) != 2:
-        return False
-    caller_idx = next((i for i, o in enumerate(operands) if o.get("source") in _CALLER_SOURCES), None)
-    time_idx = next(
-        (
-            i
-            for i, o in enumerate(operands)
-            if o.get("source") == "block_context" and o.get("block_context_kind") == "timestamp"
-        ),
-        None,
-    )
-    if caller_idx is None or time_idx is None:
-        return False
-    op = leaf.get("operator")
-    # Proceed-relation lower-bounds the caller value by the timestamp (deny-by-default):
-    #   caller is LHS → "caller OP time"  → allowlist when OP in {gt, gte}
-    #   caller is RHS → "time OP caller"  → allowlist when OP in {lt, lte}  (i.e. caller >= time)
-    if caller_idx < time_idx:
-        return op in ("gt", "gte")
-    return op in ("lt", "lte")
-
-
-def _is_caller_keyed_membership_allowlist(leaf: LeafPredicate) -> bool:
-    """True iff the leaf is a positive (``truthy``) membership test keyed on the
-    caller — ``require(allowed[msg.sender])`` — i.e. an ALLOWLIST: only the
-    addresses the contract recorded may proceed; an unset caller (mapping default
-    ``false``) is DENIED. That authorizes a caller SET, so it must stay gated (an
-    unenumerable external check), never open to ``conditional_universal``/public.
-
-    Polarity is the discriminator, mirroring ``_is_caller_keyed_time_allowlist``.
-    The two membership shapes that legitimately open and must NOT be caught:
-      * a DENYLIST / claim-once (``require(!registered[msg.sender])`` → operator
-        ``falsy``): the default-``false`` caller is ALLOWED, so anyone not yet
-        listed may call — deliberately public (the self-registration path the
-        cofinite refactor preserves).
-      * a non-caller-keyed membership (``require(allowedToken[token])``): keyed on
-        a parameter, not the caller — a business precondition, not an authority.
-    Only the positive + caller-keyed combination is an allowlist, so this re-gates
-    exactly the false-opens and nothing that is genuinely permissionless.
-
-    A 1-key caller membership is classified ``business`` on the static side (it
-    can't be told from a claim flag by shape alone, see
-    ``_classify_authority_membership``) and so reaches the side-condition block;
-    multi-key permission tables are ``caller_authority`` and resolve through the
-    membership branch instead, untouched.
-    """
-    if leaf.get("kind") != "membership":
-        return False
-    if leaf.get("operator") != "truthy":
-        return False
-    descriptor = leaf.get("set_descriptor") or {}
-    keys = descriptor.get("key_sources") or []
-    return any(k.get("source") in _CALLER_SOURCES for k in keys)
+# The E3/E4 allowlist discriminators now live in ``permissionless_shapes``
+# (the caller-taint default subsumes them); these module-level aliases keep
+# the legacy (flag-off) call sites monkeypatchable under their historic names.
+_is_caller_keyed_time_allowlist = is_caller_keyed_time_allowlist
+_is_caller_keyed_membership_allowlist = is_caller_keyed_membership_allowlist
 
 
 def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
@@ -428,7 +365,27 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 # description; gating on ``cap.members`` fixes it.
                 if cap.kind == "finite_set" and cap.members:
                     return cap
-        if _is_caller_keyed_time_allowlist(leaf):
+        if earned_public_enabled():
+            # The caller-taint default: a gate that discriminates on the caller's
+            # identity and matches no known permissionless shape is an
+            # authorization whose principals we couldn't enumerate — fail CLOSED
+            # (gated, principals unknown), never ``conditional_universal``/public.
+            # Permissionless shapes (denylist/claim-once polarity, quantity
+            # thresholds, self-service equality, effectful value-movement calls)
+            # deliberately fall through to open. Subsumes the legacy E3/E4 arms
+            # below.
+            if leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
+                return CapabilityExpr.external_check_only(
+                    ExternalCheck(
+                        target_address=None,
+                        target_call_selector=None,
+                        extra={
+                            "basis": [caller_gate_basis(leaf)],
+                            "expression": leaf.get("expression"),
+                        },
+                    )
+                )
+        elif _is_caller_keyed_time_allowlist(leaf):
             # A deny-by-default caller-keyed time allowlist authorizes a caller SET (only
             # the pre-approved, until expiry) — keep it a gated query-only check, never
             # ``conditional_universal``/public. The share-lock and balance/allowance
@@ -443,7 +400,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     },
                 )
             )
-        if _is_caller_keyed_membership_allowlist(leaf):
+        elif _is_caller_keyed_membership_allowlist(leaf):
             # ``require(allowed[msg.sender])`` — a positive caller allowlist. Only
             # recorded addresses pass, so it's a gated external check, never the
             # ``conditional_universal``/public a side-condition would emit. The
@@ -502,6 +459,28 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         return CapabilityExpr.unsupported(f"equality_op_{operator}_unsupported")
 
     if kind == "external_bool":
+        if (
+            earned_public_enabled()
+            and operator == "truthy"
+            and leaf.get("callee_state_mutability") == "nonview"
+            and leaf_is_caller_tainted(leaf)
+            and is_permissionless_caller_shape(leaf)
+        ):
+            # Value movement (§2.3): an effectful EXTERNAL call required to
+            # succeed — ``require(token.transfer(msg.sender, …))`` — moves
+            # the caller's own assets; any caller moves their own. The
+            # delegated_authority classification (state-var target + caller
+            # arg) is structural noise here: real external ACLs are
+            # view/pure. Effectful LIBRARY calls (own-storage membership
+            # consume) and void merkle-witness verifications keep the gated
+            # path — see is_permissionless_caller_shape; they fall through
+            # to the external_set descriptor/adapter resolution below.
+            return CapabilityExpr.conditional_universal(
+                Condition(
+                    kind="self_service",
+                    description=f"effectful external call must succeed: {leaf.get('expression') or 'call'}",
+                )
+            )
         descriptor = leaf.get("set_descriptor")
         if descriptor is not None:
             if descriptor.get("kind") == "external_set":
@@ -551,6 +530,11 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
                         cap = _external_check_from_descriptor(leaf, descriptor, ctx)
                     cap = _tag_caller_subject(cap, ctx)
+            # An unresolved check that IS a caller gate (requiresAuth/ACL
+            # declines) gets the caller-gate basis tag here, where the leaf
+            # is known — the projection blocker keys on it. Inlined results
+            # and enumerations pass through untouched (kind guard).
+            cap = _stamp_caller_gate_check(cap, leaf)
             if operator == "falsy":
                 cap = negate(cap)
             return cap
@@ -561,7 +545,21 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         return CapabilityExpr.signature_witness(signer)
 
     if kind == "comparison":
-        # Caller-authority comparisons are exotic; treat as conditional.
+        # Caller-authority comparisons are exotic; legacy treats them as
+        # conditional (public). Under the caller-taint default, the only
+        # comparison shape that is an authorization is the deny-by-default
+        # time allowlist — quantity thresholds stay permissionless.
+        if earned_public_enabled() and leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
+            return CapabilityExpr.external_check_only(
+                ExternalCheck(
+                    target_address=None,
+                    target_call_selector=None,
+                    extra={
+                        "basis": [caller_gate_basis(leaf)],
+                        "expression": leaf.get("expression"),
+                    },
+                )
+            )
         cond = _condition_from_leaf(leaf)
         return CapabilityExpr.conditional_universal(cond)
 
@@ -1050,6 +1048,21 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     return sorted(values)
 
 
+def _view_call_caller_selects_key(op: Mapping[str, Any]) -> bool:
+    """Does the CALLER choose the lookup key of this arg-taking view call?
+    With recorded ``callee_args`` (registry-built trees), some arg must
+    derive from a parameter or the caller itself — constant/state-derived
+    keys (``roleAdmin(ROLE)``) are fixed authority lookups, not
+    caller-chosen rows. Compiled trees don't record args; there the derived
+    view_call fold (``predicates._derived_view_call_source``) fires only
+    when a parameter flows into the value, so the absence of recorded args
+    IS the parameter-keyed evidence."""
+    args = op.get("callee_args")
+    if not args:
+        return True
+    return any((arg or {}).get("source") in ("parameter", "msg_sender", "tx_origin", "root_caller") for arg in args)
+
+
 def _resolve_equality_principal(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
@@ -1187,6 +1200,30 @@ def _resolve_equality_principal(
         # Only nullary getters (owner()/governor()) are read live — a view
         # taking args (e.g. roleAdmin(role)) can't be called with empty
         # calldata, so leave it to the placeholder.
+        signature = op.get("callee_signature")
+        if (
+            earned_public_enabled()
+            and isinstance(signature, str)
+            and "(" in signature
+            and not signature.endswith("()")
+            and _view_call_caller_selects_key(op)
+        ):
+            # An ARG-taking view lookup whose key the CALLER selects —
+            # ``msg.sender == ownerOf(tokenId)`` / ``== getApproved(id)`` /
+            # ``== withdrawal.owner``: every caller passes for their own key
+            # (self-service-or-appointed, the uniform policy). A FIXED
+            # authority keeps the gated path below — nullary getters, and
+            # arg-taking lookups keyed by constants/state
+            # (``msg.sender == roleAdmin(ROLE)``), which are authority
+            # values, not caller-chosen rows. Without this arm the
+            # placeholder empty-lower set would trip the earned-public
+            # projection blocker and gate every ERC721 transfer/claim
+            # family function.
+            cond = Condition(
+                kind="self_service",
+                description=f"caller matches {signature} for their own key",
+            )
+            return CapabilityExpr.conditional_universal(cond)
         selector = None
         canonical_selector = None
         if not op.get("callee_args"):
@@ -2144,6 +2181,31 @@ def _selector_for_signature(signature: str) -> str | None:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
+def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> CapabilityExpr:
+    """Under the earned-public default, mark an unresolvable
+    ``external_check_only`` that IS a caller gate (caller-tainted leaf, no
+    permissionless shape) with its ``caller_gate_basis`` tag. The projection
+    blocker keys on the tag: a tagged check suppresses a sibling public path
+    (the Solmate ``requiresAuth`` decline, a view ACL probe), while an
+    untagged check — a downstream statement-call probe whose revert surface
+    gates the INTERMEDIATE contract (the un-inlined Veda teller→vault call)
+    — keeps the legacy side-condition fold. The decision is made here, where
+    the leaf is in hand, never by pattern-matching check dicts downstream."""
+    if cap.kind != "external_check_only" or cap.check is None:
+        return cap
+    if not earned_public_enabled():
+        return cap
+    if not (leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf)):
+        return cap
+    tag = caller_gate_basis(leaf)
+    extra = dict(cap.check.extra or {})
+    basis = list(extra.get("basis") or [])
+    if tag not in basis:
+        basis.append(tag)
+    extra["basis"] = basis
+    return replace(cap, check=replace(cap.check, extra=extra))
+
+
 def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = None) -> CapabilityExpr:
     """``require(authority.check(...))`` — produces an
     external_check_only capability."""
@@ -2157,7 +2219,7 @@ def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = 
         target_call_selector=selector,
         extra={"basis": list(leaf.get("basis", []))},
     )
-    cap = CapabilityExpr.external_check_only(check)
+    cap = _stamp_caller_gate_check(CapabilityExpr.external_check_only(check), leaf)
     operator = leaf.get("operator")
     if operator == "falsy":
         cap = negate(cap)

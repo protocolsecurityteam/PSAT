@@ -211,6 +211,9 @@ class RevertDetector:
         # apart from one carrying an unmodeled require/assert (the fail-safe
         # against silent-public on a require form we don't structurally lift).
         self._scanned_nodes: list[Any] = []
+        # Per-container cache of every variable name read by any IR in its
+        # body, for the discarded-result test in ``_scan_node``.
+        self._container_reads: dict[int, set[str]] = {}
 
     def run(self) -> list[RevertGate]:
         # Walk the function's own body. Modifier-call IRs and
@@ -251,6 +254,27 @@ class RevertDetector:
     # ------------------------------------------------------------------
     # Per-node classification
     # ------------------------------------------------------------------
+
+    def _lvalue_is_read(self, lvalue: Any, container: Any) -> bool:
+        """Is a call's result variable read anywhere in ``container``'s body?
+        A never-read result means the call is a statement-expression whose
+        gates must be found by recursion; a read result feeds a condition
+        the predicate builder lifts instead. Names (not identities) are
+        compared because nodes mix ``irs_ssa`` and ``irs`` views."""
+        if container is None:
+            return True  # no scope to prove discard — keep the legacy skip
+        key = id(container)
+        reads = self._container_reads.get(key)
+        if reads is None:
+            reads = set()
+            for body_node in getattr(container, "nodes", []) or []:
+                for body_ir in list(getattr(body_node, "irs_ssa", None) or []) + list(
+                    getattr(body_node, "irs", []) or []
+                ):
+                    for read in getattr(body_ir, "read", []) or []:
+                        reads.add(str(read))
+            self._container_reads[key] = reads
+        return str(lvalue) in reads
 
     def _scan_node(self, node: Any, container: Any = None) -> None:
         self._scanned_nodes.append(node)
@@ -326,8 +350,16 @@ class RevertDetector:
         # contain.
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if isinstance(ir, (InternalCall, LibraryCall)):
-                if getattr(ir, "lvalue", None) is not None:
+                lvalue = getattr(ir, "lvalue", None)
+                if lvalue is not None and self._lvalue_is_read(lvalue, container):
+                    # The result feeds a condition somewhere — the predicate
+                    # builder lifts that path. Recursing too would double-count.
                     continue
+                # No result, or a DISCARDED result: ``modifier hasRole(r) {
+                # _hasRole(r, msg.sender); _; }`` calls a bool-returning guard
+                # helper and ignores the bool — the require lives in the
+                # callee. Skipping these silently dropped the whole gate
+                # (every EtherFiRedemptionManager admin function went public).
                 callee = getattr(ir, "function", None)
                 if callee is None:
                     continue

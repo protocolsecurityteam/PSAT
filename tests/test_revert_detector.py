@@ -552,3 +552,63 @@ def test_genuinely_ungated_function_stays_gateless(tmp_path):
     fn = _function(sl, "f")
     gates = RevertDetector(fn).run()
     assert gates == [], f"expected no gates for an ungated function, got {_gate_kinds(gates)}"
+
+
+# ---------------------------------------------------------------------------
+# Discarded-result guard helpers: the require lives in a bool-returning
+# callee whose result the caller ignores.
+# ---------------------------------------------------------------------------
+
+
+def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
+    """``modifier hasRole(r) { _hasRole(r, msg.sender); _; }`` calls a
+    bool-returning guard and ignores the bool — the require lives in the
+    callee. The lvalue-skip used to drop this gate entirely (every
+    EtherFiRedemptionManager admin function defaulted to public)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
+        contract C {
+            IRoleRegistry public roleRegistry;
+            function _hasRole(bytes32 role, address account) internal view returns (bool) {
+                require(roleRegistry.hasRole(role, account), "Unauthorized");
+                return true;
+            }
+            modifier hasRole(bytes32 role) {
+                _hasRole(role, msg.sender);
+                _;
+            }
+            function pauseContract() external hasRole(keccak256("PAUSER")) {}
+        }
+    """,
+    )
+    fn = _function(sl, "pauseContract")
+    gates = RevertDetector(fn).run()
+    requires = [g for g in gates if g.kind == "require"]
+    assert requires, f"the guard helper's require must be lifted, got kinds={_gate_kinds(gates)}"
+
+
+def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
+    """``require(_check(msg.sender))`` — the result feeds the caller's own
+    require, which the predicate builder lifts; the recursion must not also
+    walk the callee and emit a duplicate gate for the same condition."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) public allowed;
+            function _check(address who) internal view returns (bool) {
+                return allowed[who];
+            }
+            function f() external view {
+                require(_check(msg.sender), "no");
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"

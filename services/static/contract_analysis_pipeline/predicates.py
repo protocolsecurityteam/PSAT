@@ -31,6 +31,7 @@ from eth_utils.crypto import keccak
 try:
     from slither.core.declarations import SolidityVariable  # type: ignore[import]
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.core.variables.variable import Variable  # type: ignore[import]
     from slither.slithir.operations import (  # type: ignore[import]
         Binary,
         Condition,
@@ -38,11 +39,15 @@ try:
         Index,
         InternalCall,
         LibraryCall,
+        LowLevelCall,
         Member,
         Return,
+        Send,
         SolidityCall,
+        Transfer,
         Unary,
         UnaryType,
+        Unpack,
     )
     from slither.slithir.variables import Constant  # type: ignore[import]
 
@@ -1351,6 +1356,74 @@ def _build_index_membership_leaf(
     return leaf
 
 
+def _callee_state_mutability(ir: Any) -> str | None:
+    """Declared mutability of a HighLevelCall's callee: ``view``/``pure``
+    for reads, ``nonview`` for effectful EXTERNAL calls,
+    ``nonview_library`` for effectful SELF-CONTAINED library calls, None
+    when the callee can't be resolved. This is the structural
+    discriminator between an external ACL read (``acl.canPerform(
+    msg.sender, …)`` — an authorization) and a value-movement call
+    (``token.transferFrom(msg.sender, …)`` — permissionless); never
+    classify by callee name. An effectful library call is kept distinct
+    ONLY when its body (transitively) makes no external calls — it then
+    manipulates the contract's OWN storage (``pendingAdmins.remove(
+    msg.sender)`` — a membership-consume gate). A wrapper library whose
+    body reaches an external call (SafeERC20/SafeTransferLib) moves
+    another contract's assets exactly like a direct call → ``nonview``."""
+    fn = getattr(ir, "function", None)
+    if fn is None:
+        return None
+    if getattr(fn, "pure", False):
+        return "pure"
+    if getattr(fn, "view", False):
+        return "view"
+    # A public state-variable auto-getter (the IR callee is the Variable
+    # itself, which carries no ``view`` attribute) is a read by construction.
+    if isinstance(fn, Variable):
+        return "view"
+    if isinstance(ir, LibraryCall):
+        return "nonview" if _library_reaches_external_call(fn) else "nonview_library"
+    return "nonview"
+
+
+# Effectful call-family Yul builtins (Slither lifts inline assembly to
+# SolidityCall ops named after the builtin). ``staticcall`` is deliberately
+# absent: a read can't move value, so a staticcall-only library stays on the
+# own-storage (gated) side.
+_YUL_EXTERNAL_CALL_PREFIXES = ("call(", "callcode(", "delegatecall(")
+
+
+def _library_reaches_external_call(fn: Any, _seen: set[int] | None = None) -> bool:
+    """Does this library function's body — transitively through internal and
+    nested library callees — make any effectful EXTERNAL call? Covers plain
+    Solidity forms (HighLevelCall to another contract, low-level ``.call``,
+    ``.send``/``.transfer``) and inline-assembly forms (Yul ``call`` family,
+    which Slither lifts as SolidityCall builtins — Solmate's SafeTransferLib
+    has no LowLevelCall IR at all)."""
+    seen = _seen if _seen is not None else set()
+    if id(fn) in seen:
+        return False
+    seen.add(id(fn))
+    for node in getattr(fn, "nodes", []) or []:
+        for body_ir in getattr(node, "irs", []) or []:
+            if isinstance(body_ir, (LowLevelCall, Send, Transfer)):
+                return True
+            # LibraryCall subclasses HighLevelCall — recurse before the
+            # external-call arm so library-to-library hops aren't external.
+            if isinstance(body_ir, (LibraryCall, InternalCall)):
+                callee = getattr(body_ir, "function", None)
+                if callee is not None and _library_reaches_external_call(callee, seen):
+                    return True
+                continue
+            if isinstance(body_ir, HighLevelCall):
+                return True
+            if isinstance(body_ir, SolidityCall):
+                name = str(getattr(getattr(body_ir, "function", None), "name", "") or "")
+                if name.startswith(_YUL_EXTERNAL_CALL_PREFIXES):
+                    return True
+    return False
+
+
 def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> LeafPredicate:
     """``require(other.check(...))`` — HighLevelCall whose result
     drives the gate."""
@@ -1365,13 +1438,21 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
         operands=args_operands,
         gate=gate,
     )
+    leaf["callee_state_mutability"] = _callee_state_mutability(ir)
+    # A result-checked ``require(call())`` gates on the returned bool; an
+    # ``external_call_revert``/``try_catch_revert`` gate is the callee's
+    # ENTIRE revert surface — the caller-taint default needs the
+    # distinction (plus the callee's arg types) to tell value movement
+    # from a void merkle-witness verification.
+    leaf["gate_kind"] = gate.kind
+    leaf["callee_signature"] = callee_signature
     # Authority classification for external_bool: delegated_authority
     # if the call target traces to a state_variable AND any arg
     # traces to msg_sender or signature_recovery.
     target_sources = _sources_from_destination(ir, prov)
     has_state_target = any(s.kind == "state_variable" for s in target_sources)
     target_state_var = next(
-        (s.state_variable_name for s in target_sources if s.kind == "state_variable"),
+        (s.state_variable_name for s in sorted(target_sources, key=_source_sort_key) if s.kind == "state_variable"),
         None,
     )
     has_caller_arg = any(
@@ -1467,12 +1548,57 @@ def _build_truthy_leaf(cond: Any, prov: ProvenanceMap, gate: RevertGate) -> Leaf
         gate=gate,
     )
     leaf["authority_role"] = "business"  # bare-bool gates rarely auth
+    # ``require(sent)`` after ``msg.sender.call{value: …}("")``: the bool is
+    # an effectful-call result whose provenance folds to the caller (the
+    # call's destination). Stamp mutability so the caller-taint default can
+    # tell this value-movement success check apart from a caller-keyed
+    # storage flag (``allowlisted[msg.sender].registered``).
+    containing = getattr(gate, "containing_function", None)
+    defining = _find_defining_ir(cond, getattr(gate, "node", None), containing)
+    if isinstance(defining, Unpack):
+        # ``(bool sent, ) = …`` — chase through the tuple to the call.
+        tuple_var = getattr(defining, "tuple", None)
+        if tuple_var is not None:
+            defining = _find_defining_ir(tuple_var, None, containing) or defining
+    if isinstance(defining, (LowLevelCall, Send, Transfer)):
+        leaf["callee_state_mutability"] = "nonview"
+    elif isinstance(defining, HighLevelCall):
+        leaf["callee_state_mutability"] = _callee_state_mutability(defining)
     return leaf
 
 
 # ---------------------------------------------------------------------------
 # Operand classification
 # ---------------------------------------------------------------------------
+
+
+def _source_sort_key(source: Source) -> tuple[str, ...]:
+    """Total deterministic order over Source records. ``SourceSet`` is a
+    frozenset of string-bearing dataclasses, so its iteration order varies
+    with PYTHONHASHSEED — any "pick the first matching source" over it is
+    nondeterministic ACROSS PROCESSES (a fold flickered between
+    ``ownerOf(uint256)`` and ``_getQueue()`` run to run, flipping the
+    public/gated verdict of WithdrawalQueueERC721.approve). Every
+    single-source pick must sort by this key first. Deliberately *not* a
+    semantic preference: preferring e.g. arg-taking views could attribute a
+    nullary authority getter to an inner keyed lookup and manufacture an
+    open."""
+    return (
+        str(source.kind),
+        str(source.parameter_index),
+        str(source.parameter_name),
+        str(source.state_variable_name),
+        str(source.member_path),
+        str(source.callee),
+        str(source.callee_signature),
+        str(source.callee_selector),
+        str(source.callee_args_digest),
+        str(source.constant_value),
+        str(source.value_type),
+        str(source.computed_kind),
+        str(source.block_context_kind),
+        str(source.storage_slot),
+    )
 
 
 def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
@@ -1506,15 +1632,16 @@ def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
         "top",
     )
     for kind in priority:
-        matches = [s for s in sources if s.kind == kind]
+        matches = sorted((s for s in sources if s.kind == kind), key=_source_sort_key)
         if kind == "state_variable":
+            # Stable sort: member-path depth first, sort-key order within ties.
             matches = sorted(matches, key=lambda source: len(getattr(source, "member_path", ()) or ()), reverse=True)
         for s in matches:
             op = _source_to_operand(s)
             _attach_state_constant_value(op, value)
             return op
-    # Fallback: any source.
-    op = _source_to_operand(next(iter(sources)))
+    # Fallback: any source (deterministically the sort-key minimum).
+    op = _source_to_operand(min(sources, key=_source_sort_key))
     _attach_state_constant_value(op, value)
     return op
 
@@ -1526,7 +1653,7 @@ def _derived_view_call_source(sources: SourceSet) -> Source | None:
     has_parameter = any(s.kind == "parameter" for s in sources)
     if not has_state or not has_parameter:
         return None
-    return next((s for s in sources if s.kind == "view_call"), None)
+    return min((s for s in sources if s.kind == "view_call"), key=_source_sort_key, default=None)
 
 
 def _source_to_operand(source: Source) -> Operand:

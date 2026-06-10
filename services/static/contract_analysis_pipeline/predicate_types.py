@@ -213,6 +213,22 @@ class LeafPredicate(TypedDict):
     parameter_indices: list[int]
     expression: str
     basis: list[str]
+    # external_bool / bool-result provenance (the caller-taint default's
+    # structural discriminators — absent on trees built before they were
+    # stamped, and consumers must tolerate that):
+    # declared callee mutability: "view" / "pure" / "nonview" (effectful
+    # external, incl. wrapper libraries whose body reaches an external
+    # call) / "nonview_library" (effectful library touching only the
+    # contract's own storage).
+    callee_state_mutability: NotRequired[str | None]
+    # The RevertGate kind that produced this leaf ("require",
+    # "external_call_revert", "try_catch_revert", …): a result-checked
+    # require gates on the returned bool; a void statement call gates on
+    # the callee's entire revert surface.
+    gate_kind: NotRequired[str | None]
+    # Canonical ABI signature of the callee (arg TYPES, used e.g. for the
+    # bytes32[] merkle-witness discriminator — never the callee name).
+    callee_signature: NotRequired[str | None]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]
