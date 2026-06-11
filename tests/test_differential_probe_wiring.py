@@ -10,10 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# Initialize services.resolution before services.policy: policy's package init
-# re-enters resolution via effective_permissions → capability_surface →
-# permissionless_shapes, which import-errors if policy starts the cycle.
-import services.resolution  # noqa: F401
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.resolution import differential_probe as dp
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
