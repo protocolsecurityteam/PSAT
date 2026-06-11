@@ -156,8 +156,14 @@ jobs:
       # test needing a real solc resolves it from solc-select's local store and
       # skips when absent. Preinstall one >=0.8.26 here (outside the guard) so
       # the custom-error require tests actually run instead of skipping.
+      # `use` is load-bearing: install alone leaves no global version selected,
+      # and with a NON-empty store the solc shim skips its bootstrap-latest
+      # fallback (the accident bare-Slither compiles relied on before) and
+      # halts with "No solc version set", failing every bare-Slither test.
       - name: Install solc for real-Slither tests
-        run: uv run solc-select install 0.8.27
+        run: |
+          uv run solc-select install 0.8.27
+          uv run solc-select use 0.8.27
       - name: Install Playwright browser
         run: uv run playwright install --with-deps chromium
       - name: Create test database
