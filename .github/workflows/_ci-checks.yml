@@ -152,6 +152,12 @@ jobs:
           exit 1
       - run: uv sync --dev
       - run: forge --version
+      # The offline network guard blocks solc downloads inside pytest, so any
+      # test needing a real solc resolves it from solc-select's local store and
+      # skips when absent. Preinstall one >=0.8.26 here (outside the guard) so
+      # the custom-error require tests actually run instead of skipping.
+      - name: Install solc for real-Slither tests
+        run: uv run solc-select install 0.8.27
       - name: Install Playwright browser
         run: uv run playwright install --with-deps chromium
       - name: Create test database

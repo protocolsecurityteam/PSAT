@@ -429,14 +429,25 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _solc_086(version: str = "0.8.27") -> str:
-    """Return a >=0.8.26 solc binary path (install on demand), so the custom-error
-    require form parses. CI-safe: resolves through solc-select's own store."""
+def _solc_086() -> str:
+    """Highest installed solc >=0.8.26, so the custom-error require form
+    parses. Resolved from solc-select's LOCAL store only — the offline guard
+    blocks the binary download under pytest, so an absent version skips
+    rather than installing on demand (the CI workflow preinstalls one;
+    locally: ``solc-select install 0.8.27``)."""
     import solc_select.solc_select as ss
 
-    if version not in ss.installed_versions():
-        ss.install_artifacts([version])
-    return str(ss.artifact_path(version))
+    best: tuple[int, int, int] | None = None
+    for version in ss.installed_versions():
+        try:
+            parsed = tuple(int(x) for x in version.split("."))
+        except ValueError:
+            continue
+        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
+            best = parsed  # type: ignore[assignment]
+    if best is None:
+        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
+    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 def _compile_086(tmp_path: Path, source: str) -> Slither:
@@ -452,7 +463,7 @@ def test_require_custom_error_is_lifted(tmp_path):
     sl = _compile_086(
         tmp_path,
         """
-        pragma solidity 0.8.27;
+        pragma solidity ^0.8.26;
         contract C {
             address public owner;
             error NotOwner();
@@ -478,7 +489,7 @@ def test_require_custom_error_with_args_is_lifted(tmp_path):
     sl = _compile_086(
         tmp_path,
         """
-        pragma solidity 0.8.27;
+        pragma solidity ^0.8.26;
         contract C {
             address public owner;
             error Unauthorized(address caller);
