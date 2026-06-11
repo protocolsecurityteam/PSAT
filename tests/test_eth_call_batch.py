@@ -4,6 +4,8 @@ no live RPC is touched (fully deterministic)."""
 
 from __future__ import annotations
 
+from typing import Any
+
 from eth_abi.abi import encode as abi_encode
 
 import utils.rpc as rpc
@@ -23,7 +25,7 @@ class _FakeResponse:
 class _FakeSession:
     def __init__(self, payload):
         self._payload = payload
-        self.posted = None
+        self.posted: Any = None
 
     def post(self, url, json=None, timeout=None, headers=None):  # noqa: A002
         self.posted = json

@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import urlparse
 
 import requests
@@ -756,7 +756,7 @@ def _eth_call_result_from_rpc_item(item: Mapping[str, Any]) -> EthCallResult:
 
 def eth_call_batch(
     rpc_url: str,
-    calls: list[Mapping[str, str]],
+    calls: Sequence[Mapping[str, str]],
     block_tag: str = "latest",
     *,
     headers: Mapping[str, str] | None = None,

@@ -8,6 +8,12 @@ other outcome keeps the static gated verdict, and any failure is swallowed.
 
 from __future__ import annotations
 
+from typing import Any
+
+# Initialize services.resolution before services.policy: policy's package init
+# re-enters resolution via effective_permissions → capability_surface →
+# permissionless_shapes, which import-errors if policy starts the cycle.
+import services.resolution  # noqa: F401
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.resolution import differential_probe as dp
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
@@ -97,16 +103,18 @@ def test_apply_public_result_mints_conditional_universal_that_projects_public():
 
 def test_apply_gated_result_keeps_external_check_and_attaches_evidence():
     cap = _gated_unknown_cap()
-    for verdict, attribution in [
+    cases: list[tuple[dp.Verdict, dp.Attribution]] = [
         ("gated_confirmed", "caller_discriminating"),
         ("gated_observed", "caller_rejected_consistent"),
         ("keep_static", "indeterminate"),
-    ]:
+    ]
+    for verdict, attribution in cases:
         result = dp.ProbeResult(
             attribution=attribution, verdict=verdict, transcript={"attribution": attribution}, reason=attribution
         )
         out = _apply_probe_result(cap, result)
         assert out.kind == "external_check_only"
+        assert out.check is not None
         assert out.check.extra["differential_probe"]["attribution"] == attribution
         # The original caller-gate basis tag survives (still gated-unknown).
         assert "caller_tainted_authority_unresolved" in out.check.extra["basis"]
@@ -151,6 +159,7 @@ def test_maybe_probe_keeps_gated_for_rejecting_function():
         call_batch=lambda calls, tag: [revert("0x08c379a0") for _ in calls],
     )
     assert out.kind == "external_check_only"
+    assert out.check is not None
     assert "differential_probe" in out.check.extra
 
 
@@ -189,7 +198,7 @@ def test_probe_cache_skips_wire_on_second_resolve(monkeypatch):
         return [ok() for _ in batch]
 
     monkeypatch.setattr(cr, "eth_call_batch", fake_wire)
-    kw = dict(
+    kw: dict[str, Any] = dict(
         chain_id=1,
         contract_address="0x" + "99" * 20,
         fn_signature="setClaimingOpen(uint256)",

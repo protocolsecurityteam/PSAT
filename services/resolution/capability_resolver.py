@@ -560,8 +560,10 @@ def _maybe_differential_probe(
         if not rpc_url:
             return cap
 
-        def call_batch(calls: list[dict[str, str]], block_tag: str):  # noqa: ANN202
+        def _wire_call_batch(calls: list[dict[str, str]], block_tag: str):  # noqa: ANN202
             return eth_call_batch(rpc_url, calls, block_tag)
+
+        call_batch = _wire_call_batch
 
     try:
         result = run_differential_probe(
