@@ -19,7 +19,6 @@ from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
 from services.discovery.fetch import fetch, scaffold
-from services.policy.effective_permissions import build_effective_permissions
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
@@ -115,6 +114,14 @@ def _build_effective_permissions(
     snapshot: ControlSnapshot,
 ) -> dict[str, Any] | None:
     """Compute the effective-permissions payload for nested resolution."""
+    # Function-scope import: the module-level form is the back-edge of the
+    # policy↔resolution package cycle (policy.__init__ → effective_permissions
+    # → capability_surface → permissionless_shapes → resolution.__init__ →
+    # here), which import-crashes any process that touches services.policy
+    # first — policy_worker died on boot and took the whole worker pool with
+    # it (start_workers.sh exits on first death).
+    from services.policy.effective_permissions import build_effective_permissions
+
     try:
         return cast(
             dict,

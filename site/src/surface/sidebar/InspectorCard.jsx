@@ -1,6 +1,26 @@
 import { formatDelay, shortAddr } from "../format.js";
 import { LANE_META, TYPE_META } from "../meta.js";
 
+// Empty-callers copy keyed by the guard's open-path shape, so a one-shot or a
+// denylist/permit reads accurately instead of a flat "marked public".
+const OPEN_CALLER_TEXT = {
+  one_shot_consumed: "Consumed one-shot initializer — the open path is spent and can no longer be called.",
+  one_shot_live: "Live one-shot initializer — anyone can call it once until it is consumed.",
+  one_shot_unread: "One-shot initializer — open to anyone until its latch is consumed (on-chain state not yet read).",
+  denylist: "Permissionless except a denylist — callable by anyone not on the excluded list.",
+  permit: "Permissionless via signature — the affected party must have authorized it (permit-style).",
+  self_service: "Self-service — each caller can act only on their own account.",
+  public: "Permissionless — callable by anyone.",
+};
+
+function emptyCallerText(selected) {
+  const text = OPEN_CALLER_TEXT[selected.guard?.shape];
+  if (text) return text;
+  if (selected.authorityPublic) return "Permissionless — callable by anyone.";
+  if (selected.guard?.kind === "resolved_empty") return "No active principal can call this path right now.";
+  return "No controlling principal was resolved for this path.";
+}
+
 function principalDetail(principal) {
   const ownerCount = Array.isArray(principal.details?.owners) ? principal.details.owners.length : 0;
   const threshold = Number(principal.details?.threshold);
@@ -85,13 +105,7 @@ export function InspectorCard({ selected, onNavigate }) {
             })}
           </div>
         ) : (
-          <p className="ps-inspector-empty">
-            {selected.authorityPublic
-              ? "This function is marked public in the authority state."
-              : selected.guard.kind === "resolved_empty"
-                ? "No active principal can call this path right now."
-                : "No controlling principal was resolved for this path."}
-          </p>
+          <p className="ps-inspector-empty">{emptyCallerText(selected)}</p>
         )}
       </div>
 

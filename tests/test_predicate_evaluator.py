@@ -975,3 +975,90 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
         {"source": "constant", "constant_value": role_word},
         {"source": "root_caller"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Caller-authority gates whose authority lives in an external contract or a
+# caller-keyed allowlist must resolve GATED, never public. These were the
+# residual false-opens after the custom-error-require fix: a caller gate the
+# evaluator couldn't classify fell through to a ``business`` side-condition and
+# the function defaulted to public. Polarity / shape keeps genuinely
+# permissionless siblings (denylist / claim-once) open.
+# ---------------------------------------------------------------------------
+
+
+def test_caller_equals_external_getter_resolves_gated(tmp_path):
+    """``require(msg.sender == registry.admin())`` — the authority lives in
+    another contract. For the ``==`` to type-check, ``registry.admin()`` returns
+    ``address``, so this is a caller-authority gate. It must resolve to a gated
+    ``external_check_only`` (query the getter), never ``conditional_universal``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IRegistry { function admin() external view returns (address); }
+        contract C {
+            IRegistry public registry;
+            function f() external view {
+                require(msg.sender == registry.admin(), "not admin");
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    cap = evaluate_tree(trees["f()"])
+    assert cap.kind == "external_check_only", (
+        f"caller==external.getter() must be a gated external check, got {cap.kind} "
+        "(a regression to the business→conditional_universal→public false-open)"
+    )
+
+
+def test_caller_keyed_allowlist_membership_resolves_gated(tmp_path):
+    """``require(allowed[msg.sender])`` is a positive caller allowlist — only
+    recorded addresses pass. It must resolve gated (``external_check_only``), not
+    ``conditional_universal``/public."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) public allowed;
+            function f() external view {
+                require(allowed[msg.sender]);
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    cap = evaluate_tree(trees["f()"])
+    assert cap.kind == "external_check_only", (
+        f"a caller allowlist must be gated, got {cap.kind} (false-open regression)"
+    )
+
+
+def test_caller_keyed_denylist_membership_stays_open(tmp_path):
+    """The polarity sibling: ``require(!registered[msg.sender])`` is a denylist /
+    claim-once — the default-false caller is ALLOWED, so anyone not yet listed may
+    call. This must STAY ``conditional_universal``/public (the self-registration
+    path the cofinite refactor preserves); the allowlist gating must not catch it."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) registered;
+            function f() external {
+                require(!registered[msg.sender]);
+                registered[msg.sender] = true;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    cap = evaluate_tree(trees["f()"])
+    assert cap.kind == "conditional_universal", (
+        f"a falsy claim-once denylist must stay open, got {cap.kind} (over-gating regression)"
+    )

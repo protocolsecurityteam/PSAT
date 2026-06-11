@@ -419,3 +419,207 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
     assert any(g.kind == "try_catch_revert" for g in gates), (
         f"no gate with kind='try_catch_revert' found; got kinds={_gate_kinds(gates)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom-error require — ``require(cond, MyError())`` (Solidity >=0.8.26).
+# Slither lowers this to a SolidityCall named ``require(bool,error)``. Dropping
+# it left the predicate tree empty and the function defaulted to public; it must
+# be lifted exactly like ``require(bool)`` / ``require(bool,string)``.
+# ---------------------------------------------------------------------------
+
+
+def _solc_086() -> str:
+    """Highest installed solc >=0.8.26, so the custom-error require form
+    parses. Resolved from solc-select's LOCAL store only — the offline guard
+    blocks the binary download under pytest, so an absent version skips
+    rather than installing on demand (the CI workflow preinstalls one;
+    locally: ``solc-select install 0.8.27``)."""
+    import solc_select.solc_select as ss
+
+    best: tuple[int, int, int] | None = None
+    for version in ss.installed_versions():
+        try:
+            parsed = tuple(int(x) for x in version.split("."))
+        except ValueError:
+            continue
+        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
+            best = parsed  # type: ignore[assignment]
+    if best is None:
+        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
+    return str(ss.artifact_path(".".join(str(x) for x in best)))
+
+
+def _compile_086(tmp_path: Path, source: str) -> Slither:
+    src = textwrap.dedent(source).strip() + "\n"
+    f = tmp_path / "C.sol"
+    f.write_text(src)
+    return Slither(str(f), solc=_solc_086())
+
+
+def test_require_custom_error_is_lifted(tmp_path):
+    """``require(msg.sender == owner, NotOwner())`` must yield a ``require`` gate
+    with the caller-equality condition — not an empty gate list."""
+    sl = _compile_086(
+        tmp_path,
+        """
+        pragma solidity ^0.8.26;
+        contract C {
+            address public owner;
+            error NotOwner();
+            function f() external view {
+                require(msg.sender == owner, NotOwner());
+            }
+        }
+        """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert any(g.kind == "require" for g in gates), (
+        f"custom-error require dropped: expected a 'require' gate, got {_gate_kinds(gates)}"
+    )
+    req = next(g for g in gates if g.kind == "require")
+    assert req.polarity == "allowed_when_true"
+    assert req.condition_value is not None
+
+
+def test_require_custom_error_with_args_is_lifted(tmp_path):
+    """The error constructor taking arguments (``MyError(x)``) is the same
+    ``require(bool,error)`` SolidityCall shape — also lifted."""
+    sl = _compile_086(
+        tmp_path,
+        """
+        pragma solidity ^0.8.26;
+        contract C {
+            address public owner;
+            error Unauthorized(address caller);
+            function f() external view {
+                require(msg.sender == owner, Unauthorized(msg.sender));
+            }
+        }
+        """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert any(g.kind == "require" for g in gates), _gate_kinds(gates)
+
+
+# ---------------------------------------------------------------------------
+# Coverage invariant — a require/assert SolidityCall we walked but did not lift
+# into a gate must surface as ``unsupported`` (fail closed), never be silently
+# dropped (which defaults the function to public).
+# ---------------------------------------------------------------------------
+
+
+def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
+    """If the structural lifter rejects a require form, the coverage invariant
+    emits an ``opaque``/``unsupported`` gate so the tree is non-empty and the
+    function resolves gated. Simulated here by forcing ``_ir_is_require`` to
+    reject every require — a stand-in for any future unmodeled form."""
+    import services.static.contract_analysis_pipeline.revert_detect as rd
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f() external view {
+                require(msg.sender == owner);
+            }
+        }
+        """,
+    )
+    fn = _function(sl, "f")
+
+    # Baseline: with the require recognised, there is no unmodeled-gate marker.
+    baseline = RevertDetector(fn).run()
+    assert not any(g.unsupported_reason == "unmodeled_require_gate" for g in baseline)
+    assert any(g.kind == "require" for g in baseline)
+
+    # Reject every require → the walked-but-unlifted require must be caught.
+    monkeypatch.setattr(rd, "_ir_is_require", lambda ir: False)
+    gates = RevertDetector(fn).run()
+    assert any(g.kind == "opaque" and g.unsupported_reason == "unmodeled_require_gate" for g in gates), (
+        "an unmodeled require slipped through with no gate — the function would "
+        f"default to public; got {_gate_kinds(gates)}"
+    )
+
+
+def test_genuinely_ungated_function_stays_gateless(tmp_path):
+    """The coverage invariant must NOT fire on a function with no require/assert
+    at all — a genuinely permissionless function still yields zero gates (→ the
+    deliberate public default), not a spurious unsupported gate."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public total;
+            function f() external view returns (uint256) { return total; }
+        }
+        """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert gates == [], f"expected no gates for an ungated function, got {_gate_kinds(gates)}"
+
+
+# ---------------------------------------------------------------------------
+# Discarded-result guard helpers: the require lives in a bool-returning
+# callee whose result the caller ignores.
+# ---------------------------------------------------------------------------
+
+
+def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
+    """``modifier hasRole(r) { _hasRole(r, msg.sender); _; }`` calls a
+    bool-returning guard and ignores the bool — the require lives in the
+    callee. The lvalue-skip used to drop this gate entirely (every
+    EtherFiRedemptionManager admin function defaulted to public)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
+        contract C {
+            IRoleRegistry public roleRegistry;
+            function _hasRole(bytes32 role, address account) internal view returns (bool) {
+                require(roleRegistry.hasRole(role, account), "Unauthorized");
+                return true;
+            }
+            modifier hasRole(bytes32 role) {
+                _hasRole(role, msg.sender);
+                _;
+            }
+            function pauseContract() external hasRole(keccak256("PAUSER")) {}
+        }
+    """,
+    )
+    fn = _function(sl, "pauseContract")
+    gates = RevertDetector(fn).run()
+    requires = [g for g in gates if g.kind == "require"]
+    assert requires, f"the guard helper's require must be lifted, got kinds={_gate_kinds(gates)}"
+
+
+def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
+    """``require(_check(msg.sender))`` — the result feeds the caller's own
+    require, which the predicate builder lifts; the recursion must not also
+    walk the callee and emit a duplicate gate for the same condition."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) public allowed;
+            function _check(address who) internal view returns (bool) {
+                return allowed[who];
+            }
+            function f() external view {
+                require(_check(msg.sender), "no");
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"

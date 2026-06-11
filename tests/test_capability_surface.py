@@ -31,7 +31,7 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
     assert surface.authority_public is True
     assert len(surface.public_paths) == 1
     path = surface.public_paths[0]
-    assert any(c["kind"] == "business" and "denylist exclusion (2 known excluded)" in c["description"] for c in path), (
+    assert any(c["kind"] == "denylist" and "denylist exclusion (2 known excluded)" in c["description"] for c in path), (
         path
     )
 

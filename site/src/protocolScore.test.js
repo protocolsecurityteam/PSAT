@@ -158,4 +158,83 @@ describe("computeProtocolScore", () => {
     expect(authorityAxis.tooltip.negative).not.toContain("unresolved controllers");
     expect(JSON.stringify(authorityAxis.tooltip.negativeExamples)).not.toContain("controller unresolved");
   });
+
+  function contractWithAction(fn) {
+    return {
+      address: "0xcontract",
+      name: "Vault",
+      source_verified: true,
+      role: "value_handler",
+      total_usd: 100_000_000,
+      functions: [fn],
+    };
+  }
+
+  function authorityTooltip(fn) {
+    const score = computeProtocolScore({ contracts: [contractWithAction(fn)] }, null);
+    return score.axes.find((entry) => entry.key === "authority").tooltip;
+  }
+
+  it("describes a permissionless high-risk action as permissionless, not an unresolved controller", () => {
+    const tooltip = authorityTooltip({
+      function: "sweep(address)",
+      effect_labels: ["asset_send"], // asset_out, high-risk
+      authority_public: true,
+      controllers: [],
+    });
+    const json = JSON.stringify(tooltip.negativeExamples);
+    expect(json).toContain("permissionless");
+    expect(json).not.toContain("No resolved controller was found");
+    expect(json).not.toContain("controller unresolved");
+    expect(tooltip.negative).not.toContain("unresolved controllers");
+  });
+
+  it("still flags a genuinely unresolved (non-public) controller as such", () => {
+    const tooltip = authorityTooltip({
+      function: "sweep(address)",
+      effect_labels: ["asset_send"],
+      authority_public: false,
+      controllers: [],
+    });
+    const json = JSON.stringify(tooltip.negativeExamples);
+    expect(json).toContain("No resolved controller was found");
+    expect(json).not.toContain("permissionless");
+  });
+
+  it("does not surface a consumed one-shot initializer as a negative example", () => {
+    const score = computeProtocolScore(
+      {
+        contracts: [
+          contractWithAction({
+            function: "initialize(address)",
+            effect_labels: ["authority_update"], // admin, high-risk
+            authority_public: true,
+            conditions: [{ kind: "one_shot", latch_state: "consumed" }],
+            controllers: [],
+          }),
+        ],
+      },
+      null,
+    );
+    const tooltip = score.axes.find((entry) => entry.key === "authority").tooltip;
+    const json = JSON.stringify(tooltip.negativeExamples);
+    expect(json).not.toContain("initialize");
+    expect(json).not.toContain("permissionless");
+    expect(json).not.toContain("No resolved controller was found");
+    // a spent initializer is inert, so the authority axis reads it as protected
+    expect(axis(score, "authority")).toBeGreaterThan(0.9);
+  });
+
+  it("describes a live one-shot initializer accurately rather than as an unresolved controller", () => {
+    const tooltip = authorityTooltip({
+      function: "initialize(address)",
+      effect_labels: ["authority_update"],
+      authority_public: true,
+      conditions: [{ kind: "one_shot", latch_state: "live" }],
+      controllers: [],
+    });
+    const json = JSON.stringify(tooltip.negativeExamples);
+    expect(json).toContain("live one-shot");
+    expect(json).not.toContain("No resolved controller was found");
+  });
 });

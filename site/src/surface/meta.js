@@ -39,6 +39,9 @@ export const TYPE_META = {
   unknown: { label: "UNK", accent: "#94a3b8" },
   resolved_empty: { label: "NONE", accent: "#64748b" },
   open: { label: "OPEN", accent: "#64748b" },
+  // A live, unconsumed one-shot initializer — anyone can call it once. Red:
+  // it is the highest-severity principal-less state, not a benign open.
+  one_shot_live: { label: "1-SHOT!", accent: "#ef4444" },
   many: { label: "MULTI", accent: "#8a80a0" },
 };
 

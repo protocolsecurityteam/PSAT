@@ -4,6 +4,7 @@
 import { TYPE_META } from "../meta.js";
 import { formatDelay, shortAddr } from "../format.js";
 import { collectPrincipals } from "./controlGraph.js";
+import { oneShotState } from "../../oneShot.js";
 
 function isExactEmptyCapability(cap) {
   if (!cap || typeof cap !== "object") return false;
@@ -20,6 +21,25 @@ function isResolvedEmptyFunction(fn) {
   return fn?.status === "resolved_empty" || isExactEmptyCapability(fn?.capability_expr);
 }
 
+// Flavors of an "open" path. The function is callable by anyone in every case,
+// so they share the `open` badge kind — the `shape`/sublabel says under what
+// shape, read off the typed side-conditions the backend projects.
+const OPEN_SUBLABEL = {
+  one_shot_unread: "one-shot",
+  denylist: "denylist",
+  permit: "signature",
+  self_service: "self-service",
+  public: "public",
+};
+
+function openShape(fn) {
+  const kinds = new Set((Array.isArray(fn?.conditions) ? fn.conditions : []).map((c) => c?.kind));
+  if (kinds.has("denylist")) return "denylist";
+  if (kinds.has("permit_sig")) return "permit";
+  if (kinds.has("self_service")) return "self_service";
+  return "public";
+}
+
 export function guardSummary(fn, companyData) {
   const { direct, indirect } = collectPrincipals(fn, companyData);
   // `principals` stays as the direct list for backward compatibility — every
@@ -28,12 +48,38 @@ export function guardSummary(fn, companyData) {
   const principals = direct;
 
   if (!direct.length) {
+    // One-shot initializers split the "open" badge by their on-chain latch: a
+    // consumed one-shot is inert (renders like resolved_empty — nobody can call
+    // it again); a live one is a critical opening (its own high-severity badge).
+    const latch = oneShotState(fn);
+    if (fn.authority_public && latch === "consumed") {
+      const meta = TYPE_META.resolved_empty;
+      return { kind: "resolved_empty", shape: "one_shot_consumed", label: meta.label,
+        sublabel: "one-shot · consumed", accent: meta.accent, principals, indirect };
+    }
+    if (fn.authority_public && latch === "live") {
+      const meta = TYPE_META.one_shot_live;
+      return { kind: "one_shot_live", shape: "one_shot_live", label: meta.label,
+        sublabel: "one-shot · LIVE", accent: meta.accent, principals, indirect };
+    }
     const kind = fn.authority_public ? "open" : isResolvedEmptyFunction(fn) ? "resolved_empty" : "unknown";
     const meta = TYPE_META[kind];
+    const shape = fn.authority_public
+      ? latch
+        ? "one_shot_unread"
+        : openShape(fn)
+      : kind === "resolved_empty"
+        ? "resolved_empty"
+        : "unknown";
     return {
       kind,
+      shape,
       label: meta.label,
-      sublabel: fn.authority_public ? "public" : kind === "resolved_empty" ? "no active principal" : "unresolved",
+      sublabel: fn.authority_public
+        ? OPEN_SUBLABEL[shape]
+        : kind === "resolved_empty"
+          ? "no active principal"
+          : "unresolved",
       accent: meta.accent,
       principals,
       indirect,

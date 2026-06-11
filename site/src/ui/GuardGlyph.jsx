@@ -90,6 +90,17 @@ export function GuardGlyph({ kind, accent, title }) {
     );
   }
 
+  if (kind === "one_shot_live") {
+    // Live, unconsumed one-shot — an alert glyph, not the generic open padlock.
+    return (
+      <svg {...common}>
+        <path d="M8 2.4L14.6 13.2H1.4L8 2.4Z" stroke={accent} strokeWidth="1.4" strokeLinejoin="round" fill={`${accent}1c`} />
+        <path d="M8 6.2V9.6" stroke={accent} strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx="8" cy="11.4" r="0.85" fill={accent} />
+      </svg>
+    );
+  }
+
   if (kind === "many") {
     return (
       <svg {...common}>

@@ -195,6 +195,7 @@ AuthorityRole = Literal[
     "reentrancy",
     "pause",
     "business",
+    "one_shot",
 ]
 
 
@@ -213,6 +214,34 @@ class LeafPredicate(TypedDict):
     parameter_indices: list[int]
     expression: str
     basis: list[str]
+    # external_bool / bool-result provenance (the caller-taint default's
+    # structural discriminators — absent on trees built before they were
+    # stamped, and consumers must tolerate that):
+    # declared callee mutability: "view" / "pure" / "nonview" (effectful
+    # external, incl. wrapper libraries whose body reaches an external
+    # call) / "nonview_library" (effectful library touching only the
+    # contract's own storage).
+    callee_state_mutability: NotRequired[str | None]
+    # The RevertGate kind that produced this leaf ("require",
+    # "external_call_revert", "try_catch_revert", …): a result-checked
+    # require gates on the returned bool; a void statement call gates on
+    # the callee's entire revert surface.
+    gate_kind: NotRequired[str | None]
+    # Canonical ABI signature of the callee (arg TYPES, used e.g. for the
+    # bytes32[] merkle-witness discriminator — never the callee name).
+    callee_signature: NotRequired[str | None]
+    # Where the one-shot latch this leaf reads lives on-chain, so resolution
+    # can read its live value (consumed vs live) against the deployment
+    # address. Stamped by ``one_shot.apply_one_shot_pass`` on the version-var
+    # leaf of an initializer-family gate; absent everywhere else. Keys:
+    # ``kind`` ("storage"|"getter"), ``slot``/``byte_offset``/``size_bytes``/
+    # ``value_type``/``variable`` for storage reads, ``selector`` for getter
+    # reads, ``expected_version`` (reinitializer target), ``standard``.
+    one_shot_latch: NotRequired[dict[str, Any] | None]
+    # True when the leaf matched the name-free structural latch detector but
+    # NOT a recognized initializer standard. A candidate never changes the
+    # badge statically — only a confirmed on-chain latch read does.
+    one_shot_candidate: NotRequired[bool]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]

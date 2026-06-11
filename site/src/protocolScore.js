@@ -1,4 +1,5 @@
 import { bytecodeVerifiedAudits, isBytecodeVerifiedAudit } from "./auditCoverage.js";
+import { isInertOneShot, isLiveOneShot } from "./oneShot.js";
 
 // Generic protocol-posture score built from the control surface, upgrade
 // state, and audit coverage. This intentionally avoids Slither high/medium
@@ -200,6 +201,12 @@ function collectActions(contracts) {
 
 function actionProtectionScore(action) {
   if (action.principals.length === 0) {
+    // A consumed one-shot initializer is inert — the open path can never be
+    // taken again — so it is as protected as a no-active-principal action,
+    // never scored as an exploitable open. A LIVE one-shot is the opposite:
+    // anyone can call it right now, the worst principal-less state.
+    if (isInertOneShot(action.fn)) return 0.95;
+    if (isLiveOneShot(action.fn)) return 0;
     if (isResolvedEmptyAction(action)) return 0.95;
     return action.fn?.authority_public ? 0.1 : 0.35;
   }
@@ -433,7 +440,11 @@ function actionExample(action, reason) {
   const principals = action.principals.map(principalLabel).join(", ");
   const address = action.contract?.address || action.contract?.implementation || "";
   const signature = action.fn?.function || action.fn?.abi_signature || "";
-  const emptyMeta = isResolvedEmptyAction(action) ? "no active principal" : "controller unresolved";
+  const emptyMeta = isResolvedEmptyAction(action)
+    ? "no active principal"
+    : action.fn?.authority_public
+      ? "permissionless"
+      : "controller unresolved";
   return {
     title: `${contractName(action.contract)} · ${functionLabel(action.fn)}`,
     detail: reason,
@@ -538,6 +549,12 @@ function buildAuthorityTooltip(actions) {
       return actionExample(action, "Sensitive authority is controlled by an EOA.");
     }
     if (action.principals.length === 0) {
+      if (isLiveOneShot(action.fn)) {
+        return actionExample(action, "This sensitive action is a live one-shot initializer — anyone can call it once until it is consumed.");
+      }
+      if (action.fn?.authority_public) {
+        return actionExample(action, "This sensitive action is permissionless — callable by anyone.");
+      }
       return actionExample(action, "No resolved controller was found for this sensitive action.");
     }
     return actionExample(action, "Controller protection is weaker than the target threshold.");

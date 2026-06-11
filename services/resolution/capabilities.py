@@ -82,9 +82,26 @@ Subject = Literal["root", "bound"]
 class Condition:
     """A side condition that doesn't restrict the principal set but
     must hold at runtime for the function to succeed (time, pause,
-    reentrancy, business invariants)."""
+    reentrancy, business invariants).
 
-    kind: Literal["time", "pause", "reentrancy", "business", "self_service"]
+    ``one_shot`` — an initializer-family latch: anyone may call until the
+    global latch is consumed, then nobody. Whether it IS consumed is
+    on-chain state the resolver annotates onto the serialized condition
+    dict (``latch_state``), not a field here. ``permit_sig`` — the open
+    path verifies a signature from the affected party (EIP-2612/3009 /
+    ecrecover-equality folds that stay open). ``denylist`` — open except a
+    finite exclusion (the cofinite projection's typed badge)."""
+
+    kind: Literal[
+        "time",
+        "pause",
+        "reentrancy",
+        "business",
+        "self_service",
+        "one_shot",
+        "permit_sig",
+        "denylist",
+    ]
     description: str = ""
     parameter_index: int | None = None
     parameter_name: str | None = None
@@ -646,8 +663,8 @@ def _external_check_as_condition(check: ExternalCheck | None) -> Condition | Non
     selector = check.target_call_selector
     if target is not None:
         sel = f".{selector}" if selector else ""
-        return Condition(kind="business", description=f"denylist exclusion via external check {target}{sel}")
-    return Condition(kind="business", description="denylist exclusion via external check")
+        return Condition(kind="denylist", description=f"denylist exclusion via external check {target}{sel}")
+    return Condition(kind="denylist", description="denylist exclusion via external check")
 
 
 def _bound_condition_description(bound: CapabilityExpr) -> str:

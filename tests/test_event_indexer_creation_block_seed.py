@@ -72,7 +72,7 @@ class _SeedAwareFetcher:
         self.deploy = deploy
         self.from_blocks: list[int] = []
 
-    def fetch_logs(self, *, event_address, topic0, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
         self.from_blocks.append(from_block)
         if from_block < self.deploy:
             raise AssertionError(f"indexer scanned pre-deployment block {from_block} < deploy {self.deploy}")
@@ -85,7 +85,7 @@ class _SeedAwareFetcher:
                     block_number=self.deploy,
                     block_hash=b"\x02" * 32,
                     transaction_index=0,
-                    topics=[topic0, "0x" + "00" * 31 + "01"],
+                    topics=[topics[0], "0x" + "00" * 31 + "01"],
                     data_words=["0x" + "00" * 31 + "01"],
                 )
             )
@@ -99,7 +99,7 @@ class _RecordingFetcher:
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
 
-    def fetch_logs(self, *, event_address, topic0, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
         self.from_blocks.append(from_block)
         return []
 
