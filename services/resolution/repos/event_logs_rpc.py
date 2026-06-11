@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from utils.rpc import rpc_request
 
-MAX_BLOCK_RANGE = 10_000
+# One eth_getLogs per window up to this span. The eRPC fast lane for getLogs
+# (Envio HyperRPC) bills a flat 1000 credits per REQUEST regardless of block
+# range — 60 requests/min total — and serves million-block ranges fine, so
+# paging a window into small chunks burns the entire budget for no data
+# (measured: 10k-page scanning cost ~140 credits per 1k blocks vs ~1 with
+# single-request windows). Upstreams that can't take a wide range fail loudly
+# (HyperRPC: -32005 "Limit exceeded: More than 50000 logs returned" / -32603
+# "Query timed out"; regular nodes: explicit range caps) — never truncate — so
+# ``_fetch_range`` bisects on error down to MIN_BISECT_SPAN before giving up.
+MAX_BLOCK_RANGE = 1_000_000
+MIN_BISECT_SPAN = 10_000
 
 
 @dataclass(frozen=True)
@@ -22,37 +32,69 @@ class FetchedEventLog:
 
 
 class RpcEventLogFetcher:
-    def __init__(self, rpc_url: str, *, max_block_range: int = MAX_BLOCK_RANGE) -> None:
+    def __init__(
+        self,
+        rpc_url: str,
+        *,
+        max_block_range: int = MAX_BLOCK_RANGE,
+        min_bisect_span: int = MIN_BISECT_SPAN,
+    ) -> None:
         self.rpc_url = rpc_url
-        self.max_block_range = max_block_range
+        self.max_block_range = max(1, max_block_range)
+        self.min_bisect_span = max(1, min_bisect_span)
 
     def fetch_logs(
         self,
         *,
         event_address: str,
-        topic0: str,
+        topics: Sequence[str],
         from_block: int,
         to_block: int,
     ) -> list[FetchedEventLog]:
+        """Fetch logs matching ANY of ``topics`` in topic position 0.
+
+        Multiple topic0 values fold into one request (`"topics": [[t1, t2]]`
+        is OR semantics) so same-address cursors don't each rescan the same
+        range — the request, not the range, is what the upstream budget meters.
+        """
+        topic_list = [str(t).lower() for t in topics]
         out: list[FetchedEventLog] = []
         start = from_block
         while start <= to_block:
             end = min(to_block, start + self.max_block_range - 1)
-            params = [
-                {
-                    "address": event_address,
-                    "topics": [topic0],
-                    "fromBlock": hex(start),
-                    "toBlock": hex(end),
-                }
-            ]
-            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
-            if isinstance(raw_logs, list):
-                for raw in raw_logs:
-                    decoded = _decode_log(raw)
-                    if decoded is not None:
-                        out.append(decoded)
+            out.extend(self._fetch_range(event_address, topic_list, start, end))
             start = end + 1
+        return out
+
+    def _fetch_range(
+        self, event_address: str, topics: list[str], from_block: int, to_block: int
+    ) -> list[FetchedEventLog]:
+        params = [
+            {
+                "address": event_address,
+                "topics": [topics],
+                "fromBlock": hex(from_block),
+                "toBlock": hex(to_block),
+            }
+        ]
+        try:
+            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
+        except RuntimeError:
+            # Result-cap / range-cap / query-timeout from the upstream. Halve and
+            # recurse; a span at the floor is a real error, not a sizing problem.
+            span = to_block - from_block + 1
+            if span <= self.min_bisect_span:
+                raise
+            mid = from_block + span // 2 - 1
+            return self._fetch_range(event_address, topics, from_block, mid) + self._fetch_range(
+                event_address, topics, mid + 1, to_block
+            )
+        out: list[FetchedEventLog] = []
+        if isinstance(raw_logs, list):
+            for raw in raw_logs:
+                decoded = _decode_log(raw)
+                if decoded is not None:
+                    out.append(decoded)
         return out
 
 

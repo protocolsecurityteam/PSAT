@@ -6,8 +6,9 @@ import logging
 import os
 import signal
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Mapping, Protocol, TypeGuard
+from typing import Any, Mapping, MutableMapping, Protocol, Sequence, TypeGuard
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -27,23 +28,27 @@ logger = logging.getLogger("workers.event_log_indexer")
 DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
 
-# Backfill in bounded windows. A cold cursor's gap to head is ~25M blocks; the
-# fetcher already pages eth_getLogs, but a full-range step accumulates every
-# match into one list and inserts it in a single statement. On high-volume
-# authorities (the LayerZero endpoint) that one insert dropped the Neon
-# connection ("SSL connection has been closed unexpectedly"), wedging the cursor
-# at block 0 forever. So: cap the span scanned per step, batch the insert, and
-# let one pass advance a cursor across several windows.
-DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "50000"))
-# Two window caps bound how long a single scan pass runs. The per-cursor cap
-# stops one high-volume authority (the LayerZero endpoint) from consuming a whole
-# pass; the per-pass cap makes scan RETURN promptly even with many cold cursors
-# enrolled, so the fleet heartbeat refreshes and the least-recently-run rotation
-# re-prioritizes every pass instead of once per multi-cursor (~tens-of-minutes)
-# backfill. Per-cursor < per-pass so the budget spreads across several cursors
-# each pass; a cold cursor's ~25M-block gap drains over successive passes, with
-# the durable last_run_at ordering as the rotation offset (no separate persisted
-# cursor index needed).
+# Backfill in bounded windows. A cold cursor's gap to head is ~25M blocks; an
+# unbounded step accumulates every match into one list and inserts it in a
+# single statement. On high-volume authorities (the LayerZero endpoint) that
+# one insert dropped the Neon connection ("SSL connection has been closed
+# unexpectedly"), wedging the cursor at block 0 forever. So: cap the span
+# scanned per step, batch the insert, and let one pass advance across several
+# windows. The span is wide because one window is now ONE eth_getLogs (the
+# fetcher bisects only when an upstream rejects the range): the getLogs fast
+# lane (HyperRPC via eRPC) meters a flat 1000 credits per request — 60/min —
+# regardless of range, so small windows exhaust the lane while scanning almost
+# nothing. Dense bursts are bounded by the upstream's own result cap (50k logs)
+# plus the fetcher's bisect, and the insert stays batched.
+DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500000"))
+# Two window caps bound how long a single scan pass runs. The per-group cap
+# stops one high-volume address from consuming a whole pass; the per-pass cap
+# makes scan RETURN promptly even with many cold cursors enrolled, so the fleet
+# heartbeat refreshes and the least-recently-run rotation re-prioritizes every
+# pass instead of once per multi-group (~tens-of-minutes) backfill. Per-group <
+# per-pass so the budget spreads across several addresses each pass; a cold
+# address's gap drains over successive passes, with the durable last_run_at
+# ordering as the rotation offset (no separate persisted cursor index needed).
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
 DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
@@ -87,7 +92,7 @@ class LogFetcher(Protocol):
         self,
         *,
         event_address: str,
-        topic0: str,
+        topics: Sequence[str],
         from_block: int,
         to_block: int,
     ) -> list[FetchedEventLog]: ...
@@ -102,22 +107,24 @@ class BlockHashFetcher(Protocol):
 
 
 @dataclass(frozen=True)
-class IndexStepResult:
+class GroupStepResult:
     scanned_from: int
     scanned_to: int
     inserted: int
-    caught_up: bool  # True once scanned_to reached the confirmed head (no gap left)
+    members_at_target: int  # cursors of this group at/past the confirmed head after the step
+    group_complete: bool  # every member caught up — nothing left to scan this pass
+    fetched: bool  # False for the no-fetch visit of an all-warm group
 
 
 @dataclass(frozen=True)
 class ScanSummary:
     """What one ``scan_enrolled_events`` pass did, for the fleet heartbeat.
 
-    ``windows_scanned`` (steps run, summed across all cursors) over
-    ``total_cursors`` reveals the from-0 backfill signature: many windows
-    scanned with 0 inserted and ``caught_up_cursors`` < ``total_cursors``
-    means a cold cursor is grinding through empty eth_getLogs ranges while
-    the rest sit at head.
+    ``windows_scanned`` (group steps run — one shared getLogs per step, summed
+    across all address groups) over ``total_cursors`` reveals the from-0
+    backfill signature: many windows scanned with 0 inserted and
+    ``caught_up_cursors`` < ``total_cursors`` means a cold address is grinding
+    through empty eth_getLogs ranges while the rest sit at head.
     """
 
     inserted: int = 0
@@ -151,76 +158,155 @@ def enroll_event_cursor(
     return bool(getattr(result, "rowcount", 0))
 
 
-def index_event_log_step(
+def index_event_group_step(
     session: Session,
     *,
     chain_id: int,
     event_address: str,
-    topic0: str,
+    topics: Sequence[str],
     fetcher: LogFetcher,
-    head_fetcher: HeadBlockFetcher,
+    target: int,
     block_hash_fetcher: BlockHashFetcher,
+    block_hash_memo: MutableMapping[tuple[int, int], bytes | None] | None = None,
     confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
     max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
-) -> IndexStepResult:
-    cursor = session.execute(
-        select(IndexedEventCursor)
-        .where(IndexedEventCursor.chain_id == chain_id)
-        .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
-        .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
-        .with_for_update()
-    ).scalar_one_or_none()
-    if cursor is None:
-        return IndexStepResult(scanned_from=0, scanned_to=0, inserted=0, caught_up=True)
+) -> GroupStepResult:
+    """Advance every cursor of one (chain, address) group by one shared window.
 
-    head = head_fetcher.head_block()
-    target = max(0, head - confirmation_depth)
-    last = int(cursor.last_indexed_block or 0)
-    if target <= last:
-        # Cursor is already at (or past) the confirmed head — the historical
-        # backfill is done. Record that so resolvers stop treating a cursor
-        # seeded at the deploy block as "still cold" and trust the durable index.
-        # Stamp last_run_at on this no-fetch visit too: the scan orders cursors
-        # least-recently-run first, so a warm cursor that skipped its stale
-        # timestamp would keep sorting ahead of cold cursors that need windows.
-        cursor.backfill_complete = True
-        cursor.last_run_at = func.now()
-        return IndexStepResult(scanned_from=last + 1, scanned_to=target, inserted=0, caught_up=True)
+    One ``eth_getLogs`` covers all the group's topic0s (an OR list); results
+    demux back to per-topic cursors. Members advance in lockstep from the group
+    minimum — one that is already ahead of the window keeps its position and
+    only sees logs above it (re-inserts would be conflict-ignored anyway). The
+    upstream budget meters REQUESTS, not block range, so the group costs one
+    request per window instead of one per topic.
 
-    if last > 0 and cursor.last_indexed_block_hash is not None:
-        observed_hash = block_hash_fetcher.block_hash(last)
+    ``target`` is the confirmed head (``head - confirmation_depth``), computed
+    once per pass by the caller rather than re-fetched per step.
+    """
+    memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}
+    topic_list = sorted({str(t).lower() for t in topics})
+    cursors = (
+        session.execute(
+            select(IndexedEventCursor)
+            .where(IndexedEventCursor.chain_id == chain_id)
+            .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
+            .where(func.lower(IndexedEventCursor.topic0).in_(topic_list))
+            .with_for_update()
+        )
+        .scalars()
+        .all()
+    )
+    if not cursors:
+        return GroupStepResult(
+            scanned_from=0, scanned_to=0, inserted=0, members_at_target=0, group_complete=True, fetched=False
+        )
+
+    def _hash_at(block: int) -> bytes | None:
+        key = (chain_id, block)
+        if key not in memo:
+            memo[key] = block_hash_fetcher.block_hash(block)
+        return memo[key]
+
+    # Reorg guard. A hash stamp only exists where a cursor previously reached
+    # the confirmed target (mid-backfill windows are final and never stamp), so
+    # this runs once per warm cursor as it re-enters a scan — not per window —
+    # and the memo collapses same-block lookups across the whole pass.
+    for cursor in cursors:
+        last = int(cursor.last_indexed_block or 0)
+        if last <= 0 or cursor.last_indexed_block_hash is None or last >= target:
+            continue
+        observed_hash = _hash_at(last)
         if observed_hash is not None and observed_hash != cursor.last_indexed_block_hash:
             rewind_to = max(0, last - confirmation_depth)
+            # The delete is address-wide (all topics), so every sibling cursor
+            # above the rewind point must come back with it — otherwise its
+            # already-indexed range would be silently emptied.
             session.execute(
                 delete(IndexedEventLog)
                 .where(IndexedEventLog.chain_id == chain_id)
                 .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
                 .where(IndexedEventLog.block_number > rewind_to)
             )
-            cursor.last_indexed_block = rewind_to
-            cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(rewind_to) if rewind_to else None
-            last = rewind_to
+            for member in cursors:
+                if int(member.last_indexed_block or 0) > rewind_to:
+                    member.last_indexed_block = rewind_to
+                    member.last_indexed_block_hash = _hash_at(rewind_to) if rewind_to else None
+                    member.backfill_complete = False
+            break
 
-    # One bounded window per step — never the whole [last+1, target] gap at once.
-    start = last + 1
-    window_end = min(target, last + max(1, max_block_span))
+    active = [c for c in cursors if int(c.last_indexed_block or 0) < target]
+    if not active:
+        # Every member is at (or past) the confirmed head — record that so
+        # resolvers trust the durable index, and re-stamp last_run_at on this
+        # no-fetch visit too: the rotation orders groups least-recently-run
+        # first, so a warm group with a stale timestamp would keep sorting
+        # ahead of cold groups that need windows.
+        for cursor in cursors:
+            cursor.backfill_complete = True
+            cursor.last_run_at = func.now()
+        return GroupStepResult(
+            scanned_from=target + 1,
+            scanned_to=target,
+            inserted=0,
+            members_at_target=len(cursors),
+            group_complete=True,
+            fetched=False,
+        )
+
+    start = min(int(c.last_indexed_block or 0) for c in active) + 1
+    window_end = min(target, start - 1 + max(1, max_block_span))
     logs = fetcher.fetch_logs(
         event_address=event_address.lower(),
-        topic0=topic0.lower(),
+        topics=[c.topic0.lower() for c in active],
         from_block=start,
         to_block=window_end,
     )
-    inserted = _bulk_insert_logs(
-        session, chain_id, event_address.lower(), topic0.lower(), logs, batch_size=insert_batch_size
+    logs_by_topic: dict[str, list[FetchedEventLog]] = {}
+    for log in logs:
+        if log.topics:
+            logs_by_topic.setdefault(log.topics[0].lower(), []).append(log)
+
+    inserted = 0
+    members_at_target = 0
+    for cursor in cursors:
+        last = int(cursor.last_indexed_block or 0)
+        if last < target:
+            member_logs = [log for log in logs_by_topic.get(cursor.topic0.lower(), []) if log.block_number > last]
+            inserted += _bulk_insert_logs(
+                session,
+                chain_id,
+                event_address.lower(),
+                cursor.topic0.lower(),
+                member_logs,
+                batch_size=insert_batch_size,
+            )
+            if window_end > last:
+                cursor.last_indexed_block = window_end
+                # The stamp is position-bound; clear it on a mid-backfill
+                # advance so a later reorg pre-check can't compare the hash of
+                # one block against the position of another.
+                cursor.last_indexed_block_hash = None
+        if int(cursor.last_indexed_block or 0) >= target:
+            members_at_target += 1
+            cursor.backfill_complete = True
+            if cursor.last_indexed_block_hash is None:
+                # The only hash stamp: at the confirmed fringe, where a reorg
+                # could still rewrite the block — keyed on the missing stamp
+                # (an advance clears it), NOT on the completeness transition,
+                # which never re-fires when a warm cursor catches up again.
+                # Finalized mid-backfill windows never stamp, keeping
+                # per-window eth_getBlockByNumber traffic out of the hot loop.
+                cursor.last_indexed_block_hash = _hash_at(int(cursor.last_indexed_block))
+        cursor.last_run_at = func.now()
+    return GroupStepResult(
+        scanned_from=start,
+        scanned_to=window_end,
+        inserted=inserted,
+        members_at_target=members_at_target,
+        group_complete=members_at_target == len(cursors),
+        fetched=True,
     )
-    cursor.last_indexed_block = window_end
-    cursor.last_indexed_block_hash = block_hash_fetcher.block_hash(window_end)
-    cursor.last_run_at = func.now()
-    caught_up = window_end >= target
-    if caught_up:
-        cursor.backfill_complete = True
-    return IndexStepResult(scanned_from=start, scanned_to=window_end, inserted=inserted, caught_up=caught_up)
 
 
 def scan_enrolled_events(
@@ -235,31 +321,58 @@ def scan_enrolled_events(
     max_windows_per_pass: int = DEFAULT_MAX_WINDOWS_PER_PASS,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
 ) -> ScanSummary:
-    # Least-recently-run first (never-run NULLS first) so a single high-volume
-    # cursor (the LayerZero endpoint) can't monopolize successive passes and
-    # starve the rest: each pass advances whichever cursors have waited longest,
-    # so a freshly-enrolled deferred authority warms within a rotation rather than
-    # behind hours of someone else's backfill.
+    # Cursors group by (chain, address): every topic0 on one address rides the
+    # same eth_getLogs (an OR list), so the upstream request budget pays once
+    # per window per ADDRESS, not once per topic. Rotation is per group,
+    # least-recently-run first (min over members; a never-run member sorts the
+    # whole group first) — same fairness contract as before, at group
+    # granularity: a single high-volume address can't monopolize successive
+    # passes, and a freshly-enrolled deferred authority warms within a rotation
+    # rather than behind hours of someone else's backfill.
     all_rows = session.execute(
-        select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0).order_by(
-            IndexedEventCursor.last_run_at.asc().nullsfirst()
+        select(
+            IndexedEventCursor.chain_id,
+            IndexedEventCursor.event_address,
+            IndexedEventCursor.topic0,
+            IndexedEventCursor.last_run_at,
         )
     ).all()
     # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
     # never emit logs, so scanning it just burns one RPC round-trip every pass.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
+    groups: dict[tuple[int, str], dict[str, Any]] = {}
+    for chain_id, event_address, topic0, last_run_at in rows:
+        entry = groups.setdefault((chain_id, event_address.lower()), {"topics": set(), "runs": []})
+        entry["topics"].add(topic0.lower())
+        entry["runs"].append(last_run_at)
+
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _rotation_key(item: tuple[tuple[int, str], dict[str, Any]]) -> tuple[int, datetime, str]:
+        (chain_id, address), entry = item
+        runs = entry["runs"]
+        if any(run is None for run in runs):
+            return (0, _epoch, address)
+        return (1, min(runs), address)
+
     inserted = 0
     windows_scanned = 0
     caught_up_cursors = 0
     pass_budget = max(1, max_windows_per_pass)
-    for chain_id, event_address, topic0 in rows:
+    # One confirmed-head target and one block-hash memo per pass: the head is a
+    # per-chain fact, and hash lookups repeat across groups (every cursor
+    # reaching the same target stamps the same block), so neither belongs in
+    # the per-window hot path.
+    targets: dict[int, int] = {}
+    block_hash_memo: dict[tuple[int, int], bytes | None] = {}
+    for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
         # Global per-pass budget: stop and return once this pass has scanned
-        # pass_budget windows total, even with cold cursors still unserviced.
+        # pass_budget windows total, even with cold groups still unserviced.
         # They keep their older last_run_at, so the next pass — re-ordered
         # least-recently-run first — picks them up: fine-grained round-robin with
-        # no separate persisted offset. Without this, one pass walks every cursor
+        # no separate persisted offset. Without this, one pass walks every group
         # to completion (~tens of minutes on a cold subset), the heartbeat can't
-        # refresh, and cursors late in the order wait the whole pass.
+        # refresh, and groups late in the order wait the whole pass.
         if windows_scanned >= pass_budget:
             break
         fetcher = fetchers.get(chain_id)
@@ -267,23 +380,27 @@ def scan_enrolled_events(
         block_hash_fetcher = block_hash_fetchers.get(chain_id)
         if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
             continue
-        # Walk several windows per cursor, but cap it (per-cursor) so one
+        # Walk several windows per group, but cap it (per-group) so one
         # high-volume address can't consume the whole pass budget, and stop at
-        # the global budget mid-cursor. Commit per window: each transaction (and
+        # the global budget mid-group. Commit per window: each transaction (and
         # INSERT) stays small, progress is durable, and a mid-backfill failure on
-        # one cursor doesn't roll back the windows it already landed.
+        # one group doesn't roll back the windows it already landed.
+        group_members_at_target = 0
         try:
+            if chain_id not in targets:
+                targets[chain_id] = max(0, head_fetcher.head_block() - confirmation_depth)
             for _ in range(max(1, max_windows_per_cursor)):
                 if windows_scanned >= pass_budget:
                     break
-                result = index_event_log_step(
+                result = index_event_group_step(
                     session,
                     chain_id=chain_id,
                     event_address=event_address,
-                    topic0=topic0,
+                    topics=sorted(entry["topics"]),
                     fetcher=fetcher,
-                    head_fetcher=head_fetcher,
+                    target=targets[chain_id],
                     block_hash_fetcher=block_hash_fetcher,
+                    block_hash_memo=block_hash_memo,
                     confirmation_depth=confirmation_depth,
                     max_block_span=max_block_span,
                     insert_batch_size=insert_batch_size,
@@ -291,17 +408,18 @@ def scan_enrolled_events(
                 session.commit()
                 inserted += result.inserted
                 windows_scanned += 1
-                if result.caught_up:
-                    caught_up_cursors += 1
+                group_members_at_target = result.members_at_target
+                if result.group_complete:
                     break
         except Exception:
             session.rollback()
             logger.exception(
-                "event indexer pass failed for chain=%s address=%s topic0=%s",
+                "event indexer pass failed for chain=%s address=%s topics=%s",
                 chain_id,
                 event_address,
-                topic0,
+                sorted(entry["topics"]),
             )
+        caught_up_cursors += group_members_at_target
     return ScanSummary(
         inserted=inserted,
         windows_scanned=windows_scanned,

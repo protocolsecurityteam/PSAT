@@ -70,7 +70,7 @@ class _RangeCappedFetcher:
     def __init__(self) -> None:
         self.requested_spans: list[int] = []
 
-    def fetch_logs(self, *, event_address: str, topic0: str, from_block: int, to_block: int) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address: str, topics, from_block: int, to_block: int) -> list[FetchedEventLog]:
         span = to_block - from_block + 1
         self.requested_spans.append(span)
         if span > _MAX_SAFE_SPAN:
@@ -85,7 +85,7 @@ class _RangeCappedFetcher:
                     block_number=blk,
                     block_hash=blk.to_bytes(32, "big"),
                     transaction_index=0,
-                    topics=[topic0, "0x" + "00" * 31 + "01"],
+                    topics=[topics[0], "0x" + "00" * 31 + "01"],
                     data_words=["0x" + "00" * 31 + "01"],
                 )
             )
@@ -220,7 +220,7 @@ class _OrderRecordingFetcher:
     def __init__(self) -> None:
         self.order: list[str] = []
 
-    def fetch_logs(self, *, event_address: str, topic0: str, from_block: int, to_block: int) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address: str, topics, from_block: int, to_block: int) -> list[FetchedEventLog]:
         self.order.append(event_address.lower())
         return []
 
