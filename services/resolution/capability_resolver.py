@@ -59,6 +59,14 @@ from .adapters.event_indexed import EventIndexedAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr, Condition
 from .differential_probe import ProbeResult, differential_probe_enabled, run_differential_probe
+from .one_shot_probe import (
+    LatchReadResult,
+    annotate_capability_one_shot,
+    collect_one_shot_latches,
+    one_shot_probe_enabled,
+    resolve_one_shot_state,
+    tree_has_one_shot_role,
+)
 from .permissionless_shapes import CALLER_GATE_BASIS_TAGS
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
@@ -357,6 +365,19 @@ def resolve_contract_capabilities(
     # failure) disables probing for the pass — the probe is strictly additive (§7.1),
     # so its absence is exactly the current behavior.
     probe_block: int | None = _resolve_probe_block(rpc_url, block) if differential_probe_enabled() else None
+    # One-shot consumed/live probe (default ON). The runtime address IS a proxy
+    # when the analysis artifact came from an implementation child job, or the
+    # job carried an explicit ``proxy_address`` — so an unset latch on it is a
+    # confirmed live one-shot, not a bare-template false-open. Block is pinned
+    # once per pass (reuses the differential-probe block when set) for a
+    # consistent read height; lazily resolved only if a one-shot row exists.
+    one_shot_enabled = one_shot_probe_enabled()
+    db_proxy_linked = (runtime_job.id != analysis_job.id) or (runtime_addr != addr)
+    # Pinned one-shot read height, resolved lazily on the FIRST one-shot row so a
+    # pass with no initializers makes zero extra wire calls. ``[sentinel]`` marks
+    # "not yet resolved"; reuses the differential-probe block when that is set.
+    one_shot_block_cell: list[Any] = [probe_block if probe_block is not None else _UNRESOLVED_BLOCK]
+    one_shot_pass_cache: dict[tuple[Any, ...], LatchReadResult] = {}
     for fn_signature, tree in (artifact["trees"] or {}).items():
         ctx = EvaluationContext(
             chain_id=chain_id,
@@ -388,8 +409,21 @@ def resolve_contract_capabilities(
                 rpc_url=rpc_url,
                 block=probe_block,
             )
+        cap_dict = capability_to_dict(cap)
+        if one_shot_enabled and rpc_url:
+            _maybe_one_shot_probe(
+                cap_dict,
+                tree=tree,
+                runtime_addr=runtime_addr,
+                rpc_url=rpc_url,
+                chain_id=chain_id,
+                block=block,
+                block_cell=one_shot_block_cell,
+                db_proxy_linked=db_proxy_linked,
+                pass_cache=one_shot_pass_cache,
+            )
         fn_ms = int((time.monotonic() - fn_started) * 1000)
-        out[fn_signature] = capability_to_dict(cap)
+        out[fn_signature] = cap_dict
         per_function_ms.append((str(fn_signature), fn_ms))
         label = _capability_kind_label(cap)
         kind_counts[label] = kind_counts.get(label, 0) + 1
@@ -581,6 +615,99 @@ def _maybe_differential_probe(
     if use_cache:
         _probe_cache_put(cache_key, result)
     return _apply_probe_result(cap, result)
+
+
+# Process-level one-shot latch cache: a read is deterministic given
+# ``(chain, address, block, latch-slot signature)`` — the proxy topology and
+# init slot don't change at a fixed height — so re-resolving the same contract
+# in-process skips the wire. Bounded with a cheap FIFO trim, like the
+# differential-probe cache.
+_ONE_SHOT_CACHE: dict[tuple[Any, ...], LatchReadResult] = {}
+_ONE_SHOT_CACHE_MAX = 4096
+
+# Sentinel for the lazily-resolved one-shot block cell: distinguishes "not yet
+# resolved" from a real ``None`` (block read failed → read at latest).
+_UNRESOLVED_BLOCK = object()
+
+
+def clear_one_shot_cache() -> None:
+    """Clear the process-level one-shot latch cache (tests / manual reset)."""
+    _ONE_SHOT_CACHE.clear()
+
+
+def _one_shot_cache_put(key: tuple[Any, ...], result: LatchReadResult) -> None:
+    if len(_ONE_SHOT_CACHE) >= _ONE_SHOT_CACHE_MAX:
+        for stale in list(_ONE_SHOT_CACHE.keys())[: _ONE_SHOT_CACHE_MAX // 4]:
+            _ONE_SHOT_CACHE.pop(stale, None)
+    _ONE_SHOT_CACHE[key] = result
+
+
+def _maybe_one_shot_probe(
+    cap_dict: dict[str, Any],
+    *,
+    tree: Any,
+    runtime_addr: str,
+    rpc_url: str,
+    chain_id: int,
+    block: int | None,
+    block_cell: list[Any],
+    db_proxy_linked: bool,
+    pass_cache: dict[tuple[Any, ...], LatchReadResult],
+) -> None:
+    """Read the on-chain latch state for a one-shot row and annotate ``cap_dict``
+    in place. Strictly additive: any failure leaves the static badge untouched.
+
+    A standard (A-spine) one-shot always annotates its ``one_shot`` condition. A
+    structural candidate is promoted to a one_shot condition ONLY when the read
+    confirms a real latch (consumed/live) — an indeterminate read leaves the
+    generic badge, so the candidate's false-positive class costs one wasted read,
+    never a wrong badge.
+
+    ``block_cell`` is a 1-element mutable holder for the pass-pinned read height,
+    resolved lazily here so a function with NO one-shot row triggers zero wire
+    calls (the ``eth_blockNumber`` head read fires only once a latch is found).
+    """
+    try:
+        latches = collect_one_shot_latches(tree)
+    except Exception:
+        return
+    has_standard = bool(latches["standard"]) or tree_has_one_shot_role(tree)
+    has_candidate = bool(latches["candidate"])
+    if not has_standard and not has_candidate:
+        return
+    all_latches = list(latches["standard"]) + list(latches["candidate"])
+    if not all_latches:
+        return
+
+    if block_cell[0] is _UNRESOLVED_BLOCK:
+        block_cell[0] = _resolve_probe_block(rpc_url, block)
+    probe_height = block_cell[0]
+
+    cache_key = (
+        chain_id,
+        runtime_addr.lower(),
+        probe_height,
+        tuple(sorted(str(latch.get("slot") or latch.get("getter_selector") or "") for latch in all_latches)),
+    )
+    result = pass_cache.get(cache_key)
+    if result is None:
+        result = _ONE_SHOT_CACHE.get(cache_key)
+    if result is None:
+        try:
+            result = resolve_one_shot_state(
+                rpc_url=rpc_url,
+                address=runtime_addr,
+                latches=all_latches,
+                block=probe_height if isinstance(probe_height, int) else None,
+                db_proxy_linked=db_proxy_linked,
+            )
+        except Exception:
+            logger.debug("one-shot probe failed for %s; keeping static badge", runtime_addr, exc_info=True)
+            return
+        pass_cache[cache_key] = result
+        _one_shot_cache_put(cache_key, result)
+
+    annotate_capability_one_shot(cap_dict, result, confirmed_candidate=has_candidate and not has_standard)
 
 
 def _analysis_lookup_for_runtime_job(

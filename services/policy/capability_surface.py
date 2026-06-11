@@ -140,7 +140,7 @@ def _project_node(
         # informational only — every cofinite is "open modulo a finite/condition filter",
         # so the openness verdict never branches on it.
         denial = {
-            "kind": "business",
+            "kind": "denylist",
             "description": f"denylist exclusion ({len(cap_dict.get('blacklist') or [])} known excluded)",
         }
         return CapabilitySurface(public_paths=[node_conditions + [denial]])

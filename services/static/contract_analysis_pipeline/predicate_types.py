@@ -195,6 +195,7 @@ AuthorityRole = Literal[
     "reentrancy",
     "pause",
     "business",
+    "one_shot",
 ]
 
 
@@ -229,6 +230,18 @@ class LeafPredicate(TypedDict):
     # Canonical ABI signature of the callee (arg TYPES, used e.g. for the
     # bytes32[] merkle-witness discriminator — never the callee name).
     callee_signature: NotRequired[str | None]
+    # Where the one-shot latch this leaf reads lives on-chain, so resolution
+    # can read its live value (consumed vs live) against the deployment
+    # address. Stamped by ``one_shot.apply_one_shot_pass`` on the version-var
+    # leaf of an initializer-family gate; absent everywhere else. Keys:
+    # ``kind`` ("storage"|"getter"), ``slot``/``byte_offset``/``size_bytes``/
+    # ``value_type``/``variable`` for storage reads, ``selector`` for getter
+    # reads, ``expected_version`` (reinitializer target), ``standard``.
+    one_shot_latch: NotRequired[dict[str, Any] | None]
+    # True when the leaf matched the name-free structural latch detector but
+    # NOT a recognized initializer standard. A candidate never changes the
+    # badge statically — only a confirmed on-chain latch read does.
+    one_shot_candidate: NotRequired[bool]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]

@@ -337,7 +337,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
     # event replay / trace replay) we get a concrete finite_set;
     # otherwise the fallback path produces conditional_universal.
     role = leaf.get("authority_role")
-    if role in ("reentrancy", "pause", "business", "time"):
+    if role in ("reentrancy", "pause", "business", "time", "one_shot"):
         if _is_opaque_bool_return_predicate(leaf):
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
@@ -475,6 +475,16 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             # consume) and void merkle-witness verifications keep the gated
             # path — see is_permissionless_caller_shape; they fall through
             # to the external_set descriptor/adapter resolution below.
+            if _is_permit_family_signature(leaf.get("callee_signature")):
+                # The void EIP-2612/3009 statement call: still an open
+                # self-auth path, but typed as a permit so the badge can say
+                # "open via signature" instead of a bare self-service open.
+                return CapabilityExpr.conditional_universal(
+                    Condition(
+                        kind="permit_sig",
+                        description=f"signature authorization (permit family): {leaf.get('expression') or 'call'}",
+                    )
+                )
             return CapabilityExpr.conditional_universal(
                 Condition(
                     kind="self_service",
@@ -584,7 +594,7 @@ def _side_conditions_from_tree(tree: PredicateTree) -> list[Condition] | None:
         if not isinstance(leaf, dict):
             return None
         role = leaf.get("authority_role")
-        if role in ("reentrancy", "pause", "business", "time") and not leaf.get("references_msg_sender"):
+        if role in ("reentrancy", "pause", "business", "time", "one_shot") and not leaf.get("references_msg_sender"):
             return [_condition_from_leaf(cast(LeafPredicate, leaf))]
         return None
 
@@ -2352,8 +2362,53 @@ def _resolve_signer_from_leaf(
 
 def _condition_from_leaf(leaf: LeafPredicate) -> Condition:
     role = leaf.get("authority_role")
-    kind: str = role if role in ("time", "pause", "reentrancy", "business") else "business"
+    kind: str = role if role in ("time", "pause", "reentrancy", "business", "one_shot") else "business"
+    if kind == "business" and _leaf_is_permit_shape(leaf):
+        # A signature-witness open path that folded to a side condition (the
+        # void EIP-2612 statement call, or a recover-equality that stayed a
+        # business leaf): record that this open is a permit, not a bare open.
+        kind = "permit_sig"
     return Condition(
         kind=kind,  # type: ignore[arg-type]
         description=leaf.get("expression") or "",
     )
+
+
+# Canonical signature-verification callees: the EVM ``ecrecover`` builtin, the
+# OZ ECDSA library (``recover``/``tryRecover``), and OZ SignatureChecker /
+# EIP-1271 (``isValidSignature``/``isValidSignatureNow``). Standard library
+# entry points, not user identifiers.
+_SIGNATURE_VERIFIER_CALLEES = frozenset(
+    {"ecrecover", "recover", "tryRecover", "isValidSignature", "isValidSignatureNow"}
+)
+
+# EIP-2612 / DAI-style permit and EIP-3009 authorization ABI signatures — the
+# canonical self-authorizing token entry points a void statement call gates on.
+_PERMIT_FAMILY_SIGNATURES = frozenset(
+    {
+        "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
+        "permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)",
+        "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)",
+        "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)",
+        "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)",
+    }
+)
+
+
+def _leaf_is_permit_shape(leaf: LeafPredicate) -> bool:
+    """Structural permit witness on a side-condition leaf: an operand carrying
+    ``signature_recovery`` provenance, a canonical signature-verifier callee,
+    or a void call into the EIP-2612/3009 permit family."""
+    for op in leaf.get("operands") or []:
+        if op.get("source") == "signature_recovery":
+            return True
+        callee = op.get("callee")
+        if isinstance(callee, str) and callee in _SIGNATURE_VERIFIER_CALLEES:
+            return True
+    return _is_permit_family_signature(leaf.get("callee_signature"))
+
+
+def _is_permit_family_signature(signature: Any) -> bool:
+    if not isinstance(signature, str) or "(" not in signature:
+        return False
+    return signature.replace(" ", "") in _PERMIT_FAMILY_SIGNATURES

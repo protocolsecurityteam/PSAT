@@ -376,7 +376,7 @@ def test_cofinite_blacklist_is_public_with_no_rows(db_session) -> None:
     assert ef.authority_public is True
     assert ef.conditions is not None
     assert any(
-        c.get("kind") == "business" and "denylist exclusion" in (c.get("description") or "") for c in ef.conditions
+        c.get("kind") == "denylist" and "denylist exclusion" in (c.get("description") or "") for c in ef.conditions
     ), f"the denylist must be surfaced as a side-condition; got {ef.conditions}"
 
 

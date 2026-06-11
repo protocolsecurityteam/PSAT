@@ -33,6 +33,7 @@ from eth_utils.crypto import keccak
 
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
+from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
@@ -233,6 +234,12 @@ def build_predicate_artifacts_with_pause_info(
         pass_started = time.monotonic()
         pause_info = apply_reentrancy_pause_pass(contract, all_trees)
         pass_durations_ms["reentrancy_pause"] = int((time.monotonic() - pass_started) * 1000)
+
+        # After reentrancy/pause so an already-claimed guard leaf keeps its
+        # classification (the one-shot pass only touches business leaves).
+        pass_started = time.monotonic()
+        apply_one_shot_pass(contract, all_trees)
+        pass_durations_ms["one_shot"] = int((time.monotonic() - pass_started) * 1000)
 
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}

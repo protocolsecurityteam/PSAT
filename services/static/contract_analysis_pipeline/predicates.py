@@ -2169,7 +2169,7 @@ def _derive_confidence(leaf: LeafPredicate) -> Confidence:
     if kind == "unsupported" or role == "business":
         return "low"
 
-    if role in ("reentrancy", "pause", "time"):
+    if role in ("reentrancy", "pause", "time", "one_shot"):
         return "high"
 
     if kind == "signature_auth":

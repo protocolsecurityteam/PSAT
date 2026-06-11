@@ -307,9 +307,22 @@ def _stub_live_authority(monkeypatch):
     the evaluation context; offline there is none, so it returns ``None`` (the
     documented "pure-unit evaluation, keep the lower_bound placeholder" path).
     Returning ``None`` here reproduces that exact behaviour without the wire.
+
+    Also stubs the on-chain one-shot consumed/live probe (same hermeticity
+    concern — a live read during ``resolve_contract_capabilities``): offline it
+    returns ``indeterminate``, exactly the documented "no reachable RPC → keep
+    the static badge" path, so the projection is unchanged without the wire.
     """
     monkeypatch.setattr(
         "services.resolution.predicate_evaluator._live_resolve_authority",
+        lambda *a, **k: None,
+    )
+    # Disable the on-chain one-shot probe wholesale offline (its head-block read
+    # AND its latch reads both use the live wire). A no-op leaves every one-shot
+    # row at its static badge — the documented "no reachable RPC → static stands"
+    # path — so the projection is unchanged without any network.
+    monkeypatch.setattr(
+        "services.resolution.capability_resolver._maybe_one_shot_probe",
         lambda *a, **k: None,
     )
 
