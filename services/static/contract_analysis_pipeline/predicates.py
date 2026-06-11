@@ -24,6 +24,7 @@ follow-ups (this commit lays the scaffold + the two most common kinds).
 
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 from eth_utils.crypto import keccak
@@ -101,11 +102,27 @@ from .provenance import (
     SourceSet,
     is_top,
 )
-from .revert_detect import RevertDetector, RevertGate
+from .revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, RevertDetector, RevertGate
 
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None
 )
+
+# Callee full_names currently being gate-inlined by
+# ``_internal_call_revert_gate_subtrees`` — breaks mutual-recursion cycles
+# and bounds the inlining depth (a helper's gate can itself be
+# ``require(deeper_helper(...))``, which re-enters the same path).
+_inline_gate_callee_stack: _contextvars.ContextVar[tuple[str, ...]] = _contextvars.ContextVar(
+    "psat_predicate_inline_gate_callee_stack", default=()
+)
+
+
+def _inline_helper_revert_gates_enabled() -> bool:
+    """Conjoin an inlined bool-helper's internal revert gates into the
+    caller's tree (caller-tainted gates only). ON by default;
+    ``PSAT_INLINE_HELPER_REVERT_GATES=0`` is the kill-switch back to
+    return-expression-only inlining."""
+    return os.getenv("PSAT_INLINE_HELPER_REVERT_GATES", "1").lower() in ("1", "true", "yes")
 
 
 def _cache_key_for(callee: Any, bindings: dict[str, Any]) -> tuple | None:
@@ -439,6 +456,19 @@ def _build_subtree_from_value(
     # the inline AND/OR case above.
     if isinstance(defining_ir, (InternalCall, LibraryCall)):
         subtree = _build_internal_call_or_and_subtree(defining_ir, prov, gate)
+        # The helper's internal require/revert gates are conjuncts of this
+        # call site whatever shape its return expression takes — see
+        # _internal_call_revert_gate_subtrees. Conjoining HERE (not at the
+        # tree root) keeps an OR-branch helper's gates scoped to the branch
+        # that executes it.
+        gate_subtrees = _internal_call_revert_gate_subtrees(defining_ir, prov)
+        if gate_subtrees:
+            if subtree is None:
+                inline_leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
+                subtree = make_leaf_node(
+                    inline_leaf if inline_leaf is not None else _build_truthy_leaf(cond_value, prov, gate)
+                )
+            return make_and_node([*gate_subtrees, subtree])
         if subtree is not None:
             return subtree
 
@@ -827,6 +857,133 @@ def _find_callee_return_value(callee: Any) -> Any | None:
                 if values:
                     return values[0]
     return None
+
+
+# Internal revert forms worth conjoining at an inlined call site: the
+# explicit conditional gates. Opaque fail-safes would conjoin
+# ``unsupported`` leaves (gating callers on shapes we didn't lift), and
+# external-call/try-catch markers fire on ANY external call in the helper
+# — both manufacture gates rather than recover them, so they stay out.
+_INLINED_GATE_KINDS = ("require", "assert", "if_revert", "custom_revert")
+
+
+def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[PredicateTree]:
+    """The inlined helper's own revert gates, rebuilt in the caller's frame.
+
+    ``require(helper(args))`` admits a caller only when the helper RETURNS
+    true — and the helper didn't revert on the way to that return. The
+    return expression is lifted by ``_build_internal_call_leaf`` /
+    ``_build_internal_call_or_and_subtree``; the helper's internal
+    ``require``/``revert`` gates were owned by NEITHER side: RevertDetector
+    deliberately skips read-result callees ("the predicate builder lifts
+    that path") and the builder lifted only the return value. A
+    caller-keyed allowlist living inside the helper vanished and the caller
+    classified public (EtherFiOracle.submitReport's
+    ``shouldSubmitReport(msg.sender)`` committee gate).
+
+    Build one subtree per internal gate with the call arguments bound to
+    the helper's parameters (``registered[_member]`` resolves with
+    ``_member := msg.sender``). The caller conjoins these AT THE CALL SITE
+    in its tree — inside any enclosing OR branch — which preserves
+    short-circuit semantics: ``require(a || helper(x))`` becomes
+    ``OR(a, AND(helper_gates, helper_return))``, so the helper's gates
+    bind only the branch that actually executes it. Call-site polarity
+    deliberately does NOT apply: the helper reverts on a failed internal
+    gate however the caller uses the returned bool, so each gate keeps its
+    own polarity.
+
+    Conservative on purpose — this can only ADD gates, and only ones the
+    helper provably enforces:
+      * only explicit conditional revert forms (``_INLINED_GATE_KINDS``);
+      * only CALLER-TAINTED gates (an operand or membership key derives
+        from the caller identity after binding). A business precondition
+        can't change the authority verdict, so dropping it preserves
+        today's trees instead of risking false-gates on unliftable shapes.
+    """
+    if not _inline_helper_revert_gates_enabled():
+        return []
+    callee = getattr(ir, "function", None)
+    if callee is None:
+        return []
+    callee_id = getattr(callee, "full_name", None) or getattr(callee, "name", None)
+    if not callee_id:
+        return []
+    stack = _inline_gate_callee_stack.get()
+    if callee_id in stack or len(stack) >= DEFAULT_INTERNAL_CALL_DEPTH:
+        return []
+
+    try:
+        inner_gates = RevertDetector(callee).run()
+    except Exception:
+        return []
+    inner_gates = [g for g in inner_gates if g.kind in _INLINED_GATE_KINDS]
+    if not inner_gates:
+        return []
+
+    # Bind call-site argument provenance to the callee's parameters — the
+    # same binding _resolve_internal_call_return uses for the return
+    # expression — through the per-contract helper-engine cache.
+    bindings: dict[str, Any] = {}
+    args = list(getattr(ir, "arguments", []) or [])
+    params = list(getattr(callee, "parameters", []) or [])
+    for param, arg in zip(params, args):
+        name = getattr(param, "name", None)
+        if name:
+            bindings[name] = _operand_value_provenance(arg, prov)
+    cache = _helper_engine_cache.get()
+    cache_key = _cache_key_for(callee, bindings) if cache is not None else None
+    if cache is not None and cache_key is not None and cache_key in cache:
+        sub_prov = cache[cache_key]
+    else:
+        sub_engine = ProvenanceEngine(callee, parameter_bindings=bindings)
+        sub_engine.run()
+        sub_prov = sub_engine.provenance
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = sub_prov
+
+    token = _inline_gate_callee_stack.set(stack + (callee_id,))
+    try:
+        subtrees: list[PredicateTree] = []
+        for inner_gate in inner_gates:
+            subtree = _build_subtree_from_gate(inner_gate, sub_prov, callee)
+            if subtree is None or not _tree_has_caller_tainted_leaf(subtree):
+                continue
+            _tag_tree_leaves_basis(subtree, f"inlined_internal_gate:{callee_id}")
+            subtrees.append(subtree)
+        return subtrees
+    finally:
+        _inline_gate_callee_stack.reset(token)
+
+
+def _tree_has_caller_tainted_leaf(tree: Any) -> bool:
+    """Does any leaf condition the caller's identity? Reads operand and
+    membership-key sources (the post-binding signal), not the leaf's
+    pre-binding ``references_msg_sender`` flag — mirroring how the
+    evaluator's earned-public default decides taint."""
+    if not isinstance(tree, dict):
+        return False
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf") or {}
+        for op in leaf.get("operands") or []:
+            if (op or {}).get("source") in _CALLER_SOURCES:
+                return True
+        descriptor = leaf.get("set_descriptor") or {}
+        return any((key or {}).get("source") in _CALLER_SOURCES for key in descriptor.get("key_sources") or [])
+    return any(_tree_has_caller_tainted_leaf(child) for child in tree.get("children") or [])
+
+
+def _tag_tree_leaves_basis(tree: Any, tag: str) -> None:
+    """Stamp ``tag`` onto every leaf's basis so a conjoined helper gate is
+    attributable in dumps/diffs."""
+    if not isinstance(tree, dict):
+        return
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if isinstance(leaf, dict):
+            leaf["basis"] = list(leaf.get("basis") or []) + [tag]
+        return
+    for child in tree.get("children") or []:
+        _tag_tree_leaves_basis(child, tag)
 
 
 # ---------------------------------------------------------------------------
