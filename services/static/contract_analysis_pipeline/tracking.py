@@ -293,6 +293,42 @@ def _collect_state_var_operands(predicate_trees: Mapping[str, Any] | None) -> se
     return state_vars
 
 
+# Authority roles that mark an operand as a real access-control principal (the
+# caller is required to equal / be a member of the value). A var referenced only
+# outside these roles is consulted by business logic, not gated on.
+_AUTHORITY_LEAF_ROLES = frozenset({"caller_authority", "delegated_authority"})
+
+
+def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None) -> dict[str, set[str]]:
+    """Map each state-variable operand name to the set of ``authority_role``
+    values of the leaves that reference it (direct operand reference only).
+
+    Lets the admission loop tell a gated authority operand
+    (``caller_authority`` / ``delegated_authority``) from one consulted purely
+    by business logic, without re-deriving the predicate classification."""
+    if not isinstance(predicate_trees, dict):
+        return {}
+    trees = predicate_trees.get("trees")
+    if not isinstance(trees, dict):
+        return {}
+
+    roles_by_var: dict[str, set[str]] = {}
+
+    def visit(leaf: dict[str, Any]) -> None:
+        role = leaf.get("authority_role")
+        if not isinstance(role, str):
+            return
+        for operand in leaf.get("operands") or []:
+            if isinstance(operand, dict) and operand.get("source") == "state_variable":
+                name = operand.get("state_variable_name")
+                if isinstance(name, str) and name:
+                    roles_by_var.setdefault(name, set()).add(role)
+
+    for tree in trees.values():
+        _walk_leaves(tree, visit)
+    return roles_by_var
+
+
 def _collect_state_var_member_operands(predicate_trees: Mapping[str, Any] | None) -> set[tuple[str, tuple[str, ...]]]:
     if not isinstance(predicate_trees, dict):
         return set()
@@ -653,6 +689,7 @@ def build_controller_tracking(
 
     referenced_state_vars = _collect_state_var_operands(predicate_trees)
     referenced_member_paths = _collect_state_var_member_operands(predicate_trees)
+    authority_roles_by_var = _collect_state_var_authority_roles(predicate_trees)
     external_contract_vars_from_effects = _collect_external_contract_state_vars_from_effects(
         effects,
         set(state_vars_by_name.keys()),
@@ -771,6 +808,29 @@ def build_controller_tracking(
         if controller_id in seen_ids:
             continue
         read_spec_var = _state_var_read_spec(name, state_vars_by_name, getter_by_var)
+
+        # A bare struct has no single storable address value; only the SEPARATE
+        # member-path pass projects an individual address field out of it.
+        # Emitting the whole struct as a controller forces a getter read of the
+        # entire packed blob, which is never a principal. (Array/mapping
+        # controllers are caller-keyed ACLs tracked through their associated
+        # events, a separate concern handled downstream.)
+        if kind == "state_variable" and read_spec_var.get("type_kind") == "struct":
+            continue
+
+        # A compile-time ``constant`` address/contract consulted only by business
+        # logic (the caller is never required to equal or be a member of it) is a
+        # sentinel identifier, not an authority. Immutable authorities
+        # (``is_constant`` False) and constants the caller IS gated on
+        # (``caller_authority`` / ``delegated_authority``) are kept.
+        if (
+            kind == "state_variable"
+            and read_spec_var.get("type_kind") in {"address", "contract"}
+            and bool(getattr(sv, "is_constant", False))
+            and not (authority_roles_by_var.get(name, set()) & _AUTHORITY_LEAF_ROLES)
+        ):
+            continue
+
         writer_functions, associated_events = _writer_records_from_effects(
             contract,
             project_dir,
