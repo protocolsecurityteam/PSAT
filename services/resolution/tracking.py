@@ -577,6 +577,7 @@ def build_control_snapshot(
     *,
     heartbeat: Callable[[], None] | None = None,
     getter_fallback_address: str | None = None,
+    beacon_address: str | None = None,
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
@@ -591,6 +592,12 @@ def build_control_snapshot(
     implementation bytecode and revert when the runtime address doesn't
     delegatecall to that impl (beacon / per-instance patterns). Defaults to
     ``None`` (no fallback), preserving the prior reverting-getter behavior.
+
+    ``beacon_address`` — the UpgradeableBeacon governing this instance. Its
+    ``owner()`` is the instance's upgrade authority (it can re-point every
+    governed instance at a new implementation) but lives in the beacon, not in
+    the instance's own state, so it is read live here and recorded as a
+    ``beacon_owner`` controller. Defaults to ``None`` (no beacon attribution).
     """
     from utils.concurrency import parallel_map
 
@@ -700,12 +707,42 @@ def build_control_snapshot(
             continue
         controller_values[cid] = entry
 
+    if beacon_address:
+        beacon_entry = _read_beacon_owner(rpc_url, beacon_address, block_tag, block_number)
+        if beacon_entry is not None:
+            controller_values["beacon_owner"] = beacon_entry
+
     return {
         "schema_version": "0.1",
         "contract_address": plan["contract_address"],
         "contract_name": plan["contract_name"],
         "block_number": block_number,
         "controller_values": controller_values,
+    }
+
+
+def _read_beacon_owner(rpc_url: str, beacon_address: str, block_tag: str, block_number: int) -> dict[str, Any] | None:
+    """Read ``owner()`` on the governing UpgradeableBeacon and shape it as an
+    upgrade-authority controller value. Returns ``None`` when the beacon exposes
+    no live owner (read reverts or returns the zero address) so no empty row is
+    minted."""
+    try:
+        raw = _eth_call_raw(rpc_url, beacon_address, "owner()", block_tag)
+        owner = _decode_controller_value(raw, "external_contract")
+    except Exception as exc:
+        logger.debug("beacon owner read failed for %s: %s", beacon_address, exc)
+        return None
+    if not owner or owner in {"0x", "0x0"} or set(owner.replace("0x", "")) <= {"0"}:
+        return None
+    resolved_type, details = classify_resolved_address(rpc_url, owner, block_tag)
+    details = {**details, "source": "beacon", "beacon_address": beacon_address.lower()}
+    return {
+        "source": "beacon",
+        "value": owner,
+        "block_number": block_number,
+        "observed_via": "beacon_owner",
+        "resolved_type": resolved_type,
+        "details": details,
     }
 
 

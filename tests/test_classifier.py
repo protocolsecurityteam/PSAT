@@ -543,6 +543,110 @@ def test_classify_single_small_impl_getter_still_custom(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# UpgradeableBeacon discriminator (revert-proof regression)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_single_upgradeable_beacon(monkeypatch):
+    """A true UpgradeableBeacon — exposes implementation() AND owner(), empty
+    EIP-1967 slots, NO DELEGATECALL in bytecode — classifies type='beacon'
+    (not proxy/custom) so the static worker analyses it and discovers its
+    owner(), the upgrade authority of every governed instance.
+
+    Regression for EtherFi AvsOperator/EtherFiNode beacons (0x29b1c223 /
+    0x3c55986c): misclassified proxy/custom, they short-circuited controller
+    discovery so beacon.owner() was never attributed."""
+    addr = ADDR(0x40)
+    impl = ADDR(0x41)
+    owner = ADDR(0x42)
+    # No DELEGATECALL: a beacon is a {implementation, owner} registry that
+    # callers read; it never forwards a call itself.
+    beacon_bc = "0x" + "60" * 300
+
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: beacon_bc)
+
+    def fake_rpc(_rpc, method, params, retries=1):
+        if method == "eth_getStorageAt":
+            return ZERO_SLOT
+        if method == "eth_call":
+            sel = params[0].get("data", "")[:10]
+            if sel == cls.IMPLEMENTATION_SELECTOR:
+                return _slot_for(impl)
+            if sel == cls.OWNER_SELECTOR:
+                return _slot_for(owner)
+        raise RuntimeError("revert")
+
+    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "beacon"
+    assert result["implementation"] == impl
+    assert result["owner"] == owner
+    assert result.get("proxy_type") is None
+
+
+def test_classify_single_forwarding_proxy_with_delegatecall_stays_proxy(monkeypatch):
+    """A forwarding proxy that exposes implementation() but contains
+    DELEGATECALL must STAY a proxy — never reclassified as a beacon — even if
+    it also answered owner(). Mirrors Aragon AppProxyUpgradeable (Lido stETH,
+    cid 340): DELEGATECALL present, so it forwards calls and is a real proxy."""
+    addr = ADDR(0x43)
+    impl = ADDR(0x44)
+    # Custom proxy: small bytecode WITH a real DELEGATECALL (0xf4).
+    proxy_bc = "0x" + "60" * 100 + "f4"
+
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: proxy_bc)
+
+    def fake_rpc(_rpc, method, params, retries=1):
+        if method == "eth_getStorageAt":
+            return ZERO_SLOT
+        if method == "eth_call":
+            sel = params[0].get("data", "")[:10]
+            if sel == cls.IMPLEMENTATION_SELECTOR:
+                return _slot_for(impl)
+            # Even if it answered owner(), DELEGATECALL keeps it a proxy.
+            if sel == cls.OWNER_SELECTOR:
+                return _slot_for(ADDR(0x45))
+        # No tracing available -> protocol-specific getters revert.
+        raise RuntimeError("revert")
+
+    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "proxy"
+    assert result["proxy_type"] == "custom"
+    assert result["implementation"] == impl
+
+
+def test_classify_single_impl_getter_without_owner_is_not_beacon(monkeypatch):
+    """A no-DELEGATECALL contract that exposes implementation() but NOT owner()
+    is not a beacon — it falls through to the size-gated custom-proxy path. The
+    owner() requirement separates a beacon from a bare immutable-impl getter."""
+    addr = ADDR(0x46)
+    impl = ADDR(0x47)
+    bc = "0x" + "60" * 200  # no DELEGATECALL, under the custom-proxy size ceiling
+
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: bc)
+
+    def fake_rpc(_rpc, method, params, retries=1):
+        if method == "eth_getStorageAt":
+            return ZERO_SLOT
+        if method == "eth_call":
+            sel = params[0].get("data", "")[:10]
+            if sel == cls.IMPLEMENTATION_SELECTOR:
+                return _slot_for(impl)
+            # owner() reverts -> not a beacon.
+        raise RuntimeError("revert")
+
+    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "proxy"
+    assert result["proxy_type"] == "custom"
+    assert result["implementation"] == impl
+
+
+# ---------------------------------------------------------------------------
 # Slot-batching parity: ``classify_single`` issues one batched
 # eth_getStorageAt instead of five sequential calls.
 # ---------------------------------------------------------------------------

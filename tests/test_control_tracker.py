@@ -316,6 +316,117 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
     assert cv2["observed_via"] == "eth_call_error"
 
 
+def _avs_operator_plan(instance: str) -> ControlTrackingPlan:
+    return {
+        "schema_version": "0.1",
+        "contract_address": instance,
+        "contract_name": "AvsOperator",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:avsOperatorsManager",
+                "label": "avsOperatorsManager",
+                "source": "avsOperatorsManager",
+                "kind": "state_variable",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "avsOperatorsManager",
+                    "kind": "state_variable",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+                "tracking_mode": "state_only",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": instance,
+                    "polling_sources": ["avsOperatorsManager"],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+
+
+def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch):
+    """An UpgradeableBeacon's owner() is the governed instance's upgrade
+    authority — it can re-point every instance at a new implementation — but
+    lives in the beacon, not the instance's own state. With ``beacon_address``
+    set the snapshot reads beacon.owner() live and records it as a
+    ``beacon_owner`` controller of the instance, leaving the instance's own
+    controllers untouched. Mirrors real EtherFi AvsOperator/EtherFiNode data."""
+    instance = "0xf4718766a7fc8c81f788669b0985fac03d064d29"  # AvsOperator impl/instance
+    beacon = "0x29b1c223be35ccb6bfbd43154528cd0b881756e9"  # UpgradeableBeacon
+    manager = "2093bbb221f1d8c7c932c32ee28be6dee4a37a6a"  # beacon.owner() (AvsOperatorsManager owner)
+    plan = _avs_operator_plan(instance)
+
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            to = params[0]["to"].lower()
+            data = params[0]["data"]
+            if to == beacon and data == selector("owner()"):
+                return "0x" + "00" * 12 + manager
+            if to == instance:  # the instance's own avsOperatorsManager() getter
+                return "0x" + "00" * 12 + "00" * 20
+            return "0x"
+        raise AssertionError(f"Unexpected RPC call: {method} {params}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+    monkeypatch.setattr(
+        "services.resolution.tracking.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+
+    # Baseline: no beacon attribution -> the instance carries only its own controllers.
+    baseline = build_control_snapshot(plan, "https://rpc.example")
+    assert "beacon_owner" not in baseline["controller_values"]
+
+    snapshot = build_control_snapshot(plan, "https://rpc.example", beacon_address=beacon)
+    bo = snapshot["controller_values"]["beacon_owner"]
+    assert bo["value"] == "0x" + manager
+    assert bo["resolved_type"] == "contract"
+    assert bo["source"] == "beacon"
+    assert bo["observed_via"] == "beacon_owner"
+    assert bo["details"]["beacon_address"] == beacon
+    # Additive: every baseline controller is preserved byte-for-byte.
+    for cid, value in baseline["controller_values"].items():
+        assert snapshot["controller_values"][cid] == value
+
+
+def test_build_control_snapshot_skips_beacon_owner_when_zero_or_reverting(monkeypatch):
+    """No empty row is minted when the beacon owner is the zero address (e.g. a
+    renounced/burned beacon) or when owner() reverts."""
+    instance = "0xf4718766a7fc8c81f788669b0985fac03d064d29"
+    beacon = "0x29b1c223be35ccb6bfbd43154528cd0b881756e9"
+    plan = _avs_operator_plan(instance)
+    mode = {"owner": "zero"}
+
+    def fake_rpc(_rpc_url, method, params):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            to = params[0]["to"].lower()
+            data = params[0]["data"]
+            if to == beacon and data == selector("owner()"):
+                if mode["owner"] == "revert":
+                    raise RuntimeError("{'code': 3, 'message': 'execution reverted'}")
+                return "0x" + "00" * 32  # zero address
+            return "0x"
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+
+    zero_snap = build_control_snapshot(plan, "https://rpc.example", beacon_address=beacon)
+    assert "beacon_owner" not in zero_snap["controller_values"]
+
+    mode["owner"] = "revert"
+    revert_snap = build_control_snapshot(plan, "https://rpc.example", beacon_address=beacon)
+    assert "beacon_owner" not in revert_snap["controller_values"]
+
+
 def test_build_control_snapshot_preserves_role_identifier_for_capability_resolver(monkeypatch):
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",

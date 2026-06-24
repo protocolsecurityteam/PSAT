@@ -224,6 +224,67 @@ def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 2b. UpgradeableBeacon classification
+# ---------------------------------------------------------------------------
+
+
+def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
+    """A type='beacon' classification keeps is_proxy=False so the static worker
+    analyses the beacon itself (discovering its owner()), AND still spawns the
+    implementation as a beacon-context child so each governed instance resolves
+    against the beacon (proxy_type='beacon', proxy_address=<beacon>)."""
+    worker = StaticWorker()
+    session = MagicMock()
+    contract_row = SimpleNamespace(
+        is_proxy=None,
+        proxy_type=None,
+        implementation=None,
+        beacon=None,
+        admin=None,
+        protocol_id=None,
+        address=_ADDR,
+        discovery_sources=None,
+    )
+    session.execute.return_value.scalar_one_or_none.return_value = contract_row
+    job = _job()
+
+    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
+
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda address, rpc_url: {
+            "type": "beacon",
+            "implementation": _IMPL_ADDR,
+            "owner": "0x2222222222222222222222222222222222222222",
+        },
+    )
+    # reconcile returns "spawn" -> create_job runs (all dedup lookups miss).
+    monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **k: "spawn")
+    monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **k: None)
+
+    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+
+    # The beacon is analysed as itself: is_proxy stays False.
+    assert contract_row.is_proxy is False
+    assert contract_row.proxy_type == "beacon"
+    assert contract_row.implementation == _IMPL_ADDR
+    assert contract_row.beacon == _ADDR
+
+    flags = store_calls[0][1]
+    assert flags["is_proxy"] is False
+    assert flags["classification_type"] == "beacon"
+    assert flags["proxy_type"] == "beacon"
+    assert flags["beacon"] == _ADDR
+
+    # The impl child is still spawned in beacon context.
+    assert len(created_jobs) == 1
+    child_req = created_jobs[0]
+    assert child_req["address"] == _IMPL_ADDR
+    assert child_req["proxy_address"] == _ADDR
+    assert child_req["proxy_type"] == "beacon"
+
+
+# ---------------------------------------------------------------------------
 # 3. Proxy with facets (diamond pattern)
 # ---------------------------------------------------------------------------
 
