@@ -14,6 +14,44 @@ from typing import Any, Callable, cast
 from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EnumerationResult, EvaluationContext
 
+_CALLER_KEY_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+
+def _implicit_membership_value_predicate(descriptor: dict) -> dict | None:
+    """Synthesize the value predicate a caller-keyed boolean membership ACL
+    implies when the descriptor carries no explicit ``value_predicate``.
+
+    A leaf like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` read for
+    truthiness authorizes exactly the caller keys whose latest stored value is
+    nonzero — i.e. an implicit ``{value != 0}``. The membership-truthy keys are
+    the same set the writer-side ``set``-direction fold produces; the leaf's
+    own truthy/falsy polarity is applied upstream by the predicate evaluator,
+    so this always yields the truthy-key set.
+
+    Returns the synthesized ``{op: any_nonzero}`` predicate only for a
+    ``mapping_membership`` descriptor that (a) is keyed on the caller and
+    (b) carries a ``set``-direction hint with ``value_position is not None``
+    (the gate that structurally excludes caller-keyed data-maps with no value
+    slot). Returns ``None`` for everything else, leaving unrelated descriptors
+    on their existing path.
+    """
+    if descriptor.get("kind") != "mapping_membership":
+        return None
+    if descriptor.get("value_predicate"):
+        return None
+    key_sources = descriptor.get("key_sources") or []
+    if not any(k.get("source") in _CALLER_KEY_SOURCES for k in key_sources if isinstance(k, dict)):
+        return None
+    hints = descriptor.get("enumeration_hint") or []
+    has_value_set_hint = any(
+        h.get("topic0") and h.get("direction") == "set" and h.get("value_position") is not None
+        for h in hints
+        if isinstance(h, dict)
+    )
+    if not has_value_set_hint:
+        return None
+    return {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"}
+
 
 class EventIndexedAdapter:
     """Generic adapter for storage vars with enumeration_hint
@@ -36,6 +74,11 @@ class EventIndexedAdapter:
             for hint in hints:
                 if hint.get("topic0") and hint.get("direction") == "set" and hint.get("value_position") is not None:
                     return 55
+        # A caller-keyed boolean membership ACL carries the same set-direction
+        # value hint but no explicit value_predicate: the truthy read implies
+        # ``{value != 0}``. Route it through the same value-aware fold.
+        if _implicit_membership_value_predicate(descriptor) is not None:
+            return 55
         return 0
 
     @classmethod
@@ -46,8 +89,13 @@ class EventIndexedAdapter:
         # D.2 — when the descriptor carries a ValuePredicate and at
         # least one ``set``-direction hint, dispatch to the value-aware
         # fold path (latest-value-per-key, filtered by predicate)
-        # rather than the add/remove present-set fold.
-        value_predicate = descriptor.get("value_predicate")
+        # rather than the add/remove present-set fold. A caller-keyed
+        # boolean membership ACL supplies an implicit ``{value != 0}``
+        # predicate the same way (the truthy read), routing through the
+        # identical fold.
+        explicit_predicate = descriptor.get("value_predicate")
+        implicit_predicate = None if explicit_predicate else _implicit_membership_value_predicate(descriptor)
+        value_predicate = explicit_predicate or implicit_predicate
         hints = descriptor.get("enumeration_hint") or []
         if value_predicate and ctx.contract_address is not None:
             set_hints = [
@@ -56,7 +104,17 @@ class EventIndexedAdapter:
                 if h.get("direction") == "set" and h.get("value_position") is not None and h.get("topic0")
             ]
             if set_hints:
-                return self._enumerate_value_predicate(descriptor, set_hints, value_predicate, ctx)
+                # A caller-keyed membership ACL folds latest-value-per-CALLER:
+                # the hint's ``key_position`` points at the innermost mapping
+                # key (e.g. the selector), so the fold must be re-keyed on the
+                # caller's own event-arg position. For an explicit-predicate
+                # descriptor ``key_position`` is already the enumerated key.
+                fold_key_position = (
+                    _caller_event_arg_position(descriptor, set_hints[0]) if implicit_predicate is not None else None
+                )
+                return self._enumerate_value_predicate(
+                    descriptor, set_hints, value_predicate, ctx, fold_key_position=fold_key_position
+                )
 
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
         if repo is None or not hints:
@@ -176,6 +234,7 @@ class EventIndexedAdapter:
         set_hints: list[dict],
         value_predicate: dict,
         ctx: EvaluationContext,
+        fold_key_position: int | None = None,
     ) -> CapabilityExpr:
         """D.2 fold: latest-value-per-key, filtered by ``value_predicate``.
 
@@ -183,6 +242,10 @@ class EventIndexedAdapter:
         on demand. The result is a ``finite_set`` of keys whose latest
         value satisfies the predicate. ``status != complete`` from the
         underlying scan demotes ``quality`` to ``lower_bound``.
+
+        ``fold_key_position`` overrides the hint's ``key_position`` when the
+        enumerated key is not the hint's innermost mapping key (a caller-keyed
+        membership ACL folds on the caller's event-arg position).
         """
         contract_address = ctx.contract_address or ""
         # Reconstruct WriterEventSpec dicts the enumerator expects from
@@ -191,12 +254,13 @@ class EventIndexedAdapter:
         # to the spec keys.
         writer_specs = []
         for hint in set_hints:
+            key_position = fold_key_position if fold_key_position is not None else int(hint.get("key_position") or 0)
             writer_specs.append(
                 {
                     "mapping_name": hint.get("mapping_name") or descriptor.get("storage_var") or "",
                     "event_signature": hint.get("event_signature") or "",
                     "event_name": hint.get("event_name") or "",
-                    "key_position": int(hint.get("key_position") or 0),
+                    "key_position": key_position,
                     "indexed_positions": list(hint.get("indexed_positions") or []),
                     "direction": "set",
                     "writer_function": hint.get("writer_function") or "",
@@ -223,6 +287,42 @@ class EventIndexedAdapter:
             confidence="enumerable" if is_complete else "partial",
             last_indexed_block=scan["last_block_scanned"] or None,
         )
+
+
+def _caller_event_arg_position(descriptor: dict, hint: dict) -> int | None:
+    """Event-arg position holding the CALLER key for a caller-keyed membership.
+
+    The hint's ``key_position`` names the innermost mapping key (e.g. the
+    selector in ``mapping[msg.sender][selector]``). The value fold for a
+    caller ACL must instead key on the caller. ``key_sources`` gives the caller
+    key index; ``topics_to_keys`` / ``data_to_keys`` invert from key index to
+    event-arg position (a topic arg is the n-th ``indexed_positions`` entry;
+    a data arg is the m-th non-indexed entry).
+    """
+    key_sources = descriptor.get("key_sources") or []
+    caller_key_index = next(
+        (i for i, src in enumerate(key_sources) if isinstance(src, dict) and src.get("source") in _CALLER_KEY_SOURCES),
+        None,
+    )
+    if caller_key_index is None:
+        return None
+    indexed_positions = sorted({int(p) for p in (hint.get("indexed_positions") or [])})
+
+    for topic_index, key_index in (hint.get("topics_to_keys") or {}).items():
+        if int(key_index) != caller_key_index:
+            continue
+        rank = int(topic_index) - 1  # topic 0 is the event signature
+        if 0 <= rank < len(indexed_positions):
+            return indexed_positions[rank]
+
+    non_indexed = [pos for pos in range(64) if pos not in indexed_positions]
+    for data_index, key_index in (hint.get("data_to_keys") or {}).items():
+        if int(key_index) != caller_key_index:
+            continue
+        rank = int(data_index)
+        if 0 <= rank < len(non_indexed):
+            return non_indexed[rank]
+    return None
 
 
 def _resolve_event_address(descriptor: dict, hint: dict, ctx: EvaluationContext) -> str | None:
