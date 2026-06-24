@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -303,15 +304,167 @@ def test_cold_durable_index_demotes_to_lower_bound(db_session, no_live_calls):
     assert no_live_calls == []
 
 
-def test_durable_index_without_rows_falls_through_to_live(db_session, monkeypatch):
-    # No durable rows for this address → defer to the live replay, which fails
-    # closed without a token (no live endpoint reachable in the offline suite).
-    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+def test_cold_durable_index_no_rows_defers_pending_index(db_session, no_live_calls):
+    # A real durable repo but no rows AND no backfill_complete cursor for this
+    # event address (``no_index_cursor``) is index-cold: defer to
+    # external_check_only tagged ``deferred_pending_index`` (the reconciler
+    # re-resolves once the indexer warms) rather than blocking on a live replay.
+    # ZERO live enumerate_mapping_values_sync calls.
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=STATE_HOLDER,
         block=RESOLUTION_BLOCK,
         event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert cap.check.extra.get("deferred_pending_index") is True
+    # ``no_index_cursor`` drives the reconciler; ``caller_keyed_membership_allowlist``
+    # (a CALLER_GATE_BASIS_TAGS member) makes the earned-public projection treat the
+    # cold deferral as a root-authority blocker so the function stays gated.
+    assert cap.check.extra.get("basis") == ["no_index_cursor", "caller_keyed_membership_allowlist"]
+    from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS
+
+    assert "caller_keyed_membership_allowlist" in CALLER_GATE_BASIS_TAGS
+    # The reconciler keys on target_address; it MUST be the event state-holder
+    # whose cursor backfilling triggers re-resolution.
+    assert cap.check.target_address == STATE_HOLDER
+    assert no_live_calls == []
+
+
+def test_cold_defer_projects_identically_to_unsupported_leaf(db_session, no_live_calls):
+    # Regression guard (no public flip): the cold deferral projects the SAME
+    # public/gated verdict as the unsupported leaf it replaces, in every position.
+    #   AND[gate, public]: gated (the gate blocks the sibling public path) — both.
+    #   OR[gate, public] : public (a genuine open disjunct keeps the OR open) —
+    #                      both, so no row that was OR-public flips and none that
+    #                      was AND-gated opens.
+    from services.policy.capability_surface import project_capability_surface
+    from services.resolution.capabilities import CapabilityExpr, Condition
+    from services.resolution.capability_resolver import capability_to_dict
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    defer = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+    assert defer.kind == "external_check_only"
+    public = CapabilityExpr.conditional_universal(Condition(kind="business", description="open sibling"))
+    unsupported = CapabilityExpr.unsupported("mapping_value_scan_failed")
+
+    def pub(cap) -> bool:
+        return project_capability_surface(capability_to_dict(cap)).authority_public
+
+    # AND position: deferral blocks the public sibling exactly like unsupported.
+    assert pub(CapabilityExpr.structural_and([defer, public])) is False
+    assert pub(CapabilityExpr.structural_and([unsupported, public])) is False
+    # OR position: a real public disjunct keeps the OR open for BOTH — unchanged.
+    assert pub(CapabilityExpr.structural_or([defer, public])) == pub(
+        CapabilityExpr.structural_or([unsupported, public])
+    )
+    assert no_live_calls == []
+
+
+def test_structural_absent_repo_without_fold_event_values_falls_through_to_live(db_session, monkeypatch):
+    # A repo present but lacking ``fold_event_values`` (fixture / non-PG wire) is
+    # STRUCTURAL-absent, not index-cold: the live replay is the only resolver and
+    # MUST still run. Here it fails closed without a token (no live endpoint in
+    # the offline suite), proving the live path was taken (not deferred).
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+
+    class _NoValueFoldRepo:
+        """Add/remove-only repo: no ``fold_event_values`` method at all."""
+
+        def fold_event_history(self, **_kwargs):
+            raise AssertionError("value path must not reach the add/remove fold")
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=cast(Any, _NoValueFoldRepo()),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "unsupported"
+    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
+
+
+def test_structural_absent_no_repo_falls_through_to_live(monkeypatch):
+    # No repo at all (no ctx.event_log_repo, no meta) is STRUCTURAL-absent: the
+    # live replay runs and fails closed without a token. NOT a cold-index defer.
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+    ctx = EvaluationContext(chain_id=1, contract_address=STATE_HOLDER, block=RESOLUTION_BLOCK)
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "unsupported"
+    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
+
+
+def test_zero_event_address_does_not_defer_forever(db_session, monkeypatch):
+    # A renounced / zero event address never gets an indexer cursor, so deferring
+    # on it would wait forever. It is treated as STRUCTURAL-absent (anti-stranding,
+    # mirrors solmate_roles' nonzero-authority guard): the live replay runs (fails
+    # closed here), it does NOT emit a deferred external_check.
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+    # The hint pins the event address (checked first by _resolve_event_address)
+    # to the zero address; contract_address stays valid so the value path runs.
+    desc = _eigenpod_descriptor()
+    desc["enumeration_hint"][0]["event_address"] = "0x" + "0" * 40
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    cap = EventIndexedAdapter().enumerate(desc, ctx)
+
+    assert cap.kind == "unsupported"
+    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
+
+
+def test_fold_repo_error_falls_through_to_live(monkeypatch):
+    # A repo whose fold_event_values raises is STRUCTURAL-absent (transient repo
+    # error, not index-cold): fall through to the live replay so a later retry
+    # resolves it. Does NOT defer.
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+
+    class _RaisingRepo:
+        def fold_event_values(self, **_kwargs):
+            raise RuntimeError("backend down")
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=cast(Any, _RaisingRepo()),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "unsupported"
+    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
+
+
+def test_non_cold_partial_reason_falls_through_to_live_not_defer(monkeypatch):
+    # The defer discriminator is STRICTLY ``no_index_cursor``. A different partial
+    # reason (e.g. ``unresolved_event_key``) with no entries is structural — fall
+    # through to the live replay, NEVER defer (no deferred_pending_index).
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+    from services.resolution.repos.event_logs_pg import ValueFoldResult
+
+    class _UnresolvedKeyRepo:
+        def fold_event_values(self, **_kwargs):
+            return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=cast(Any, _UnresolvedKeyRepo()),
     )
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
 
@@ -324,8 +477,6 @@ def test_durable_and_tree_recovers_membership_keeps_hasrole_external_and_not_pub
     # the membership leaf resolves to the caller set off the durable index and
     # the roleRegistry.hasRole sibling stays external_check_only. The AND is not
     # opened — the function stays gated (authority_public would be False).
-    from typing import Any, cast
-
     from services.resolution.adapters import AdapterRegistry
     from services.resolution.predicate_evaluator import evaluate_tree_with_registry
 
@@ -467,8 +618,10 @@ def test_durable_explicit_value_predicate_filters_by_value(db_session, no_live_c
 
 
 def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, monkeypatch):
-    # No durable rows → live replay fallback. The token, an injected client, the
-    # module and url ride from ctx.meta; the resolution block becomes to_block.
+    # STRUCTURAL-absent repo (no ``fold_event_values``) → live replay fallback.
+    # The token, an injected client, the module and url ride from ctx.meta; the
+    # resolution block becomes to_block. (Index-cold defers and is covered
+    # separately; only the structural case reaches the live wire.)
     captured: dict = {}
 
     async def fake_values(contract_address, writer_specs, **kwargs):
@@ -485,13 +638,16 @@ def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, 
     monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
     mapping_enumerator._VALUE_CACHE.clear()
 
+    class _NoValueFoldRepo:
+        """Add/remove-only repo: no ``fold_event_values`` → structural-absent."""
+
     sentinel_client = object()
     sentinel_module = object()
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=STATE_HOLDER,
         block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
+        event_log_repo=cast(Any, _NoValueFoldRepo()),
         meta={
             "hypersync_token": "tok-123",
             "hypersync_client": sentinel_client,

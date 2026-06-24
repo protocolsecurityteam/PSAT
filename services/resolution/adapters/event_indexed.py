@@ -9,7 +9,7 @@ adapter consumes those records directly with no per-standard adapter.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EnumerationResult, EvaluationContext
@@ -18,6 +18,16 @@ if TYPE_CHECKING:
     from ..repos.event_logs_pg import ValueFoldResult
 
 _CALLER_KEY_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+_ZERO_ADDRESS = "0x" + "0" * 40
+
+# Discriminates the durable value fold's three outcomes for the caller:
+#   ok     — a resolved finite_set (warm head, or a populated cold lower bound)
+#   cold   — the durable index for this event address has no backfill_complete
+#            cursor, so the fold is empty-and-incomplete; the caller defers
+#   absent — structural: no repo, repo lacks fold_event_values, no event
+#            address, or a repo error; the caller falls through to the live replay
+_FoldStatus = Literal["ok", "cold", "absent"]
 
 
 def _implicit_membership_value_predicate(descriptor: dict) -> dict | None:
@@ -254,6 +264,14 @@ class EventIndexedAdapter:
         ``fold_key_position`` overrides the hint's ``key_position`` when the
         enumerated key is not the hint's innermost mapping key (a caller-keyed
         membership ACL folds on the caller's event-arg position).
+
+        When the durable index for the event address is cold (no
+        ``backfill_complete`` cursor) the fold defers to ``external_check_only``
+        with ``deferred_pending_index`` rather than blocking on a live replay:
+        ``deferred_reconciler`` re-resolves this function once the indexer
+        backfills the event address. The structural-absent case (no repo / no
+        ``fold_event_values`` / no event address) still falls through to the
+        live replay so offline and non-indexed deployments keep resolving.
         """
         event_address = next(
             (addr for addr in (_resolve_event_address(descriptor, hint, ctx) for hint in set_hints) if addr),
@@ -261,12 +279,50 @@ class EventIndexedAdapter:
         )
         key_sources = _contextual_key_sources(descriptor.get("key_sources") or [], ctx)
 
-        durable = self._durable_value_fold(
+        status, durable = self._durable_value_fold(
             descriptor, set_hints, value_predicate, ctx, event_address, key_sources, fold_key_position
         )
-        if durable is not None:
+        if status == "ok" and durable is not None:
             return durable
+        if status == "cold":
+            return self._deferred_value_check(descriptor, ctx, event_address)
         return self._live_value_fold(descriptor, set_hints, value_predicate, ctx, event_address, fold_key_position)
+
+    def _deferred_value_check(
+        self,
+        descriptor: dict,
+        ctx: EvaluationContext,
+        event_address: str | None,
+    ) -> CapabilityExpr:
+        """Defer a cold-index value fold to ``external_check_only`` so the
+        deferred-resolution reconciler re-resolves it once the event address's
+        logs finish indexing.
+
+        ``external_check_only`` is the gated safe baseline (it can neither
+        manufacture authority nor open the function); ``deferred_pending_index``
+        tags it for ``deferred_reconciler`` (live in ``event_log_indexer``),
+        which keys on ``target_address`` to detect the backfill. Mirrors
+        ``_external_check`` (add/remove path) and ``solmate_roles._check_only``.
+
+        The basis carries ``caller_keyed_membership_allowlist`` (a
+        ``CALLER_GATE_BASIS_TAGS`` member, asserted in the adapter tests) because
+        an unresolved caller-keyed value gate is a caller-discriminating
+        authorization: the earned-public projection must treat the deferral as a
+        root-authority blocker so the function stays gated until the index warms,
+        never opening on a sibling public path.
+        """
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=event_address,
+                target_call_selector=descriptor.get("callee_selector"),
+                extra={
+                    "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
+                    "deferred_pending_index": True,
+                    "callee_function": descriptor.get("callee_function"),
+                    "callee_signature": descriptor.get("callee_signature"),
+                },
+            )
+        )
 
     def _durable_value_fold(
         self,
@@ -277,14 +333,28 @@ class EventIndexedAdapter:
         event_address: str | None,
         key_sources: list[dict],
         fold_key_position: int | None,
-    ) -> CapabilityExpr | None:
-        """Fold the value predicate over the durable index, or ``None`` to defer
-        to the live replay (no repo, repo lacks the method, or it holds none of
-        these events). Any repo error folds to ``None`` so the live path retries."""
+    ) -> tuple[_FoldStatus, CapabilityExpr | None]:
+        """Fold the value predicate over the durable index, returning a tagged
+        outcome the caller routes on:
+
+        - ``("ok", finite_set)`` — durable rows resolved (warm-head exact, or a
+          populated cold lower bound).
+        - ``("cold", None)`` — the index for the event address holds none of
+          these events because its backfill cursor isn't complete
+          (``partial_reason == "no_index_cursor"``). The caller defers.
+        - ``("absent", None)`` — structural: no repo / no ``fold_event_values`` /
+          no resolvable (nonzero) event address / a repo error. The caller falls
+          through to the live replay (offline + non-indexed deployments resolve
+          only there; a never-seeded zero-address cursor must never defer).
+        """
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
         fold_values = getattr(repo, "fold_event_values", None)
-        if not callable(fold_values) or event_address is None:
-            return None
+        # A zero / renounced event address never gets an indexer cursor, so a
+        # cold fold against it would defer forever. Treat it as structural so the
+        # live replay (fail-closed) settles it instead — mirrors solmate_roles'
+        # nonzero-authority anti-stranding guard.
+        if not callable(fold_values) or event_address is None or event_address == _ZERO_ADDRESS:
+            return "absent", None
 
         value_hints = [
             {
@@ -307,16 +377,22 @@ class EventIndexedAdapter:
                 block=ctx.block,
             )
         except Exception:
-            return None
-        # No durable rows for these events: let the live replay try (the durable
-        # index may simply not cover this address yet).
+            return "absent", None
         if not result.entries and not result.complete:
-            return None
+            # An empty, not-complete fold splits two ways. A cold index
+            # (``no_index_cursor``: no backfill_complete cursor) is waiting on the
+            # indexer — defer so the reconciler re-resolves once it warms, rather
+            # than blocking on a live replay. Any other partial reason
+            # (unresolved key, etc.) is structural — fall through to the live
+            # replay, which is the only resolver in that case.
+            if result.partial_reason == "no_index_cursor":
+                return "cold", None
+            return "absent", None
 
         from ..mapping_enumerator import filter_value_entries
 
         keys = filter_value_entries(cast(Any, result.entries), value_predicate)
-        return CapabilityExpr.finite_set(
+        return "ok", CapabilityExpr.finite_set(
             keys,
             quality="exact" if result.complete else "lower_bound",
             confidence="enumerable" if result.complete else "partial",
