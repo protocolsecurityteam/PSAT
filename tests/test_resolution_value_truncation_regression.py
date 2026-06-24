@@ -182,7 +182,12 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
     """build_control_snapshot must not emit a value that overflows
     controller_values.value. Persisting the snapshot exactly as
     resolution_worker.process() does must NOT raise (pre-fix it raised
-    StringDataRightTruncation; the worker session would then be poisoned)."""
+    StringDataRightTruncation; the worker session would then be poisoned).
+
+    Discovery no longer emits a bare-struct controller (it has no single
+    storable value), so a real plan never carries one. This pins the
+    resolution-layer defense-in-depth: even if a bare-struct controller is
+    handed to the snapshot directly, the value resolves to an honest ``None``."""
     clear_classify_cache()
     plan = _struct_controller_plan()
 
