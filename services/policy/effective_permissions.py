@@ -395,6 +395,14 @@ def _effect_record_has_sensitive_sink(record: Mapping[str, Any]) -> bool:
     return False
 
 
+def _effect_record_is_state_changing_entry_point(record: Mapping[str, Any]) -> bool:
+    """True for a selector-bearing external/public, non-view, non-pure entry
+    point. The static stage stamps ``state_changing`` from the verified
+    function mutability so the ABI surface is visible here without re-running
+    Slither; falsy/absent means a view/pure read or a non-selector function."""
+    return record.get("state_changing") is True
+
+
 def _function_records_from_semantic_artifacts(
     *,
     capability_dicts: Mapping[str, dict[str, Any]],
@@ -402,11 +410,35 @@ def _function_records_from_semantic_artifacts(
     predicate_trees_by_function: Mapping[str, dict[str, Any]],
     resolver_output_available: bool,
 ) -> list[dict[str, Any]]:
-    """Build effective-permission function records from semantic resolver/effects data."""
+    """Build effective-permission function records from semantic resolver/effects data.
+
+    Rows are the union of the semantic artifacts (capabilities ∪ predicate trees
+    ∪ effects with a sensitive sink) plus every state-changing external/public
+    ABI entry point. The latter makes a mutator whose authority gate and writes
+    live in inline assembly — invisible to the high-level IR as a sink or a
+    predicate tree — a visible, honestly-flagged ``unsupported`` row rather than
+    a silent omission. Such a row carries no capability and no tree, so no
+    principals attach to it."""
+    sink_signatures = {
+        signature for signature, record in effects_by_function.items() if _effect_record_has_sensitive_sink(record)
+    }
+    abi_mutability_signatures = {
+        signature
+        for signature, record in effects_by_function.items()
+        if _effect_record_is_state_changing_entry_point(record)
+    }
+
     signatures = set(capability_dicts)
     signatures.update(predicate_trees_by_function)
-    signatures.update(
-        signature for signature, record in effects_by_function.items() if _effect_record_has_sensitive_sink(record)
+    signatures.update(sink_signatures)
+    signatures.update(abi_mutability_signatures)
+
+    # A state-changing entry point with no capability, no tree, and no sensitive
+    # sink is covered ONLY by its ABI mutability — its authority is unresolved
+    # (the gate lives outside the high-level IR), so it is flagged unsupported,
+    # never projected public.
+    abi_only_signatures = (
+        abi_mutability_signatures - set(capability_dicts) - set(predicate_trees_by_function) - sink_signatures
     )
 
     records: list[dict[str, Any]] = []
@@ -422,6 +454,9 @@ def _function_records_from_semantic_artifacts(
         if signature not in capability_dicts:
             if signature in predicate_trees_by_function:
                 record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
+                record["status"] = "unsupported"
+            elif signature in abi_only_signatures:
+                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
                 record["status"] = "unsupported"
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
