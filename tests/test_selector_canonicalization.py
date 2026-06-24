@@ -23,6 +23,7 @@ selector, on real compiled Solidity.
 from __future__ import annotations
 
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -225,3 +226,176 @@ def test_abi_signature_and_selector_helper_prefers_map():
         "execute(address)",
         EXECUTE_ADDRESS_BUG,
     )
+
+
+# --- nested / repeated user-defined type lowering -------------------------
+#
+# A struct whose fields reference the SAME user-defined type more than once,
+# and a struct field whose type is itself a struct (defined in another scope),
+# must lower EVERY occurrence — not just the first. These mirror the real
+# LayerZeroTeller ``depositAndBridgeWithPermit`` (two ERC20 fields) and
+# AvsOperator ``verifyBlsKey`` (two ``G1Point`` fields) shapes.
+
+# depositAndBridgeWithPermit(Permit{ERC20,uint256,ERC20,uint8})
+PERMIT_CANONICAL = _sel("depositAndBridgeWithPermit((address,uint256,address,uint8))")
+# The pre-fix partial lowering left the 2nd ERC20 raw → wrong selector.
+PERMIT_PARTIAL_BUG = _sel("depositAndBridgeWithPermit((address,uint256,ERC20,uint8))")
+# verifyBlsKey(BlsKey{G1Point{uint256,uint256}, G1Point{uint256,uint256}})
+BLS_CANONICAL = _sel("verifyBlsKey(((uint256,uint256),(uint256,uint256)))")
+# Array-of-struct preserving its [N] suffix with a repeated contract field.
+PARAMS_CANONICAL = _sel("setParams((address,uint256,address)[2])")
+
+NESTED_SOURCE = """
+pragma solidity ^0.8.19;
+
+interface ERC20 {}
+
+contract D {
+    struct Permit { ERC20 a; uint256 amount; ERC20 b; uint8 v; }
+    struct G1Point { uint256 X; uint256 Y; }
+    struct BlsKey { G1Point pk1; G1Point pk2; }
+    struct Pair { ERC20 in_; uint256 amount; ERC20 out_; }
+
+    address public owner;
+    uint256 internal x;
+
+    function depositAndBridgeWithPermit(Permit calldata p) external {
+        require(msg.sender == owner, "auth");
+        x = p.amount;
+    }
+
+    function verifyBlsKey(BlsKey calldata k) external {
+        require(msg.sender == owner, "auth");
+        x = k.pk1.X;
+    }
+
+    function setParams(Pair[2] calldata ps) external {
+        require(msg.sender == owner, "auth");
+        x = ps[0].amount;
+    }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def nested_artifact(tmp_path_factory) -> dict:
+    tmp = tmp_path_factory.mktemp("sel_canon_nested")
+    f = tmp / "D.sol"
+    f.write_text(textwrap.dedent(NESTED_SOURCE).strip() + "\n")
+    contract = next(c for c in Slither(str(f)).contracts if c.name == "D")
+    return build_predicate_artifacts(contract)
+
+
+def test_repeated_and_nested_user_types_lower_at_every_occurrence(nested_artifact):
+    """Every occurrence of a repeated/nested user-defined type lowers — the
+    canonical signature keccaks to the real on-chain selector, not the
+    partially-lowered string the bug produced."""
+    canonical = nested_artifact["canonical_signatures"]
+
+    _, permit = _lookup(canonical, "depositAndBridgeWithPermit")
+    assert permit == "depositAndBridgeWithPermit((address,uint256,address,uint8))"
+    assert _sel(permit) == PERMIT_CANONICAL
+    assert _sel(permit) != PERMIT_PARTIAL_BUG  # revert-proof: catches the partial-lowering regression
+
+    _, bls = _lookup(canonical, "verifyBlsKey")
+    assert bls == "verifyBlsKey(((uint256,uint256),(uint256,uint256)))"
+    assert _sel(bls) == BLS_CANONICAL
+
+    _, params = _lookup(canonical, "setParams")
+    assert params == "setParams((address,uint256,address)[2])"
+    assert _sel(params) == PARAMS_CANONICAL
+
+
+def test_nested_canonical_flows_to_effective_permissions_selector(nested_artifact):
+    """The corrected canonical signature reaches the policy stage's
+    ``effective_functions.selector`` column for the struct-param rows."""
+    analysis = {"subject": {"address": "0x" + "22" * 20, "name": "D"}}
+    ep = build_effective_permissions(
+        analysis,
+        predicate_trees=nested_artifact,
+        capability_resolver_output={},
+    )
+    by_name = {fn["function"].split("(", 1)[0]: fn for fn in ep["functions"]}
+
+    assert by_name["depositAndBridgeWithPermit"]["selector"] == PERMIT_CANONICAL
+    assert by_name["verifyBlsKey"]["selector"] == BLS_CANONICAL
+    assert by_name["setParams"]["selector"] == PARAMS_CANONICAL
+
+
+# Dynamic array of a repeated-contract struct, plus a user-defined value type
+# (``type ... is``) — exercises the ``[]`` array-suffix and type-alias lowering.
+ALIAS_AND_DYNARRAY_SOURCE = """
+pragma solidity ^0.8.19;
+
+interface ERC20 {}
+type Amount is uint128;
+
+contract E {
+    struct Leg { ERC20 sell; uint256 qty; ERC20 buy; }
+
+    address public owner;
+    uint256 internal x;
+
+    function route(Leg[] calldata legs, Amount cap) external {
+        require(msg.sender == owner, "auth");
+        x = legs.length;
+    }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def alias_artifact(tmp_path_factory) -> dict:
+    tmp = tmp_path_factory.mktemp("sel_canon_alias")
+    f = tmp / "E.sol"
+    f.write_text(textwrap.dedent(ALIAS_AND_DYNARRAY_SOURCE).strip() + "\n")
+    contract = next(c for c in Slither(str(f)).contracts if c.name == "E")
+    return build_predicate_artifacts(contract)
+
+
+def test_dynamic_array_and_type_alias_lower(alias_artifact):
+    """A dynamic ``[]`` array of a struct with a repeated contract field lowers
+    every occurrence and keeps the ``[]`` suffix; a user-defined value type
+    lowers to its underlying elementary type."""
+    canonical = alias_artifact["canonical_signatures"]
+    _, route = _lookup(canonical, "route")
+    assert route == "route((address,uint256,address)[],uint128)"
+    assert _sel(route) == _sel("route((address,uint256,address)[],uint128)")
+
+
+def test_canonical_signature_rejects_self_recursive_struct():
+    """A struct that recurses into itself can't be lowered to a real ABI
+    selector — a residual user-defined token survives the walk, so the
+    signature is rejected and consumers fall back to the string path."""
+
+    src = textwrap.dedent(
+        """
+        pragma solidity ^0.8.19;
+        contract R {
+            struct Node { Node[] kids; uint256 v; }
+            uint256 internal x;
+            function walk(Node memory n) internal { x = n.v; }
+        }
+        """
+    ).strip()
+    tmp = Path(tempfile.mkdtemp("rec"))
+    f = tmp / "R.sol"
+    f.write_text(src + "\n")
+    contract = next(c for c in Slither(str(f)).contracts if c.name == "R")
+    walk = next(fn for fn in contract.functions if fn.name == "walk")
+    assert _canonical_signature(walk) is None
+
+
+def test_canonical_signature_guards_missing_parameters():
+    """An object without lowerable ``parameters`` returns ``None`` rather than
+    raising — the same fallback path as a non-lowerable param."""
+
+    class _NoParams:
+        name = "f"
+        parameters = None
+
+    class _NoName:
+        parameters = []
+
+    assert _canonical_signature(_NoParams()) is None
+    assert _canonical_signature(_NoName()) is None
