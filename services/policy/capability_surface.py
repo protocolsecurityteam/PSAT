@@ -166,8 +166,12 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
       - ``unsupported`` — an un-modeled gate (extraction fail-closed, E2).
       - an EMPTY non-exact ``finite_set`` — a caller equality whose authority
         value wasn't read (``msg.sender == owner`` with no controller value);
-        exact-empty (provably nobody / empty-by-design) is NOT a blocker —
-        that is resolved, not unresolved.
+        a generic exact-empty / empty-by-design set is NOT a blocker — that is
+        resolved, not unresolved.
+      - an EMPTY ``finite_set`` enumerated from a Solmate ``RolesAuthority``
+        (``requiresAuth`` with the capability not public and no role holders):
+        a provably-nobody read. AND-ed with a sibling public side-condition,
+        the gate still authorizes literally no caller — the function is gated.
       - AND: any blocking child; OR: only if EVERY disjunct blocks (a single
         genuinely-open disjunct keeps the OR open).
 
@@ -181,8 +185,14 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     if kind == "finite_set":
         if cap_dict.get("members"):
             return False
-        # Exact-empty / empty-by-design is RESOLVED (provably nobody, or an
-        # accept-side ceiling) — mirrors ``_is_resolved_empty_capability``.
+        # An empty Solmate RolesAuthority enumeration is a provably-nobody gate:
+        # the capability is not public and no role holds it, so no caller passes
+        # ``requiresAuth``. AND-ed with a sibling public path it still blocks.
+        if _is_solmate_provably_empty(cap_dict):
+            return True
+        # A generic exact-empty / empty-by-design set is RESOLVED (an accept-side
+        # ceiling, e.g. a 2-step transfer with none pending) and folds as a side
+        # condition next to a public path — mirrors ``_is_resolved_empty_capability``.
         if cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design":
             return False
         return True
@@ -198,6 +208,26 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
         children = _child_dicts(cap_dict)
         return bool(children) and all(_is_root_authority_blocker(child) for child in children)
     return False
+
+
+def _is_solmate_provably_empty(cap_dict: dict[str, Any]) -> bool:
+    """An EXACT-quality empty ``finite_set`` enumerated from a Solmate
+    ``RolesAuthority``: the ``requiresAuth`` capability is not public and no role
+    holds it at the resolution block, so the on-chain authority authorizes
+    literally no caller. Keyed on the adapter's ``solmate_roles_authority`` trace
+    step so only this confirmed-warm read counts — an empty LOWER_BOUND set
+    (under-resolved / cold index) and a generic empty-exact ceiling (no such
+    trace) are excluded."""
+    if cap_dict.get("kind") != "finite_set":
+        return False
+    if cap_dict.get("members"):
+        return False
+    if cap_dict.get("membership_quality") != "exact":
+        return False
+    trace = cap_dict.get("trace")
+    if not isinstance(trace, list):
+        return False
+    return any(isinstance(step, dict) and step.get("step") == "solmate_roles_authority" for step in trace)
 
 
 def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:
