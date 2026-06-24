@@ -181,6 +181,13 @@
       "contract_name": "TopUpSolady",
       "description": "ether.fi TopUp.processTopUp gate (verbatim) over the real Solady Ownable: address _owner = owner(); require(_owner == msg.sender). Reproduces the production state_variable:_OWNER_SLOT caller operand that resolution must read via owner() rather than _OWNER_SLOT() (bug #6).",
       "detection_patterns": ["owner_guard", "solady_ownable", "storage_slot_constant", "canonical_getter_resolution"]
+    },
+    {
+      "path": "authority/OzV5NamespacedOwnable.sol",
+      "category": "authority",
+      "contract_name": "OzV5AccessControlDefaultAdmin",
+      "description": "OZ-v5 ERC-7201 namespaced ownership in the two etherfi forms: OzV5Ownable (OwnableUpgradeable, EtherfiL1SyncPoolETH cid 615) surfaces the suppressed OwnableStorageLocation slot constant, and OzV5AccessControlDefaultAdmin (AccessControlDefaultAdminRules with owner()=>defaultAdmin(), CumulativeMerkleDrop cid 462) inlines owner() to a view_call of the private _getAccessControlDefaultAdminRulesStorage() accessor. The owner controller and the gate principal must both resolve via owner(), never the dead slot/accessor.",
+      "detection_patterns": ["owner_guard", "oz_v5_namespaced_storage", "namespaced_storage_authority", "canonical_getter_resolution"]
     }
   ]
 }

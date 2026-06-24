@@ -66,6 +66,55 @@ def _is_storage_layout_constant(name: str) -> bool:
     )
 
 
+# OZ-v5 ERC-7201 namespaced-storage OWNERSHIP roots. The owner lives in a
+# namespaced struct rather than a plain ``_owner`` state var, so the compiler
+# surfaces it only through two suppressed identifiers — the slot-locator constant
+# (``<Name>StorageLocation``, a state_variable / role operand) and the internal
+# storage accessor (``_get<Name>Storage()``, a view_call operand) — both of which
+# revert when called directly. Each denotes the same root whose canonical public
+# getter is ``owner()``. Scoped to the ownership roots only: Reentrancy / Pausable
+# / OAppCore / EIP712 namespaces are not authorities, and the PARAMETRIC
+# AccessControl role-admin root (``_getAccessControlStorage`` /
+# ``getRoleAdmin(role)``) is a different, per-role authority — neither is the
+# OZ-v5 owner and both stay out.
+_OZ_V5_OWNERSHIP_SLOT_CONSTANTS = frozenset(
+    {
+        "OwnableStorageLocation",
+        "AccessControlDefaultAdminRulesStorageLocation",
+    }
+)
+_OZ_V5_OWNERSHIP_ACCESSORS = frozenset(
+    {
+        "_getOwnableStorage",
+        "_getAccessControlDefaultAdminRulesStorage",
+    }
+)
+
+
+def _oz_v5_ownership_getter_for_slot_constant(name: str | None) -> str | None:
+    """Canonical authority getter name for an OZ-v5 namespaced-storage ownership
+    slot constant (``OwnableStorageLocation`` /
+    ``AccessControlDefaultAdminRulesStorageLocation`` → ``owner``), or ``None``.
+
+    The returned name is the live public getter, never the dead slot constant."""
+    if isinstance(name, str) and name in _OZ_V5_OWNERSHIP_SLOT_CONSTANTS:
+        return "owner"
+    return None
+
+
+def _oz_v5_ownership_getter_for_accessor(accessor: str | None) -> str | None:
+    """Canonical authority getter name for an OZ-v5 namespaced-storage ownership
+    internal accessor (``_getAccessControlDefaultAdminRulesStorage`` /
+    ``_getOwnableStorage`` → ``owner``), matched by EXACT name, or ``None``.
+
+    Anchored to the known ownership accessors so an arbitrary ``_get<X>Storage``
+    (``_getL1BaseSyncPoolStorage``, the parametric ``_getAccessControlStorage``
+    role-admin root) is never rerouted to ``owner()``."""
+    if isinstance(accessor, str) and accessor in _OZ_V5_OWNERSHIP_ACCESSORS:
+        return "owner"
+    return None
+
+
 def _abi_type(type_obj) -> str:
     if type_obj is None:
         return "unknown"
@@ -653,6 +702,91 @@ def _state_var_read_spec(
     return spec
 
 
+# Canonical OZ ownership-mutation event. Every function that touches an OZ-v5
+# namespaced struct reads its slot via the same assembly accessor, so effects
+# attributes a write of the slot constant to non-owner setters too; the
+# ``OwnershipTransferred`` log is the precise ownership-change signal, so the
+# owner controller's writer/event set is filtered to its emitters (matching the
+# OZ-v4 ``_owner`` controller, whose only writers transfer/renounce ownership).
+_OWNERSHIP_TRANSFERRED_SIGNATURE = "OwnershipTransferred(address,address)"
+
+
+def _emit_oz_v5_owner_target(
+    tracking_targets: list[ControllerTrackingTarget],
+    seen_ids: set[str],
+    getter: str,
+    slot_constant: str,
+    contract,
+    project_dir: Path,
+    event_lookup: dict[str, list],
+    effects: Mapping[str, Any] | None,
+) -> None:
+    """Append a canonical OZ-v5 ownership controller (read through ``owner()``)
+    once, deduplicated by ``controller_id``.
+
+    ``getter`` is the live public authority getter (``owner``); ``slot_constant``
+    is the namespaced ``*StorageLocation`` constant the owner is written through.
+    Writer/event discovery is keyed on the slot constant, then narrowed to the
+    ``OwnershipTransferred`` emitters so the controller carries the same clean
+    transfer/renounce writer set and ownership event as the OZ-v4 form."""
+    controller_id = f"state_variable:{getter}"
+    if controller_id in seen_ids:
+        return
+    read_spec: ControllerReadSpec = cast(
+        ControllerReadSpec,
+        {
+            "strategy": "getter_call",
+            "target": getter,
+            "kind": "state_variable",
+            "state_variable_name": getter,
+            "type": "address",
+            "type_kind": "address",
+        },
+    )
+    all_writers, all_events = _writer_records_from_effects(
+        contract,
+        project_dir,
+        [slot_constant],
+        event_lookup,
+        effects,
+    )
+    writer_functions = [
+        wf
+        for wf in all_writers
+        if any(ev.get("signature") == _OWNERSHIP_TRANSFERRED_SIGNATURE for ev in wf.get("associated_events") or [])
+    ]
+    associated_events = [ev for ev in all_events if ev.get("signature") == _OWNERSHIP_TRANSFERRED_SIGNATURE]
+    if associated_events:
+        tracking_mode = "event_plus_state"
+        notes = [
+            "Monitor associated events for low-latency detection and confirm "
+            "the resulting controller state with RPC reads."
+        ]
+    else:
+        tracking_mode = "state_only"
+        notes = [
+            "No deterministically associated post-deploy events were found "
+            "for this controller state; rely on periodic RPC reads and "
+            "reconciliation."
+        ]
+    tracking_targets.append(
+        {
+            "controller_id": controller_id,
+            "label": getter,
+            "source": getter,
+            "kind": "state_variable",
+            "read_spec": read_spec,
+            "confidence": None,
+            "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+            "writer_functions": writer_functions,
+            "associated_events": associated_events,
+            "polling_sources": [getter],
+            "notes": notes,
+        }
+    )
+    seen_ids.add(controller_id)
+
+
 # ---------------------------------------------------------------------------
 # Top-level builders.
 # ---------------------------------------------------------------------------
@@ -728,6 +862,26 @@ def build_controller_tracking(
         # matter which pass first sees the name. The owner/governor they locate is
         # resolved from the canonical getter in predicate_evaluator instead.
         if _is_storage_layout_constant(role_name):
+            # An OZ-v5 namespaced ownership slot is the one storage-layout
+            # constant that backs a real authority: the owner lives in a
+            # namespaced struct (no plain ``owner`` state var), so the slot
+            # constant is the only operand the gate exposes. Emit a CANONICAL
+            # owner controller read through ``owner()`` (never the dead slot
+            # constant), keyed for writer/event tracking on the slot constant
+            # itself (where ``transferOwnership`` / ``OwnershipTransferred`` write
+            # and emit). Other slot constants stay suppressed.
+            getter = _oz_v5_ownership_getter_for_slot_constant(role_name)
+            if getter is not None:
+                _emit_oz_v5_owner_target(
+                    tracking_targets,
+                    seen_ids,
+                    getter,
+                    role_name,
+                    contract,
+                    project_dir,
+                    event_lookup,
+                    effects,
+                )
             continue
         controller_id = f"role_identifier:{role_name}"
         if controller_id in seen_ids:
