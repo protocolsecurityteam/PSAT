@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import func, select
@@ -11,6 +12,20 @@ from db.models import IndexedEventCursor, IndexedEventLog
 from services.resolution.adapters import EnumerationResult
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+
+@dataclass(frozen=True)
+class ValueFoldResult:
+    """Latest-value-per-caller fold output for ``fold_event_values``.
+
+    ``entries`` maps each caller (``key``) to the 32-byte hex word it was
+    most recently assigned (``value_hex``). ``complete`` is True only when
+    every participating topic's durable backfill has reached head.
+    """
+
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    complete: bool = False
+    partial_reason: str | None = None
 
 
 class PostgresEventLogRepo:
@@ -154,6 +169,102 @@ class PostgresEventLogRepo:
             last_indexed_block=last_indexed_block,
         )
 
+    def fold_event_values(
+        self,
+        *,
+        chain_id: int,
+        event_address: str,
+        value_hints: list[dict[str, Any]],
+        key_sources: list[dict[str, Any]],
+        fold_key_position: int | None,
+        block: int | None = None,
+    ) -> "ValueFoldResult":
+        """Latest-value-per-caller fold over the durable index.
+
+        Mirrors ``fold_event_history`` (same caller-key resolution and
+        constant-key filtering) but, instead of folding an add/remove
+        present-set, remembers the most recent value word each caller was
+        assigned. ``value_hints`` carry the writer-event topic, the
+        value's event-arg position, the indexed-arg positions, and the
+        topic/data → key-source maps. ``fold_key_position``, when given,
+        re-keys the fold onto the caller's event-arg position (a
+        caller-keyed membership ACL keys on the caller, not the hint's
+        innermost mapping key); ``None`` keeps the hint's own key map.
+
+        Returns the per-caller latest value plus an ``enumerable`` flag
+        that is True only when every participating topic's backfill is
+        complete. Reads no live endpoint.
+
+        With ``fold_key_position`` set (a caller-keyed membership ACL) the
+        member is read directly at the caller's event-arg position and the
+        other event args (free per-call parameters such as the selector or
+        target) are not constrained. Otherwise the hint's own caller-key
+        resolution + constant-key filtering applies, mirroring
+        ``fold_event_history``.
+        """
+        member_key: int | None = None
+        key_filters: dict[int, str] = {}
+        if fold_key_position is None:
+            member_key = _caller_key_index(key_sources)
+            if member_key is None:
+                return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
+            resolved_filters = _constant_key_filters(key_sources, member_key)
+            if resolved_filters is None:
+                return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
+            key_filters = resolved_filters
+
+        hints_by_topic = _value_hints_by_topic(value_hints)
+        if not hints_by_topic:
+            return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
+
+        topic0s = sorted(hints_by_topic)
+        rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=block)
+
+        # (member) -> (value_hex, block, tx_index, log_index) — keep the latest.
+        state: dict[str, tuple[str, int, int, int]] = {}
+        for row in rows:
+            topic0 = str(row.topic0).lower()
+            topics = list(row.topics or [])
+            data_words = list(row.data_words or [])
+            for hint in hints_by_topic.get(topic0, []):
+                if fold_key_position is not None:
+                    member = _word_to_address(_word_at_event_arg(topics, data_words, fold_key_position, hint))
+                else:
+                    topics_to_keys = hint.get("topics_to_keys") or {}
+                    data_to_keys = hint.get("data_to_keys") or {}
+                    event_keys = _event_keys(topics, data_words, topics_to_keys, data_to_keys)
+                    if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
+                        continue
+                    member = _word_to_address(event_keys.get(member_key)) if member_key is not None else None
+                if member is None:
+                    continue
+                value_position = hint.get("value_position")
+                if value_position is None:
+                    continue
+                value_hex = _word_at_event_arg(topics, data_words, int(value_position), hint)
+                if value_hex is None:
+                    continue
+                position = (
+                    int(row.block_number),
+                    int(row.transaction_index),
+                    int(row.log_index),
+                )
+                prior = state.get(member)
+                if prior is None or position > (prior[1], prior[2], prior[3]):
+                    state[member] = (value_hex, position[0], position[1], position[2])
+
+        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        complete = all(c_block is not None and done for c_block, done in cursor_states.values())
+        entries = [
+            {"key": member, "value_hex": value_hex, "last_block": last_block}
+            for member, (value_hex, last_block, _tx, _log) in state.items()
+        ]
+        return ValueFoldResult(
+            entries=entries,
+            complete=complete,
+            partial_reason=None if complete else "no_index_cursor",
+        )
+
     def iter_event_rows(
         self,
         *,
@@ -266,6 +377,40 @@ def _event_hints_by_topic(event_hints: list[dict[str, Any]]) -> dict[str, list[d
             continue
         out.setdefault(topic0, []).append(hint)
     return out
+
+
+def _value_hints_by_topic(value_hints: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for hint in value_hints:
+        topic0 = _normalize_topic(hint.get("topic0"))
+        if topic0 is None or hint.get("value_position") is None:
+            continue
+        out.setdefault(topic0, []).append(hint)
+    return out
+
+
+def _word_at_event_arg(
+    topics: list[str],
+    data_words: list[str],
+    event_arg_position: int,
+    hint: dict[str, Any],
+) -> str | None:
+    """The 32-byte word at an event-arg position over a durable row.
+
+    Event-arg positions count every event argument in declaration order;
+    ``indexed_positions`` lists which of those are indexed (carried in
+    ``topics`` after ``topic0``), the rest live in ``data_words`` in order.
+    """
+    indexed_positions = sorted({int(p) for p in (hint.get("indexed_positions") or [])})
+    if event_arg_position in indexed_positions:
+        topic_index = 1 + indexed_positions.index(event_arg_position)
+        if 0 <= topic_index < len(topics):
+            return _normalize_word(topics[topic_index])
+        return None
+    data_rank = len([p for p in range(event_arg_position) if p not in indexed_positions])
+    if 0 <= data_rank < len(data_words):
+        return _normalize_word(data_words[data_rank])
+    return None
 
 
 def _event_keys(

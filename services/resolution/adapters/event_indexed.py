@@ -9,10 +9,13 @@ adapter consumes those records directly with no per-standard adapter.
 
 from __future__ import annotations
 
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EnumerationResult, EvaluationContext
+
+if TYPE_CHECKING:
+    from ..repos.event_logs_pg import ValueFoldResult
 
 _CALLER_KEY_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
@@ -238,16 +241,100 @@ class EventIndexedAdapter:
     ) -> CapabilityExpr:
         """D.2 fold: latest-value-per-key, filtered by ``value_predicate``.
 
-        Uses ``services.resolution.mapping_enumerator`` to replay events
-        on demand. The result is a ``finite_set`` of keys whose latest
-        value satisfies the predicate. ``status != complete`` from the
-        underlying scan demotes ``quality`` to ``lower_bound``.
+        Folds over the durable ``indexed_event_logs`` index (``ctx.event_log_repo``,
+        the same data source the add/remove path reads), so it issues no live
+        request and is unaffected by upstream rate-limiting or token plumbing.
+        The result is a ``finite_set`` of keys whose latest stored value
+        satisfies the predicate; a not-yet-complete backfill demotes ``quality``
+        to ``lower_bound``. Only when the durable index is unavailable or holds
+        none of these events does it fall back to an on-demand event replay
+        (forwarding the token + block), and any failure is fail-closed
+        (``unsupported``), never raised.
 
         ``fold_key_position`` overrides the hint's ``key_position`` when the
         enumerated key is not the hint's innermost mapping key (a caller-keyed
         membership ACL folds on the caller's event-arg position).
         """
-        contract_address = ctx.contract_address or ""
+        event_address = next(
+            (addr for addr in (_resolve_event_address(descriptor, hint, ctx) for hint in set_hints) if addr),
+            None,
+        )
+        key_sources = _contextual_key_sources(descriptor.get("key_sources") or [], ctx)
+
+        durable = self._durable_value_fold(
+            descriptor, set_hints, value_predicate, ctx, event_address, key_sources, fold_key_position
+        )
+        if durable is not None:
+            return durable
+        return self._live_value_fold(descriptor, set_hints, value_predicate, ctx, event_address, fold_key_position)
+
+    def _durable_value_fold(
+        self,
+        descriptor: dict,
+        set_hints: list[dict],
+        value_predicate: dict,
+        ctx: EvaluationContext,
+        event_address: str | None,
+        key_sources: list[dict],
+        fold_key_position: int | None,
+    ) -> CapabilityExpr | None:
+        """Fold the value predicate over the durable index, or ``None`` to defer
+        to the live replay (no repo, repo lacks the method, or it holds none of
+        these events). Any repo error folds to ``None`` so the live path retries."""
+        repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
+        fold_values = getattr(repo, "fold_event_values", None)
+        if not callable(fold_values) or event_address is None:
+            return None
+
+        value_hints = [
+            {
+                "topic0": hint.get("topic0"),
+                "topics_to_keys": hint.get("topics_to_keys") or {},
+                "data_to_keys": hint.get("data_to_keys") or {},
+                "indexed_positions": list(hint.get("indexed_positions") or []),
+                "value_position": int(hint["value_position"]),
+            }
+            for hint in set_hints
+        ]
+        typed_fold_values = cast(Callable[..., "ValueFoldResult"], fold_values)
+        try:
+            result = typed_fold_values(
+                chain_id=ctx.chain_id,
+                event_address=event_address,
+                value_hints=value_hints,
+                key_sources=key_sources,
+                fold_key_position=fold_key_position,
+                block=ctx.block,
+            )
+        except Exception:
+            return None
+        # No durable rows for these events: let the live replay try (the durable
+        # index may simply not cover this address yet).
+        if not result.entries and not result.complete:
+            return None
+
+        from ..mapping_enumerator import filter_value_entries
+
+        keys = filter_value_entries(cast(Any, result.entries), value_predicate)
+        return CapabilityExpr.finite_set(
+            keys,
+            quality="exact" if result.complete else "lower_bound",
+            confidence="enumerable" if result.complete else "partial",
+        )
+
+    def _live_value_fold(
+        self,
+        descriptor: dict,
+        set_hints: list[dict],
+        value_predicate: dict,
+        ctx: EvaluationContext,
+        event_address: str | None,
+        fold_key_position: int | None,
+    ) -> CapabilityExpr:
+        """On-demand event replay fallback (used only when the durable index is
+        unavailable or holds none of these events). Forwards the bearer token and
+        the resolution block; any failure is fail-closed."""
+        contract_address = event_address or ctx.contract_address or ""
         # Reconstruct WriterEventSpec dicts the enumerator expects from
         # the EventHint payload. The hint already carries ``topic0``,
         # ``event_signature``, ``key_position`` etc. — we just rename
@@ -270,11 +357,29 @@ class EventIndexedAdapter:
 
         from ..mapping_enumerator import enumerate_mapping_values_sync, filter_value_entries
 
+        meta = ctx.meta or {}
+        kwargs: dict[str, Any] = {"value_predicate": value_predicate}
+        token = meta.get("hypersync_token")
+        if token:
+            kwargs["bearer_token"] = token
+        client = meta.get("hypersync_client")
+        if client is not None:
+            kwargs["client"] = client
+        module = meta.get("hypersync_module")
+        if module is not None:
+            kwargs["hypersync_module"] = module
+        hypersync_url = meta.get("hypersync_url")
+        if isinstance(hypersync_url, str) and hypersync_url:
+            kwargs["hypersync_url"] = hypersync_url
+        if isinstance(ctx.block, int):
+            kwargs["to_block"] = ctx.block
+
         try:
             scan = enumerate_mapping_values_sync(
                 contract_address,
                 writer_specs,  # type: ignore[arg-type]
-                value_predicate=value_predicate,
+                chain=str(ctx.chain_id) if isinstance(ctx.chain_id, int) else None,
+                **kwargs,
             )
         except Exception:
             return CapabilityExpr.unsupported("mapping_value_scan_failed")
