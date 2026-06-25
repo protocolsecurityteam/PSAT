@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import IndexedEventCursor, IndexedEventLog
@@ -57,8 +57,8 @@ class PostgresEventLogRepo:
         q = (
             select(IndexedEventLog)
             .where(IndexedEventLog.chain_id == chain_id)
-            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventLog.topic0) == topic0.lower())
+            .where(IndexedEventLog.event_address == event_address.lower())
+            .where(IndexedEventLog.topic0 == topic0.lower())
             .order_by(
                 IndexedEventLog.block_number.asc(),
                 IndexedEventLog.transaction_index.asc(),
@@ -122,8 +122,8 @@ class PostgresEventLogRepo:
         q = (
             select(IndexedEventLog)
             .where(IndexedEventLog.chain_id == chain_id)
-            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventLog.topic0).in_(topic0s))
+            .where(IndexedEventLog.event_address == event_address.lower())
+            .where(IndexedEventLog.topic0.in_(topic0s))
             .order_by(
                 IndexedEventLog.block_number.asc(),
                 IndexedEventLog.transaction_index.asc(),
@@ -191,9 +191,12 @@ class PostgresEventLogRepo:
         caller-keyed membership ACL keys on the caller, not the hint's
         innermost mapping key); ``None`` keeps the hint's own key map.
 
-        Returns the per-caller latest value plus an ``enumerable`` flag
-        that is True only when every participating topic's backfill is
-        complete. Reads no live endpoint.
+        Returns the per-caller latest value with ``complete`` True only when
+        every participating topic's backfill has reached head. When any required
+        topic's cursor is cold the fold is incomplete by definition, so it returns
+        an empty ``no_index_cursor`` result without scanning rows (the caller
+        defers to the reconciler); the row scan + fold runs only on a warm head.
+        Reads no live endpoint.
 
         With ``fold_key_position`` set (a caller-keyed membership ACL) the
         member is read directly at the caller's event-arg position and the
@@ -218,6 +221,17 @@ class PostgresEventLogRepo:
             return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
 
         topic0s = sorted(hints_by_topic)
+
+        # A topic is trustworthy only when its backfill has reached head. If any
+        # required topic is cold (no ``backfill_complete`` cursor) the fold cannot
+        # be complete, so it defers (``no_index_cursor``) regardless of what a scan
+        # would return — read the cursors first and skip the row scan entirely.
+        # The adapter re-resolves the deferral once the indexer warms the address.
+        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        complete = all(c_block is not None and done for c_block, done in cursor_states.values())
+        if not complete:
+            return ValueFoldResult(entries=[], complete=False, partial_reason="no_index_cursor")
+
         rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=block)
 
         # (member) -> (value_hex, block, tx_index, log_index) — keep the latest.
@@ -253,17 +267,11 @@ class PostgresEventLogRepo:
                 if prior is None or position > (prior[1], prior[2], prior[3]):
                     state[member] = (value_hex, position[0], position[1], position[2])
 
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
-        complete = all(c_block is not None and done for c_block, done in cursor_states.values())
         entries = [
             {"key": member, "value_hex": value_hex, "last_block": last_block}
             for member, (value_hex, last_block, _tx, _log) in state.items()
         ]
-        return ValueFoldResult(
-            entries=entries,
-            complete=complete,
-            partial_reason=None if complete else "no_index_cursor",
-        )
+        return ValueFoldResult(entries=entries, complete=True, partial_reason=None)
 
     def iter_event_rows(
         self,
@@ -286,8 +294,8 @@ class PostgresEventLogRepo:
         q = (
             select(IndexedEventLog)
             .where(IndexedEventLog.chain_id == chain_id)
-            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventLog.topic0).in_(lowered))
+            .where(IndexedEventLog.event_address == event_address.lower())
+            .where(IndexedEventLog.topic0.in_(lowered))
             .order_by(
                 IndexedEventLog.block_number.asc(),
                 IndexedEventLog.transaction_index.asc(),
@@ -322,8 +330,8 @@ class PostgresEventLogRepo:
         row = self.session.execute(
             select(IndexedEventCursor.last_indexed_block, IndexedEventCursor.backfill_complete)
             .where(IndexedEventCursor.chain_id == chain_id)
-            .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
+            .where(IndexedEventCursor.event_address == event_address.lower())
+            .where(IndexedEventCursor.topic0 == topic0.lower())
         ).first()
         if row is None:
             return None, False
