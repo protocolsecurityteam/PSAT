@@ -223,12 +223,14 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setattr("utils.rpc.rpc_request", _revert)
 
-    # The live param-keyed value scan now floors from_block at the contract's
-    # creation block; keep that lookup off the (blocked) Etherscan wire offline.
+    # The live param-keyed value scan now floors from_block via the shared
+    # floor-or-defer helper; stub it to a known floor so the fold runs over the
+    # seeded log (rather than deferring) without touching Etherscan/the cursor
+    # table offline.
     import services.resolution.creation_block_floor as floor_mod
 
-    floor_mod._FLOOR_CACHE.clear()
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
 
     ME.clear_enumeration_cache()
     yield
@@ -258,8 +260,8 @@ def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> No
     (deploy→head), not genesis: identical receiver set, no pre-deployment scan."""
     import services.resolution.creation_block_floor as floor_mod
 
-    floor_mod._FLOOR_CACHE.clear()
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 12_345_678)
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 12_345_678 - 1)
 
     captured: dict[str, Any] = {}
     orig = ME.enumerate_mapping_values_sync

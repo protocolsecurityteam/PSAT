@@ -33,9 +33,9 @@ class HyperSyncEventLogRepo:
     def __init__(
         self,
         *,
+        from_block: int,
         url: str = DEFAULT_HYPERSYNC_URL,
         bearer_token: str | None = None,
-        from_block: int = 0,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_pages: int = DEFAULT_MAX_PAGES,
     ) -> None:
@@ -114,7 +114,9 @@ class HyperSyncEventLogRepo:
         try:
             import hypersync  # type: ignore
 
-            client = hypersync.HypersyncClient(hypersync.ClientConfig(url=self.url, bearer_token=self.bearer_token))
+            from services.resolution.hypersync_bound import build_hypersync_client
+
+            client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
         except Exception as exc:
             return EnumerationResult(
                 members=[],
@@ -150,7 +152,10 @@ class HyperSyncEventLogRepo:
                 ),
             )
             try:
-                response = await client.get(query)
+                from services.resolution.hypersync_bound import hypersync_slot
+
+                with hypersync_slot(self.bearer_token):
+                    response = await client.get(query)
             except Exception as exc:
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
@@ -212,7 +217,9 @@ class HyperSyncEventLogRepo:
         try:
             import hypersync  # type: ignore
 
-            client = hypersync.HypersyncClient(hypersync.ClientConfig(url=self.url, bearer_token=self.bearer_token))
+            from services.resolution.hypersync_bound import build_hypersync_client
+
+            client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
         except Exception as exc:
             return EnumerationResult(
                 members=[],
@@ -250,7 +257,10 @@ class HyperSyncEventLogRepo:
                 ),
             )
             try:
-                response = await client.get(query)
+                from services.resolution.hypersync_bound import hypersync_slot
+
+                with hypersync_slot(self.bearer_token):
+                    response = await client.get(query)
             except Exception as exc:
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),

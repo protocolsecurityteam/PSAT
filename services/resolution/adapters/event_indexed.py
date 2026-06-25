@@ -456,9 +456,14 @@ class EventIndexedAdapter:
         # Floor the scan at the event address's deploy block (deploy→head, not
         # genesis→head): a contract emits no events before it exists, so the log
         # set is identical, but the empty pre-deployment range is never fetched.
-        from ..creation_block_floor import creation_block_floor
+        # When no floor can be resolved we DEFER (skip the live scan) rather than
+        # scan from genesis — fail-closed to the gated external-check baseline.
+        from ..creation_block_floor import resolve_scan_floor
 
-        kwargs["from_block"] = creation_block_floor(contract_address, ctx.chain_id)
+        floor = resolve_scan_floor(contract_address, ctx.chain_id, session=ctx.session)
+        if floor is None:
+            return self._deferred_value_check(descriptor, ctx, event_address)
+        kwargs["from_block"] = floor
 
         try:
             scan = enumerate_mapping_values_sync(

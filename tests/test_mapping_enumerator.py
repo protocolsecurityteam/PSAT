@@ -41,7 +41,11 @@ def enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs):
     """Test helper. The function now returns an EnumerationResult dict;
     legacy tests below expect the bare principal list, so this helper
     unwraps result["principals"] to keep the legacy tests focused on
-    the per-event semantics they were written for."""
+    the per-event semantics they were written for.
+
+    ``from_block`` is now a required enumerator arg; these per-event unit
+    tests replay over the full stub-log range, so default it to genesis here."""
+    kwargs.setdefault("from_block", 0)
     result = _enumerate(contract_address, cast(Any, writer_specs), **kwargs)
 
     async def _run():
@@ -481,6 +485,7 @@ def test_max_pages_bound_returns_incomplete_status():
         _enumerate(
             "0xCC00000000000000000000000000000000000001",
             cast(Any, [_rely_spec()]),
+            from_block=0,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
             timeout_s=10,
@@ -518,6 +523,7 @@ def test_timeout_returns_incomplete_status():
         _enumerate(
             "0x" + "22" * 20,
             cast(Any, [_rely_spec()]),
+            from_block=0,
             client=_SlowClient(20),
             hypersync_module=_FakeHypersyncModule(),
             timeout_s=0.12,
@@ -552,6 +558,7 @@ def test_rpc_error_surfaces_status_not_silent_fallback():
         _enumerate(
             "0x" + "33" * 20,
             cast(Any, [_rely_spec()]),
+            from_block=0,
             client=_BoomClient(),
             hypersync_module=_FakeHypersyncModule(),
             timeout_s=10,
@@ -574,6 +581,7 @@ def test_complete_result_carries_status_complete():
         _enumerate(
             "0x" + "44" * 20,
             cast(Any, [_rely_spec()]),
+            from_block=0,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
             timeout_s=10,
@@ -596,6 +604,7 @@ def test_sync_wrapper_caches_results():
     result1 = enumerate_mapping_allowlist_sync(
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,
@@ -609,6 +618,7 @@ def test_sync_wrapper_caches_results():
     result2 = enumerate_mapping_allowlist_sync(
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -623,6 +633,7 @@ def test_clear_enumeration_cache_drops_entries():
     enumerate_mapping_allowlist_sync(
         "0x" + "BB" * 20,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -692,6 +703,7 @@ def test_value_predicate_eq_filters_to_matching_keys():
         enumerate_mapping_values(
             "0xCC00000000000000000000000000000000000001",
             cast(Any, [_owner_set_spec()]),
+            from_block=0,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -732,6 +744,7 @@ def test_value_predicate_latest_value_wins_over_older_assignment():
         enumerate_mapping_values(
             "0xCC00000000000000000000000000000000000001",
             cast(Any, [_owner_set_spec()]),
+            from_block=0,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )

@@ -182,6 +182,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
     result1 = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,
@@ -204,6 +205,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
     result2 = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=new_client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,
@@ -235,6 +237,7 @@ def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
     enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=rely_client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -255,6 +258,7 @@ def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
     result_two_specs = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec(), _deny_spec()]),
+        from_block=0,
         client=rely_deny_client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -287,6 +291,7 @@ def test_l2_cache_persists_truncated_results(_clean_l2):
     result1 = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
         max_pages=2,  # forces incomplete_max_pages
@@ -301,6 +306,7 @@ def test_l2_cache_persists_truncated_results(_clean_l2):
     result2 = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=new_client,
         hypersync_module=_FakeHypersyncModule(),
         max_pages=2,
@@ -324,6 +330,7 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
     enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -338,6 +345,7 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
     enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
+        from_block=0,
         client=new_client,
         hypersync_module=_FakeHypersyncModule(),
     )

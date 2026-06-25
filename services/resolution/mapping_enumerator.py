@@ -271,9 +271,9 @@ async def enumerate_mapping_allowlist(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
+    from_block: int,
     hypersync_url: str = DEFAULT_HYPERSYNC_URL,
     bearer_token: str | None = None,
-    from_block: int = 0,
     to_block: int | None = None,
     client: Any = None,
     hypersync_module: Any = None,
@@ -315,9 +315,9 @@ async def enumerate_mapping_allowlist(
     if client is None:
         if not bearer_token:
             raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")
-        client = hypersync_module.HypersyncClient(
-            hypersync_module.ClientConfig(url=hypersync_url, bearer_token=bearer_token)
-        )
+        from services.resolution.hypersync_bound import build_hypersync_client
+
+        client = build_hypersync_client(hypersync_module, url=hypersync_url, bearer_token=bearer_token)
 
     topic0s = sorted(topic0_to_specs.keys())
     logger.info(
@@ -331,6 +331,8 @@ async def enumerate_mapping_allowlist(
         [(s["event_signature"], s["direction"], s.get("key_position")) for s in writer_specs],
     )
     query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
+
+    from services.resolution.hypersync_bound import hypersync_slot
 
     state: dict[tuple[str, str], dict[str, Any]] = {}
     current_from = from_block
@@ -360,7 +362,8 @@ async def enumerate_mapping_allowlist(
             break
 
         try:
-            result = await client.get(query)
+            with hypersync_slot(bearer_token):
+                result = await client.get(query)
         except Exception as exc:
             status = "error"
             error = str(exc)
@@ -557,9 +560,9 @@ async def enumerate_mapping_values(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
     *,
+    from_block: int,
     hypersync_url: str = DEFAULT_HYPERSYNC_URL,
     bearer_token: str | None = None,
-    from_block: int = 0,
     to_block: int | None = None,
     client: Any = None,
     hypersync_module: Any = None,
@@ -601,9 +604,11 @@ async def enumerate_mapping_values(
     if client is None:
         if not bearer_token:
             raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")
-        client = hypersync_module.HypersyncClient(
-            hypersync_module.ClientConfig(url=hypersync_url, bearer_token=bearer_token)
-        )
+        from services.resolution.hypersync_bound import build_hypersync_client
+
+        client = build_hypersync_client(hypersync_module, url=hypersync_url, bearer_token=bearer_token)
+
+    from services.resolution.hypersync_bound import hypersync_slot
 
     topic0s = sorted(topic0_to_specs.keys())
     query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
@@ -623,7 +628,8 @@ async def enumerate_mapping_values(
             status = "incomplete_max_pages"
             break
         try:
-            result = await client.get(query)
+            with hypersync_slot(bearer_token):
+                result = await client.get(query)
         except Exception as exc:
             status = "error"
             error = str(exc)

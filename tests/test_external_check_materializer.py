@@ -148,7 +148,8 @@ def test_candidate_hypersync_scan_floors_from_block_at_creation_block(monkeypatc
     import services.resolution.external_check_materializer as mod
 
     monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
-    floor_mod._FLOOR_CACHE.clear()
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 9_000_000)
 
     captured: dict = {}
