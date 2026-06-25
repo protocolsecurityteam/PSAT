@@ -282,9 +282,13 @@ def test_durable_value_fold_respects_resolution_block(db_session, no_live_calls)
     assert no_live_calls == []
 
 
-def test_cold_durable_index_demotes_to_lower_bound(db_session, no_live_calls):
-    # backfill_complete=False but rows present → trust the partial fold as a
-    # lower bound (real members), demoted quality, still no live call.
+def test_cold_durable_index_with_rows_defers_pending_index(db_session, no_live_calls):
+    # backfill_complete=False (cold) is incomplete by definition: a partial
+    # mid-backfill member set can neither be trusted as exact nor be re-resolved
+    # later if returned as a finite_set, so a cold cursor always defers to
+    # external_check_only tagged ``deferred_pending_index`` (the reconciler
+    # re-resolves once the index warms) — even when rows are already present, and
+    # without scanning them. ZERO live calls.
     rows = [
         _eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146),
     ]
@@ -298,9 +302,11 @@ def test_cold_durable_index_demotes_to_lower_bound(db_session, no_live_calls):
     )
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
 
-    assert cap.kind == "finite_set"
-    assert cap.membership_quality == "lower_bound"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert cap.check.extra.get("deferred_pending_index") is True
+    assert cap.check.extra.get("basis") == ["no_index_cursor", "caller_keyed_membership_allowlist"]
+    assert cap.check.target_address == STATE_HOLDER
     assert no_live_calls == []
 
 
@@ -331,6 +337,83 @@ def test_cold_durable_index_no_rows_defers_pending_index(db_session, no_live_cal
     # The reconciler keys on target_address; it MUST be the event state-holder
     # whose cursor backfilling triggers re-resolution.
     assert cap.check.target_address == STATE_HOLDER
+    assert no_live_calls == []
+
+
+@pytest.fixture
+def iter_rows_spy(monkeypatch):
+    """Count ``PostgresEventLogRepo.iter_event_rows`` invocations (the durable row
+    scan) so a test can assert a cold fold performs zero scans."""
+    calls: list[dict] = []
+    orig = PostgresEventLogRepo.iter_event_rows
+
+    def spy(self, **kwargs):
+        calls.append(kwargs)
+        return orig(self, **kwargs)
+
+    monkeypatch.setattr(PostgresEventLogRepo, "iter_event_rows", spy)
+    return calls
+
+
+def test_cold_durable_index_performs_zero_row_scans(db_session, no_live_calls, iter_rows_spy):
+    # A cold cursor (backfill_complete=False) reads the cursor state first and
+    # defers WITHOUT scanning indexed_event_logs: zero iter_event_rows calls.
+    _seed(db_session, [], [_cursor(EIG_TOPIC0, last_block=23600000, complete=False)])
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert cap.check.extra.get("deferred_pending_index") is True
+    assert iter_rows_spy == []  # the wasted scan is skipped on cold
+    assert no_live_calls == []
+
+
+def test_no_cursor_at_all_performs_zero_row_scans(db_session, no_live_calls, iter_rows_spy):
+    # The audited-run cold shape: no cursor row exists for the event address yet
+    # (never enrolled). The fold reads cursor state, finds none, and defers
+    # without scanning. This is the row-scan the audited run wasted on every
+    # caller-keyed-ACL function before the index warmed.
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert cap.check.extra.get("deferred_pending_index") is True
+    assert iter_rows_spy == []
+    assert no_live_calls == []
+
+
+def test_warm_durable_index_still_scans_rows(db_session, no_live_calls, iter_rows_spy):
+    # Counterpart to the cold-skip tests: a warm cursor (backfill_complete=True)
+    # DOES scan + fold, returning the same exact member set as before. The scan
+    # is skipped only when cold.
+    rows = [_eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146)]
+    _seed(db_session, rows, [_cursor(EIG_TOPIC0, last_block=25389740, complete=True)])
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert cap.kind == "finite_set"
+    assert cap.membership_quality == "exact"
+    assert sorted(cap.members or []) == [CALLER_A.lower()]
+    assert len(iter_rows_spy) == 1  # warm path scans exactly once
     assert no_live_calls == []
 
 
