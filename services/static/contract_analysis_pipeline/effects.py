@@ -67,6 +67,12 @@ class EffectInfo(TypedDict):
     effect_targets: list[str]
     action_summary: str
     writer_selectors: list[str]
+    # True for a selector-bearing external/public, non-view, non-pure entry
+    # point (the ABI mutability surface). False for views/pure and for
+    # fallback/receive (no selector). The policy stage uses this to surface a
+    # state-changing entry point that produced no sink (e.g. an inline-assembly
+    # writer) as an honest unsupported row.
+    state_changing: bool
 
 
 class EffectsArtifact(TypedDict):
@@ -95,6 +101,19 @@ def _is_externally_observable(fn: Any) -> bool:
         return True
     visibility = getattr(fn, "visibility", None)
     return visibility in ("external", "public")
+
+
+def _is_state_changing_entry_point(fn: Any) -> bool:
+    """A selector-bearing external/public, non-view, non-pure function — the
+    ABI mutability surface. Excludes fallback/receive (no selector) and
+    view/pure reads."""
+    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
+        return False
+    if (getattr(fn, "name", "") or "") in ("fallback", "receive"):
+        return False
+    if getattr(fn, "visibility", None) not in ("external", "public"):
+        return False
+    return not (getattr(fn, "view", False) or getattr(fn, "pure", False))
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +373,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "effect_targets": list(effect_targets),
         "action_summary": summary,
         "writer_selectors": _writer_selectors_for(function, sinks),
+        "state_changing": _is_state_changing_entry_point(function),
     }
 
 
