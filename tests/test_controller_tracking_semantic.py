@@ -139,19 +139,24 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
     targets = build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
     by_id = {t["controller_id"]: t for t in targets}
 
-    assert "state_variable:accountantState" in by_id, list(by_id.keys())
+    # The bare struct has no single storable address value, so it is not a
+    # controller; only the projected address member is.
+    assert "state_variable:accountantState" not in by_id, list(by_id.keys())
     assert "state_variable:accountantState.payoutAddress" in by_id, list(by_id.keys())
     leaf = predicate_trees["trees"]["sweep()"]["leaf"]
     projected_operand = next(operand for operand in leaf["operands"] if operand.get("source") == "state_variable")
     assert projected_operand["state_variable_name"] == "accountantState"
     assert projected_operand["member_path"] == ["payoutAddress"]
 
-    read_spec = by_id["state_variable:accountantState"]["read_spec"]
-    assert isinstance(read_spec, dict)
-    assert read_spec["target"] == "accountantState"
-    assert read_spec.get("type") == "C.AccountantState"
-    assert read_spec.get("type_kind") == "struct"
-    assert read_spec.get("components") == [
+    projected_spec = by_id["state_variable:accountantState.payoutAddress"]["read_spec"]
+    assert isinstance(projected_spec, dict)
+    assert projected_spec["target"] == "accountantState"
+    assert projected_spec.get("parent_type") == "C.AccountantState"
+    assert projected_spec.get("type") == "address"
+    assert projected_spec.get("type_kind") == "address"
+    assert projected_spec.get("member_path") == ["payoutAddress"]
+    # The projected member spec preserves the full struct field component list.
+    assert projected_spec.get("components") == [
         {
             "name": "payoutAddress",
             "type": "address",
@@ -171,14 +176,6 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
             "type_kind": "primitive",
         },
     ]
-    projected_spec = by_id["state_variable:accountantState.payoutAddress"]["read_spec"]
-    assert isinstance(projected_spec, dict)
-    assert projected_spec["target"] == "accountantState"
-    assert projected_spec.get("parent_type") == "C.AccountantState"
-    assert projected_spec.get("type") == "address"
-    assert projected_spec.get("type_kind") == "address"
-    assert projected_spec.get("member_path") == ["payoutAddress"]
-    assert projected_spec.get("components") == read_spec.get("components")
 
 
 def test_role_identifier_does_not_infer_authority_contract_source(tmp_path):
