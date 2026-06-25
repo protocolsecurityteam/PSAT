@@ -277,8 +277,13 @@ def test_event_indexed_backend_error_yields_check_only():
     assert cap.check.extra["basis"] == ["event_log_backend_error"]
 
 
-def test_event_indexed_no_cursor_without_hypersync_yields_check_only(monkeypatch):
-    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
+    # A caller-keyed add/remove ACL whose durable cursor is cold
+    # (``no_index_cursor``) defers to external_check_only tagged
+    # ``deferred_pending_index`` rather than a live genesis scan: the reconciler
+    # re-resolves once the indexer backfills the event address. The basis carries
+    # ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS member) so
+    # the earned-public projection keeps the gate fail-closed.
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "msg_sender"}],
@@ -291,16 +296,44 @@ def test_event_indexed_no_cursor_without_hypersync_yields_check_only(monkeypatch
 
     assert cap.kind == "external_check_only"
     assert cap.check is not None
-    assert cap.check.extra["basis"] == ["no_index_cursor", "no_hypersync_token"]
+    assert cap.check.extra["basis"] == ["no_index_cursor", "caller_keyed_membership_allowlist"]
+    assert cap.check.extra["deferred_pending_index"] is True
+    assert cap.check.target_address == ADDR_A
+
+    from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS
+
+    assert "caller_keyed_membership_allowlist" in CALLER_GATE_BASIS_TAGS
 
 
-def test_event_indexed_no_cursor_uses_hypersync_fallback(monkeypatch):
-    import services.resolution.adapters.event_indexed as event_indexed_mod
+def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag():
+    # A non-caller-keyed (parameter-keyed) ACL still defers on a cold cursor, but
+    # without the caller-gate basis tag: the deferral is index-driven, not a
+    # caller-discriminating gate.
+    descriptor = {
+        "kind": "mapping_membership",
+        "key_sources": [{"source": "parameter", "parameter_index": 0}],
+        "enumeration_hint": [
+            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {1: 0}},
+        ],
+    }
+    ctx = EvaluationContext(chain_id=1, contract_address=ADDR_A, meta={"event_log_repo": NoCursorEventLogRepo()})
+    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
 
-    def fake_fallback(**_kwargs):
-        return EnumerationResult(members=[ADDR_B], confidence="enumerable", last_indexed_block=123)
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    assert cap.check.extra["basis"] == ["no_index_cursor"]
+    assert cap.check.extra["deferred_pending_index"] is True
 
-    monkeypatch.setattr(event_indexed_mod, "_hypersync_fallback_result", fake_fallback)
+
+def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
+    # The cold-cursor add/remove branch must NOT reach the live hypersync replay:
+    # any genesis scan (the 429-storm source) is the regression this removes.
+    import services.resolution.mapping_enumerator as mapping_enumerator
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("cold cursor must defer, never live-scan")
+
+    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values_sync", boom)
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "msg_sender"}],
@@ -310,10 +343,7 @@ def test_event_indexed_no_cursor_uses_hypersync_fallback(monkeypatch):
     }
     ctx = EvaluationContext(chain_id=1, contract_address=ADDR_A, meta={"event_log_repo": NoCursorEventLogRepo()})
     cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [ADDR_B.lower()]
-    assert cap.last_indexed_block == 123
+    assert cap.kind == "external_check_only"
 
 
 def test_registry_event_indexed_handles_two_key_descriptor():

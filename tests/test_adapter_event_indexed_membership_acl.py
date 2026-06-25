@@ -78,7 +78,13 @@ def _client(logs: list[Any]):
 def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
     """Route the adapter's value fold through ``enumerate_mapping_values`` with
     a stubbed HyperSync client, so the real latest-value-per-key fold runs over
-    ``logs``. Only the wire is replaced."""
+    ``logs``. Only the wire is replaced; the creation-block floor lookup is
+    stubbed to genesis so the live fold never reaches Etherscan offline."""
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod._FLOOR_CACHE.clear()
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
+
     orig = mapping_enumerator.enumerate_mapping_values
 
     async def fake(contract_address, writer_specs, **kwargs):
@@ -414,6 +420,39 @@ def test_pre_fix_membership_leaf_absorbs_and(monkeypatch):
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_creation_block_floor_caches_per_address(monkeypatch):
+    # The floor memoizes per (address, chain) so a multi-key fold or sibling
+    # functions never issue duplicate Etherscan lookups.
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod._FLOOR_CACHE.clear()
+    calls: list[str] = []
+
+    def fake_lookup(addr, **_k):
+        calls.append(addr)
+        return 6_000_000
+
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", fake_lookup)
+    addr = "0x" + "ab" * 20
+    assert floor_mod.creation_block_floor(addr, 1) == 6_000_000 - 1
+    assert floor_mod.creation_block_floor(addr, 1) == 6_000_000 - 1
+    assert calls == [addr]  # second call served from cache
+
+
+def test_creation_block_floor_zero_for_zero_or_missing_address(monkeypatch):
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod._FLOOR_CACHE.clear()
+    monkeypatch.setattr(
+        floor_mod,
+        "get_contract_creation_block",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not look up zero/invalid")),
+    )
+    assert floor_mod.creation_block_floor("0x" + "0" * 40, 1) == 0
+    assert floor_mod.creation_block_floor(None, 1) == 0
+    assert floor_mod.creation_block_floor("not-an-address", 1) == 0
 
 
 def test_value_fold_keys_on_caller_not_inner_selector(monkeypatch):

@@ -30,6 +30,15 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 _FoldStatus = Literal["ok", "cold", "absent"]
 
 
+def _descriptor_is_caller_keyed(descriptor: dict) -> bool:
+    """True when one of the descriptor's key sources is the caller, so an
+    unresolved membership is a caller-discriminating gate (basis tag
+    ``caller_keyed_membership_allowlist`` keeps the earned-public projection
+    fail-closed)."""
+    key_sources = descriptor.get("key_sources") or []
+    return any(k.get("source") in _CALLER_KEY_SOURCES for k in key_sources if isinstance(k, dict))
+
+
 def _implicit_membership_value_predicate(descriptor: dict) -> dict | None:
     """Synthesize the value predicate a caller-keyed boolean membership ACL
     implies when the descriptor carries no explicit ``value_predicate``.
@@ -180,23 +189,18 @@ class EventIndexedAdapter:
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
             if result.confidence == "partial" and result.partial_reason == "no_index_cursor":
-                try:
-                    fallback = _hypersync_fallback_result(
-                        hints=event_hints,
-                        ctx=ctx,
-                        event_address=event_address,
-                        key_sources=key_sources,
-                    )
-                except Exception:
-                    return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
-                if fallback.confidence == "partial" and fallback.partial_reason == "no_hypersync_token":
-                    return self._external_check(descriptor, first_hint, ctx, ["no_index_cursor", "no_hypersync_token"])
-                result = fallback
-                if result.confidence == "partial" and result.partial_reason in {
-                    "event_history_fold_unavailable",
-                    "unresolved_event_key",
-                }:
-                    return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
+                # A cold durable index (no backfill_complete cursor) defers to
+                # external_check_only tagged ``deferred_pending_index`` rather
+                # than a live genesis-scan replay: ``deferred_reconciler`` (live
+                # in event_log_indexer) re-resolves once the indexer backfills
+                # the event address. Mirrors the value-fold cold path
+                # (_deferred_value_check). A caller-keyed gate also carries
+                # ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS
+                # member) so the earned-public projection keeps it gated.
+                basis = ["no_index_cursor"]
+                if _descriptor_is_caller_keyed(descriptor):
+                    basis.append("caller_keyed_membership_allowlist")
+                return self._external_check(descriptor, first_hint, ctx, basis)
             merged.extend(result.members)
             if result.confidence == "partial" and worst_confidence == "enumerable":
                 worst_confidence = "partial"
@@ -449,6 +453,12 @@ class EventIndexedAdapter:
             kwargs["hypersync_url"] = hypersync_url
         if isinstance(ctx.block, int):
             kwargs["to_block"] = ctx.block
+        # Floor the scan at the event address's deploy block (deploy→head, not
+        # genesis→head): a contract emits no events before it exists, so the log
+        # set is identical, but the empty pre-deployment range is never fetched.
+        from ..creation_block_floor import creation_block_floor
+
+        kwargs["from_block"] = creation_block_floor(contract_address, ctx.chain_id)
 
         try:
             scan = enumerate_mapping_values_sync(
@@ -599,27 +609,4 @@ def _fold_event_history(
         key_sources=key_sources,
         direction=hint.get("direction"),
         block=block,
-    )
-
-
-def _hypersync_fallback_result(
-    *,
-    hints: list[dict],
-    ctx: EvaluationContext,
-    event_address: str,
-    key_sources: list[dict],
-) -> EnumerationResult:
-    from ..repos.event_logs_hypersync import HyperSyncEventLogRepo
-
-    repo = HyperSyncEventLogRepo(
-        url=str(ctx.meta.get("hypersync_url") or "https://eth.hypersync.xyz"),
-        bearer_token=ctx.meta.get("hypersync_token"),
-    )
-    return _fold_event_history(
-        repo=repo,
-        chain_id=ctx.chain_id,
-        event_address=event_address,
-        event_hints=hints,
-        key_sources=key_sources,
-        block=ctx.block,
     )
