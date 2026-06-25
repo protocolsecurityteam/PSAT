@@ -154,6 +154,17 @@ def _external_descriptor() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _stub_creation_block_floor(monkeypatch):
+    """Keep the live-fold creation-block floor off the network in the offline
+    suite: default the lookup to genesis (None → from_block 0). Tests asserting a
+    specific floor re-stub it after this autouse fixture runs."""
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod._FLOOR_CACHE.clear()
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
+
+
 @pytest.fixture
 def no_live_calls(monkeypatch):
     """Spy that fails the test if the live event-replay path is hit. The durable
@@ -749,3 +760,75 @@ def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, 
     assert kw.get("client") is sentinel_client
     assert kw.get("hypersync_url") == "https://eth.example.xyz"
     assert kw.get("to_block") == RESOLUTION_BLOCK
+
+
+def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
+    # The remaining live replay (structural-absent repo) scans deploy→head, not
+    # genesis→head: from_block is the event address's creation block minus one
+    # (the _seed_block convention), so the empty pre-deployment range — and the
+    # 429-storm it triggers on high-volume contracts — is never scanned.
+    import services.resolution.creation_block_floor as floor_mod
+
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+    floor_mod._FLOOR_CACHE.clear()
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda addr, **_k: 18_000_000)
+
+    captured: dict = {}
+
+    async def fake_values(contract_address, writer_specs, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"entries": [], "status": "complete", "pages_fetched": 1, "last_block_scanned": 0, "error": None}
+
+    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
+    mapping_enumerator._VALUE_CACHE.clear()
+
+    class _NoValueFoldRepo:
+        pass
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=cast(Any, _NoValueFoldRepo()),
+        meta={"hypersync_token": "tok-123"},
+    )
+    EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert captured["kwargs"].get("from_block") == 18_000_000 - 1
+
+
+def test_live_fallback_fails_open_to_genesis_on_creation_block_lookup_failure(monkeypatch):
+    # A creation-block lookup failure must never drop logs: the floor falls open
+    # to from_block=0 (the status-quo full scan), so no member is ever lost.
+    import services.resolution.creation_block_floor as floor_mod
+
+    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
+    floor_mod._FLOOR_CACHE.clear()
+
+    def _raise(addr, **_k):
+        raise RuntimeError("etherscan down")
+
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _raise)
+
+    captured: dict = {}
+
+    async def fake_values(contract_address, writer_specs, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"entries": [], "status": "complete", "pages_fetched": 1, "last_block_scanned": 0, "error": None}
+
+    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
+    mapping_enumerator._VALUE_CACHE.clear()
+
+    class _NoValueFoldRepo:
+        pass
+
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=STATE_HOLDER,
+        block=RESOLUTION_BLOCK,
+        event_log_repo=cast(Any, _NoValueFoldRepo()),
+        meta={"hypersync_token": "tok-123"},
+    )
+    EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+
+    assert captured["kwargs"].get("from_block") == 0

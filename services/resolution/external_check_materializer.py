@@ -110,7 +110,9 @@ def materialize_external_check_from_events(
             limit=_MAX_CANDIDATES,
         )
         if not candidates:
-            candidates = _candidate_addresses_from_hypersync(checker_address=checker_address, limit=_MAX_CANDIDATES)
+            candidates = _candidate_addresses_from_hypersync(
+                checker_address=checker_address, limit=_MAX_CANDIDATES, chain_id=chain_id
+            )
         _CANDIDATE_CACHE[cache_key] = list(candidates)
     if not candidates:
         return None
@@ -208,17 +210,21 @@ def _candidate_addresses_from_events(
     return out
 
 
-def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int) -> list[str]:
+def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, chain_id: int = 1) -> list[str]:
     token = os.getenv("ENVIO_API_TOKEN")
     if not token:
         return []
     try:
-        return asyncio.run(_candidate_addresses_from_hypersync_async(checker_address=checker_address, limit=limit))
+        return asyncio.run(
+            _candidate_addresses_from_hypersync_async(checker_address=checker_address, limit=limit, chain_id=chain_id)
+        )
     except Exception:
         return []
 
 
-async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int) -> list[str]:
+async def _candidate_addresses_from_hypersync_async(
+    *, checker_address: str, limit: int, chain_id: int = 1
+) -> list[str]:
     try:
         import hypersync  # type: ignore
     except Exception:
@@ -228,7 +234,9 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
     max_pages = int(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_MAX_PAGES", "20"))
     client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=os.getenv("ENVIO_API_TOKEN")))
-    current_from = 0
+    from services.resolution.creation_block_floor import creation_block_floor
+
+    current_from = creation_block_floor(checker_address, chain_id)
     page_count = 0
     started = time.monotonic()
     seen: set[str] = set()
