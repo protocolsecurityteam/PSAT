@@ -70,6 +70,7 @@ FACET_ADDRESSES_SELECTOR = "0x52ef6b2c"  # facetAddresses() — EIP-2535
 MASTER_COPY_SELECTOR = "0xa619486e"  # masterCopy() — GnosisSafe
 COMPTROLLER_IMPL_SELECTOR = "0xbb82aa5e"  # comptrollerImplementation() — Compound
 TARGET_SELECTOR = "0xd4b83992"  # target() — Synthetix
+OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 
 # Proxy types whose upgrade events the monitor recognises.  These get
 # needs_polling=False because the event scan loop detects their upgrades.
@@ -429,7 +430,25 @@ def classify_single(
             info.update(type="proxy", proxy_type="synthetix", implementation=target_addr)
             return info
 
-    # 7. implementation() call — catches custom proxies with non-standard
+    # 7. UpgradeableBeacon — an {implementation, owner} registry that exposes
+    #    implementation() but does NOT delegatecall: callers read its impl
+    #    pointer and delegate to it themselves. A forwarding proxy (which the
+    #    next step catches) always contains DELEGATECALL; a beacon never does.
+    #    The owner() requirement separates a beacon from a bare immutable-impl
+    #    getter, and the empty EIP-1967 slots (verified above) separate it from
+    #    a proxy that also exposes implementation(). Classifying it 'beacon'
+    #    keeps the static worker analysing the beacon itself so its owner() —
+    #    the upgrade authority of every governed instance — is discovered.
+    if not _bytecode_has_delegatecall(bytecode):
+        beacon_impl = _try_implementation_call(rpc_url, address)
+        if beacon_impl:
+            beacon_owner = _try_implementation_call(rpc_url, address, OWNER_SELECTOR)
+            if beacon_owner:
+                logger.debug("%s → beacon (implementation()+owner(), no delegatecall), impl=%s", address, beacon_impl)
+                info.update(type="beacon", implementation=beacon_impl, owner=beacon_owner)
+                return info
+
+    # 8. implementation() call — catches custom proxies with non-standard
     #    storage slots that still expose the standard interface. Guarded by a
     #    bytecode-size ceiling: a real forwarding proxy is tiny, so a large
     #    contract exposing implementation() is a logic contract using it as a
@@ -452,7 +471,7 @@ def classify_single(
             GENERIC_IMPL_PROXY_MAX_BYTES,
         )
 
-    # 8. Heuristic: short bytecode (<= 300 bytes) with DELEGATECALL opcode.
+    # 9. Heuristic: short bytecode (<= 300 bytes) with DELEGATECALL opcode.
     #    When tracing is available, probe with synthetic calldata to confirm
     #    DELEGATECALL actually fires in the fallback path (eliminates library
     #    false positives) and extract the implementation address from the trace.

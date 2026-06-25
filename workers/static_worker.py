@@ -1051,7 +1051,12 @@ class StaticWorker(BaseWorker):
             return None
 
         classification_type = classification.get("type", "regular")
-        if classification_type != "proxy":
+        # An UpgradeableBeacon is analysed as itself (is_proxy stays False so the
+        # static worker runs Slither/tracking and discovers its owner()) yet still
+        # spawns its implementation as a beacon-context child, so each governed
+        # instance resolves against the beacon. Every other non-proxy type returns.
+        is_beacon = classification_type == "beacon"
+        if classification_type != "proxy" and not is_beacon:
             store_artifact(
                 session,
                 job.id,
@@ -1066,9 +1071,10 @@ class StaticWorker(BaseWorker):
             )
             return classification
 
-        proxy_type = classification.get("proxy_type", "unknown")
+        proxy_type = "beacon" if is_beacon else classification.get("proxy_type", "unknown")
         impl_address = classification.get("implementation")
-        beacon = classification.get("beacon")
+        # A beacon governs instances FROM the beacon address itself.
+        beacon = address if is_beacon else classification.get("beacon")
         admin = classification.get("admin")
         facets = classification.get("facets")
 
@@ -1079,7 +1085,7 @@ class StaticWorker(BaseWorker):
             sa_select(Contract).where(Contract.job_id == job.id).limit(1)
         ).scalar_one_or_none()
         if contract_row:
-            contract_row.is_proxy = True
+            contract_row.is_proxy = not is_beacon
             contract_row.proxy_type = proxy_type
             contract_row.implementation = impl_address
             contract_row.beacon = beacon
@@ -1160,7 +1166,7 @@ class StaticWorker(BaseWorker):
             job.id,
             "contract_flags",
             data={
-                "is_proxy": True,
+                "is_proxy": not is_beacon,
                 "classification_type": classification_type,
                 "proxy_type": proxy_type,
                 "implementation": impl_address,
@@ -1171,8 +1177,9 @@ class StaticWorker(BaseWorker):
         )
 
         logger.info(
-            "Job %s: proxy classified as %s, implementation=%s",
+            "Job %s: %s classified as %s, implementation=%s",
             job.id,
+            "beacon" if is_beacon else "proxy",
             proxy_type,
             impl_address or "unknown",
         )

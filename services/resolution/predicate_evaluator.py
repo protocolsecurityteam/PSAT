@@ -888,6 +888,31 @@ def _public_getter_selector_for_internal_accessor(signature: str | None) -> str 
     return _selector_for_signature(f"{public_name}()")
 
 
+def _oz_v5_namespaced_authority_selector(signature: str | None) -> str | None:
+    """Canonical public authority-getter selector for an OZ-v5 namespaced-storage
+    OWNERSHIP accessor, or ``None`` (fail-closed).
+
+    OZ-v5 keeps ownership in an ERC-7201 namespaced struct, so a caller-equality
+    gate that lowers through ``owner()`` inlines to a ``view_call`` of the
+    PRIVATE accessor that ``sload``s the namespace (CumulativeMerkleDrop overrides
+    ``owner()`` to ``defaultAdmin()`` → ``_getAccessControlDefaultAdminRulesStorage()``).
+    That accessor has no external selector, so reading it reverts; the canonical
+    public ``owner()`` reads the same root. Anchored to the known ownership
+    accessors by EXACT name (via the shared OZ-v5 recognition table) so an
+    arbitrary ``_get<X>Storage()`` — the L1BaseSyncPool namespace, the parametric
+    ``_getAccessControlStorage()`` role-admin root — is never rerouted here."""
+    if not isinstance(signature, str) or not signature.endswith("()"):
+        return None
+    from services.static.contract_analysis_pipeline.tracking import (
+        _oz_v5_ownership_getter_for_accessor,
+    )
+
+    getter = _oz_v5_ownership_getter_for_accessor(signature[:-2])
+    if getter is None:
+        return None
+    return _selector_for_signature(f"{getter}()")
+
+
 def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
     """Canonical public authority-getter selector for a storage-slot-constant
     operand, or ``None`` when the name doesn't denote one (fail-closed).
@@ -1251,6 +1276,13 @@ def _resolve_equality_principal(
             # authority is the value the public getter returns, so prefer the
             # de-underscored canonical getter (``governor()``/``owner()``).
             canonical_selector = _public_getter_selector_for_internal_accessor(signature)
+            # OZ-v5 keeps ownership in an ERC-7201 namespace, so an ``owner()``
+            # gate inlines to a ``view_call`` of the namespaced storage accessor
+            # (``_getAccessControlDefaultAdminRulesStorage()``) rather than a
+            # ``_owner()`` helper — recognized by exact accessor name and read
+            # through ``owner()``.
+            if canonical_selector is None:
+                canonical_selector = _oz_v5_namespaced_authority_selector(signature)
         # Canonical public getter first (when the operand is an internal authority
         # accessor its own selector is dead); otherwise the literal selector.
         result = _resolve_authority_via_getters(ctx, list(dict.fromkeys((canonical_selector, selector))))

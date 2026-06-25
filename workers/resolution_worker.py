@@ -95,6 +95,9 @@ class ResolutionWorker(BaseWorker):
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
+        # An UpgradeableBeacon governs this instance: its owner() is the
+        # instance's upgrade authority and is read live from the beacon below.
+        beacon_address = proxy_address if request.get("proxy_type") == "beacon" else None
         # Deployment this resolution is attributed to (proxy for an impl in proxy
         # context, else NULL) so a shared impl can hold per-proxy result sets.
         deployment_address = normalize_deployment(proxy_address)
@@ -125,6 +128,7 @@ class ResolutionWorker(BaseWorker):
             rpc_url,
             heartbeat=lambda: self._heartbeat(session, job),
             getter_fallback_address=getter_fallback_address,
+            beacon_address=beacon_address,
         )
         logger.info(
             "resolution phase complete: control snapshot",
