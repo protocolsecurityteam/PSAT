@@ -27,6 +27,7 @@ EXPECTED_AUTHORITY_ROLES = {
     "reentrancy",
     "pause",
     "business",
+    "one_shot",
 }
 
 EXPECTED_CAPABILITY_KINDS = {
