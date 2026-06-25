@@ -854,22 +854,24 @@ def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(sessi
 
 
 @requires_postgres
-def test_unscanned_event_cursor_uses_hypersync_fallback(session, monkeypatch):
-    """A just-enrolled cursor at block 0 is not a complete empty index."""
-    import services.resolution.adapters.event_indexed as event_indexed_mod
+def test_unscanned_event_cursor_defers_pending_index(session, monkeypatch):
+    """A just-enrolled cursor at block 0 (cold, no backfill_complete) is index-cold:
+    the caller-keyed ACL leaf defers to external_check_only tagged
+    ``deferred_pending_index`` rather than a live genesis scan. The reconciler
+    re-resolves once the indexer backfills the event address."""
+    import services.resolution.mapping_enumerator as mapping_enumerator
     from db.models import IndexedEventCursor
-    from services.resolution.adapters import EnumerationResult
     from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("cold cursor must defer, never live-scan")
+
+    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values_sync", boom)
 
     address = "0x" + uuid.uuid4().hex[:8] + "c9" * 16
     role_const_hex = "0x" + "44" * 32
-    member = "0x" + "55" * 20
     topic0 = "0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d"
 
-    def fake_fallback(**_kwargs):
-        return EnumerationResult(members=[member], confidence="enumerable", last_indexed_block=123)
-
-    monkeypatch.setattr(event_indexed_mod, "_hypersync_fallback_result", fake_fallback)
     _seed_contract(session, address=address)
     session.add(
         IndexedEventCursor(
@@ -922,9 +924,8 @@ def test_unscanned_event_cursor_uses_hypersync_fallback(session, monkeypatch):
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["pause()"]
-    assert cap["kind"] == "finite_set"
-    assert cap.get("members") == [member]
-    assert cap.get("last_indexed_block") == 123
+    assert cap["kind"] == "external_check_only"
+    assert cap["check"]["extra"].get("deferred_pending_index") is True
 
 
 @requires_postgres

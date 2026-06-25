@@ -222,6 +222,16 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
         raise RuntimeError("execution reverted")
 
     monkeypatch.setattr("utils.rpc.rpc_request", _revert)
+
+    # The live param-keyed value scan now floors from_block via the shared
+    # floor-or-defer helper; stub it to a known floor so the fold runs over the
+    # seeded log (rather than deferring) without touching Etherscan/the cursor
+    # table offline.
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
+
     ME.clear_enumeration_cache()
     yield
     ME.clear_enumeration_cache()
@@ -243,6 +253,31 @@ def test_receivers_resolve_to_value_set() -> None:
     assert cap.membership_quality == "lower_bound"
     assert sorted(_principals(cap)) == sorted([R1, R2])
     assert _status(cap) != "resolved_empty"
+
+
+def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> None:
+    """The live param-keyed value scan starts at the contract's creation block
+    (deploy→head), not genesis: identical receiver set, no pre-deployment scan."""
+    import services.resolution.creation_block_floor as floor_mod
+
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 12_345_678 - 1)
+
+    captured: dict[str, Any] = {}
+    orig = ME.enumerate_mapping_values_sync
+
+    def spy(contract_address, writer_specs, **kwargs):
+        captured["from_block"] = kwargs.get("from_block")
+        return orig(contract_address, writer_specs, **kwargs)
+
+    # The resolver imports the enumerator locally from ``mapping_enumerator``, so
+    # patching it on that module is sufficient.
+    monkeypatch.setattr(ME, "enumerate_mapping_values_sync", spy)
+
+    meta = _seeded_meta(_receiver_set_log(30183, R1))
+    evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
+
+    assert captured.get("from_block") == 12_345_678 - 1
 
 
 def test_latest_value_per_key_is_folded() -> None:

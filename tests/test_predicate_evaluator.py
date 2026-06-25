@@ -1062,3 +1062,44 @@ def test_caller_keyed_denylist_membership_stays_open(tmp_path):
     assert cap.kind == "conditional_universal", (
         f"a falsy claim-once denylist must stay open, got {cap.kind} (over-gating regression)"
     )
+
+
+def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
+    """The view-key-membership HyperSync scan starts at the event address's
+    creation block, not genesis — identical key words, no pre-deployment scan."""
+    import hypersync
+
+    import services.resolution.creation_block_floor as floor_mod
+    from services.resolution.predicate_evaluator import _observed_event_key_words_from_hypersync
+
+    monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
+
+    captured: dict = {}
+
+    def _query(*, from_block, to_block, logs, field_selection):  # noqa: ARG001
+        captured["from_block"] = from_block
+        return SimpleNamespace(from_block=from_block)
+
+    class _Client:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def get(self, _query):
+            return SimpleNamespace(data=None, logs=[], next_block=None)
+
+    monkeypatch.setattr(hypersync, "Query", _query)
+    monkeypatch.setattr(hypersync, "HypersyncClient", _Client)
+
+    event_addr = "0x" + "33" * 20
+    descriptor = {"key_sources": [{"source": "msg_sender"}]}
+    hints = [{"topic0": "0x" + "ab" * 32, "event_address": event_addr, "topics_to_keys": {1: 0}}]
+    outer = SimpleNamespace(meta={}, chain_id=1, block=None)
+
+    _observed_event_key_words_from_hypersync(
+        outer_ctx=outer, descriptor=cast(Any, descriptor), event_hints=hints, key_index=0
+    )
+
+    assert captured["from_block"] == 7_000_000 - 1

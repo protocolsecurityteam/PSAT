@@ -110,7 +110,9 @@ def materialize_external_check_from_events(
             limit=_MAX_CANDIDATES,
         )
         if not candidates:
-            candidates = _candidate_addresses_from_hypersync(checker_address=checker_address, limit=_MAX_CANDIDATES)
+            candidates = _candidate_addresses_from_hypersync(
+                checker_address=checker_address, limit=_MAX_CANDIDATES, chain_id=chain_id
+            )
         _CANDIDATE_CACHE[cache_key] = list(candidates)
     if not candidates:
         return None
@@ -208,17 +210,21 @@ def _candidate_addresses_from_events(
     return out
 
 
-def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int) -> list[str]:
+def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, chain_id: int = 1) -> list[str]:
     token = os.getenv("ENVIO_API_TOKEN")
     if not token:
         return []
     try:
-        return asyncio.run(_candidate_addresses_from_hypersync_async(checker_address=checker_address, limit=limit))
+        return asyncio.run(
+            _candidate_addresses_from_hypersync_async(checker_address=checker_address, limit=limit, chain_id=chain_id)
+        )
     except Exception:
         return []
 
 
-async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int) -> list[str]:
+async def _candidate_addresses_from_hypersync_async(
+    *, checker_address: str, limit: int, chain_id: int = 1
+) -> list[str]:
     try:
         import hypersync  # type: ignore
     except Exception:
@@ -227,8 +233,17 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     url = os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
     timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
     max_pages = int(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_MAX_PAGES", "20"))
-    client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=os.getenv("ENVIO_API_TOKEN")))
-    current_from = 0
+    from services.resolution.hypersync_bound import build_hypersync_client, hypersync_slot
+
+    envio_token = os.getenv("ENVIO_API_TOKEN")
+    client = build_hypersync_client(hypersync, url=url, bearer_token=envio_token)
+    from services.resolution.creation_block_floor import resolve_scan_floor
+
+    # No floor → DEFER: return no candidates rather than scan from genesis.
+    floor = resolve_scan_floor(checker_address, chain_id)
+    if floor is None:
+        return []
+    current_from = floor
     page_count = 0
     started = time.monotonic()
     seen: set[str] = set()
@@ -241,7 +256,8 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
             logs=[hypersync.LogSelection(address=[checker_address.lower()])],
             field_selection=hypersync.FieldSelection(log=[field.value for field in hypersync.LogField]),
         )
-        response = await client.get(query)
+        with hypersync_slot(envio_token):
+            response = await client.get(query)
         page_count += 1
         for log in _logs_from_hypersync_response(response):
             for word in _topics_from_hypersync_log(log)[1:] + _data_words_from_hypersync_log(log):

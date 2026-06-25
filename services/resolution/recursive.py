@@ -637,6 +637,111 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
     return specs
 
 
+def _replay_mapping_principals(
+    *,
+    address: str,
+    mapping_specs: list[WriterEventSpec],
+    contract_node_id: str,
+    depth: int,
+    nodes: dict[str, ResolvedGraphNode],
+    edges: dict[tuple, ResolvedGraphEdge],
+) -> str:
+    """Replay mapping-writer events for *address* into principal nodes/edges,
+    returning the enumeration status.
+
+    FLOOR-or-DEFER: a contract emits no events before it exists, so flooring the
+    replay at its deploy block returns the identical principal set without the
+    genesis walk that 429-storms HyperSync. When the floor is unknown we DEFER
+    (skip the live scan, status ``deferred_no_floor``) rather than walk from 0 —
+    these ACL/authority addresses are enrolled+backfilled, so the principal set
+    materializes on a later policy pass instead of stranding the function.
+    """
+    hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
+    logger.info(
+        "mapping_enumerator: %s has %d writer-event specs, token=%s",
+        address,
+        len(mapping_specs),
+        "present" if hypersync_token else "missing",
+    )
+    if not hypersync_token:
+        return "skipped"
+
+    from services.resolution.creation_block_floor import resolve_scan_floor
+
+    scan_floor = resolve_scan_floor(address, 1)
+    if scan_floor is None:
+        logger.info("mapping_enumerator: %s deferring replay (no scan floor resolved)", address)
+        return "deferred_no_floor"
+
+    from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
+
+    try:
+        result = enumerate_mapping_allowlist_sync(
+            address,
+            mapping_specs,
+            bearer_token=hypersync_token,
+            from_block=scan_floor,
+        )
+    except Exception as exc:
+        # Bounds are inside enumerate_mapping_allowlist; raises here are
+        # unexpected (auth, hypersync load, etc).
+        record_degraded(phase="mapping_enumerator", exc=exc, context={"address": address})
+        logger.warning(
+            "mapping_enumerator UNEXPECTED FAILURE for %s: %s — treating as truncated",
+            address,
+            exc,
+        )
+        return "error"
+
+    enumerated = list(result["principals"])
+    enumeration_status = result["status"]
+    if enumeration_status != "complete":
+        logger.warning(
+            "mapping_enumerator: %s INCOMPLETE status=%s pages=%d last_block=%d (principal set may be missing entries)",
+            address,
+            enumeration_status,
+            result["pages_fetched"],
+            result["last_block_scanned"],
+        )
+    logger.info(
+        "mapping_enumerator: %s returned %d principals (status=%s)",
+        address,
+        len(enumerated),
+        enumeration_status,
+    )
+
+    for principal in enumerated:
+        member_addr = principal["address"]
+        _ensure_node(
+            nodes,
+            address=member_addr,
+            resolved_type="unknown",
+            label=principal["mapping_name"],
+            depth=depth + 1,
+            node_type="principal",
+            analyzed=False,
+            details={
+                "address": member_addr,
+                "controller_label": principal["mapping_name"],
+                "mapping_name": principal["mapping_name"],
+                "last_seen_block": principal["last_seen_block"],
+                "direction_history": principal["direction_history"],
+            },
+        )
+        _add_edge(
+            edges,
+            {
+                "from_id": contract_node_id,
+                "to_id": _address_node_id(member_addr),
+                "relation": "mapping_member",
+                "label": principal["mapping_name"],
+                "source_controller_id": f"mapping:{principal['mapping_name']}",
+                "notes": [],
+            },
+        )
+    return enumeration_status
+
+
 def _maybe_queue_address(
     queue: deque[PendingContract], queued: set[str], address: str, depth: int, max_depth: int
 ) -> None:
@@ -890,88 +995,17 @@ def resolve_control_graph(
             # Replay semantic mapping-writer event hints into principal nodes;
             # bounded enumeration surfaces truncation via the `status` field.
             mapping_specs = _mapping_writer_specs_from_predicate_trees(artifacts.get("predicate_trees"))
-            enumerated: list[Any] = []
-            enumeration_status = "skipped"
             if mapping_specs:
-                hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
-                logger.info(
-                    "mapping_enumerator: %s has %d writer-event specs, token=%s",
-                    address,
-                    len(mapping_specs),
-                    "present" if hypersync_token else "missing",
+                enumeration_status = _replay_mapping_principals(
+                    address=address,
+                    mapping_specs=mapping_specs,
+                    contract_node_id=contract_node_id,
+                    depth=depth,
+                    nodes=nodes,
+                    edges=edges,
                 )
-                if hypersync_token:
-                    from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
-
-                    try:
-                        result = enumerate_mapping_allowlist_sync(
-                            address,
-                            mapping_specs,
-                            bearer_token=hypersync_token,
-                        )
-                    except Exception as exc:
-                        # Bounds are inside enumerate_mapping_allowlist; raises here are
-                        # unexpected (auth, hypersync load, etc).
-                        record_degraded(
-                            phase="mapping_enumerator",
-                            exc=exc,
-                            context={"address": address},
-                        )
-                        logger.warning(
-                            "mapping_enumerator UNEXPECTED FAILURE for %s: %s — treating as truncated",
-                            address,
-                            exc,
-                        )
-                        enumeration_status = "error"
-                    else:
-                        enumerated = list(result["principals"])
-                        enumeration_status = result["status"]
-                        if enumeration_status != "complete":
-                            logger.warning(
-                                "mapping_enumerator: %s INCOMPLETE status=%s pages=%d last_block=%d "
-                                "(principal set may be missing entries)",
-                                address,
-                                enumeration_status,
-                                result["pages_fetched"],
-                                result["last_block_scanned"],
-                            )
-                        logger.info(
-                            "mapping_enumerator: %s returned %d principals (status=%s)",
-                            address,
-                            len(enumerated),
-                            enumeration_status,
-                        )
-                for principal in enumerated:
-                    member_addr = principal["address"]
-                    _ensure_node(
-                        nodes,
-                        address=member_addr,
-                        resolved_type="unknown",
-                        label=principal["mapping_name"],
-                        depth=depth + 1,
-                        node_type="principal",
-                        analyzed=False,
-                        details={
-                            "address": member_addr,
-                            "controller_label": principal["mapping_name"],
-                            "mapping_name": principal["mapping_name"],
-                            "last_seen_block": principal["last_seen_block"],
-                            "direction_history": principal["direction_history"],
-                        },
-                    )
-                    _add_edge(
-                        edges,
-                        {
-                            "from_id": contract_node_id,
-                            "to_id": _address_node_id(member_addr),
-                            "relation": "mapping_member",
-                            "label": principal["mapping_name"],
-                            "source_controller_id": f"mapping:{principal['mapping_name']}",
-                            "notes": [],
-                        },
-                    )
                 # Surface enumeration status on the node so downstream stages can flag incomplete allowlists.
-                if mapping_specs and contract_node_id in nodes:
+                if contract_node_id in nodes:
                     nodes[contract_node_id]["details"]["mapping_enumeration_status"] = enumeration_status
 
             for controller_id, controller_value in snapshot.get("controller_values", {}).items():

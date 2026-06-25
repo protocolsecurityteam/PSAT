@@ -135,3 +135,44 @@ def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
     )
     assert cap is not None
     assert cap.members == [member]
+
+
+def test_candidate_hypersync_scan_floors_from_block_at_creation_block(monkeypatch):
+    """The candidate-enumeration HyperSync scan starts at the checker's creation
+    block, not genesis: identical candidate set, no pre-deployment 429-storm."""
+    import asyncio
+
+    import hypersync
+
+    import services.resolution.creation_block_floor as floor_mod
+    import services.resolution.external_check_materializer as mod
+
+    monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 9_000_000)
+
+    captured: dict = {}
+    candidate = "0x" + "ab" * 20
+
+    class _FakeResp:
+        data = None
+        logs = [type("L", (), {"topics": ["0x" + "00" * 32, "0x" + "00" * 12 + candidate[2:]], "data": "0x"})()]
+        next_block = None
+
+    class _FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def get(self, query):
+            captured["from_block"] = getattr(query, "from_block", None)
+            return _FakeResp()
+
+    monkeypatch.setattr(hypersync, "HypersyncClient", _FakeClient)
+
+    out = asyncio.run(
+        mod._candidate_addresses_from_hypersync_async(checker_address="0x" + "11" * 20, limit=8, chain_id=1)
+    )
+
+    assert captured["from_block"] == 9_000_000 - 1
+    assert candidate in out
