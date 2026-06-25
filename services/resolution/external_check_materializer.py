@@ -233,10 +233,17 @@ async def _candidate_addresses_from_hypersync_async(
     url = os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
     timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
     max_pages = int(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_MAX_PAGES", "20"))
-    client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=os.getenv("ENVIO_API_TOKEN")))
-    from services.resolution.creation_block_floor import creation_block_floor
+    from services.resolution.hypersync_bound import build_hypersync_client, hypersync_slot
 
-    current_from = creation_block_floor(checker_address, chain_id)
+    envio_token = os.getenv("ENVIO_API_TOKEN")
+    client = build_hypersync_client(hypersync, url=url, bearer_token=envio_token)
+    from services.resolution.creation_block_floor import resolve_scan_floor
+
+    # No floor → DEFER: return no candidates rather than scan from genesis.
+    floor = resolve_scan_floor(checker_address, chain_id)
+    if floor is None:
+        return []
+    current_from = floor
     page_count = 0
     started = time.monotonic()
     seen: set[str] = set()
@@ -249,7 +256,8 @@ async def _candidate_addresses_from_hypersync_async(
             logs=[hypersync.LogSelection(address=[checker_address.lower()])],
             field_selection=hypersync.FieldSelection(log=[field.value for field in hypersync.LogField]),
         )
-        response = await client.get(query)
+        with hypersync_slot(envio_token):
+            response = await client.get(query)
         page_count += 1
         for log in _logs_from_hypersync_response(response):
             for word in _topics_from_hypersync_log(log)[1:] + _data_words_from_hypersync_log(log):

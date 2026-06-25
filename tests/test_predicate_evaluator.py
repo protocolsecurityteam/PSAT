@@ -1073,7 +1073,8 @@ def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
     from services.resolution.predicate_evaluator import _observed_event_key_words_from_hypersync
 
     monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
-    floor_mod._FLOOR_CACHE.clear()
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
 
     captured: dict = {}

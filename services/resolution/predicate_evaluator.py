@@ -1044,11 +1044,18 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     block = getattr(outer, "block", None)
     chain_id = getattr(outer, "chain_id", None)
     _bump_resolve_counter(outer, "mapping_value_scans")
-    from services.resolution.creation_block_floor import creation_block_floor
+    from services.resolution.creation_block_floor import resolve_scan_floor
 
-    kwargs: dict[str, Any] = {
-        "from_block": creation_block_floor(contract, chain_id if isinstance(chain_id, int) else 1)
-    }
+    # No floor → DEFER: skip the live scan (return empty, surfaced as the gated
+    # external check) rather than scan from genesis.
+    floor = resolve_scan_floor(
+        contract,
+        chain_id if isinstance(chain_id, int) else 1,
+        session=getattr(outer, "session", None),
+    )
+    if floor is None:
+        return []
+    kwargs: dict[str, Any] = {"from_block": floor}
     if isinstance(block, int):
         kwargs["to_block"] = block
     if token:
@@ -1541,13 +1548,24 @@ def _observed_event_key_words_from_hypersync(
         )
         timeout_s = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
         max_pages = int(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_MAX_PAGES", "50"))
-        client = hypersync.HypersyncClient(hypersync.ClientConfig(url=url, bearer_token=token))
-        from services.resolution.creation_block_floor import creation_block_floor
+        from services.resolution.hypersync_bound import build_hypersync_client, hypersync_slot
+
+        client = build_hypersync_client(hypersync, url=url, bearer_token=token)
+        from services.resolution.creation_block_floor import resolve_scan_floor
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         found: set[str] = set()
         for event_address, topic0s in address_topics.items():
-            current_from = creation_block_floor(event_address, scan_chain_id if isinstance(scan_chain_id, int) else 1)
+            # No floor → DEFER this address (skip the live scan) rather than scan
+            # from genesis; a known floor scans deploy→head.
+            floor = resolve_scan_floor(
+                event_address,
+                scan_chain_id if isinstance(scan_chain_id, int) else 1,
+                session=getattr(outer_ctx, "session", None),
+            )
+            if floor is None:
+                continue
+            current_from = floor
             page_count = 0
             started = time.monotonic()
             while True:
@@ -1565,7 +1583,8 @@ def _observed_event_key_words_from_hypersync(
                     field_selection=hypersync.FieldSelection(log=[field.value for field in hypersync.LogField]),
                 )
                 try:
-                    response = await client.get(query)
+                    with hypersync_slot(token):
+                        response = await client.get(query)
                 except Exception:
                     break
                 page_count += 1

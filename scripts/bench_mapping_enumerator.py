@@ -100,6 +100,7 @@ def _run_one(fixture: dict, *, timeout_s: float, max_pages: int, bearer_token: s
         timeout_s=timeout_s,
         max_pages=max_pages,
         bearer_token=bearer_token,
+        from_block=0,  # explicit genesis replay for the bench (deploy-floor n/a here)
     )
     elapsed = time.monotonic() - t0
     return {

@@ -156,13 +156,14 @@ def _external_descriptor() -> dict:
 
 @pytest.fixture(autouse=True)
 def _stub_creation_block_floor(monkeypatch):
-    """Keep the live-fold creation-block floor off the network in the offline
-    suite: default the lookup to genesis (None → from_block 0). Tests asserting a
-    specific floor re-stub it after this autouse fixture runs."""
+    """Keep the live-fold scan floor off the network in the offline suite: default
+    the floor to a known block (0) so the live fold runs over the stub logs rather
+    than deferring. Tests asserting a specific floor or the defer path re-stub
+    ``resolve_scan_floor`` after this autouse fixture runs."""
     import services.resolution.creation_block_floor as floor_mod
 
-    floor_mod._FLOOR_CACHE.clear()
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
 
 
 @pytest.fixture
@@ -770,8 +771,8 @@ def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
-    floor_mod._FLOOR_CACHE.clear()
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda addr, **_k: 18_000_000)
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 18_000_000 - 1)
 
     captured: dict = {}
 
@@ -797,23 +798,23 @@ def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
     assert captured["kwargs"].get("from_block") == 18_000_000 - 1
 
 
-def test_live_fallback_fails_open_to_genesis_on_creation_block_lookup_failure(monkeypatch):
-    # A creation-block lookup failure must never drop logs: the floor falls open
-    # to from_block=0 (the status-quo full scan), so no member is ever lost.
+def test_live_fallback_defers_on_unknown_floor(monkeypatch):
+    # A scan floor that can't be resolved (no cursor, creation-block lookup fails)
+    # must NOT fall open to a genesis scan: the live fold is skipped entirely and
+    # the function defers to the gated external check, to be re-resolved once the
+    # durable index warms. Deferral returns the same member set without storming.
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
-    floor_mod._FLOOR_CACHE.clear()
+    floor_mod.clear_scan_floor_cache()
+    # Override the autouse floor stub: an unresolvable floor returns the DEFER
+    # sentinel (None), which must skip the live scan entirely.
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: None)
 
-    def _raise(addr, **_k):
-        raise RuntimeError("etherscan down")
-
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _raise)
-
-    captured: dict = {}
+    invoked: dict = {"called": False}
 
     async def fake_values(contract_address, writer_specs, **kwargs):
-        captured["kwargs"] = kwargs
+        invoked["called"] = True
         return {"entries": [], "status": "complete", "pages_fetched": 1, "last_block_scanned": 0, "error": None}
 
     monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
@@ -829,6 +830,7 @@ def test_live_fallback_fails_open_to_genesis_on_creation_block_lookup_failure(mo
         event_log_repo=cast(Any, _NoValueFoldRepo()),
         meta={"hypersync_token": "tok-123"},
     )
-    EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+    result = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
 
-    assert captured["kwargs"].get("from_block") == 0
+    assert invoked["called"] is False  # no live scan issued on an unknown floor
+    assert result.kind == "external_check_only"
