@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -20,8 +21,42 @@ logger = logging.getLogger(__name__)
 
 ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 MAX_LOGS_PER_TOPIC = int(os.getenv("PSAT_PRINCIPAL_HISTORY_MAX_LOGS_PER_TOPIC", "10000"))
-_ABI_CACHE: dict[tuple[int, str], list[dict[str, Any]]] = {}
-_LOG_CACHE: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+
+# Process-wide cache of an authority's full role-event log history, keyed
+# (chain_id, authority, topic0) so the contracts sharing one authority fetch it
+# once. Size-capped with oldest-fraction eviction; entries carry a monotonic
+# insert time and a medium TTL so a later grant/revoke is eventually re-read.
+_LOG_CACHE: dict[tuple[int, str, str], tuple[list[dict[str, Any]], float]] = {}
+_LOG_CACHE_LOCK = threading.Lock()
+_LOG_CACHE_MAX = 256
+_LOG_CACHE_TTL_S = float(os.getenv("PSAT_PRINCIPAL_LOG_CACHE_TTL_S", "1800"))
+
+
+def clear_log_cache() -> None:
+    """Clear the process-wide authority-log cache. For tests + manual reset."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _LOG_CACHE_LOCK:
+        _LOG_CACHE.clear()
+    reset_cache_pressure_state("principal_log")
+
+
+def _evict_log_cache_if_needed() -> None:
+    """Drop the oldest 25% of _LOG_CACHE entries when the bound is reached (caller holds _LOG_CACHE_LOCK)."""
+    if len(_LOG_CACHE) < _LOG_CACHE_MAX:
+        return
+    cutoff = sorted(_LOG_CACHE.values(), key=lambda v: v[1])[len(_LOG_CACHE) // 4][1]
+    for k in [k for k, v in _LOG_CACHE.items() if v[1] <= cutoff]:
+        _LOG_CACHE.pop(k, None)
+
+
+def _log_principal_log_pressure() -> None:
+    """Log when _LOG_CACHE crosses 50/75/95% of its bound (caller holds the lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("principal_log", len(_LOG_CACHE), _LOG_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
 
 
 def build_principal_history(
@@ -501,25 +536,26 @@ def _event_base(log: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_abi(address: str, chain_id: int) -> list[dict[str, Any]]:
+    # ABI is served by utils.etherscan.get, which carries the durable PG layer
+    # and a bounded in-memory LRU — no third copy here.
     from utils.etherscan import get
 
-    cache_key = (chain_id, address.lower())
-    cached = _ABI_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
     data = get("contract", "getabi", chain_id=chain_id, address=address)
     raw = data.get("result")
     decoded = json.loads(raw) if isinstance(raw, str) else raw
-    abi = decoded if isinstance(decoded, list) else []
-    _ABI_CACHE[cache_key] = abi
-    return abi
+    return decoded if isinstance(decoded, list) else []
 
 
 def _fetch_logs(*, authority_address: str, chain_id: int, topic0: str) -> list[dict[str, Any]]:
     cache_key = (chain_id, authority_address.lower(), topic0.lower())
-    cached = _LOG_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    now = time.monotonic()
+    with _LOG_CACHE_LOCK:
+        cached = _LOG_CACHE.get(cache_key)
+        if cached is not None:
+            logs, inserted_at = cached
+            if now - inserted_at < _LOG_CACHE_TTL_S:
+                return logs
+            del _LOG_CACHE[cache_key]
     api_key = os.getenv("ETHERSCAN_API_KEY")
     if not api_key:
         raise RuntimeError("ETHERSCAN_API_KEY not set")
@@ -554,7 +590,10 @@ def _fetch_logs(*, authority_address: str, chain_id: int, topic0: str) -> list[d
         if len(out) > MAX_LOGS_PER_TOPIC:
             raise RuntimeError(f"principal history log cap exceeded for {authority_address} topic {topic0}")
         if len(batch) < 1000:
-            _LOG_CACHE[cache_key] = list(out)
+            with _LOG_CACHE_LOCK:
+                _evict_log_cache_if_needed()
+                _LOG_CACHE[cache_key] = (list(out), time.monotonic())
+                _log_principal_log_pressure()
             return out
         page += 1
         time.sleep(0.25)
