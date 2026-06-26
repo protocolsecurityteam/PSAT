@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -73,17 +75,67 @@ class EnumerationValueResult(TypedDict):
     error: str | None
 
 
-# Process-wide cache keyed on lowercased contract address; head_block is in the value, not the key, so cascade siblings
-# reuse results.
-_CACHE: dict[str, tuple[EnumerationResult, float]] = {}
+# Process-wide L1 caches keyed on (chain, address, specs_hash) — the same identity
+# db.mapping_enumeration_cache (L2) uses — so the same address on two chains, or with
+# two writer-spec sets, never collides. head_block lives in the value, not the key, so
+# cascade siblings still share a scan. Both caches are size-capped (oldest 25% evicted
+# at the bound); a wall-clock TTL (see _cache_ttl_s) handles staleness on top.
+_CACHE: dict[tuple[str, str, str], tuple[EnumerationResult, float]] = {}
 _CACHE_LOCK = threading.Lock()
+_CACHE_MAX = 1024
+_PRESENT_PRESSURE_NAME = "mapping_enumeration"
+_VALUE_PRESSURE_NAME = "mapping_enumeration_value"
 
 
 def clear_enumeration_cache() -> None:
     """Test helper. Drop all cached enumerations (allowlist present-set + value folds)."""
+    from utils.memory import reset_cache_pressure_state
+
     with _CACHE_LOCK:
         _CACHE.clear()
         _VALUE_CACHE.clear()
+    reset_cache_pressure_state(_PRESENT_PRESSURE_NAME)
+    reset_cache_pressure_state(_VALUE_PRESSURE_NAME)
+
+
+def _chain_key(chain: str | None) -> str:
+    """Chain component of the L1 key, mirroring L2's ``(chain or DEFAULT_CHAIN).lower()``
+    (DEFAULT_CHAIN = "ethereum") so the in-process and durable layers agree."""
+    return (chain or "ethereum").lower()
+
+
+def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:
+    """The fingerprint L2 (db.mapping_enumeration_cache) keys on, so L1 distinguishes
+    the same (chain, address, specs) identity L2 does. Falls back to a local stable
+    digest when the DB module isn't importable (CLI/test paths driving L1 alone)."""
+    try:
+        from db.mapping_enumeration_cache import specs_fingerprint
+
+        return specs_fingerprint(specs_as_dicts)
+    except Exception:
+        canonical = json.dumps(specs_as_dicts, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _evict_enumeration_if_needed(cache: dict) -> None:
+    """Drop the oldest 25% of *cache* by insertion time when the bound is reached
+    (caller holds _CACHE_LOCK)."""
+    if len(cache) < _CACHE_MAX:
+        return
+    cutoff = sorted(cache.values(), key=lambda v: v[1])[len(cache) // 4][1]
+    for k in [k for k, v in cache.items() if v[1] <= cutoff]:
+        cache.pop(k, None)
+
+
+def _store_enumeration(cache: dict, cache_key: tuple[str, str, str], entry: tuple, name: str) -> None:
+    """Bounded insert into an L1 enumeration cache (caller holds _CACHE_LOCK)."""
+    from utils.memory import cache_pressure_message
+
+    _evict_enumeration_if_needed(cache)
+    cache[cache_key] = entry
+    msg = cache_pressure_message(name, len(cache), _CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
 
 
 def _event_topic0(signature: str) -> str:
@@ -466,7 +518,8 @@ def enumerate_mapping_allowlist_sync(
     the TTL would just hit the same bound; the caller sees the
     ``status`` field and decides whether to act on partial data.
     """
-    cache_key = contract_address.lower()
+    specs_as_dicts = [dict(s) for s in writer_specs]
+    cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
     now = time.monotonic()
 
     with _CACHE_LOCK:
@@ -482,8 +535,6 @@ def enumerate_mapping_allowlist_sync(
                 )
                 return result
             del _CACHE[cache_key]
-
-    specs_as_dicts = [dict(s) for s in writer_specs]
 
     if _db_cache_enabled():
         try:
@@ -514,7 +565,7 @@ def enumerate_mapping_allowlist_sync(
                 )
                 result = EnumerationResult(**db_hit)  # type: ignore[typeddict-item]
                 with _CACHE_LOCK:
-                    _CACHE[cache_key] = (result, now)
+                    _store_enumeration(_CACHE, cache_key, (result, now), _PRESENT_PRESSURE_NAME)
                 return result
     else:
         specs_hash = None
@@ -539,7 +590,7 @@ def enumerate_mapping_allowlist_sync(
             )
 
     with _CACHE_LOCK:
-        _CACHE[cache_key] = (result, now)
+        _store_enumeration(_CACHE, cache_key, (result, now), _PRESENT_PRESSURE_NAME)
     return result
 
 
@@ -695,7 +746,7 @@ async def enumerate_mapping_values(
 
 # Separate L1 cache for the value path so a re-run with a different
 # predicate doesn't blow away the present-set cache.
-_VALUE_CACHE: dict[str, tuple[EnumerationValueResult, float]] = {}
+_VALUE_CACHE: dict[tuple[str, str, str], tuple[EnumerationValueResult, float]] = {}
 
 
 def enumerate_mapping_values_sync(
@@ -724,7 +775,11 @@ def enumerate_mapping_values_sync(
     fingerprint will key on it. Until then they're pass-through
     arguments only.
     """
-    cache_key = contract_address.lower()
+    specs_as_dicts = [dict(s) for s in writer_specs]
+    # The fold entries are predicate-independent (filter_value_entries applies the
+    # predicate downstream), so the key excludes value_predicate: a re-run with a
+    # different predicate HITs the same scan instead of re-paginating.
+    cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
     now = time.monotonic()
 
     with _CACHE_LOCK:
@@ -735,17 +790,14 @@ def enumerate_mapping_values_sync(
                 return result
             del _VALUE_CACHE[cache_key]
 
-    specs_as_dicts = [dict(s) for s in writer_specs]
-
     result = asyncio.run(enumerate_mapping_values(contract_address, writer_specs, **kwargs))
 
     with _CACHE_LOCK:
-        _VALUE_CACHE[cache_key] = (result, now)
-    # specs_hash + L2 caching for the value path is intentionally
-    # deferred — the L2 schema is keyed on EnumerationResult shape, not
-    # EnumerationValueResult, so persisting requires a schema change
-    # we'll do alongside the durable indexer (D.3).
-    _ = (chain, value_predicate, specs_as_dicts)
+        _store_enumeration(_VALUE_CACHE, cache_key, (result, now), _VALUE_PRESSURE_NAME)
+    # L2 / Postgres caching for the value path is intentionally deferred — the L2
+    # schema is keyed on EnumerationResult shape, not EnumerationValueResult, so
+    # persisting requires a schema change we'll do alongside the durable indexer (D.3).
+    _ = value_predicate
     return result
 
 

@@ -354,6 +354,51 @@ def test_resolve_scan_floor_never_fails_open_to_zero(monkeypatch):
     assert floor_mod.resolve_scan_floor("0x" + "cd" * 20, 1) is None
 
 
+def test_resolve_scan_floor_does_not_cache_none_permanently(monkeypatch):
+    """P1.4: a DEFER (None) must not pin for the process life — once the creation block
+    backfills, a later call resolves it instead of serving the stale None."""
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_FLOOR_DEFER_TTL_S", 0.0)  # None re-resolves immediately
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
+    created = {"v": None}
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: created["v"])
+
+    addr = "0x" + "ab" * 20
+    assert floor_mod.resolve_scan_floor(addr, 1) is None  # unknown → defer
+    created["v"] = 9_000_000  # index backfills the creation block
+    assert floor_mod.resolve_scan_floor(addr, 1) == 9_000_000 - 1  # picked up, not stale None
+
+
+def test_resolve_scan_floor_caches_resolved_int_for_process_life(monkeypatch):
+    """A resolved (immutable) creation-block floor is cached: a second call must not
+    re-issue the creation-block lookup."""
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def _creation(*_a, **_k):
+        calls["n"] += 1
+        return 5_000_000
+
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _creation)
+    addr = "0x" + "cd" * 20
+    assert floor_mod.resolve_scan_floor(addr, 1) == 4_999_999
+    assert floor_mod.resolve_scan_floor(addr, 1) == 4_999_999
+    assert calls["n"] == 1  # cached, not re-probed
+
+
+def test_floor_cache_size_capped(monkeypatch):
+    """P1.4: the per-process floor memo is size-capped — many distinct addresses evict
+    the oldest rather than growing unbounded."""
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "_FLOOR_CACHE_MAX", 8)
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda _addr, **_k: 1_000_000)
+    for i in range(40):
+        floor_mod.resolve_scan_floor("0x" + f"{i:040x}", 1)
+    assert len(floor_mod._FLOOR_CACHE) <= 8
+
+
 def _recursive_module():
     import services.resolution.recursive as recursive
 

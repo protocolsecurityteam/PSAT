@@ -22,21 +22,54 @@ Preference order (cheapest / least-rate-limited first):
   3. a live ``getcontractcreation`` Etherscan call (the cache-miss case of #2).
   4. ``None`` — DEFER. The floor is unknown; the caller must skip the live scan.
 
-The lookup is memoized per process keyed on ``(address, chain_id)`` so a
-multi-key fold or sibling functions don't issue N duplicate lookups.
+The lookup is memoized per process keyed on ``(address, chain_id)`` so a multi-key
+fold or sibling functions don't issue N duplicate lookups. A resolved (immutable)
+creation-block floor is held for the process life; a DEFER (``None``) is held only
+briefly (a short TTL) so a floor that backfills later is picked up. The memo is
+size-capped, evicting the oldest entries at the bound.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
+import time
 
 from utils.etherscan import get_contract_creation_block
 
-# Per-process memo of resolved floors. ``None`` is a real (cached) result: the
-# floor is unknown and the caller should defer. A key absent from the dict means
-# "not yet looked up".
-_FLOOR_CACHE: dict[tuple[str, int], int | None] = {}
+logger = logging.getLogger(__name__)
+
+# Per-process memo of resolved floors, ``(floor, monotonic_ts)`` per (address,
+# chain_id). A resolved int floor is immutable → served for the process life. A DEFER
+# (``None``) is provisional — the durable cursor or creation-block lookup may succeed
+# once the index backfills — so it is served only within a short TTL and re-resolved
+# after, never pinned. Size-capped; oldest 25% evicted at the bound.
+_FLOOR_CACHE: dict[tuple[str, int], tuple[int | None, float]] = {}
 _FLOOR_LOCK = threading.Lock()
+_FLOOR_CACHE_MAX = 4096
+_FLOOR_DEFER_TTL_S = float(os.getenv("PSAT_SCAN_FLOOR_DEFER_TTL_S", "120"))
+_FLOOR_PRESSURE_NAME = "scan_floor"
+
+
+def _evict_floor_if_needed() -> None:
+    """Drop the oldest 25% of _FLOOR_CACHE entries by insertion time when the bound is
+    reached (caller holds _FLOOR_LOCK)."""
+    if len(_FLOOR_CACHE) < _FLOOR_CACHE_MAX:
+        return
+    cutoff = sorted(_FLOOR_CACHE.values(), key=lambda v: v[1])[len(_FLOOR_CACHE) // 4][1]
+    for k in [k for k, v in _FLOOR_CACHE.items() if v[1] <= cutoff]:
+        _FLOOR_CACHE.pop(k, None)
+
+
+def _log_floor_pressure() -> None:
+    """Log when _FLOOR_CACHE crosses 50/75/95% of the bound (caller holds _FLOOR_LOCK)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message(_FLOOR_PRESSURE_NAME, len(_FLOOR_CACHE), _FLOOR_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -98,9 +131,16 @@ def resolve_scan_floor(
         return None
     assert address is not None  # narrowed by _is_address
     key = (address.lower(), chain_id)
+    now = time.monotonic()
     with _FLOOR_LOCK:
-        if key in _FLOOR_CACHE:
-            return _FLOOR_CACHE[key]
+        cached = _FLOOR_CACHE.get(key)
+        if cached is not None:
+            value, inserted_at = cached
+            # Resolved int floors are immutable; a None defer is re-resolved after a
+            # short TTL so a backfilled creation block is eventually picked up.
+            if value is not None or now - inserted_at < _FLOOR_DEFER_TTL_S:
+                return value
+            del _FLOOR_CACHE[key]
 
     floor = _floor_from_cursor(key[0], chain_id, session)
     if floor is None:
@@ -112,11 +152,16 @@ def resolve_scan_floor(
             floor = created - 1
 
     with _FLOOR_LOCK:
-        _FLOOR_CACHE[key] = floor
+        _evict_floor_if_needed()
+        _FLOOR_CACHE[key] = (floor, now)
+        _log_floor_pressure()
     return floor
 
 
 def clear_scan_floor_cache() -> None:
     """Test helper — drop the per-process floor memo."""
+    from utils.memory import reset_cache_pressure_state
+
     with _FLOOR_LOCK:
         _FLOOR_CACHE.clear()
+    reset_cache_pressure_state(_FLOOR_PRESSURE_NAME)

@@ -9,7 +9,9 @@ the checker for each candidate.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -26,9 +28,47 @@ from utils.rpc import (
     rpc_batch_request_with_status,
 )
 
+logger = logging.getLogger(__name__)
+
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
+
+# Per-checker candidate cache keyed on (chain_id, checker_address). _MAX_CANDIDATES
+# bounds each entry's list length; _CANDIDATE_CACHE_MAX bounds the NUMBER of entries so
+# a long-lived worker probing many distinct checkers stays memory-bounded (oldest 25%
+# evicted by insertion order at the cap).
 _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
+_CANDIDATE_CACHE_LOCK = threading.Lock()
+_CANDIDATE_CACHE_MAX = 1024
+_CANDIDATE_PRESSURE_NAME = "external_check_candidates"
+
+
+def _evict_candidates_if_needed() -> None:
+    """Drop the oldest 25% of _CANDIDATE_CACHE entries by insertion order when the bound
+    is reached (caller holds _CANDIDATE_CACHE_LOCK)."""
+    if len(_CANDIDATE_CACHE) < _CANDIDATE_CACHE_MAX:
+        return
+    for k in list(_CANDIDATE_CACHE.keys())[: _CANDIDATE_CACHE_MAX // 4]:
+        _CANDIDATE_CACHE.pop(k, None)
+
+
+def _log_candidate_pressure() -> None:
+    """Log when _CANDIDATE_CACHE crosses 50/75/95% of the bound (caller holds the lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message(_CANDIDATE_PRESSURE_NAME, len(_CANDIDATE_CACHE), _CANDIDATE_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
+
+def clear_candidate_cache() -> None:
+    """Clear the per-checker candidate cache. For tests + manual reset."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _CANDIDATE_CACHE_LOCK:
+        _CANDIDATE_CACHE.clear()
+    reset_cache_pressure_state(_CANDIDATE_PRESSURE_NAME)
+
 
 # Collapse the per-candidate checker probes (canCall/isAllowed/…) into one billable eth_call via Multicall3.
 # The checker takes the candidate as an explicit argument — the enumerable caller dimension — so it is
@@ -101,8 +141,11 @@ def materialize_external_check_from_events(
         return None
 
     cache_key = (chain_id, checker_address.lower())
-    candidates = _CANDIDATE_CACHE.get(cache_key)
+    with _CANDIDATE_CACHE_LOCK:
+        candidates = _CANDIDATE_CACHE.get(cache_key)
     if candidates is None:
+        # Candidate discovery (PG read + optional hypersync scan) runs outside the
+        # lock so concurrent misses for different checkers don't serialize.
         candidates = _candidate_addresses_from_events(
             session=session,
             chain_id=chain_id,
@@ -113,7 +156,11 @@ def materialize_external_check_from_events(
             candidates = _candidate_addresses_from_hypersync(
                 checker_address=checker_address, limit=_MAX_CANDIDATES, chain_id=chain_id
             )
-        _CANDIDATE_CACHE[cache_key] = list(candidates)
+        candidates = list(candidates)
+        with _CANDIDATE_CACHE_LOCK:
+            _evict_candidates_if_needed()
+            _CANDIDATE_CACHE[cache_key] = candidates
+            _log_candidate_pressure()
     if not candidates:
         return None
 

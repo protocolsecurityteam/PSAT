@@ -774,3 +774,160 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
     zero_word = "0x" + "0" * 64
     assert _value_predicate_passes(one_word, {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"})
     assert not _value_predicate_passes(zero_word, {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"})
+
+
+# ---------------------------------------------------------------------------
+# P1.3 — L1 re-key on (chain, address, specs_hash) + size cap.
+#
+# The old address-only L1 key collided across chains and writer-spec sets,
+# defeating L2's careful (chain, address, specs_hash) keying. These pin the
+# re-key (distinct specs/chain MISS) AND the parity requirement (the common
+# single-chain/single-specs repeat must still HIT — no extra hypersync scan).
+# The autouse _isolated_cache fixture sets DB cache OFF and clears L1/L2.
+# ---------------------------------------------------------------------------
+
+
+def test_l1_rekey_parity_same_chain_single_specs():
+    """PARITY: a repeat with the same chain + specs must still HIT L1 (the re-key must
+    not introduce a miss that re-pays the hypersync scan)."""
+    rely_topic = _event_topic0("Rely(address)")
+    alice = _addr("a11ce")
+    client, calls = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
+    addr = "0x" + "CC" * 20
+    r1 = enumerate_mapping_allowlist_sync(
+        addr, cast(Any, [_rely_spec()]), from_block=0, client=client, hypersync_module=_FakeHypersyncModule()
+    )
+    n_after_first = calls["n"]
+    assert n_after_first >= 1
+    r2 = enumerate_mapping_allowlist_sync(
+        addr, cast(Any, [_rely_spec()]), from_block=0, client=client, hypersync_module=_FakeHypersyncModule()
+    )
+    assert calls["n"] == n_after_first  # HIT — no re-scan
+    assert r2["principals"] == r1["principals"]
+
+
+def test_l1_rekey_distinguishes_specs():
+    """Two different writer-spec sets on the SAME address must not collide in L1 — the
+    old address-only key returned the first specs' principals for the second specs."""
+    rely_topic = _event_topic0("Rely(address)")
+    auth_topic = _event_topic0("Auth(address)")
+    alice = _addr("a11ce")
+    bob = _addr("b0b")
+    addr = "0x" + "AA" * 20
+
+    client1, _ = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
+    r1 = enumerate_mapping_allowlist_sync(
+        addr, cast(Any, [_rely_spec()]), from_block=0, client=client1, hypersync_module=_FakeHypersyncModule()
+    )
+    assert [p["address"] for p in r1["principals"]] == [alice]
+
+    other_spec = {**_rely_spec(), "event_signature": "Auth(address)", "mapping_name": "auths"}
+    client2, calls2 = _fake_client([([_log(auth_topic, indexed_args=[bob], block=20)], None)])
+    r2 = enumerate_mapping_allowlist_sync(
+        addr, cast(Any, [other_spec]), from_block=0, client=client2, hypersync_module=_FakeHypersyncModule()
+    )
+    assert calls2["n"] >= 1  # distinct specs → distinct key → real scan
+    assert [p["address"] for p in r2["principals"]] == [bob]
+
+
+def test_l1_rekey_distinguishes_chain():
+    """The same address on two chains must not collide in L1 (the original cross-chain
+    correctness bug where L1 defeated L2's chain dimension)."""
+    rely_topic = _event_topic0("Rely(address)")
+    alice = _addr("a11ce")
+    bob = _addr("b0b")
+    addr = "0x" + "BB" * 20
+
+    client1, _ = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
+    enumerate_mapping_allowlist_sync(
+        addr,
+        cast(Any, [_rely_spec()]),
+        chain="ethereum",
+        from_block=0,
+        client=client1,
+        hypersync_module=_FakeHypersyncModule(),
+    )
+    client2, calls2 = _fake_client([([_log(rely_topic, indexed_args=[bob], block=20)], None)])
+    r2 = enumerate_mapping_allowlist_sync(
+        addr,
+        cast(Any, [_rely_spec()]),
+        chain="base",
+        from_block=0,
+        client=client2,
+        hypersync_module=_FakeHypersyncModule(),
+    )
+    assert calls2["n"] >= 1  # different chain → distinct key → real scan
+    assert [p["address"] for p in r2["principals"]] == [bob]
+
+
+def test_l1_enumeration_cache_size_capped(monkeypatch):
+    """P1.3: the present-set L1 cache is size-capped — many distinct addresses evict the
+    oldest rather than growing unbounded (the lazy per-key TTL del is not a size bound)."""
+    monkeypatch.setattr(mapping_enumerator, "_CACHE_MAX", 8)
+    rely_topic = _event_topic0("Rely(address)")
+    alice = _addr("a11ce")
+    for i in range(40):
+        client, _ = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
+        enumerate_mapping_allowlist_sync(
+            "0x" + f"{i:040x}",
+            cast(Any, [_rely_spec()]),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    assert len(mapping_enumerator._CACHE) <= 8
+
+
+def test_value_cache_rekey_ignores_predicate():
+    """The value-fold L1 key is (chain, address, specs_hash) WITHOUT the predicate: the
+    cached entries are predicate-independent (filter_value_entries applies the predicate
+    downstream), so a re-run with a different predicate HITs instead of re-paginating."""
+    from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
+
+    topic0 = _event_topic0("OwnerSet(address,uint256)")
+    a = _addr("a11ce")
+    addr = "0x" + "DD" * 20
+    client, calls = _fake_client([([_set_log(topic0, a, 10, block=100, log_index=0)], None)])
+    r1 = enumerate_mapping_values_sync(
+        addr,
+        cast(Any, [_owner_set_spec()]),
+        from_block=0,
+        value_predicate={"op": "eq", "rhs_values": ["10"], "value_type": "uint256"},
+        client=client,
+        hypersync_module=_FakeHypersyncModule(),
+    )
+    n_after_first = calls["n"]
+    assert n_after_first >= 1
+    r2 = enumerate_mapping_values_sync(
+        addr,
+        cast(Any, [_owner_set_spec()]),
+        from_block=0,
+        value_predicate={"op": "eq", "rhs_values": ["999"], "value_type": "uint256"},
+        client=client,
+        hypersync_module=_FakeHypersyncModule(),
+    )
+    assert calls["n"] == n_after_first  # HIT despite different predicate
+    assert r2["entries"] == r1["entries"]
+
+
+def test_value_cache_rekey_distinguishes_specs():
+    """Different value specs on the same address must not collide in the value-fold L1."""
+    from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
+
+    owner_topic = _event_topic0("OwnerSet(address,uint256)")
+    member_topic = _event_topic0("MemberSet(address,uint256)")
+    a = _addr("a11ce")
+    b = _addr("b0b")
+    addr = "0x" + "EE" * 20
+
+    client1, _ = _fake_client([([_set_log(owner_topic, a, 10, block=100, log_index=0)], None)])
+    enumerate_mapping_values_sync(
+        addr, cast(Any, [_owner_set_spec()]), from_block=0, client=client1, hypersync_module=_FakeHypersyncModule()
+    )
+    other = {**_owner_set_spec(), "event_signature": "MemberSet(address,uint256)", "mapping_name": "members"}
+    client2, calls2 = _fake_client([([_set_log(member_topic, b, 7, block=110, log_index=0)], None)])
+    r2 = enumerate_mapping_values_sync(
+        addr, cast(Any, [other]), from_block=0, client=client2, hypersync_module=_FakeHypersyncModule()
+    )
+    assert calls2["n"] >= 1  # distinct specs → distinct key → real scan
+    assert [e["key"] for e in r2["entries"]] == [b.lower()]
