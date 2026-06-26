@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -12,39 +11,34 @@ from sqlalchemy.orm import Session
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
 from services.audits.serializers import _audit_brief
 
-# Per-process TTL cache of eth_getCode keccak hashes keyed by address.
-# The audit_timeline endpoint fetches these live to compare against the
-# per-coverage-row ``bytecode_keccak_at_match`` — a rapid reload of the
-# surface view shouldn't fire one RPC per audit row on every request.
-# TTL is intentionally short (30s) so "just upgraded" reflects quickly
-# in the UI when someone's actively debugging a drift.
-_BYTECODE_KECCAK_CACHE: dict[str, tuple[float, str | None]] = {}
-_BYTECODE_KECCAK_TTL_SECONDS: float = 30.0
+# Coverage anchors are ethereum-deployed, so the live keccak is read from the
+# mainnet ``bytecode_cache`` layer (utils.rpc — the durable system of record for
+# deployed bytecode).
+_ANCHOR_CHAIN_ID = 1
 
 
 def _bytecode_keccak_now_batch(addresses: set[str]) -> dict[str, str | None]:
     """Return ``{lower_address: keccak_hex_or_None}`` for a set of addresses.
 
-    Uses a short TTL cache so the typical burst-of-requests pattern (UI
-    loading and user flipping between contracts) only pays for one RPC
-    per impl per 30s. A ``None`` result is cached too — a temporary RPC
-    outage shouldn't cause a hot retry loop.
+    Reads ``code_keccak`` from the durable ``bytecode_cache`` (utils.rpc PG
+    layer); only addresses absent there are fetched live, which itself populates
+    that layer plus the bounded in-process ``_GETCODE_CACHE``. There is no
+    timeline-local cache — dedup and size-bounding live in those shared layers,
+    so a rapid reload of the surface view doesn't fire one RPC per audit row.
     """
     from services.audits.coverage import _fetch_bytecode_keccak
+    from utils.rpc import _pg_bytecode_get
 
-    now = time.monotonic()
     out: dict[str, str | None] = {}
     for raw in addresses:
         if not raw:
             continue
         addr = raw.lower()
-        cached = _BYTECODE_KECCAK_CACHE.get(addr)
-        if cached is not None and (now - cached[0]) < _BYTECODE_KECCAK_TTL_SECONDS:
-            out[addr] = cached[1]
+        pg_hit = _pg_bytecode_get(_ANCHOR_CHAIN_ID, addr)
+        if pg_hit is not None:
+            out[addr] = pg_hit[1]
             continue
-        keccak = _fetch_bytecode_keccak(addr)
-        _BYTECODE_KECCAK_CACHE[addr] = (now, keccak)
-        out[addr] = keccak
+        out[addr] = _fetch_bytecode_keccak(addr)
     return out
 
 

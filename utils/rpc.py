@@ -42,17 +42,38 @@ COMMON_CHAIN_IDS = {
 }
 
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
-_GETCODE_CACHE: dict[tuple[str, str], tuple[str, str, float]] = {}
+# Keyed on (chain_id, address) when the chain id is resolvable so RPC-URL aliases
+# for one chain share a slot; falls back to (rpc_url, address) otherwise.
+_GETCODE_CACHE: dict[tuple, tuple[str, str, float]] = {}
 _GETCODE_CACHE_LOCK = threading.Lock()
 _GETCODE_CACHE_MAX = 8192
 _GETCODE_CACHE_TTL_S = float(os.getenv("PSAT_GETCODE_CACHE_TTL_S", "1800"))
+
+
+def _getcode_cache_key(rpc_url: str, chain_id_eff: int | None, addr: str) -> tuple:
+    """In-memory getcode key: prefer ``(chain_id, addr)`` so URL aliases for one
+    chain dedup; fall back to ``(rpc_url, addr)`` when the chain id isn't resolvable."""
+    return (chain_id_eff, addr) if chain_id_eff is not None else (rpc_url, addr)
+
 
 # Cross-process bytecode cache: layered in-memory → Postgres → wire. Bytecode at
 # a deployed address is effectively immutable, so the PG layer skips the TTL
 # the in-memory layer carries. Disabled flag makes the CLI usable without a DB.
 _PG_BYTECODE_CACHE_ENABLED = os.getenv("PSAT_BYTECODE_PG_CACHE", "1").lower() in ("1", "true", "yes")
+# Chain-id memo keyed by RPC URL. Cardinality is naturally a handful (one eRPC
+# base per supported chain), but the cap bounds a caller that mints per-request
+# URLs; oldest insert is FIFO-evicted at the ceiling.
 _chain_id_cache: dict[str, int] = {}
 _chain_id_cache_lock = threading.Lock()
+_CHAIN_ID_CACHE_MAX = 256
+
+
+def _remember_chain_id(rpc_url: str, chain_id: int) -> None:
+    """Memoize the chain id for *rpc_url*, FIFO-evicting the oldest entry at the cap."""
+    with _chain_id_cache_lock:
+        if rpc_url not in _chain_id_cache and len(_chain_id_cache) >= _CHAIN_ID_CACHE_MAX:
+            _chain_id_cache.pop(next(iter(_chain_id_cache)), None)
+        _chain_id_cache[rpc_url] = chain_id
 
 
 def clear_getcode_cache() -> None:
@@ -75,8 +96,7 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
     skips the PG layer cleanly — the in-memory dict + wire fetch keep working.
     """
     if chain_hint is not None:
-        with _chain_id_cache_lock:
-            _chain_id_cache[rpc_url] = chain_hint
+        _remember_chain_id(rpc_url, chain_hint)
         return chain_hint
     with _chain_id_cache_lock:
         cached = _chain_id_cache.get(rpc_url)
@@ -92,8 +112,7 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
         chain_id = int(raw, 16)
     except ValueError:
         return None
-    with _chain_id_cache_lock:
-        _chain_id_cache[rpc_url] = chain_id
+    _remember_chain_id(rpc_url, chain_id)
     return chain_id
 
 
@@ -466,13 +485,18 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
     """Return ``(bytecode_hex, keccak_hex)`` cached together so downstream content-addressed lookups get the keccak for
     free.
 
-    Cache layering: in-memory dict (TTL'd) → Postgres ``bytecode_cache`` (no
-    TTL — bytecode is immutable per ``(chain_id, address)``) → wire fetch.
-    Pass *chain_id* explicitly to skip the one-time ``eth_chainId`` lookup.
+    Cache layering: in-memory dict (TTL'd, keyed on ``(chain_id, address)`` when
+    resolvable) → Postgres ``bytecode_cache`` (no TTL — bytecode is immutable per
+    ``(chain_id, address)``) → wire fetch. Pass *chain_id* explicitly to skip the
+    one-time ``eth_chainId`` lookup.
     """
     addr = _normalized_addr(address)
-    key = (rpc_url, addr)
     now = time.monotonic()
+    # Resolve the chain id up front (cheap when passed or already memoised) so the
+    # in-memory and PG layers share a key. Skipped when the PG layer is off, where
+    # the key falls back to the RPC URL exactly as before.
+    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
+    key = _getcode_cache_key(rpc_url, chain_id_eff, addr)
     with _GETCODE_CACHE_LOCK:
         cached = _GETCODE_CACHE.get(key)
         if cached is not None:
@@ -483,7 +507,6 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
             del _GETCODE_CACHE[key]
 
     # PG cache: cross-process layer; only consulted when we can resolve a chain id.
-    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
     if chain_id_eff is not None:
         pg_hit = _pg_bytecode_get(chain_id_eff, addr)
         if pg_hit is not None:
@@ -534,10 +557,14 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
     now = time.monotonic()
     out: dict[str, str] = {}
 
+    # Resolve the chain id up front so the in-memory key matches the PG layer and
+    # dedups RPC-URL aliases; falls back to the URL when unresolvable / PG off.
+    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
+
     to_fetch: list[str] = []
     with _GETCODE_CACHE_LOCK:
         for addr in normalized:
-            cached = _GETCODE_CACHE.get((rpc_url, addr))
+            cached = _GETCODE_CACHE.get(_getcode_cache_key(rpc_url, chain_id_eff, addr))
             if cached is not None:
                 code, _keccak, inserted_at = cached
                 if now - inserted_at < _GETCODE_CACHE_TTL_S:
@@ -550,7 +577,6 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
 
     # PG layer: bulk SELECT for the in-memory misses; promote hits into the
     # in-memory cache so a later same-process call short-circuits.
-    chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
     if chain_id_eff is not None and to_fetch:
         pg_hits = _pg_bytecode_get_many(chain_id_eff, to_fetch)
         if pg_hits:
@@ -561,7 +587,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
                         continue
                     code, keccak_hex = payload
                     _evict_getcode_if_needed()
-                    _GETCODE_CACHE[(rpc_url, addr)] = (code, keccak_hex, now)
+                    _GETCODE_CACHE[_getcode_cache_key(rpc_url, chain_id_eff, addr)] = (code, keccak_hex, now)
                     _log_getcode_pressure()
                     out[addr] = code
             to_fetch = [addr for addr in to_fetch if addr not in pg_hits]
@@ -587,7 +613,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
             # bypassing eviction, letting long-lived workers exceed
             # _GETCODE_CACHE_MAX with full bytecode payloads.
             _evict_getcode_if_needed()
-            _GETCODE_CACHE[(rpc_url, addr)] = (code, keccak_hex, now)
+            _GETCODE_CACHE[_getcode_cache_key(rpc_url, chain_id_eff, addr)] = (code, keccak_hex, now)
             _log_getcode_pressure()
             out[addr] = code
             pg_writes.append((addr, code, keccak_hex))

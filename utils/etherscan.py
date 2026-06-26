@@ -70,12 +70,60 @@ def _pg_cache_eligible(module: str, action: str) -> bool:
     return (module, action) in _PG_CACHE_WHITELIST
 
 
-_cache: dict[tuple, dict] = {}
+# Narrower whitelist for the in-memory layer: only the small, immutable contract
+# metadata responses (ABI, creation record) live in process memory. Source is
+# psql-only (multi-MB blobs served by the PG layer); volatile data (balances,
+# prices, tx history, logs) is never held in-process.
+_INMEM_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("contract", "getabi"),
+        ("contract", "getcontractcreation"),
+    }
+)
+
+
+def _inmem_cache_eligible(module: str, action: str) -> bool:
+    return (module, action) in _INMEM_CACHE_WHITELIST
+
+
+# Bounded LRU over the whitelisted in-memory responses. Each value carries a
+# monotonic insert time so the oldest quartile is evicted at the cap — the cap
+# is the memory bound. No TTL: the cached actions are immutable, and the cap is
+# kept small because that's the whole point.
+_CACHE_MAX = 256
+_cache: dict[tuple, tuple[dict, float]] = {}
 _cache_lock = threading.Lock()
 
 
 def _cache_key(module: str, action: str, chain_id: int, params: dict) -> tuple:
     return (module, action, chain_id, tuple(sorted(params.items())))
+
+
+def _evict_cache_if_needed() -> None:
+    """Drop the oldest 25% of _cache entries when the bound is reached (caller holds _cache_lock)."""
+    if len(_cache) < _CACHE_MAX:
+        return
+    cutoff = sorted(_cache.values(), key=lambda v: v[1])[len(_cache) // 4][1]
+    for k in [k for k, v in _cache.items() if v[1] <= cutoff]:
+        _cache.pop(k, None)
+
+
+def _log_cache_pressure() -> None:
+    """Log when _cache crosses 50/75/95% of its bound (caller holds _cache_lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("etherscan", len(_cache), _CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
+
+def clear_etherscan_cache() -> None:
+    """Clear the process-wide in-memory Etherscan cache. For tests + manual reset."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _cache_lock:
+        _cache.clear()
+    reset_cache_pressure_state("etherscan")
 
 
 def _params_hash(module: str, action: str, chain_id: int, params: dict) -> str:
@@ -170,19 +218,23 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 
 def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire."""
-    if _CACHE_ENABLED:
-        key = _cache_key(module, action, chain_id, params)
+    inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
+    key = _cache_key(module, action, chain_id, params) if inmem else None
+    if inmem:
         with _cache_lock:
-            if key in _cache:
+            cached = _cache.get(key)
+            if cached is not None:
                 logger.debug("Etherscan in-memory cache hit: %s/%s %s", module, action, params.get("address", ""))
-                return _cache[key]
+                return cached[0]
 
     pg_hit = _pg_cache_get(module, action, chain_id, params)
     if pg_hit is not None:
         logger.debug("Etherscan PG cache hit: %s/%s %s", module, action, params.get("address", ""))
-        if _CACHE_ENABLED:
+        if inmem:
             with _cache_lock:
-                _cache[_cache_key(module, action, chain_id, params)] = pg_hit
+                _evict_cache_if_needed()
+                _cache[key] = (pg_hit, time.monotonic())
+                _log_cache_pressure()
         return pg_hit
 
     api_key = _get_api_key()
@@ -205,9 +257,11 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
         data = resp.json()
 
         if data.get("status") == "1":
-            if _CACHE_ENABLED:
+            if inmem:
                 with _cache_lock:
-                    _cache[_cache_key(module, action, chain_id, params)] = data
+                    _evict_cache_if_needed()
+                    _cache[key] = (data, time.monotonic())
+                    _log_cache_pressure()
             _pg_cache_put(module, action, chain_id, params, data)
             return data
 
