@@ -369,6 +369,92 @@ def test_resolve_scan_floor_does_not_cache_none_permanently(monkeypatch):
     assert floor_mod.resolve_scan_floor(addr, 1) == 9_000_000 - 1  # picked up, not stale None
 
 
+class _FakeSession:
+    """A stand-in that satisfies the ``hasattr(session, "execute")`` live-session check;
+    ``_floor_from_cursor`` is monkeypatched in these tests so ``execute`` is never reached."""
+
+    def execute(self, *_a, **_k):
+        raise AssertionError("monkeypatched _floor_from_cursor should be used, not raw execute")
+
+
+def test_resolve_scan_floor_rechecks_cursor_within_ttl_with_session(monkeypatch):
+    """Self-heal under the raised defer TTL: a deferring address re-reads the durable cursor
+    on every call when a live session is threaded, so a cursor the indexer seeds mid-run is
+    picked up at once — WITHOUT re-hitting the rate-limited Etherscan creation-block lookup."""
+    floor_mod.clear_scan_floor_cache()
+    cursor: dict[str, int | None] = {"v": None}  # cursor not yet seeded
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: cursor["v"])
+    es_calls = {"n": 0}
+
+    def _creation(*_a, **_k):
+        es_calls["n"] += 1
+        return None  # creation block unresolvable → first call defers
+
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _creation)
+
+    addr = "0x" + "ab" * 20
+    sess = _FakeSession()
+    assert floor_mod.resolve_scan_floor(addr, 1, session=sess) is None  # defer; Etherscan consulted once
+    assert es_calls["n"] == 1
+    cursor["v"] = 6_000_000  # indexer backfills the cursor mid-run
+    # Within the (long) defer TTL the cheap cursor re-read picks up the floor; Etherscan is NOT re-hit.
+    assert floor_mod.resolve_scan_floor(addr, 1, session=sess) == 6_000_000
+    assert es_calls["n"] == 1, "Etherscan must not be re-hit once the cursor self-heals"
+
+
+def test_resolve_scan_floor_throttles_re_resolution_within_ttl_sessionless(monkeypatch):
+    """Without a threaded session a deferring address must NOT re-resolve within the defer TTL —
+    neither the cursor read (a fresh SessionLocal/Neon checkout) nor the rate-limited Etherscan
+    lookup may fire on every call. This is the churn the re-tune removes."""
+    floor_mod.clear_scan_floor_cache()
+    cursor_calls = {"n": 0}
+    es_calls = {"n": 0}
+
+    def _cursor(*_a, **_k):
+        cursor_calls["n"] += 1
+        return None
+
+    def _creation(*_a, **_k):
+        es_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", _cursor)
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _creation)
+
+    addr = "0x" + "cd" * 20
+    assert floor_mod.resolve_scan_floor(addr, 1) is None  # call 1: full resolve
+    assert (cursor_calls["n"], es_calls["n"]) == (1, 1)
+    assert floor_mod.resolve_scan_floor(addr, 1) is None  # call 2: throttled, no re-resolve
+    assert (cursor_calls["n"], es_calls["n"]) == (1, 1), "session-less defer must not re-probe within the TTL"
+
+
+def test_resolve_scan_floor_session_recheck_still_none_throttles_etherscan(monkeypatch):
+    """A threaded-session defer whose cursor is STILL None re-reads the cheap cursor every call
+    but does NOT re-hit the rate-limited Etherscan lookup within the throttle window."""
+    floor_mod.clear_scan_floor_cache()
+    cursor_calls = {"n": 0}
+    es_calls = {"n": 0}
+
+    def _cursor(*_a, **_k):
+        cursor_calls["n"] += 1
+        return None
+
+    def _creation(*_a, **_k):
+        es_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", _cursor)
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", _creation)
+
+    sess = _FakeSession()  # has .execute; _floor_from_cursor is monkeypatched so execute is never reached
+    addr = "0x" + "ef" * 20
+    assert floor_mod.resolve_scan_floor(addr, 1, session=sess) is None  # call 1
+    assert es_calls["n"] == 1
+    assert floor_mod.resolve_scan_floor(addr, 1, session=sess) is None  # call 2: cursor re-read, Etherscan throttled
+    assert cursor_calls["n"] == 2, "the cheap cursor must be re-read every call when a session is threaded"
+    assert es_calls["n"] == 1, "Etherscan must stay throttled while the cursor is still None"
+
+
 def test_resolve_scan_floor_caches_resolved_int_for_process_life(monkeypatch):
     """A resolved (immutable) creation-block floor is cached: a second call must not
     re-issue the creation-block lookup."""
@@ -515,6 +601,27 @@ def test_floor_from_cursor_reads_min_last_indexed_block(db_session):
 
     floor_mod.clear_scan_floor_cache()
     assert floor_mod._floor_from_cursor(addr, 1, db_session) == 4_100_000
+
+
+def test_floor_from_cursor_reuses_threaded_session_no_fresh_sessionlocal(monkeypatch):
+    """Threading a live session reuses it for the cursor read; a fresh ``SessionLocal`` (the
+    per-call Neon checkout the re-tune removes) must never be opened when a session is passed."""
+    import db.models as dbm
+
+    def _boom(*_a, **_k):
+        raise AssertionError("must not open a fresh SessionLocal when a session is threaded")
+
+    monkeypatch.setattr(dbm, "SessionLocal", _boom)
+
+    class _FakeResult:
+        def scalar(self):
+            return 4242
+
+    class _LiveSession:
+        def execute(self, *_a, **_k):
+            return _FakeResult()
+
+    assert floor_mod._floor_from_cursor("0x" + "ab" * 20, 1, _LiveSession()) == 4242
 
 
 def test_resolve_scan_floor_uses_cursor_without_etherscan(db_session, monkeypatch):

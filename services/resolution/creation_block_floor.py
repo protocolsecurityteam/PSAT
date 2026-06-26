@@ -24,9 +24,13 @@ Preference order (cheapest / least-rate-limited first):
 
 The lookup is memoized per process keyed on ``(address, chain_id)`` so a multi-key
 fold or sibling functions don't issue N duplicate lookups. A resolved (immutable)
-creation-block floor is held for the process life; a DEFER (``None``) is held only
-briefly (a short TTL) so a floor that backfills later is picked up. The memo is
-size-capped, evicting the oldest entries at the bound.
+creation-block floor is held for the process life. A DEFER (``None``) re-reads the
+durable cursor on every call when the caller threads a live session — a cheap,
+never-rate-limited PG read, so a floor the indexer seeds mid-run self-heals at once
+— while the rate-limited Etherscan creation-block re-lookup (and the session-less
+cursor read, which would open a fresh ``SessionLocal``) is throttled to a defer TTL
+so a still-deferring address can't re-probe upstream on every call within a run. The
+memo is size-capped, evicting the oldest entries at the bound.
 """
 
 from __future__ import annotations
@@ -43,12 +47,15 @@ logger = logging.getLogger(__name__)
 # Per-process memo of resolved floors, ``(floor, monotonic_ts)`` per (address,
 # chain_id). A resolved int floor is immutable → served for the process life. A DEFER
 # (``None``) is provisional — the durable cursor or creation-block lookup may succeed
-# once the index backfills — so it is served only within a short TTL and re-resolved
-# after, never pinned. Size-capped; oldest 25% evicted at the bound.
+# once the index backfills. The cheap cursor is re-read on every call when a live
+# session is threaded; only the rate-limited Etherscan re-lookup (and the session-less
+# cursor read) is throttled to this TTL, so a still-deferring address can't re-probe
+# upstream on every call while a freshly-seeded cursor is still picked up at once.
+# Size-capped; oldest 25% evicted at the bound.
 _FLOOR_CACHE: dict[tuple[str, int], tuple[int | None, float]] = {}
 _FLOOR_LOCK = threading.Lock()
 _FLOOR_CACHE_MAX = 4096
-_FLOOR_DEFER_TTL_S = float(os.getenv("PSAT_SCAN_FLOOR_DEFER_TTL_S", "120"))
+_FLOOR_DEFER_TTL_S = float(os.getenv("PSAT_SCAN_FLOOR_DEFER_TTL_S", "1800"))
 _FLOOR_PRESSURE_NAME = "scan_floor"
 
 
@@ -125,25 +132,36 @@ def resolve_scan_floor(
     Resolution order: durable cursor floor → cached/looked-up creation block −1 →
     ``None``. Never returns ``0`` as a fail-open: a missing/zero address or an
     unresolvable creation block defers rather than scanning from genesis. The
-    result (including a deferring ``None``) is memoized per ``(address,
-    chain_id)``."""
+    result is memoized per ``(address, chain_id)``; a deferring ``None`` re-reads
+    the cheap durable cursor on every call (when a live session is threaded) while
+    throttling the rate-limited Etherscan re-lookup — see the module docstring."""
     if not _is_address(address):
         return None
     assert address is not None  # narrowed by _is_address
     key = (address.lower(), chain_id)
     now = time.monotonic()
+
     with _FLOOR_LOCK:
         cached = _FLOOR_CACHE.get(key)
-        if cached is not None:
-            value, inserted_at = cached
-            # Resolved int floors are immutable; a None defer is re-resolved after a
-            # short TTL so a backfilled creation block is eventually picked up.
-            if value is not None or now - inserted_at < _FLOOR_DEFER_TTL_S:
-                return value
-            del _FLOOR_CACHE[key]
+    if cached is not None and cached[0] is not None:
+        # A resolved creation-block floor is immutable — serve it for process life.
+        return cached[0]
+
+    # ``cached`` is absent (first lookup) or a DEFER (None floor). Re-read the
+    # durable cursor every call when the caller threads a live session: it is a
+    # cheap, never-rate-limited PG read, so a cursor the indexer seeds mid-run is
+    # picked up at once (the deferred-reconciler convergence depends on it). The
+    # rate-limited Etherscan creation-block lookup — and the session-less cursor
+    # read, which would open a fresh SessionLocal (the Neon-checkout churn this
+    # removes) — are throttled to _FLOOR_DEFER_TTL_S so a still-deferring address
+    # can't re-probe upstream on every call within a run.
+    within_defer_ttl = cached is not None and now - cached[1] < _FLOOR_DEFER_TTL_S
+    session_live = session is not None and hasattr(session, "execute")
+    if within_defer_ttl and not session_live:
+        return None
 
     floor = _floor_from_cursor(key[0], chain_id, session)
-    if floor is None:
+    if floor is None and not within_defer_ttl:
         try:
             created = get_contract_creation_block(key[0], chain_id=chain_id)
         except Exception:
@@ -152,9 +170,15 @@ def resolve_scan_floor(
             floor = created - 1
 
     with _FLOOR_LOCK:
-        _evict_floor_if_needed()
-        _FLOOR_CACHE[key] = (floor, now)
-        _log_floor_pressure()
+        if floor is None and within_defer_ttl and cached is not None:
+            # Still deferring inside the throttle window — keep the ORIGINAL defer
+            # timestamp so the TTL counts down to the next Etherscan retry rather
+            # than resetting on each cheap cursor re-check.
+            _FLOOR_CACHE[key] = (None, cached[1])
+        else:
+            _evict_floor_if_needed()
+            _FLOOR_CACHE[key] = (floor, now)
+            _log_floor_pressure()
     return floor
 
 

@@ -118,10 +118,11 @@ def test_pg_cache_get_hit_promotes_whitelisted_to_in_memory(monkeypatch):
     assert second == cached_response
 
 
-def test_getsourcecode_pg_hit_not_promoted_to_in_memory(monkeypatch):
-    """getsourcecode is psql-only (decision #1): a PG hit must NOT enter
-    the in-mem cache, so every read re-consults the durable PG layer and
-    the multi-MB source blob never accumulates in process memory."""
+def test_getsourcecode_served_from_bounded_source_cache_not_metadata_cache(monkeypatch):
+    """getsourcecode never enters the small-entry metadata ``_cache`` (256 multi-MB
+    source blobs would be the OOM). It IS held in the SEPARATE, tightly bounded
+    ``_source_cache`` so a contract's source isn't re-deserialized from Postgres on
+    every read within a run: the first read hits PG, the second is served in-process."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     cached_response = {"status": "1", "result": [{"SourceCode": "contract Foo {}"}]}
@@ -141,8 +142,9 @@ def test_getsourcecode_pg_hit_not_promoted_to_in_memory(monkeypatch):
 
     etherscan.get("contract", "getsourcecode", 1, address="0xabc")
     etherscan.get("contract", "getsourcecode", 1, address="0xabc")
-    assert pg_calls["n"] == 2, "getsourcecode must hit PG each call (no in-mem promotion)"
-    assert etherscan._cache == {}, "source must never be held in process memory"
+    assert pg_calls["n"] == 1, "second getsourcecode read must be served from the bounded source cache, not re-hit PG"
+    assert etherscan._cache == {}, "source must never enter the small-entry metadata cache"
+    assert len(etherscan._source_cache) == 1, "source must be held in the bounded source cache"
 
 
 def test_pg_cache_miss_calls_etherscan_then_writes_back(monkeypatch):
@@ -359,3 +361,73 @@ def test_clear_etherscan_cache_resets_pressure_state(monkeypatch):
     etherscan.clear_etherscan_cache()
     assert len(etherscan._cache) == 0
     assert "etherscan" not in memory._CACHE_PRESSURE_STATE
+
+
+# ---------------------------------------------------------------------------
+# Bounded in-process source cache (getsourcecode only): cut redundant in-run
+# multi-MB Postgres deserializes WITHOUT reintroducing the OOM — a SEPARATE,
+# tightly bounded LRU, never the 256-entry metadata cache.
+# ---------------------------------------------------------------------------
+
+
+def test_source_cache_eligible():
+    """Only getsourcecode uses the separate bounded source cache; the in-mem-whitelisted
+    metadata actions and volatile actions do not."""
+    assert etherscan._source_cache_eligible("contract", "getsourcecode") is True
+    assert etherscan._source_cache_eligible("contract", "getabi") is False
+    assert etherscan._source_cache_eligible("contract", "getcontractcreation") is False
+    assert etherscan._source_cache_eligible("account", "balance") is False
+
+
+def test_source_cache_wire_fetch_populates_then_serves(monkeypatch):
+    """A getsourcecode PG miss → wire fetch must populate the bounded source cache (and
+    never the metadata cache); the next read is served in-process without re-hitting the wire."""
+    payload = {"status": "1", "result": [{"SourceCode": "contract Bar {}"}]}
+    _wire_status1(payload, monkeypatch)
+    etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
+    assert len(etherscan._source_cache) == 1
+    assert etherscan._cache == {}, "source must not enter the metadata cache"
+    # Second call hits the source cache; wire must not be called again.
+    etherscan.requests.get.side_effect = AssertionError("second call must hit the source cache")
+    result = etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
+    assert result == payload
+
+
+def test_source_cache_skips_empty_source(monkeypatch):
+    """An unverified-contract empty-source response must NOT be pinned in the source cache
+    (mirrors the PG persistability gate), so a later verification isn't masked by a stale empty."""
+    monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
+    key = ("contract", "getsourcecode", 1, (("address", "0xunverified"),))
+    etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": ""}]})
+    assert etherscan._source_cache == {}, "empty/unverified source must not be cached"
+    # Real source IS cached.
+    etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": "x"}]})
+    assert len(etherscan._source_cache) == 1
+
+
+def test_source_cache_bound_evicts(monkeypatch):
+    """The source cache cannot grow past _SOURCE_CACHE_MAX — the oldest quartile is evicted
+    at the cap (the cap, not a TTL, is the memory bound). This is the OOM guard for multi-MB blobs."""
+    monkeypatch.setattr(etherscan, "_SOURCE_CACHE_MAX", 8)
+    _wire_status1({"status": "1", "result": [{"SourceCode": "contract X {}"}]}, monkeypatch)
+    for i in range(20):
+        etherscan.get("contract", "getsourcecode", 1, address=f"0x{i:040x}")
+    assert len(etherscan._source_cache) <= etherscan._SOURCE_CACHE_MAX
+
+
+def test_clear_etherscan_cache_clears_source_cache_and_pressure(monkeypatch):
+    """clear_etherscan_cache empties BOTH the metadata and source caches and resets both
+    pressure thresholds so a later genuine pressure event still logs."""
+    from utils import memory
+
+    monkeypatch.setattr(etherscan, "_SOURCE_CACHE_MAX", 8)
+    with etherscan._source_cache_lock:
+        for i in range(5):  # 5/8 = 62% → crosses the 50% threshold
+            key = ("contract", "getsourcecode", 1, (("address", f"0x{i:040x}"),))
+            etherscan._source_cache[key] = ({"status": "1"}, float(i))
+        etherscan._log_source_cache_pressure()
+    assert memory._CACHE_PRESSURE_STATE.get("etherscan_source", 0) >= 50
+
+    etherscan.clear_etherscan_cache()
+    assert len(etherscan._source_cache) == 0
+    assert "etherscan_source" not in memory._CACHE_PRESSURE_STATE
