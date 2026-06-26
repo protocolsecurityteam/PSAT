@@ -663,3 +663,49 @@ def test_reset_cache_clears_entries(monkeypatch):
     assert rd._research_cache  # populated
     rd.reset_cache()
     assert rd._research_cache == {}
+
+
+def test_research_cache_evicts_at_max(monkeypatch):
+    """Distinct instructions past the cap evict, keeping the cache size-bounded."""
+    monkeypatch.setattr(rd, "_RESEARCH_CACHE_MAX", 4)
+    monkeypatch.setattr(
+        rd.exa,
+        "deep_research",
+        lambda instructions, schema=None, timeout_seconds=900: {"data": {"i": instructions}},
+    )
+    for i in range(20):
+        rd._cached_deep_research(f"instr-{i}", schema={})
+    assert len(rd._research_cache) <= rd._RESEARCH_CACHE_MAX
+
+
+def test_research_cache_ttl_expiry_reprobes(monkeypatch):
+    """An entry past the TTL is dropped on read and the research re-run."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        rd.exa,
+        "deep_research",
+        lambda instructions, schema=None, timeout_seconds=900: calls.append(instructions) or {"data": {}},
+    )
+    monkeypatch.setattr(rd, "RESEARCH_CACHE_TTL_SECONDS", 0)
+    rd._cached_deep_research("k", schema={})
+    rd._cached_deep_research("k", schema={})
+    assert len(calls) == 2
+
+
+def test_research_cache_pressure_state_set_and_cleared(monkeypatch):
+    """Crossing 50% records pressure; reset_cache forgets it."""
+    from utils import memory
+
+    monkeypatch.setattr(rd, "_RESEARCH_CACHE_MAX", 4)
+    monkeypatch.setattr(
+        rd.exa,
+        "deep_research",
+        lambda instructions, schema=None, timeout_seconds=900: {"data": {}},
+    )
+    for i in range(8):
+        rd._cached_deep_research(f"instr-{i}", schema={})
+    assert "research" in memory._CACHE_PRESSURE_STATE
+
+    rd.reset_cache()
+    assert rd._research_cache == {}
+    assert "research" not in memory._CACHE_PRESSURE_STATE
