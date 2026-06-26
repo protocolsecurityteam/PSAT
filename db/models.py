@@ -1092,6 +1092,11 @@ class ContractMaterialization(Base):
     analysis_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     tracking_plan_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     predicate_trees_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Analyzer/pipeline schema version this bundle was built under. Read paths in
+    # ``db.contract_materializations`` only serve rows matching the current
+    # ``ANALYSIS_SCHEMA_VERSION``; bumping that constant makes older rows miss and
+    # rebuild. ``server_default`` backfills pre-existing rows to the launch version.
+    analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     builder_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -126,6 +126,105 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
     assert details2["address"] == "0x" + "e" * 40
 
 
+# ---------------------------------------------------------------------------
+# P2.1 — split TTL: immutable classifications keep the long TTL; entries whose
+# details carry mutable Safe owners/threshold or timelock delay use a short TTL at
+# block_tag='latest' so a changed owner-set / delay re-probes sooner. Tests age the
+# cached timestamp directly (no sleeping) to span the short-but-not-long window.
+# ---------------------------------------------------------------------------
+
+
+def test_immutable_classification_keeps_long_ttl(monkeypatch):
+    """A plain-contract classification is immutable: aging it past the short (mutable)
+    TTL must NOT re-probe — the long TTL still applies."""
+    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
+    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
+    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
+    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)  # all probes empty → "contract"
+
+    addr = "0x" + "b" * 40
+    kind1, _ = classify_resolved_address("https://rpc", addr)
+    assert kind1 == "contract"
+
+    assert tracking._CLASSIFY_CACHE_MUTABLE_TTL_S < tracking._CLASSIFY_CACHE_TTL_S
+    key = ("https://rpc", addr, "latest")
+    kind, details, ts = _CLASSIFY_CACHE[key]
+    _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
+
+    # If the entry re-probed it would now look like a Safe; it must NOT — long TTL holds.
+    def fake_safe(_rpc, _addr, signature, _abi, *_a, **_k):
+        if signature == "getOwners()":
+            return ["0x" + "9" * 40]
+        if signature == "getThreshold()":
+            return 1
+        return None
+
+    monkeypatch.setattr(tracking, "_try_eth_call_decoded", fake_safe)
+    kind2, _ = classify_resolved_address("https://rpc", addr)
+    assert kind2 == "contract"  # served from cache, not re-probed
+
+
+def test_mutable_safe_details_use_short_ttl(monkeypatch):
+    """A 'safe' classification carries owners/threshold which mutate on-chain, so aging
+    it past the short TTL (still within the long TTL) forces a re-probe."""
+    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
+    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
+    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
+
+    owners = {"v": ["0x" + "1" * 40]}
+
+    def fake_call(_rpc, _addr, signature, _abi, *_a, **_k):
+        if signature == "getOwners()":
+            return list(owners["v"])
+        if signature == "getThreshold()":
+            return 1
+        return None
+
+    monkeypatch.setattr(tracking, "_try_eth_call_decoded", fake_call)
+
+    addr = "0x" + "a" * 40
+    kind1, details1 = classify_resolved_address("https://rpc", addr)
+    assert kind1 == "safe"
+    assert details1["owners"] == ["0x" + "1" * 40]
+
+    key = ("https://rpc", addr, "latest")
+    kind, details, ts = _CLASSIFY_CACHE[key]
+    _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
+
+    owners["v"] = ["0x" + "1" * 40, "0x" + "2" * 40]  # owner-set changed on-chain
+    _kind2, details2 = classify_resolved_address("https://rpc", addr)
+    assert details2["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]  # short TTL forced a re-probe
+
+
+def test_pinned_block_mutable_details_keep_long_ttl(monkeypatch):
+    """A pinned-block read is immutable at that block, so even a 'safe' entry keeps the
+    long TTL — only block_tag='latest' reads use the short TTL."""
+    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
+    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
+    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
+
+    owners = {"v": ["0x" + "1" * 40]}
+
+    def fake_call(_rpc, _addr, signature, _abi, *_a, **_k):
+        if signature == "getOwners()":
+            return list(owners["v"])
+        if signature == "getThreshold()":
+            return 1
+        return None
+
+    monkeypatch.setattr(tracking, "_try_eth_call_decoded", fake_call)
+
+    addr = "0x" + "c" * 40
+    classify_resolved_address("https://rpc", addr, "0x100")
+    key = ("https://rpc", addr, "0x100")
+    kind, details, ts = _CLASSIFY_CACHE[key]
+    _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
+
+    owners["v"] = ["0x" + "1" * 40, "0x" + "2" * 40]
+    _kind2, details2 = classify_resolved_address("https://rpc", addr, "0x100")
+    assert details2["owners"] == ["0x" + "1" * 40]  # pinned block → long TTL, served from cache
+
+
 def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
     """Step 3 fan-out: 8 worker threads classifying overlapping address sets
     must not corrupt the process cache or surface inconsistent values for the

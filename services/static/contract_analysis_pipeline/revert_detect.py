@@ -118,29 +118,6 @@ def _ir_class(ir: Any) -> str:
     return type(ir).__name__
 
 
-# Module-level memo for str(node.expression). Slither expression objects
-# are stable for the lifetime of the parsed Slither instance and the
-# repeated calls (one per build_predicate_tree invocation per node) are
-# the dominant cost in the Maker-wards bench profile (300ms of 2s ~=
-# 14% of runtime, all in literal/binary __str__ chains). Keyed by
-# id(expression) since Slither expression objects aren't hashable.
-# Memory bound: O(unique expressions in parsed contracts) per process.
-_EXPRESSION_TEXT_CACHE: dict[int, str] = {}
-
-
-def _expression_text(node: Any) -> str:
-    expr = getattr(node, "expression", None)
-    if expr is None:
-        return ""
-    key = id(expr)
-    cached = _EXPRESSION_TEXT_CACHE.get(key)
-    if cached is not None:
-        return cached
-    text = str(expr)
-    _EXPRESSION_TEXT_CACHE[key] = text
-    return text
-
-
 def _ir_is_solidity_revert(ir: Any) -> bool:
     """Slither emits SolidityCall(``revert(...)``) for both Solidity-
     level reverts and Yul-level revert(offset, length). The signature
@@ -214,6 +191,25 @@ class RevertDetector:
         # Per-container cache of every variable name read by any IR in its
         # body, for the discarded-result test in ``_scan_node``.
         self._container_reads: dict[int, set[str]] = {}
+        # Per-detector memo for ``str(node.expression)``, keyed by
+        # ``id(expression)``. Scoped to this (per-function) detector so it's
+        # GC'd with the instance — the id() keys never outlive the Slither
+        # parse they index. Repeated ``str(expr)`` over literal/binary chains
+        # is the dominant predicate-bench cost, so the memo stays; only its
+        # lifetime is bounded.
+        self._expression_text_cache: dict[int, str] = {}
+
+    def _expression_text(self, node: Any) -> str:
+        expr = getattr(node, "expression", None)
+        if expr is None:
+            return ""
+        key = id(expr)
+        cached = self._expression_text_cache.get(key)
+        if cached is not None:
+            return cached
+        text = str(expr)
+        self._expression_text_cache[key] = text
+        return text
 
     def run(self) -> list[RevertGate]:
         # Walk the function's own body. Modifier-call IRs and
@@ -308,7 +304,7 @@ class RevertDetector:
                             node=node,
                             containing_function=container,
                             call_chain=list(self._call_chain_irs),
-                            expression_text=_expression_text(node) or "<try/catch>",
+                            expression_text=self._expression_text(node) or "<try/catch>",
                             basis=["try/catch with revert in catch (recognized call shape)"],
                             unsupported_reason=None,
                         )
@@ -322,7 +318,7 @@ class RevertDetector:
                         node=node,
                         containing_function=container,
                         call_chain=list(self._call_chain_irs),
-                        expression_text=_expression_text(node) or "<try/catch>",
+                        expression_text=self._expression_text(node) or "<try/catch>",
                         basis=["try/catch with revert in catch"],
                         unsupported_reason="opaque_try_catch",
                     )
@@ -340,7 +336,7 @@ class RevertDetector:
                         node=node,
                         containing_function=container,
                         call_chain=list(self._call_chain_irs),
-                        expression_text=_expression_text(node) or str(ir),
+                        expression_text=self._expression_text(node) or str(ir),
                         basis=["external call must not revert"],
                     )
                 )
@@ -409,7 +405,7 @@ class RevertDetector:
                             node=node,
                             containing_function=container,
                             call_chain=list(self._call_chain_irs),
-                            expression_text=_expression_text(node),
+                            expression_text=self._expression_text(node),
                             basis=[f"if-revert via successor {son.type}"],
                         )
                     )
@@ -425,7 +421,7 @@ class RevertDetector:
                     node=node,
                     containing_function=container,
                     call_chain=list(self._call_chain_irs),
-                    expression_text=_expression_text(node) or "<asm>",
+                    expression_text=self._expression_text(node) or "<asm>",
                     basis=["inline assembly conditional revert"],
                     unsupported_reason=None,  # captured but limited
                 )
@@ -446,7 +442,7 @@ class RevertDetector:
             node=node,
             containing_function=container,
             call_chain=list(self._call_chain_irs),
-            expression_text=_expression_text(node),
+            expression_text=self._expression_text(node),
             basis=[f"{kind}({cond})" if cond is not None else kind],
         )
 

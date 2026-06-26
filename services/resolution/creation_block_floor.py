@@ -22,21 +22,61 @@ Preference order (cheapest / least-rate-limited first):
   3. a live ``getcontractcreation`` Etherscan call (the cache-miss case of #2).
   4. ``None`` — DEFER. The floor is unknown; the caller must skip the live scan.
 
-The lookup is memoized per process keyed on ``(address, chain_id)`` so a
-multi-key fold or sibling functions don't issue N duplicate lookups.
+The lookup is memoized per process keyed on ``(address, chain_id)`` so a multi-key
+fold or sibling functions don't issue N duplicate lookups. A resolved (immutable)
+creation-block floor is held for the process life. A DEFER (``None``) re-reads the
+durable cursor on every call when the caller threads a live session — a cheap,
+never-rate-limited PG read, so a floor the indexer seeds mid-run self-heals at once
+— while the rate-limited Etherscan creation-block re-lookup (and the session-less
+cursor read, which would open a fresh ``SessionLocal``) is throttled to a defer TTL
+so a still-deferring address can't re-probe upstream on every call within a run. The
+memo is size-capped, evicting the oldest entries at the bound.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
+import time
 
 from utils.etherscan import get_contract_creation_block
 
-# Per-process memo of resolved floors. ``None`` is a real (cached) result: the
-# floor is unknown and the caller should defer. A key absent from the dict means
-# "not yet looked up".
-_FLOOR_CACHE: dict[tuple[str, int], int | None] = {}
+logger = logging.getLogger(__name__)
+
+# Per-process memo of resolved floors, ``(floor, monotonic_ts)`` per (address,
+# chain_id). A resolved int floor is immutable → served for the process life. A DEFER
+# (``None``) is provisional — the durable cursor or creation-block lookup may succeed
+# once the index backfills. The cheap cursor is re-read on every call when a live
+# session is threaded; only the rate-limited Etherscan re-lookup (and the session-less
+# cursor read) is throttled to this TTL, so a still-deferring address can't re-probe
+# upstream on every call while a freshly-seeded cursor is still picked up at once.
+# Size-capped; oldest 25% evicted at the bound.
+_FLOOR_CACHE: dict[tuple[str, int], tuple[int | None, float]] = {}
 _FLOOR_LOCK = threading.Lock()
+_FLOOR_CACHE_MAX = 4096
+_FLOOR_DEFER_TTL_S = float(os.getenv("PSAT_SCAN_FLOOR_DEFER_TTL_S", "1800"))
+_FLOOR_PRESSURE_NAME = "scan_floor"
+
+
+def _evict_floor_if_needed() -> None:
+    """Drop the oldest 25% of _FLOOR_CACHE entries by insertion time when the bound is
+    reached (caller holds _FLOOR_LOCK)."""
+    if len(_FLOOR_CACHE) < _FLOOR_CACHE_MAX:
+        return
+    cutoff = sorted(_FLOOR_CACHE.values(), key=lambda v: v[1])[len(_FLOOR_CACHE) // 4][1]
+    for k in [k for k, v in _FLOOR_CACHE.items() if v[1] <= cutoff]:
+        _FLOOR_CACHE.pop(k, None)
+
+
+def _log_floor_pressure() -> None:
+    """Log when _FLOOR_CACHE crosses 50/75/95% of the bound (caller holds _FLOOR_LOCK)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message(_FLOOR_PRESSURE_NAME, len(_FLOOR_CACHE), _FLOOR_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -92,18 +132,36 @@ def resolve_scan_floor(
     Resolution order: durable cursor floor → cached/looked-up creation block −1 →
     ``None``. Never returns ``0`` as a fail-open: a missing/zero address or an
     unresolvable creation block defers rather than scanning from genesis. The
-    result (including a deferring ``None``) is memoized per ``(address,
-    chain_id)``."""
+    result is memoized per ``(address, chain_id)``; a deferring ``None`` re-reads
+    the cheap durable cursor on every call (when a live session is threaded) while
+    throttling the rate-limited Etherscan re-lookup — see the module docstring."""
     if not _is_address(address):
         return None
     assert address is not None  # narrowed by _is_address
     key = (address.lower(), chain_id)
+    now = time.monotonic()
+
     with _FLOOR_LOCK:
-        if key in _FLOOR_CACHE:
-            return _FLOOR_CACHE[key]
+        cached = _FLOOR_CACHE.get(key)
+    if cached is not None and cached[0] is not None:
+        # A resolved creation-block floor is immutable — serve it for process life.
+        return cached[0]
+
+    # ``cached`` is absent (first lookup) or a DEFER (None floor). Re-read the
+    # durable cursor every call when the caller threads a live session: it is a
+    # cheap, never-rate-limited PG read, so a cursor the indexer seeds mid-run is
+    # picked up at once (the deferred-reconciler convergence depends on it). The
+    # rate-limited Etherscan creation-block lookup — and the session-less cursor
+    # read, which would open a fresh SessionLocal (the Neon-checkout churn this
+    # removes) — are throttled to _FLOOR_DEFER_TTL_S so a still-deferring address
+    # can't re-probe upstream on every call within a run.
+    within_defer_ttl = cached is not None and now - cached[1] < _FLOOR_DEFER_TTL_S
+    session_live = session is not None and hasattr(session, "execute")
+    if within_defer_ttl and not session_live:
+        return None
 
     floor = _floor_from_cursor(key[0], chain_id, session)
-    if floor is None:
+    if floor is None and not within_defer_ttl:
         try:
             created = get_contract_creation_block(key[0], chain_id=chain_id)
         except Exception:
@@ -112,11 +170,22 @@ def resolve_scan_floor(
             floor = created - 1
 
     with _FLOOR_LOCK:
-        _FLOOR_CACHE[key] = floor
+        if floor is None and within_defer_ttl and cached is not None:
+            # Still deferring inside the throttle window — keep the ORIGINAL defer
+            # timestamp so the TTL counts down to the next Etherscan retry rather
+            # than resetting on each cheap cursor re-check.
+            _FLOOR_CACHE[key] = (None, cached[1])
+        else:
+            _evict_floor_if_needed()
+            _FLOOR_CACHE[key] = (floor, now)
+            _log_floor_pressure()
     return floor
 
 
 def clear_scan_floor_cache() -> None:
     """Test helper — drop the per-process floor memo."""
+    from utils.memory import reset_cache_pressure_state
+
     with _FLOOR_LOCK:
         _FLOOR_CACHE.clear()
+    reset_cache_pressure_state(_FLOOR_PRESSURE_NAME)

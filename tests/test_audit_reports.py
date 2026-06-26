@@ -22,6 +22,7 @@ in the integration test, not here.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -560,3 +561,109 @@ class TestResolveBranchCommit:
 
         monkeypatch.setattr(ar._requests, "get", fake_get)
         assert ar._resolve_branch_commit("owner", "ghost-repo", "main") is None
+
+    def test_does_not_cache_negative_result(self, monkeypatch):
+        """A transient miss is not cached, so the next call re-probes."""
+        from services.discovery.audit_reports import _github
+
+        _github.clear_branch_sha_cache()
+        sha = "c" * 40
+        state = {"n": 0}
+
+        def fake_get(url, **kwargs):
+            state["n"] += 1
+
+            class R:
+                # First call 5xx (transient); retry succeeds.
+                status_code = 500 if state["n"] == 1 else 200
+
+                def json(self):
+                    return {"object": {"sha": sha}}
+
+            return R()
+
+        monkeypatch.setattr(_github._requests, "get", fake_get)
+
+        assert _github._resolve_branch_commit("owner", "repo", "main") is None
+        assert ("owner", "repo", "main") not in _github._BRANCH_SHA_CACHE
+        # Retry resolves and now caches.
+        assert _github._resolve_branch_commit("owner", "repo", "main") == sha
+        assert state["n"] == 2
+
+    def test_expired_entry_reprobes(self, monkeypatch):
+        """An entry older than the TTL is dropped and the HEAD re-fetched."""
+        from services.discovery.audit_reports import _github
+
+        _github.clear_branch_sha_cache()
+        fresh = "d" * 40
+        state = {"n": 0}
+
+        def fake_get(url, **kwargs):
+            state["n"] += 1
+
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"object": {"sha": fresh}}
+
+            return R()
+
+        monkeypatch.setattr(_github._requests, "get", fake_get)
+
+        key = ("owner", "repo", "main")
+        stale_ts = time.monotonic() - _github._BRANCH_SHA_CACHE_TTL_S - 10
+        _github._BRANCH_SHA_CACHE[key] = ("e" * 40, stale_ts)
+
+        assert _github._resolve_branch_commit("owner", "repo", "main") == fresh
+        assert state["n"] == 1
+        assert _github._BRANCH_SHA_CACHE[key][0] == fresh
+
+    def test_eviction_bounds_at_max(self, monkeypatch):
+        """Distinct repos past the cap evict, keeping the cache size-bounded."""
+        from services.discovery.audit_reports import _github
+
+        _github.clear_branch_sha_cache()
+        monkeypatch.setattr(_github, "_BRANCH_SHA_CACHE_MAX", 4)
+
+        def fake_get(url, **kwargs):
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"object": {"sha": "f" * 40}}
+
+            return R()
+
+        monkeypatch.setattr(_github._requests, "get", fake_get)
+
+        for i in range(20):
+            _github._resolve_branch_commit("owner", f"repo{i}", "main")
+        assert len(_github._BRANCH_SHA_CACHE) <= _github._BRANCH_SHA_CACHE_MAX
+
+    def test_clear_resets_pressure_state(self, monkeypatch):
+        """clear_branch_sha_cache empties the dict and forgets pressure state."""
+        from services.discovery.audit_reports import _github
+        from utils import memory
+
+        _github.clear_branch_sha_cache()
+        monkeypatch.setattr(_github, "_BRANCH_SHA_CACHE_MAX", 4)
+
+        def fake_get(url, **kwargs):
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"object": {"sha": "a" * 40}}
+
+            return R()
+
+        monkeypatch.setattr(_github._requests, "get", fake_get)
+
+        for i in range(8):
+            _github._resolve_branch_commit("owner", f"repo{i}", "main")
+        assert "branch_sha" in memory._CACHE_PRESSURE_STATE
+
+        _github.clear_branch_sha_cache()
+        assert _github._BRANCH_SHA_CACHE == {}
+        assert "branch_sha" not in memory._CACHE_PRESSURE_STATE

@@ -34,12 +34,18 @@ logger = logging.getLogger(__name__)
 # misclassification.
 _PROBE_ERROR = object()
 
-# Process-wide classify cache keyed on (rpc_url, address, block_tag); skips error returns and applies a TTL so latest-
-# block reads eventually re-probe.
+# Process-wide classify cache keyed on (rpc_url, address, block_tag); skips error returns. Immutable classifications
+# (eoa/proxy/plain contract) keep the long TTL; entries whose details carry mutable Safe owners/threshold or timelock
+# delay use a short TTL at block_tag='latest' so a changed owner-set / delay re-probes sooner.
 _CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[str, dict[str, object], float]] = {}
 _CLASSIFY_CACHE_LOCK = threading.Lock()
 _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
+_CLASSIFY_CACHE_MUTABLE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_MUTABLE_TTL_S", "60"))
+
+# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay) — a
+# 'latest' classification carrying any of them is served only briefly.
+_MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay"})
 
 # Single-batch classify probes (default ON); falls back to sequential on whole-batch failure. Toggle
 # PSAT_CLASSIFY_BATCH=0 to force sequential.
@@ -82,6 +88,14 @@ def _log_classify_pressure() -> None:
     msg = cache_pressure_message("classify", len(_CLASSIFY_CACHE), _CLASSIFY_CACHE_MAX)
     if msg:
         logger.info("[CACHE_PRESSURE] %s", msg)
+
+
+def _classify_ttl(block_tag: str, details: dict[str, object]) -> float:
+    """Long TTL for immutable classifications and pinned-block reads; short TTL only for
+    a 'latest' read whose details carry mutable Safe/timelock fields."""
+    if block_tag == "latest" and any(key in details for key in _MUTABLE_DETAIL_KEYS):
+        return _CLASSIFY_CACHE_MUTABLE_TTL_S
+    return _CLASSIFY_CACHE_TTL_S
 
 
 # ``controller_values.value`` is ``String(66)`` (db/models.py): an address is
@@ -227,7 +241,7 @@ def classify_resolved_address_with_status(
         cached = _CLASSIFY_CACHE.get(cache_key)
         if cached is not None:
             kind, cached_details, inserted_at = cached
-            if now - inserted_at < _CLASSIFY_CACHE_TTL_S:
+            if now - inserted_at < _classify_ttl(block_tag, cached_details):
                 return kind, copy.deepcopy(cached_details), True
             del _CLASSIFY_CACHE[cache_key]
 

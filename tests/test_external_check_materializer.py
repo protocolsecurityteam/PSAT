@@ -176,3 +176,48 @@ def test_candidate_hypersync_scan_floors_from_block_at_creation_block(monkeypatc
 
     assert captured["from_block"] == 9_000_000 - 1
     assert candidate in out
+
+
+def test_candidate_cache_caps_entry_count(monkeypatch):
+    """P1.4: the per-checker candidate cache caps the NUMBER of entries (the existing
+    _MAX_CANDIDATES caps each value list's length, not the entry count), so a long-lived
+    worker probing many distinct checkers stays bounded."""
+    import services.resolution.external_check_materializer as mod
+
+    mod.clear_candidate_cache()
+    monkeypatch.setattr(mod, "_EXTERNAL_CHECK_MULTICALL_ENABLED", False)
+    monkeypatch.setattr(mod, "_CANDIDATE_CACHE_MAX", 8)
+    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ["0x" + "aa" * 20])
+    monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
+    monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
+
+    for i in range(40):
+        materialize_external_check_from_events(
+            session=object(),  # type: ignore[arg-type]
+            rpc_url="http://rpc",
+            chain_id=i,  # distinct checker key per call
+            checker_address="0x" + "11" * 20,
+            checker_selector="0xb7009613",
+            call_args=[{"source": "root_caller"}],
+        )
+    assert len(mod._CANDIDATE_CACHE) <= 8
+
+
+def test_clear_candidate_cache_empties_and_resets(monkeypatch):
+    import services.resolution.external_check_materializer as mod
+
+    monkeypatch.setattr(mod, "_EXTERNAL_CHECK_MULTICALL_ENABLED", False)
+    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ["0x" + "aa" * 20])
+    monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
+    monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
+    materialize_external_check_from_events(
+        session=object(),  # type: ignore[arg-type]
+        rpc_url="http://rpc",
+        chain_id=1,
+        checker_address="0x" + "11" * 20,
+        checker_selector="0xb7009613",
+        call_args=[{"source": "root_caller"}],
+    )
+    assert mod._CANDIDATE_CACHE
+    mod.clear_candidate_cache()
+    assert not mod._CANDIDATE_CACHE

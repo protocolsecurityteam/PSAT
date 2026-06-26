@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,30 @@ def _load_known_docs() -> dict[str, dict[str, list[str]]]:
     return data.get("protocols", {}) or {}
 
 
+# Process-wide cache keyed on (instructions, schema_hash). Values are
+# ``(monotonic_ts, result)``: the 24h TTL serves re-run savings, the size
+# cap bounds the entry count across protocols in a long-lived worker.
 _research_cache: dict[tuple, tuple[float, dict]] = {}
+_research_cache_lock = threading.Lock()
+_RESEARCH_CACHE_MAX = 256
+
+
+def _evict_research_if_needed() -> None:
+    """Drop the oldest 25% of _research_cache entries when the bound is reached (caller holds the lock)."""
+    if len(_research_cache) < _RESEARCH_CACHE_MAX:
+        return
+    cutoff = sorted(_research_cache.values(), key=lambda v: v[0])[len(_research_cache) // 4][0]
+    for k in [k for k, v in _research_cache.items() if v[0] <= cutoff]:
+        _research_cache.pop(k, None)
+
+
+def _log_research_pressure() -> None:
+    """Log when _research_cache crosses 50/75/95% of its bound (caller holds the lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("research", len(_research_cache), _RESEARCH_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
 
 
 def _cached_deep_research(instructions: str, schema: dict | None = None) -> dict:
@@ -88,13 +112,21 @@ def _cached_deep_research(instructions: str, schema: dict | None = None) -> dict
     schema_hash = hashlib.sha1(_json.dumps(schema or {}, sort_keys=True).encode()).hexdigest()
     key = (instructions, schema_hash)
     now = time.monotonic()
-    if key in _research_cache:
-        ts, result = _research_cache[key]
-        if now - ts < RESEARCH_CACHE_TTL_SECONDS:
-            logger.info("deep_research cache hit for %r", instructions[:60])
-            return result
+    with _research_cache_lock:
+        cached = _research_cache.get(key)
+        if cached is not None:
+            ts, result = cached
+            if now - ts < RESEARCH_CACHE_TTL_SECONDS:
+                logger.info("deep_research cache hit for %r", instructions[:60])
+                return result
+            del _research_cache[key]
+    # exa.deep_research runs outside the lock (it can block up to 900s); concurrent
+    # misses for the same key may both fetch, matching the _GETCODE_CACHE pattern.
     result = exa.deep_research(instructions, schema=schema, timeout_seconds=900)
-    _research_cache[key] = (now, result)
+    with _research_cache_lock:
+        _evict_research_if_needed()
+        _research_cache[key] = (now, result)
+        _log_research_pressure()
     return result
 
 
@@ -588,5 +620,9 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
 
 
 def reset_cache() -> None:
-    """Clear the deep_research cache (for tests)."""
-    _research_cache.clear()
+    """Clear the deep_research cache + its pressure state (for tests)."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _research_cache_lock:
+        _research_cache.clear()
+    reset_cache_pressure_state("research")

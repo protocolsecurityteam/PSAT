@@ -13,6 +13,7 @@ from services.policy.principal_history import (
     build_principal_history,
     build_role_authority_history,
 )
+from utils import memory
 from utils.logging import bind_trace_context, degraded_errors_var, stage_metrics_var
 
 AUTHORITY = "0x" + "aa" * 20
@@ -211,12 +212,10 @@ class _FakeEtherscanResponse:
 
 @pytest.fixture(autouse=True)
 def _clear_principal_history_caches():
-    # The module memoizes ABI + logs process-wide; clear so the stubbed wire is
-    # actually consulted and tests don't bleed into each other.
-    principal_history._ABI_CACHE.clear()
+    # The module memoizes authority logs process-wide; clear so the stubbed wire
+    # is actually consulted and tests don't bleed into each other.
     principal_history._LOG_CACHE.clear()
     yield
-    principal_history._ABI_CACHE.clear()
     principal_history._LOG_CACHE.clear()
 
 
@@ -327,3 +326,74 @@ def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch
     # The summary still records the (failed) authority; no role events folded.
     assert metrics["principal_history_authorities"] == 1
     assert metrics["principal_history_role_events"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _LOG_CACHE size cap + TTL: the process-global authority-log cache must stay
+# bounded (no OOM in a long-lived policy worker) and eventually re-read so role
+# grants after the first fetch are seen. Only the Etherscan getLogs wire is
+# stubbed; _fetch_logs drives the real cache machinery.
+# ---------------------------------------------------------------------------
+
+
+def _no_records_get(url, params=None, timeout=None):
+    return _FakeEtherscanResponse({"status": "0", "result": "No records found"})
+
+
+def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
+    """_fetch_logs caps _LOG_CACHE at its MAX, evicting the oldest entries so a
+    long-lived worker can't accumulate authority histories without bound."""
+    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
+    monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
+    monkeypatch.setattr(requests, "get", _no_records_get)
+
+    last_authority = ""
+    for i in range(12):
+        last_authority = "0x" + f"{i:040x}"
+        principal_history._fetch_logs(authority_address=last_authority, chain_id=1, topic0=SELECTOR)
+
+    assert len(principal_history._LOG_CACHE) <= principal_history._LOG_CACHE_MAX
+    # Eviction runs before the write, so the most recent fetch is always retained.
+    assert (1, last_authority.lower(), SELECTOR.lower()) in principal_history._LOG_CACHE
+    principal_history.clear_log_cache()
+
+
+def test_log_cache_ttl_expiry_refetches(monkeypatch):
+    """A cached authority-log entry is reused within the TTL but re-fetched once
+    it expires, so a later grant/revoke is eventually picked up."""
+    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
+    calls: list = []
+
+    def _counting_get(url, params=None, timeout=None):
+        calls.append((params or {}).get("topic0"))
+        return _FakeEtherscanResponse({"status": "0", "result": "No records found"})
+
+    monkeypatch.setattr(requests, "get", _counting_get)
+
+    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
+    assert len(calls) == 1
+    # Within TTL: served from cache, no second wire call.
+    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
+    assert len(calls) == 1
+    # Past TTL: the stale entry is dropped and re-fetched.
+    monkeypatch.setattr(principal_history, "_LOG_CACHE_TTL_S", -1.0)
+    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
+    assert len(calls) == 2
+
+
+def test_clear_log_cache_resets_pressure_state(monkeypatch):
+    """clear_log_cache empties the dict and forgets the cache-pressure threshold
+    so a later genuine pressure event still logs."""
+    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
+    monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
+    monkeypatch.setattr(requests, "get", _no_records_get)
+    principal_history.clear_log_cache()
+
+    # Two of four slots = 50%, which arms the pressure threshold for this cache.
+    for i in range(2):
+        principal_history._fetch_logs(authority_address="0x" + f"{i:040x}", chain_id=1, topic0=SELECTOR)
+    assert "principal_log" in memory._CACHE_PRESSURE_STATE
+
+    principal_history.clear_log_cache()
+    assert principal_history._LOG_CACHE == {}
+    assert "principal_log" not in memory._CACHE_PRESSURE_STATE

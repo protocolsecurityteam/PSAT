@@ -27,6 +27,7 @@ from services.audits.source_equivalence import (  # noqa: E402
     VerifiedSource,
     _candidate_paths_for_name,
     _fetch_github_raw,
+    _fetch_github_raw_hash,
     _hash_source_text,
     check_audit_covers_impl,
     check_audit_row_covers_contract,
@@ -39,11 +40,12 @@ from services.audits.source_equivalence import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clear_lru_cache():
-    """``_fetch_github_raw`` caches at module scope — stale cache hits
-    would poison tests that stub ``requests.get`` for the same URL."""
-    _fetch_github_raw.cache_clear()
+    """The process-global cache is ``_fetch_github_raw_hash`` (``_fetch_github_raw``
+    itself is uncached). Stale hash hits would poison tests that stub
+    ``requests.get`` / ``_fetch_github_raw`` for the same URL."""
+    _fetch_github_raw_hash.cache_clear()
     yield
-    _fetch_github_raw.cache_clear()
+    _fetch_github_raw_hash.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +227,8 @@ class TestFetchDbSourceFilesShortCircuits:
 
 
 # ---------------------------------------------------------------------------
-# _fetch_github_raw — HTTP contract boundaries (LRU cache cleared per test)
+# _fetch_github_raw — HTTP contract boundaries (uncached worker; the hash-level
+# LRU it feeds is cleared per test by the autouse fixture)
 # ---------------------------------------------------------------------------
 
 
@@ -328,9 +331,9 @@ class TestFetchGithubRaw:
 #
 # Same root-cause pattern as services.audits.text_extraction: prod observed
 # bursts of ConnectionResetError(104) from raw.githubusercontent.com that
-# turned every flake into a permanent ``transport_error``. The lru_cache
-# makes this *worse* — once memoized, the same URL stays poisoned for the
-# whole worker process. Retry must happen *before* memoization.
+# turned every flake into a permanent ``transport_error``. Retry runs inside
+# the worker so its outcome is settled *before* the hash-level cache memoizes
+# it — otherwise a single flake would poison the URL for the worker's life.
 # ---------------------------------------------------------------------------
 
 
@@ -436,10 +439,11 @@ class TestFetchGithubRawRetry:
         assert calls["n"] == 1
 
     def test_success_after_retry_is_memoized_not_the_flake(self, monkeypatch):
-        """The lru_cache wrapper makes the retry strictly necessary: without
+        """The hash-level cache makes the retry strictly necessary: without
         it, a single transient flake gets memoized as ``transport_error``
         for the whole worker process, starving every later call to the same
-        URL. With retry, the *successful* outcome is what the cache stores."""
+        URL. With retry, the *successful* outcome is what the cache stores —
+        and what it stores is the content hash, not the body."""
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -456,13 +460,58 @@ class TestFetchGithubRawRetry:
         monkeypatch.setattr("services.audits.source_equivalence.requests.get", flaky_then_ok)
 
         url = "https://raw.githubusercontent.com/x/y/abc/Retry6.sol"
-        first = _fetch_github_raw(url, None)
-        second = _fetch_github_raw(url, None)
+        first = _fetch_github_raw_hash(url, None)
+        second = _fetch_github_raw_hash(url, None)
 
         assert first.status == "ok"
         assert second.status == "ok"
-        # Cache hit on the second call: requests.get is not called again.
+        assert first.sha256 == _hash_source_text("contract M {}")
+        # Cache hit on the second call: the worker (and requests.get) is not
+        # re-run — only the retried success was memoized, not the flake.
         assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _fetch_github_raw_hash — the process-global cache. It memoizes the content
+# hash (not the file body), so its 4096-entry lru_cache cap is a real memory
+# bound: each row is fixed-size regardless of source-file size.
+# ---------------------------------------------------------------------------
+
+
+class TestFetchGithubRawHashCaching:
+    def test_caches_content_hash_not_body(self, monkeypatch):
+        """A large body must reduce to its 64-char sha256 in the cache — the
+        raw text is never retained on the cached row (the ~1000× per-entry
+        shrink that bounds the cache)."""
+        body = "contract X { /* " + ("A" * 200_000) + " */ }"
+        monkeypatch.setattr(
+            "services.audits.source_equivalence.requests.get",
+            lambda *_a, **_k: _resp(text=body, content_type="text/plain"),
+        )
+        got = _fetch_github_raw_hash("https://raw.githubusercontent.com/x/y/abc/Big.sol", None)
+        assert got.status == "ok"
+        assert got.sha256 == _hash_source_text(body)
+        assert got.sha256 is not None and len(got.sha256) == 64
+        # The body itself is not carried on the cached result — only its hash.
+        assert not hasattr(got, "content")
+
+    def test_lru_cap_is_bounded(self):
+        """A finite 4096-entry ceiling (never ``maxsize=None``) keeps the
+        process-global cache from growing without bound in a long-lived
+        worker. Pin it so a refactor can't silently unbound the cache."""
+        info = _fetch_github_raw_hash.cache_info()
+        assert info.maxsize == 4096
+
+    def test_failure_status_propagates_with_no_hash(self, monkeypatch):
+        """A terminal failure caches its status with ``sha256=None`` — still a
+        tiny row, and the caller can distinguish missing from mismatched."""
+        monkeypatch.setattr(
+            "services.audits.source_equivalence.requests.get",
+            lambda *_a, **_k: _resp(status_code=404, text="Not Found"),
+        )
+        got = _fetch_github_raw_hash("https://raw.githubusercontent.com/x/y/abc/Missing.sol", None)
+        assert got.sha256 is None
+        assert got.status == "http_404"
 
 
 class TestFetchGithubSourceHash:

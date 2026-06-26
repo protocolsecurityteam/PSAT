@@ -38,10 +38,9 @@ logger = logging.getLogger(__name__)
 #
 # Same shape as services.audits.text_extraction: prod observed bursts of
 # ConnectionResetError(104) hammering raw.githubusercontent.com that turned
-# every flake into a permanent ``transport_error``. The lru_cache below
-# makes this *worse* — once memoized, the URL stays poisoned for the entire
-# worker process. Retry runs *inside* the cached function, so the cache
-# stores the eventual outcome (success or genuine failure), not a flake.
+# every flake into a permanent ``transport_error``. Retry runs *inside* the
+# fetch worker so its post-retry outcome — not a flake — is what the
+# hash-level cache (``_fetch_github_raw_hash``) memoizes for the run.
 # ---------------------------------------------------------------------------
 _RETRY_ATTEMPTS: Final[int] = 3
 _RETRY_INITIAL_BACKOFF: Final[float] = 0.5
@@ -399,18 +398,16 @@ def fetch_contract_source_files(session: Any, contract_id: int) -> VerifiedSourc
 # ---------------------------------------------------------------------------
 
 
-@functools.lru_cache(maxsize=4096)
 def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
     """Fetch a GitHub raw URL, returning a diagnostic-rich outcome.
 
-    Result is cached by (url, token) — lru_cache works on ``GithubFetch``
-    because it's a frozen dataclass (hashable). A 404 is cached too, so a
-    known-missing URL is a single lookup across the whole run.
-
-    Retries transient transport flakes (``ConnectionError``, ``Timeout``)
-    and transient HTTP statuses (408/429/5xx) with jittered exponential
-    backoff *before* the cache memoizes the outcome — so a single RST
-    burst can't poison a URL for the worker's process lifetime.
+    The full body is returned here but not memoized; the process-global
+    cache lives one level up in :func:`_fetch_github_raw_hash`, which keeps
+    only the content hash. Retries transient transport flakes
+    (``ConnectionError``, ``Timeout``) and transient HTTP statuses
+    (408/429/5xx) with jittered exponential backoff *before* the hash-level
+    cache memoizes the outcome — so a single RST burst can't poison a URL
+    for the worker's process lifetime.
     """
     headers = {"User-Agent": "PSAT-source-equivalence/0.1"}
     if token:
@@ -521,6 +518,24 @@ def _coerce_github_hash_result(result: Any) -> GithubHashResult:
     raise TypeError(f"unsupported github hash result type: {type(result).__name__}")
 
 
+@functools.lru_cache(maxsize=4096)
+def _fetch_github_raw_hash(url: str, token: str | None) -> GithubHashResult:
+    """Memoized content hash for ``url`` — the process-global GitHub cache.
+
+    Keyed by ``(url, token)`` and capped at 4096 entries by ``lru_cache``.
+    Stores only the sha256 (plus the fetch status/detail), never the body,
+    so each row is a fixed ~100 bytes regardless of file size and the entry
+    cap is a real memory bound. The full text from :func:`_fetch_github_raw`
+    is hashed and discarded here. Terminal failures (404, content-type/size
+    rejects, exhausted retries) cache their status too, so a known outcome
+    is a single lookup per run.
+    """
+    fetch = _fetch_github_raw(url, token)
+    if fetch.content is None:
+        return GithubHashResult(sha256=None, status=fetch.status, detail=fetch.detail)
+    return GithubHashResult(sha256=_hash_source_text(fetch.content), status="ok", detail="")
+
+
 def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | None = None) -> GithubHashResult:
     """Hash the file at ``github.com/<repo>/<commit>/<path>``.
 
@@ -537,26 +552,23 @@ def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | 
             detail=f"repo/commit/path required (got {repo!r},{commit!r},{path!r})",
         )
     url = f"https://raw.githubusercontent.com/{repo}/{commit}/{path}"
-    fetch = _fetch_github_raw(url, token)
-    if fetch.content is None:
-        return GithubHashResult(sha256=None, status=fetch.status, detail=fetch.detail)
-    return GithubHashResult(sha256=_hash_source_text(fetch.content), status="ok", detail="")
+    return _fetch_github_raw_hash(url, token)
 
 
-def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) -> GithubFetch:
+def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) -> GithubHashResult:
     """Probe whether a commit resolves in ``repo``.
 
     Fetches the repo's root tree at the commit ref — one URL, returns a
-    success/failure diagnostic. Used to distinguish a real "commit not
-    found" (bad SHA / force-push) from a "commit exists but this file
-    isn't in it" (path miss).
+    success/failure diagnostic (``status == 'ok'`` ⇔ the commit resolves).
+    Used to distinguish a real "commit not found" (bad SHA / force-push)
+    from a "commit exists but this file isn't in it" (path miss).
 
     Hits ``raw.githubusercontent.com/<repo>/<commit>/README.md`` as a
     cheap probe. If the repo has no README (uncommon) this still reports
     ``http_404`` which degrades the diagnosis — acceptable edge case.
     """
     url = f"https://raw.githubusercontent.com/{repo}/{commit}/README.md"
-    return _fetch_github_raw(url, token)
+    return _fetch_github_raw_hash(url, token)
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +831,7 @@ def _verify_single_repo(
             # "commit doesn't exist" from "commit exists but path missing"
             # by probing the repo root at the commit.
             probe = _commit_exists_in_repo(source_repo, commit, token=github_token)
-            if probe.content is not None:
+            if probe.status == "ok":
                 # Commit resolves — just our candidate paths didn't match.
                 any_commit_resolved = True
 

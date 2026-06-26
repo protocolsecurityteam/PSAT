@@ -350,3 +350,78 @@ def test_pg_address_case_normalized(monkeypatch):
     rpc.clear_getcode_cache()
     rpc.get_code_with_keccak("https://rpc", "0x" + "ab" * 20)
     assert seen[0] == seen[1] == ("0x" + "ab" * 20)
+
+
+# ---------------------------------------------------------------------------
+# In-memory getcode key re-keyed on (chain_id, address) — P2.4
+# ---------------------------------------------------------------------------
+
+
+def test_getcode_inmem_key_dedups_url_aliases(monkeypatch):
+    """Two RPC URLs that resolve to the same chain id share one in-mem slot:
+    the second URL's read is served from cache without a second wire call."""
+    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
+    monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: 1)
+    monkeypatch.setattr(rpc, "_pg_bytecode_get", lambda *_a, **_kw: None)
+    monkeypatch.setattr(rpc, "_pg_bytecode_put", lambda *_a, **_kw: None)
+
+    wire = {"n": 0}
+
+    def _wire(_url, _method, _params, retries=1):
+        wire["n"] += 1
+        return "0x6080"
+
+    monkeypatch.setattr(rpc, "rpc_request", _wire)
+
+    addr = "0x" + "ab" * 20
+    rpc.get_code_with_keccak("https://erpc-a/main/evm/1", addr)
+    rpc.get_code_with_keccak("https://erpc-b/main/evm/1", addr)
+    assert wire["n"] == 1, "same chain id → distinct URLs must share one cache slot"
+    assert list(rpc._GETCODE_CACHE.keys()) == [(1, addr)]
+
+
+def test_getcode_inmem_key_falls_back_to_url_when_no_chain_id(monkeypatch):
+    """With the chain id unresolvable (PG off), the in-mem key falls back to
+    (rpc_url, addr): distinct URLs keep distinct slots, exactly as before."""
+    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
+
+    wire = {"n": 0}
+
+    def _wire(_url, _method, _params, retries=1):
+        wire["n"] += 1
+        return "0x6080"
+
+    monkeypatch.setattr(rpc, "rpc_request", _wire)
+
+    addr = "0x" + "cd" * 20
+    rpc.get_code_with_keccak("https://node-a", addr)
+    rpc.get_code_with_keccak("https://node-b", addr)
+    assert wire["n"] == 2
+    assert set(rpc._GETCODE_CACHE.keys()) == {("https://node-a", addr), ("https://node-b", addr)}
+
+
+# ---------------------------------------------------------------------------
+# _chain_id_cache is size-capped — P2.3
+# ---------------------------------------------------------------------------
+
+
+def test_chain_id_cache_bounded(monkeypatch):
+    """A caller minting per-request URLs can't grow _chain_id_cache without
+    bound — it's FIFO-capped at _CHAIN_ID_CACHE_MAX."""
+    rpc._chain_id_cache.clear()
+    monkeypatch.setattr(rpc, "_CHAIN_ID_CACHE_MAX", 4)
+    for i in range(20):
+        rpc._remember_chain_id(f"https://rpc-{i}", 1)
+    assert len(rpc._chain_id_cache) <= rpc._CHAIN_ID_CACHE_MAX
+
+
+def test_remember_chain_id_evicts_oldest(monkeypatch):
+    """At the cap the oldest-inserted URL is dropped; the newest survives."""
+    rpc._chain_id_cache.clear()
+    monkeypatch.setattr(rpc, "_CHAIN_ID_CACHE_MAX", 3)
+    for i in range(3):
+        rpc._remember_chain_id(f"https://rpc-{i}", i)
+    rpc._remember_chain_id("https://rpc-new", 99)
+    assert "https://rpc-0" not in rpc._chain_id_cache
+    assert rpc._chain_id_cache["https://rpc-new"] == 99
+    assert len(rpc._chain_id_cache) == 3

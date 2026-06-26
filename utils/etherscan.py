@@ -70,12 +70,111 @@ def _pg_cache_eligible(module: str, action: str) -> bool:
     return (module, action) in _PG_CACHE_WHITELIST
 
 
-_cache: dict[tuple, dict] = {}
+# Narrower whitelist for the in-memory layer: only the small, immutable contract
+# metadata responses (ABI, creation record) live in process memory. Source is
+# psql-only (multi-MB blobs served by the PG layer); volatile data (balances,
+# prices, tx history, logs) is never held in-process.
+_INMEM_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("contract", "getabi"),
+        ("contract", "getcontractcreation"),
+    }
+)
+
+
+def _inmem_cache_eligible(module: str, action: str) -> bool:
+    return (module, action) in _INMEM_CACHE_WHITELIST
+
+
+def _source_cache_eligible(module: str, action: str) -> bool:
+    """``getsourcecode`` only — held in the separate bounded source LRU below, never the
+    small-entry metadata ``_cache`` (256 multi-MB source blobs would be the OOM this avoids)."""
+    return (module, action) == ("contract", "getsourcecode")
+
+
+# Bounded LRU over the whitelisted in-memory responses. Each value carries a
+# monotonic insert time so the oldest quartile is evicted at the cap — the cap
+# is the memory bound. No TTL: the cached actions are immutable, and the cap is
+# kept small because that's the whole point.
+_CACHE_MAX = 256
+_cache: dict[tuple, tuple[dict, float]] = {}
 _cache_lock = threading.Lock()
 
 
 def _cache_key(module: str, action: str, chain_id: int, params: dict) -> tuple:
     return (module, action, chain_id, tuple(sorted(params.items())))
+
+
+def _evict_cache_if_needed() -> None:
+    """Drop the oldest 25% of _cache entries when the bound is reached (caller holds _cache_lock)."""
+    if len(_cache) < _CACHE_MAX:
+        return
+    cutoff = sorted(_cache.values(), key=lambda v: v[1])[len(_cache) // 4][1]
+    for k in [k for k, v in _cache.items() if v[1] <= cutoff]:
+        _cache.pop(k, None)
+
+
+def _log_cache_pressure() -> None:
+    """Log when _cache crosses 50/75/95% of its bound (caller holds _cache_lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("etherscan", len(_cache), _CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
+
+# Separate bounded LRU for getsourcecode. Its responses are multi-MB, so they are kept
+# OUT of the 256-entry metadata _cache (256 source blobs would reintroduce the OOM this
+# module avoids) and were psql-only — but a single analysis run re-reads the same
+# contract's source many times, each a multi-MB Postgres deserialize. This holds them in
+# process so the same source isn't re-fetched within a run; the SMALL cap is the memory
+# bound (worst case cap × blob, a handful of contracts). No TTL — verified source is
+# immutable. Each value carries a monotonic insert time so the oldest quartile evicts.
+_SOURCE_CACHE_MAX = int(os.getenv("ETHERSCAN_SOURCE_CACHE_MAX", "16"))
+_source_cache: dict[tuple, tuple[dict, float]] = {}
+_source_cache_lock = threading.Lock()
+
+
+def _evict_source_cache_if_needed() -> None:
+    """Drop the oldest 25% of _source_cache entries when the bound is reached (caller holds _source_cache_lock)."""
+    if len(_source_cache) < _SOURCE_CACHE_MAX:
+        return
+    cutoff = sorted(_source_cache.values(), key=lambda v: v[1])[len(_source_cache) // 4][1]
+    for k in [k for k, v in _source_cache.items() if v[1] <= cutoff]:
+        _source_cache.pop(k, None)
+
+
+def _log_source_cache_pressure() -> None:
+    """Log when _source_cache crosses 50/75/95% of its bound (caller holds _source_cache_lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("etherscan_source", len(_source_cache), _SOURCE_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
+
+
+def _source_cache_put(key: tuple, module: str, action: str, response: dict) -> None:
+    """Cache a getsourcecode response in the bounded source LRU, skipping empty/unverified
+    sources (the same ``_is_persistable`` gate the PG layer uses) so a not-yet-verified
+    contract's empty response is never pinned in process."""
+    if not _is_persistable(module, action, response):
+        return
+    with _source_cache_lock:
+        _evict_source_cache_if_needed()
+        _source_cache[key] = (response, time.monotonic())
+        _log_source_cache_pressure()
+
+
+def clear_etherscan_cache() -> None:
+    """Clear the process-wide in-memory Etherscan caches (metadata + source). For tests + manual reset."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _cache_lock:
+        _cache.clear()
+    with _source_cache_lock:
+        _source_cache.clear()
+    reset_cache_pressure_state("etherscan")
+    reset_cache_pressure_state("etherscan_source")
 
 
 def _params_hash(module: str, action: str, chain_id: int, params: dict) -> str:
@@ -170,19 +269,32 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 
 def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire."""
-    if _CACHE_ENABLED:
-        key = _cache_key(module, action, chain_id, params)
+    inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
+    source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
+    key = _cache_key(module, action, chain_id, params)
+    if inmem:
         with _cache_lock:
-            if key in _cache:
+            cached = _cache.get(key)
+            if cached is not None:
                 logger.debug("Etherscan in-memory cache hit: %s/%s %s", module, action, params.get("address", ""))
-                return _cache[key]
+                return cached[0]
+    if source_cached:
+        with _source_cache_lock:
+            cached = _source_cache.get(key)
+            if cached is not None:
+                logger.debug("Etherscan source cache hit: %s", params.get("address", ""))
+                return cached[0]
 
     pg_hit = _pg_cache_get(module, action, chain_id, params)
     if pg_hit is not None:
         logger.debug("Etherscan PG cache hit: %s/%s %s", module, action, params.get("address", ""))
-        if _CACHE_ENABLED:
+        if inmem:
             with _cache_lock:
-                _cache[_cache_key(module, action, chain_id, params)] = pg_hit
+                _evict_cache_if_needed()
+                _cache[key] = (pg_hit, time.monotonic())
+                _log_cache_pressure()
+        if source_cached:
+            _source_cache_put(key, module, action, pg_hit)
         return pg_hit
 
     api_key = _get_api_key()
@@ -205,9 +317,13 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
         data = resp.json()
 
         if data.get("status") == "1":
-            if _CACHE_ENABLED:
+            if inmem:
                 with _cache_lock:
-                    _cache[_cache_key(module, action, chain_id, params)] = data
+                    _evict_cache_if_needed()
+                    _cache[key] = (data, time.monotonic())
+                    _log_cache_pressure()
+            if source_cached:
+                _source_cache_put(key, module, action, data)
             _pg_cache_put(module, action, chain_id, params, data)
             return data
 

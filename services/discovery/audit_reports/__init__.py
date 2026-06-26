@@ -56,6 +56,7 @@ from ._github import (
     _llm_extract_filename_metadata,
     _parse_github_url,
     _resolve_branch_commit,
+    clear_branch_sha_cache,
     github_blob_to_raw,
 )
 from ._urls import (
@@ -660,6 +661,7 @@ __all__ = [
     "_github_api_headers",
     "_resolve_branch_commit",
     "_BRANCH_SHA_CACHE",
+    "clear_branch_sha_cache",
     "_AUDIT_FOLDER_CANDIDATES",
     "_AUDIT_FOLDER_LAST_SEGMENTS",
     "_DEPENDENCY_LIBRARY_PATTERNS",

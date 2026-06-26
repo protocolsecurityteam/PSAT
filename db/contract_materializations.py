@@ -67,6 +67,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHAIN = "ethereum"
 
+# Analyzer/pipeline schema version stamped on every materialized row. The read
+# paths (``find_by_keccak``/``find_by_address``/``materialize_or_wait``) only
+# serve a row whose ``analysis_schema_version`` equals this constant, so a row
+# written by an older analyzer reads as a miss and is rebuilt. Bump by hand only
+# when the static-analysis / tracking-plan / predicate-tree *output shape*
+# changes — deliberately NOT tied to a git SHA, which would cold-rebuild every
+# multi-MB forge+Slither bundle on unrelated deploys (frontend, docs, workers).
+ANALYSIS_SCHEMA_VERSION = 1
+
 
 def _builder_staleness_s() -> float:
     """How long a ``status='building'`` row stays trusted as in-flight.
@@ -137,7 +146,9 @@ def find_by_keccak(
 
     ``status='pending'`` rows are NOT returned — a pending row means a
     builder is still in flight; the caller should take the advisory
-    lock and re-read inside it.
+    lock and re-read inside it. Rows stamped with a different
+    ``analysis_schema_version`` are likewise skipped (read as a miss) so
+    a bumped analyzer rebuilds rather than serving a stale bundle.
     """
     chain_norm = (chain or DEFAULT_CHAIN).lower()
     keccak_norm = bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower()
@@ -146,6 +157,7 @@ def find_by_keccak(
             ContractMaterialization.chain == chain_norm,
             ContractMaterialization.bytecode_keccak == keccak_norm,
             ContractMaterialization.status == "ready",
+            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
     return row
@@ -161,7 +173,9 @@ def find_by_address(
 
     Address-keyed lookup is the legacy entry path — same-bytecode-different-address
     contracts share one row keyed by keccak, but a known address still
-    resolves to that row via the unique index.
+    resolves to that row via the unique index. A row stamped with a
+    different ``analysis_schema_version`` reads as a miss so a bumped
+    analyzer rebuilds rather than serving a stale bundle.
     """
     chain_norm = (chain or DEFAULT_CHAIN).lower()
     addr_norm = address.lower()
@@ -170,6 +184,7 @@ def find_by_address(
             ContractMaterialization.chain == chain_norm,
             ContractMaterialization.address == addr_norm,
             ContractMaterialization.status == "ready",
+            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
     return row
@@ -350,9 +365,12 @@ def materialize_or_wait(
                     ContractMaterialization.bytecode_keccak == keccak_norm,
                 )
             ).scalar_one_or_none()
-            if row is not None and row.status == "ready":
+            if row is not None and row.status == "ready" and row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION:
                 session.commit()
                 return row
+            # An old-version 'ready' row falls through to the claim below and
+            # is rebuilt; its status is overwritten to 'building' then 'ready'
+            # with the current version in phase 3.
 
             if row is not None and row.status == "building":
                 started = row.builder_started_at
@@ -381,6 +399,7 @@ def materialize_or_wait(
                 status="building",
                 builder_started_at=now_dt,
                 error=None,
+                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
             claim_stmt = claim_stmt.on_conflict_do_update(
                 constraint="contract_materializations_pkey",
@@ -409,6 +428,7 @@ def materialize_or_wait(
                 status="failed",
                 error=err,
                 builder_started_at=None,
+                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
             stmt = stmt.on_conflict_do_update(
                 constraint="contract_materializations_pkey",
@@ -466,7 +486,11 @@ def materialize_or_wait(
                 ContractMaterialization.bytecode_keccak == keccak_norm,
             )
         ).scalar_one_or_none()
-        if existing is not None and existing.status == "ready":
+        if (
+            existing is not None
+            and existing.status == "ready"
+            and existing.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
+        ):
             session.commit()
             return existing
 
@@ -483,6 +507,7 @@ def materialize_or_wait(
             predicate_trees_blob_key=predicate_trees_blob_key,
             status="ready",
             builder_started_at=None,
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="contract_materializations_pkey",
@@ -498,6 +523,7 @@ def materialize_or_wait(
                 "address": stmt.excluded.address,
                 "error": None,
                 "builder_started_at": None,
+                "analysis_schema_version": stmt.excluded.analysis_schema_version,
                 "materialized_at": func.now(),
                 "updated_at": func.now(),
             },

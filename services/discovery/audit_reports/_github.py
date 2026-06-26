@@ -7,8 +7,11 @@ from ``_urls`` so there are no cycles.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -24,6 +27,8 @@ from ._urls import (
     _company_name_variants,
     _filename_mentions_company,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- URL parsing ----------------------------------------------------------
 
@@ -109,9 +114,41 @@ def _github_api_headers() -> dict[str, str]:
 
 # --- Branch → commit SHA cache --------------------------------------------
 
-# One API call per (owner, repo, branch) per process lifetime. Cleared
-# implicitly at exit.
-_BRANCH_SHA_CACHE: dict[tuple[str, str, str], str | None] = {}
+# Process-wide cache keyed on (owner, repo, branch). Values are
+# ``(sha, monotonic_ts)``: a short TTL re-probes because HEAD advances on
+# every push, and a size cap bounds the key count across repeated runs.
+# Misses are not cached so a transient GitHub error retries next call.
+_BRANCH_SHA_CACHE: dict[tuple[str, str, str], tuple[str, float]] = {}
+_BRANCH_SHA_CACHE_LOCK = threading.Lock()
+_BRANCH_SHA_CACHE_MAX = 4096
+_BRANCH_SHA_CACHE_TTL_S = float(os.getenv("PSAT_BRANCH_SHA_CACHE_TTL_S", "300"))
+
+
+def clear_branch_sha_cache() -> None:
+    """Clear the process-wide branch→SHA cache. For tests + manual reset."""
+    from utils.memory import reset_cache_pressure_state
+
+    with _BRANCH_SHA_CACHE_LOCK:
+        _BRANCH_SHA_CACHE.clear()
+    reset_cache_pressure_state("branch_sha")
+
+
+def _evict_branch_sha_if_needed() -> None:
+    """Drop the oldest 25% of _BRANCH_SHA_CACHE entries when the bound is reached (caller holds the lock)."""
+    if len(_BRANCH_SHA_CACHE) < _BRANCH_SHA_CACHE_MAX:
+        return
+    cutoff = sorted(_BRANCH_SHA_CACHE.values(), key=lambda v: v[1])[len(_BRANCH_SHA_CACHE) // 4][1]
+    for k in [k for k, v in _BRANCH_SHA_CACHE.items() if v[1] <= cutoff]:
+        _BRANCH_SHA_CACHE.pop(k, None)
+
+
+def _log_branch_sha_pressure() -> None:
+    """Log when _BRANCH_SHA_CACHE crosses 50/75/95% of its bound (caller holds the lock)."""
+    from utils.memory import cache_pressure_message
+
+    msg = cache_pressure_message("branch_sha", len(_BRANCH_SHA_CACHE), _BRANCH_SHA_CACHE_MAX)
+    if msg:
+        logger.info("[CACHE_PRESSURE] %s", msg)
 
 
 def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = False) -> str | None:
@@ -121,8 +158,15 @@ def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = Fal
     the PDF still lives at the same SHA and build stable permalinks.
     """
     key = (owner.lower(), repo.lower(), branch)
-    if key in _BRANCH_SHA_CACHE:
-        return _BRANCH_SHA_CACHE[key]
+    now = time.monotonic()
+
+    with _BRANCH_SHA_CACHE_LOCK:
+        cached = _BRANCH_SHA_CACHE.get(key)
+        if cached is not None:
+            sha_cached, inserted_at = cached
+            if now - inserted_at < _BRANCH_SHA_CACHE_TTL_S:
+                return sha_cached
+            del _BRANCH_SHA_CACHE[key]
 
     url = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch}"
     sha: str | None = None
@@ -145,7 +189,11 @@ def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = Fal
         else:
             _debug_log(debug, f"GitHub ref {resp.status_code} for {owner}/{repo}@{branch}")
 
-    _BRANCH_SHA_CACHE[key] = sha
+    if sha is not None:
+        with _BRANCH_SHA_CACHE_LOCK:
+            _evict_branch_sha_if_needed()
+            _BRANCH_SHA_CACHE[key] = (sha, now)
+            _log_branch_sha_pressure()
     return sha
 
 
