@@ -13,18 +13,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import ProtocolSurface from "./ProtocolSurface.jsx";
-import ProtocolGraph from "./ProtocolGraph.jsx";
-import RiskSurface from "./RiskSurface.jsx";
 import DependencyGraphTab from "./DependencyGraphTab.jsx";
-import AuditsTab from "./AuditsTab.jsx";
-import AuditExtractionShelf from "./AuditExtractionShelf.jsx";
 import AddressesModal from "./AddressesModal.jsx";
 import AuditsAdminModal from "./AuditsAdminModal.jsx";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ProtocolLogo from "./ProtocolLogo.jsx";
 import ProtocolRadar from "./ProtocolRadar.jsx";
-import HeroMesh from "./HeroMesh.jsx";
 
 import { computeProtocolScore } from "./protocolScore.js";
 import { setFetchHandler } from "./test/fetchMock.js";
@@ -98,57 +93,6 @@ describe("ProtocolSurface", () => {
   });
 });
 
-describe("ProtocolGraph", () => {
-  beforeEach(() => {
-    installCommonApiMocks();
-  });
-
-  it("renders for a company", async () => {
-    render(<ProtocolGraph companyName="etherfi" />);
-    await waitFor(() => {
-      // ProtocolGraph either shows loading text or the React Flow canvas
-      const text = document.body.textContent || "";
-      const hasContent =
-        /Loading/i.test(text) || document.querySelector(".react-flow");
-      expect(hasContent).toBeTruthy();
-    });
-    expectNoCrash();
-  });
-});
-
-describe("RiskSurface", () => {
-  beforeEach(() => {
-    installCommonApiMocks();
-  });
-
-  it("renders for a company", async () => {
-    render(<RiskSurface companyName="etherfi" />);
-    await waitFor(() => {
-      const container = document.querySelector(".rs-container");
-      const loading = screen.queryByText(/Loading risk/i);
-      expect(container || loading).toBeTruthy();
-    });
-    expectNoCrash();
-  });
-});
-
-describe("AuditsTab", () => {
-  beforeEach(() => {
-    installCommonApiMocks();
-  });
-
-  it("renders an empty audits list", async () => {
-    render(<AuditsTab companyName="etherfi" />);
-    await waitFor(() => {
-      // Either the eyebrow ("Audits") or the empty-state copy renders
-      // depending on whether listAudits resolved already.
-      const text = document.body.textContent || "";
-      expect(/Audits|No audits discovered/i.test(text)).toBe(true);
-    });
-    expectNoCrash();
-  });
-});
-
 describe("DependencyGraphTab", () => {
   it("renders with empty data", () => {
     render(<DependencyGraphTab data={null} runName="empty" />);
@@ -164,20 +108,6 @@ describe("DependencyGraphTab", () => {
       edges: [{ source: "0xaaa", target: "0xbbb", type: "CALL" }],
     };
     render(<DependencyGraphTab data={data} runName="demo" />);
-    expectNoCrash();
-  });
-});
-
-describe("AuditExtractionShelf", () => {
-  beforeEach(() => {
-    setFetchHandler(/^\/api\/audits\/pipeline/, () => ({ groups: [], recent_completed: [] }));
-  });
-
-  it("renders without throwing", async () => {
-    render(<AuditExtractionShelf />);
-    await waitFor(() => {
-      expect(document.body.textContent).toBeTruthy();
-    });
     expectNoCrash();
   });
 });
@@ -242,15 +172,8 @@ describe("AddressLabelInline", () => {
 });
 
 describe("ProductHero", () => {
-  it("renders with form state", () => {
-    render(
-      <ProductHero
-        form={{ target: "", chain: "", analyzeLimit: "5", name: "" }}
-        setForm={() => {}}
-        onSubmit={(e) => e.preventDefault()}
-        loading={false}
-      />,
-    );
+  it("renders the hero title", () => {
+    render(<ProductHero />);
     expect(screen.getByText(/Detect every/i)).toBeInTheDocument();
     expectNoCrash();
   });
@@ -269,14 +192,6 @@ describe("ProtocolRadar", () => {
     render(<ProtocolRadar axes={score.axes} />);
     // 6 axis labels (Authority, Audits, Upgrades, Pause, Safes, Data)
     expect(screen.getByText(/Authority/i)).toBeInTheDocument();
-    expectNoCrash();
-  });
-});
-
-describe("HeroMesh", () => {
-  it("renders the SVG constellation", () => {
-    const { container } = render(<HeroMesh />);
-    expect(container.querySelector("svg")).toBeInTheDocument();
     expectNoCrash();
   });
 });

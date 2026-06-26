@@ -8,7 +8,6 @@
 @import "./styles/shell/submit-dropdown.css";
 @import "./styles/shell/page.css";
 @import "./styles/shell/runs-table.css";
-@import "./styles/shell/active-jobs.css";
 @import "./styles/shell/forms.css";
 @import "./styles/shell/layout-helpers.css";
 @import "./styles/shell/monitor-stage.css";
@@ -18,15 +17,12 @@
 @import "./styles/components/upgrade-timeline.css";
 @import "./styles/components/protocol-graph.css";
 @import "./styles/components/agent-sidebar.css";
-@import "./styles/components/risk-surface.css";
 @import "./styles/components/principals-sidebar.css";
 @import "./styles/surface/layout.css";
 @import "./styles/pages/home-hero.css";
 @import "./styles/components/protocol-logo.css";
 @import "./styles/components/protocol-radar.css";
 @import "./styles/pages/company-hero.css";
-@import "./styles/components/surface-preview.css";
-@import "./styles/components/eye-conveyor.css";
 @import "./styles/pages/pipeline-dashboard.css";
 @import "./styles/pages/job-monitor.css";
 @import "./styles/pages/protocol-monitoring.css";

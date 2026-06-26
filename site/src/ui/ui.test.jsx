@@ -9,7 +9,6 @@ import { render, screen } from "@testing-library/react";
 import { StatCard } from "./StatCard.jsx";
 import { GuardButton } from "./GuardButton.jsx";
 import { GuardGlyph } from "./GuardGlyph.jsx";
-import { UpgradeAuditCard } from "./UpgradeAuditCard.jsx";
 
 describe("StatCard", () => {
   it("renders label + value", () => {
@@ -67,39 +66,5 @@ describe("GuardButton", () => {
     );
     expect(container.querySelector(".ps-guard-navigable")).toBeInTheDocument();
     expect(screen.getByText(/Safe \(3\/5\)/)).toBeInTheDocument();
-  });
-});
-
-describe("UpgradeAuditCard", () => {
-  const COVERAGE = {
-    audit_id: 7,
-    auditor: "Trail of Bits",
-    title: "V2 Audit",
-    date: "2024-03-15",
-    match_type: "reviewed_commit",
-    match_confidence: "high",
-    equivalence_status: "proven",
-    proof_kind: "clean",
-    bytecode_drift: false,
-  };
-
-  it("renders an anchor when companyName is provided", () => {
-    const { container } = render(<UpgradeAuditCard coverage={COVERAGE} companyName="etherfi" />);
-    const link = container.querySelector("a.upgrade-audit-card");
-    expect(link).toBeInTheDocument();
-    expect(link.getAttribute("href")).toContain("/company/etherfi/audits");
-    expect(link.getAttribute("href")).toContain("audit=7");
-  });
-
-  it("renders a div when companyName is missing", () => {
-    const { container } = render(<UpgradeAuditCard coverage={COVERAGE} />);
-    expect(container.querySelector("a.upgrade-audit-card")).not.toBeInTheDocument();
-    expect(container.querySelector("div.upgrade-audit-card")).toBeInTheDocument();
-  });
-
-  it("shows live findings count when present", () => {
-    const coverage = { ...COVERAGE, live_findings: [{ title: "issue" }, { title: "another" }] };
-    render(<UpgradeAuditCard coverage={coverage} companyName="etherfi" />);
-    expect(screen.getByText(/2 live findings/)).toBeInTheDocument();
   });
 });

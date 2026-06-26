@@ -1,9 +1,8 @@
 import { useMemo, useRef, useState } from "react";
 
 import ProtocolLogo from "../ProtocolLogo.jsx";
-import { PIPELINE_STAGES } from "./PipelineDashboard.jsx";
 
-export default function RunsPage({ analyses, activeJobs, onSelect, onDiscoverMore, onSelectCompany }) {
+export default function RunsPage({ analyses, onSelect, onDiscoverMore, onSelectCompany }) {
   const [search, setSearch] = useState("");
   const protocolSectionRef = useRef(null);
 
@@ -33,28 +32,6 @@ export default function RunsPage({ analyses, activeJobs, onSelect, onDiscoverMor
 
   return (
     <div>
-      {activeJobs.length > 0 && (
-        <div className="active-jobs-bar" style={{ maxWidth: 1400, margin: "0 auto", padding: "0 24px" }}>
-          {activeJobs.slice(0, 8).map((j) => {
-            const stageIdx = PIPELINE_STAGES.indexOf(j.stage);
-            const isDone = j.stage === "done" || j.status === "completed";
-            const isFailed = j.status === "failed";
-            return (
-              <div key={j.job_id} className={`active-job-chip ${isDone ? "done" : ""} ${isFailed ? "err" : ""}`}>
-                <span className="active-job-name">{j.name || j.company || j.address || "Job"}</span>
-                <span className="active-job-stage">{j.stage}</span>
-                <div className="mini-bar">
-                  {PIPELINE_STAGES.map((s, i) => (
-                    <div key={s} className={`mini-step ${isDone || i < stageIdx ? "done" : i === stageIdx ? "current" : ""}`} />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-          {activeJobs.length > 8 && <div className="active-job-chip" style={{ opacity: 0.6 }}>+{activeJobs.length - 8} more</div>}
-        </div>
-      )}
-
       <section ref={protocolSectionRef} id="protocols" className="home-protocol-section">
         <div className="home-protocol-header">
           <div>

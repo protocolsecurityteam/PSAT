@@ -17,9 +17,6 @@ export default function HamburgerMenu({ onClose, viewMode, companyName, companyT
             <div className="hamburger-section-label">{companyName}</div>
             <button className={`hamburger-link ${viewMode === "company" && companyTab === "overview" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("overview"); onClose(); }}>Overview</button>
             <button className={`hamburger-link ${viewMode === "company" && companyTab === "surface" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("surface"); onClose(); }}>Surface</button>
-            <button className={`hamburger-link ${viewMode === "company" && companyTab === "graph" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("graph"); onClose(); }}>Ownership</button>
-            <button className={`hamburger-link ${viewMode === "company" && companyTab === "risk" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("risk"); onClose(); }}>Risk Matrix</button>
-            <button className={`hamburger-link ${viewMode === "company" && companyTab === "audits" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("audits"); onClose(); }}>Audits</button>
             <button className={`hamburger-link ${viewMode === "company" && companyTab === "monitoring" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("monitoring"); onClose(); }}>Monitoring</button>
           </nav>
         )}

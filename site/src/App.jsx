@@ -25,15 +25,11 @@ import CompanyOverview from "./pages/CompanyOverview.jsx";
 import LoadingFallback from "./LoadingFallback.jsx";
 import RunsPage from "./pages/RunsPage.jsx";
 
-// The control surface, dependency graph, ownership graph, risk matrix,
-// and audits tab are heavy — keep them lazy so the home page bundle
-// stays slim. ProtocolSurface is also imported separately by
-// CompanyOverview; Vite/Rollup dedupe to a single chunk.
+// The control surface and dependency graph are heavy — keep them lazy
+// so the home page bundle stays slim. ProtocolSurface is also imported
+// separately by CompanyOverview; Vite/Rollup dedupe to a single chunk.
 const DependencyGraphTab = lazy(() => import("./DependencyGraphTab.jsx"));
-const ProtocolGraph = lazy(() => import("./ProtocolGraph.jsx"));
-const RiskSurface = lazy(() => import("./RiskSurface.jsx"));
 const ProtocolSurface = lazy(() => import("./ProtocolSurface.jsx"));
-const AuditsTab = lazy(() => import("./AuditsTab.jsx"));
 
 // TODO: replace this with a real sign-in page + session-based auth. Options
 // that fit our Fly deployment: (a) an identity-aware proxy sidecar such as
@@ -65,7 +61,7 @@ export default function App() {
   // can race with loadAnalysis' state batch.
   const [activeTab, setActiveTab] = useState(() => parseLocationPath(window.location.pathname).tab);
   const [job, setJob] = useState(null);
-  const [activeJobs, setActiveJobs] = useState([]);
+  const [, setActiveJobs] = useState([]);
   const [form, setForm] = useState({ target: "", name: "", chain: "", analyzeLimit: "5" });
   const [formOpen, setFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -370,40 +366,15 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {isCompany && companyName && companyTab === "graph" && (
-        <div className="page" style={{ height: "calc(100vh - 52px)", display: "flex", flexDirection: "column" }}>
-          <div className="protocol-graph-wrapper" style={{ flex: 1, minHeight: 0 }}>
-            <Suspense fallback={<LoadingFallback label="Loading graph..." />}>
-              <ProtocolGraph companyName={companyName} />
-            </Suspense>
-          </div>
-        </div>
-      )}
-      {isCompany && companyName && companyTab === "risk" && (
-        <div className="page">
-          <Suspense fallback={<LoadingFallback label="Loading risk matrix..." />}>
-            <RiskSurface companyName={companyName} />
-          </Suspense>
-        </div>
-      )}
       {isCompany && companyName && companyTab === "monitoring" && (
         <ProtocolMonitoringPage companyName={companyName} />
-      )}
-      {isCompany && companyName && companyTab === "audits" && (
-        <Suspense fallback={<LoadingFallback label="Loading audits..." />}>
-          <AuditsTab
-            companyName={companyName}
-            focusAuditId={new URLSearchParams(window.location.search).get("audit")}
-          />
-        </Suspense>
       )}
 
       {!isDetail && !isMonitor && !isCompany && (
         <>
-          <ProductHero form={form} setForm={setForm} onSubmit={submit} loading={loading} />
+          <ProductHero />
           <RunsPage
             analyses={analyses}
-            activeJobs={activeJobs}
             onSelect={(runId) => loadAnalysis(runId, { history: "push" })}
             onDiscoverMore={discoverMore}
             onSelectCompany={openCompany}

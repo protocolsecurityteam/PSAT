@@ -1,7 +1,6 @@
 // Tests for the shared audit badge vocabulary in auditUi.jsx. The
-// constants are referenced by ProtocolSurface, AuditsTab, and
-// UpgradeAuditCard; if the shape changes during a refactor every site
-// of use breaks at once.
+// constants are referenced across the surface UI; if the shape changes
+// during a refactor every site of use breaks at once.
 
 import React from "react";
 import { describe, it, expect } from "vitest";

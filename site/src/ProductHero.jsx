@@ -56,7 +56,7 @@ function useCyclingWord(words) {
   return ref;
 }
 
-export default function ProductHero({ form, setForm, onSubmit, loading }) {
+export default function ProductHero() {
   const wordRef = useCyclingWord(CYCLE_WORDS);
   return (
     <section className="ph" aria-labelledby="ph-title">
@@ -77,47 +77,10 @@ export default function ProductHero({ form, setForm, onSubmit, loading }) {
         </h1>
 
         <p className="ph-sub">
-          Drop an address. PSAT walks every contract a protocol touches —
+          PSAT walks every contract a protocol touches —
           exposing owner traps, upgrade backdoors, privileged paths, and{' '}
           <em>the exploits a predator would hit first.</em>
         </p>
-
-        <form className="ph-form" onSubmit={onSubmit}>
-          <label className="ph-field ph-field-main">
-            <span>Address or protocol</span>
-            <input
-              value={form.target}
-              onChange={(e) => setForm((c) => ({ ...c, target: e.target.value }))}
-              placeholder="0x... or etherfi"
-              required
-            />
-          </label>
-          <label className="ph-field">
-            <span>Chain</span>
-            <input
-              value={form.chain}
-              onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))}
-              placeholder="auto"
-            />
-          </label>
-          <label className="ph-field ph-field-narrow">
-            <span>Limit</span>
-            <input
-              type="number"
-              min="1"
-              max="200"
-              value={form.analyzeLimit}
-              onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))}
-            />
-          </label>
-          <button
-            type="submit"
-            className="ph-submit"
-            disabled={loading || !form.target}
-          >
-            <span>{loading ? "Descending…" : "Descend ↘"}</span>
-          </button>
-        </form>
       </div>
     </section>
   );
