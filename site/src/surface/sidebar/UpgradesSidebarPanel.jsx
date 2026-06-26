@@ -10,8 +10,7 @@ import { shortAddr } from "../format.js";
 //   - Machine selected (proxy): lazy-fetch the analysis blob for that contract
 //     (the per-contract upgrade_history isn't included in /api/company/{name},
 //     so we go via /api/analyses/{job_id}) and render the existing
-//     UpgradesPanel — same layout as the standalone /address/<addr>/upgrades
-//     page so the per-impl audit cards (UpgradeAuditCard) appear identically.
+//     UpgradesPanel — same layout as the standalone /address/<addr>/upgrades page.
 export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect, cache, onCache }) {
   const [history, setHistory] = useState(null);
   const [deps, setDeps] = useState({});

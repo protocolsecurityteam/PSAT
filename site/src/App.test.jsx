@@ -113,27 +113,6 @@ describe("App router smoke tests", () => {
     expectNoCrash();
   });
 
-  it("renders the company graph tab at /company/:name/graph", async () => {
-    navigateTo("/company/etherfi/graph");
-    render(<App />);
-    await waitFor(() => {
-      expect(document.querySelector(".protocol-graph-wrapper")).toBeInTheDocument();
-    });
-    expectNoCrash();
-  });
-
-  it("renders the company risk tab at /company/:name/risk", async () => {
-    navigateTo("/company/etherfi/risk");
-    render(<App />);
-    // RiskSurface is lazy-loaded; assert on its loading or loaded state.
-    await waitFor(() => {
-      const loading = screen.queryByText(/Loading risk (surface|matrix)/i);
-      const container = document.querySelector(".rs-container");
-      expect(loading || container).toBeTruthy();
-    });
-    expectNoCrash();
-  });
-
   it("renders the company monitoring tab at /company/:name/monitoring", async () => {
     navigateTo("/company/etherfi/monitoring");
     const { container } = render(<App />);
@@ -149,18 +128,6 @@ describe("App router smoke tests", () => {
         /Discord notifications/i.test(text) ||
         /no contracts/i.test(text);
       expect(matched).toBe(true);
-    });
-    expectNoCrash();
-  });
-
-  it("renders the company audits tab at /company/:name/audits", async () => {
-    navigateTo("/company/etherfi/audits");
-    render(<App />);
-    // AuditsTab lazy-loads then shows an "Audits" eyebrow when loaded.
-    await waitFor(() => {
-      const eyebrow = screen.queryByText(/^Audits$/);
-      const loading = screen.queryByText(/Loading audits/i);
-      expect(eyebrow || loading).toBeTruthy();
     });
     expectNoCrash();
   });

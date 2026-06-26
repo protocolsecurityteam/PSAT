@@ -32,7 +32,7 @@ export function parseLocationPath(pathname) {
   }
 
   if (segments[0] === "company" && segments[1]) {
-    const validCompanyTabs = ["overview", "surface", "graph", "risk", "monitoring", "audits"];
+    const validCompanyTabs = ["overview", "surface", "monitoring"];
     const companyTab = validCompanyTabs.includes(segments[2]) ? segments[2] : "overview";
     return { mode: "company", value: segments[1], tab: "summary", companyTab };
   }

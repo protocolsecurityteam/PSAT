@@ -25,10 +25,6 @@ export const JOB_STAGE_ORDER = [
   "done",
 ];
 
-// Pipeline stages excluding the terminal `done` — the working stages. Kept
-// for RunsPage (which still imports it via PipelineDashboard.jsx).
-export const PIPELINE_STAGES = JOB_STAGE_ORDER.filter((s) => s !== "done");
-
 export const STAGE_COLORS = {
   discovery: "#0f766e",
   dapp_crawl: "#0e7490",

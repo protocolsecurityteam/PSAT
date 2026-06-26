@@ -6,9 +6,6 @@ import { JobDetail } from "./JobDetailPanel.jsx";
 import { FleetStrip, DaemonDetail, computeFleetRates } from "./FleetStrip.jsx";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";
 
-// Re-exported for RunsPage.jsx, which still imports PIPELINE_STAGES from here.
-export { PIPELINE_STAGES } from "./jobStages.js";
-
 // Time-window selector universe. Only truly live work (queued/processing) is
 // exempt from the window filter — those represent the current state of the
 // worker fleet and have no useful "stale" interpretation. failed and
