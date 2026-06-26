@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.contract_materializations import find_by_address, hydrate_tracking_plan
@@ -91,8 +92,9 @@ def enroll_protocol_contracts(
 ) -> list[MonitoredContract]:
     """Create MonitoredContract rows for all contracts in a protocol.
 
-    Performs upsert (ON CONFLICT address+chain DO UPDATE) so this is
-    idempotent. Also creates WatchedProxy rows for proxy contracts and
+    Idempotent and concurrency-safe: new rows insert with ON CONFLICT
+    (address, chain) DO NOTHING and any pre-existing row is updated in
+    place. Also creates WatchedProxy rows for proxy contracts and
     enrolls the protocol's controllers — primary + privileged co-controllers
     (safes, timelocks, proxy admins).
 
@@ -217,22 +219,39 @@ def enroll_protocol_contracts(
                 existing.watched_proxy_id = None
             mc = existing
         else:
-            mc = MonitoredContract(
-                id=uuid.uuid4(),
-                address=contract.address.lower(),
-                chain=contract_chain,
-                protocol_id=protocol_id,
-                contract_id=contract.id,
-                contract_type=contract_type,
-                monitoring_config=monitoring_config,
-                last_known_state=initial_state,
-                last_scanned_block=current_block,
-                needs_polling=needs_poll,
-                is_active=True,
-                enrollment_source="auto",
+            # Concurrent policy workers enrolling the same protocol can insert
+            # this (address, chain) between the SELECT above and here. ON
+            # CONFLICT DO NOTHING keeps a concurrent loser a no-op instead of a
+            # uq_monitored_contract_address_chain violation that would poison
+            # the session; only the unique conflict is ignored — any other
+            # IntegrityError still raises.
+            session.execute(
+                pg_insert(MonitoredContract)
+                .values(
+                    id=uuid.uuid4(),
+                    address=contract.address.lower(),
+                    chain=contract_chain,
+                    protocol_id=protocol_id,
+                    contract_id=contract.id,
+                    contract_type=contract_type,
+                    monitoring_config=monitoring_config,
+                    last_known_state=initial_state,
+                    last_scanned_block=current_block,
+                    needs_polling=needs_poll,
+                    is_active=True,
+                    enrollment_source="auto",
+                )
+                .on_conflict_do_nothing(index_elements=["address", "chain"])
             )
-            session.add(mc)
-            session.flush()
+            # Re-fetch the persistent row — ours if we won the insert, the
+            # concurrent winner's otherwise — so the proxy bridge and the
+            # enrolled list below operate on a managed ORM object either way.
+            mc = session.execute(
+                select(MonitoredContract).where(
+                    MonitoredContract.address == contract.address.lower(),
+                    MonitoredContract.chain == contract_chain,
+                )
+            ).scalar_one()
 
         # Create WatchedProxy only for actual proxy shells (is_proxy / proxy_type),
         # not UUPS implementations that are merely "upgradeable" per summary.
@@ -523,18 +542,29 @@ def _bridge_to_watched_proxy(
             existing_wp.label = contract.contract_name
         mc.watched_proxy_id = existing_wp.id
     else:
-        wp = WatchedProxy(
-            id=uuid.uuid4(),
-            proxy_address=contract.address.lower(),
-            chain=contract.chain or "ethereum",
-            label=contract.contract_name,
-            proxy_type=contract.proxy_type,
-            last_known_implementation=contract.implementation,
-            last_scanned_block=current_block,
-            needs_polling=poll,
+        # Race-safe on uq_watched_proxy_address_chain — same rationale as the
+        # MonitoredContract insert: a concurrent enroller for the same proxy
+        # shell must become a no-op rather than poison the session.
+        session.execute(
+            pg_insert(WatchedProxy)
+            .values(
+                id=uuid.uuid4(),
+                proxy_address=contract.address.lower(),
+                chain=contract.chain or "ethereum",
+                label=contract.contract_name,
+                proxy_type=contract.proxy_type,
+                last_known_implementation=contract.implementation,
+                last_scanned_block=current_block,
+                needs_polling=poll,
+            )
+            .on_conflict_do_nothing(index_elements=["proxy_address", "chain"])
         )
-        session.add(wp)
-        session.flush()
+        wp = session.execute(
+            select(WatchedProxy).where(
+                WatchedProxy.proxy_address == contract.address.lower(),
+                WatchedProxy.chain == (contract.chain or "ethereum"),
+            )
+        ).scalar_one()
         mc.watched_proxy_id = wp.id
 
 
@@ -615,8 +645,12 @@ def _enroll_controller_addresses(
                 tracked_topics=None,
             )
             config = _build_monitoring_config(None, [], monitored_type, None, polling_plan)
-            session.add(
-                MonitoredContract(
+            # Race-safe on uq_monitored_contract_address_chain — a concurrent
+            # reconcile / re-enroll for the same controller must become a no-op
+            # rather than poison the session.
+            session.execute(
+                pg_insert(MonitoredContract)
+                .values(
                     id=uuid.uuid4(),
                     address=addr,
                     chain=chain,
@@ -629,6 +663,7 @@ def _enroll_controller_addresses(
                     is_active=True,
                     enrollment_source="auto",
                 )
+                .on_conflict_do_nothing(index_elements=["address", "chain"])
             )
 
     # Pass 2: demote any active auto-enrolled controller row that is no longer

@@ -653,6 +653,9 @@ class PolicyWorker(BaseWorker):
                             )
                             session.commit()
                     except Exception as exc:
+                        # Failed TVL commit poisons the session; roll back
+                        # before record_degraded reads job.protocol_id.
+                        session.rollback()
                         record_degraded(
                             phase="initial_tvl_snapshot",
                             exc=exc,
@@ -665,6 +668,14 @@ class PolicyWorker(BaseWorker):
                             extra={"exc_type": type(exc).__name__},
                         )
             except Exception as exc:
+                # A failed enroll (e.g. a benign concurrent (address, chain)
+                # race) leaves the session pending-rollback. Roll back BEFORE
+                # reading any job attribute below and before returning to the
+                # worker's success path, so the non-fatal hiccup degrades to a
+                # logged warning instead of escalating to a terminal job failure
+                # when the poisoned session next lazy-loads. A rollback that
+                # itself fails propagates to base.py's failure handler.
+                session.rollback()
                 record_degraded(
                     phase="auto_enrollment",
                     exc=exc,
