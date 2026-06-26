@@ -623,3 +623,45 @@ def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
     fn = _function(sl, "f")
     gates = RevertDetector(fn).run()
     assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"
+
+
+# ---------------------------------------------------------------------------
+# Expression-text memo: instance-scoped (mirrors ``_container_reads``), so it's
+# GC'd with the per-function detector and never keys ``id(expr)`` across the
+# lifetime of a different Slither parse.
+# ---------------------------------------------------------------------------
+
+
+def test_expression_text_cache_is_instance_scoped(tmp_path):
+    """The ``str(expr)`` memo lives on the ``RevertDetector`` instance, not at
+    module scope — so two detectors don't share an ``id(expr)`` keyspace and
+    the cache can't accrete across a long-lived process."""
+    import services.static.contract_analysis_pipeline.revert_detect as rd
+
+    # No process-global memo survives between runs.
+    assert not hasattr(rd, "_EXPRESSION_TEXT_CACHE")
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            function f() external view {
+                require(msg.sender == ownerVar);
+            }
+        }
+        """,
+    )
+    fn = _function(sl, "f")
+
+    d1 = RevertDetector(fn)
+    assert d1._expression_text_cache == {}
+    d1.run()
+    assert d1._expression_text_cache, "str(expr) memo should populate during run()"
+
+    # A fresh detector starts with its own empty memo — no cross-instance reuse
+    # of id() keys (the hazard a module-level dict would carry).
+    d2 = RevertDetector(fn)
+    assert d2._expression_text_cache == {}
+    assert d2._expression_text_cache is not d1._expression_text_cache
