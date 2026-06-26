@@ -74,7 +74,8 @@ def test_skips_empty_addresses(monkeypatch):
 
     monkeypatch.setattr("utils.rpc._pg_bytecode_get", _no_pg)
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a: None)
-    out = cat._bytecode_keccak_now_batch({"", None})
+    bad_addrs: set = {"", None}  # deliberately malformed input the batcher must skip
+    out = cat._bytecode_keccak_now_batch(bad_addrs)
     assert out == {}
 
 

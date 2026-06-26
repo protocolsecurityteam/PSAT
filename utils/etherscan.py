@@ -219,7 +219,7 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire."""
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
-    key = _cache_key(module, action, chain_id, params) if inmem else None
+    key = _cache_key(module, action, chain_id, params)
     if inmem:
         with _cache_lock:
             cached = _cache.get(key)

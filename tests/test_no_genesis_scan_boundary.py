@@ -360,7 +360,7 @@ def test_resolve_scan_floor_does_not_cache_none_permanently(monkeypatch):
     floor_mod.clear_scan_floor_cache()
     monkeypatch.setattr(floor_mod, "_FLOOR_DEFER_TTL_S", 0.0)  # None re-resolves immediately
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
-    created = {"v": None}
+    created: dict[str, int | None] = {"v": None}
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: created["v"])
 
     addr = "0x" + "ab" * 20

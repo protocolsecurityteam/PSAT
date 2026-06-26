@@ -491,7 +491,7 @@ class TestFetchGithubRawHashCaching:
         got = _fetch_github_raw_hash("https://raw.githubusercontent.com/x/y/abc/Big.sol", None)
         assert got.status == "ok"
         assert got.sha256 == _hash_source_text(body)
-        assert len(got.sha256) == 64
+        assert got.sha256 is not None and len(got.sha256) == 64
         # The body itself is not carried on the cached result — only its hash.
         assert not hasattr(got, "content")
 
