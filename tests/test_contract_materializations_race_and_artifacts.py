@@ -40,6 +40,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -389,3 +390,184 @@ def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
         tracking_plan={"slots": []},
     )
     assert cm.hydrate_predicate_trees(row) is None
+
+
+# ---------------------------------------------------------------------------
+# analysis_schema_version: an analyzer bump invalidates old rows
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_find_by_keccak_filters_on_schema_version(_clean_cm):
+    """``find_by_keccak`` serves only a row stamped with the current
+    ``ANALYSIS_SCHEMA_VERSION``. An older-version row reads as a miss so
+    a bumped analyzer rebuilds instead of serving a stale bundle."""
+    chain = "ethereum"
+    keccak_old = "0x" + "a1" * 32
+    keccak_cur = "0x" + "a2" * 32
+
+    _clean_cm.add_all(
+        [
+            ContractMaterialization(
+                chain=chain,
+                bytecode_keccak=keccak_old,
+                address="0x" + "1" * 40,
+                status="ready",
+                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+            ),
+            ContractMaterialization(
+                chain=chain,
+                bytecode_keccak=keccak_cur,
+                address="0x" + "2" * 40,
+                status="ready",
+                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+            ),
+        ]
+    )
+    _clean_cm.commit()
+
+    assert cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_old) is None
+    hit = cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_cur)
+    assert hit is not None
+    assert hit.bytecode_keccak == keccak_cur
+
+
+@requires_postgres
+def test_find_by_address_filters_on_schema_version(_clean_cm):
+    """Address-keyed lookups apply the same version gate as keccak ones."""
+    chain = "ethereum"
+    addr_old = "0x" + "a3" * 20
+    addr_cur = "0x" + "a4" * 20
+
+    _clean_cm.add_all(
+        [
+            ContractMaterialization(
+                chain=chain,
+                bytecode_keccak="0x" + "b3" * 32,
+                address=addr_old,
+                status="ready",
+                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+            ),
+            ContractMaterialization(
+                chain=chain,
+                bytecode_keccak="0x" + "b4" * 32,
+                address=addr_cur,
+                status="ready",
+                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+            ),
+        ]
+    )
+    _clean_cm.commit()
+
+    assert cm.find_by_address(_clean_cm, chain=chain, address=addr_old) is None
+    hit = cm.find_by_address(_clean_cm, chain=chain, address=addr_cur)
+    assert hit is not None
+    assert hit.address == addr_cur
+
+
+@requires_postgres
+def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
+    """A 'ready' row built by an older analyzer must NOT be served — it
+    reads as a miss, the builder runs once, and the row is rewritten at
+    the current ``ANALYSIS_SCHEMA_VERSION``."""
+    chain = "ethereum"
+    keccak = "0x" + "c1" * 32
+
+    _clean_cm.add(
+        ContractMaterialization(
+            chain=chain,
+            bytecode_keccak=keccak,
+            address="0x" + "1" * 40,
+            contract_name="StaleAnalyzer",
+            status="ready",
+            analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+        )
+    )
+    _clean_cm.commit()
+
+    invocations = {"n": 0}
+
+    def rebuild_builder() -> dict[str, Any]:
+        invocations["n"] += 1
+        return {
+            "contract_name": "FreshAnalyzer",
+            "analysis": {"controllers": []},
+            "tracking_plan": {"slots": []},
+        }
+
+    with patch("db.contract_materializations.get_storage_client", return_value=None):
+        row = cm.materialize_or_wait(
+            chain=chain,
+            address="0x" + "1" * 40,
+            bytecode_keccak=keccak,
+            builder=rebuild_builder,
+        )
+
+    assert invocations["n"] == 1, "an old-schema-version row must miss and rebuild"
+    assert row.status == "ready"
+    assert row.contract_name == "FreshAnalyzer"
+    assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
+
+
+@requires_postgres
+def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
+    """A 'ready' row at the current version is a hit — the builder never
+    runs (a re-run would re-pay the forge+Slither cost for nothing)."""
+    chain = "ethereum"
+    keccak = "0x" + "c2" * 32
+
+    _clean_cm.add(
+        ContractMaterialization(
+            chain=chain,
+            bytecode_keccak=keccak,
+            address="0x" + "1" * 40,
+            contract_name="CurrentAnalyzer",
+            status="ready",
+            analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+        )
+    )
+    _clean_cm.commit()
+
+    def must_not_run() -> dict[str, Any]:
+        raise AssertionError("current-version row must be served without rebuild")
+
+    with patch("db.contract_materializations.get_storage_client", return_value=None):
+        row = cm.materialize_or_wait(
+            chain=chain,
+            address="0x" + "1" * 40,
+            bytecode_keccak=keccak,
+            builder=must_not_run,
+        )
+
+    assert row.status == "ready"
+    assert row.contract_name == "CurrentAnalyzer"
+    assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
+
+
+@requires_postgres
+def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
+    """A row inserted without an explicit ``analysis_schema_version`` — the
+    shape a pre-column row takes after the migration backfill — carries the
+    ``server_default`` the migration installed: schema version 1, the launch
+    value of ``ANALYSIS_SCHEMA_VERSION``. This keeps a deploy from
+    invalidating the whole cache at once."""
+    chain = "ethereum"
+    keccak = "0x" + "d1" * 32
+    _clean_cm.execute(
+        text(
+            "INSERT INTO contract_materializations "
+            "(chain, bytecode_keccak, address, status) "
+            "VALUES (:chain, :keccak, :addr, 'ready')"
+        ),
+        {"chain": chain, "keccak": keccak, "addr": "0x" + "1" * 40},
+    )
+    _clean_cm.commit()
+
+    version = _clean_cm.execute(
+        text(
+            "SELECT analysis_schema_version FROM contract_materializations "
+            "WHERE chain = :chain AND bytecode_keccak = :keccak"
+        ),
+        {"chain": chain, "keccak": keccak},
+    ).scalar_one()
+    assert version == 1
