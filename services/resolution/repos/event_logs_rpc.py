@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 from utils.rpc import rpc_request
+
+logger = logging.getLogger(__name__)
 
 # One eth_getLogs per window up to this span. The eRPC fast lane for getLogs
 # (Envio HyperRPC) bills a flat 1000 credits per REQUEST regardless of block
@@ -79,12 +82,23 @@ class RpcEventLogFetcher:
         ]
         try:
             raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
-        except RuntimeError:
+        except RuntimeError as exc:
             # Result-cap / range-cap / query-timeout from the upstream. Halve and
             # recurse; a span at the floor is a real error, not a sizing problem.
             span = to_block - from_block + 1
             if span <= self.min_bisect_span:
                 raise
+            # Per-window detail (the parent scan logs the aggregate) — DEBUG.
+            logger.debug(
+                "eth_getLogs window rejected; bisecting",
+                extra={
+                    "event_address": event_address,
+                    "from_block": from_block,
+                    "to_block": to_block,
+                    "span": span,
+                    "exc_type": type(exc).__name__,
+                },
+            )
             mid = from_block + span // 2 - 1
             return self._fetch_range(event_address, topics, from_block, mid) + self._fetch_range(
                 event_address, topics, mid + 1, to_block

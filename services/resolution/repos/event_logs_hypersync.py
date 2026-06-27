@@ -8,6 +8,7 @@ for a descriptor yet.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import Any
@@ -19,8 +20,11 @@ from .event_logs_pg import (
     _constant_key_filters,
     _event_hints_by_topic,
     _event_keys,
+    _note_partial_reason,
     _word_to_address,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_HYPERSYNC_URL = "https://eth.hypersync.xyz"
 DEFAULT_TIMEOUT_S = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
@@ -118,10 +122,12 @@ class HyperSyncEventLogRepo:
 
             client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
         except Exception as exc:
+            reason = f"hypersync_error:{type(exc).__name__}"
+            _note_partial_reason(reason, event_address=event_address, repo="hypersync")
             return EnumerationResult(
                 members=[],
                 confidence="partial",
-                partial_reason=f"hypersync_error:{type(exc).__name__}",
+                partial_reason=reason,
             )
         current_from = self.from_block
         page_count = 0
@@ -157,10 +163,12 @@ class HyperSyncEventLogRepo:
                 with hypersync_slot(self.bearer_token):
                     response = await client.get(query)
             except Exception as exc:
+                reason = f"hypersync_error:{type(exc).__name__}"
+                _note_partial_reason(reason, event_address=event_address, repo="hypersync")
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
                     confidence="partial",
-                    partial_reason=f"hypersync_error:{type(exc).__name__}",
+                    partial_reason=reason,
                     last_indexed_block=last_block or None,
                 )
 
@@ -188,6 +196,7 @@ class HyperSyncEventLogRepo:
                 break
             current_from = next_block
 
+        _note_partial_reason(partial_reason, event_address=event_address, repo="hypersync")
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
             confidence="partial" if partial_reason else "enumerable",
@@ -221,10 +230,12 @@ class HyperSyncEventLogRepo:
 
             client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
         except Exception as exc:
+            reason = f"hypersync_error:{type(exc).__name__}"
+            _note_partial_reason(reason, event_address=event_address, repo="hypersync")
             return EnumerationResult(
                 members=[],
                 confidence="partial",
-                partial_reason=f"hypersync_error:{type(exc).__name__}",
+                partial_reason=reason,
             )
 
         topic0s = sorted(hints_by_topic)
@@ -262,10 +273,12 @@ class HyperSyncEventLogRepo:
                 with hypersync_slot(self.bearer_token):
                     response = await client.get(query)
             except Exception as exc:
+                reason = f"hypersync_error:{type(exc).__name__}"
+                _note_partial_reason(reason, event_address=event_address, repo="hypersync")
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
                     confidence="partial",
-                    partial_reason=f"hypersync_error:{type(exc).__name__}",
+                    partial_reason=reason,
                     last_indexed_block=last_block or None,
                 )
 
@@ -300,6 +313,7 @@ class HyperSyncEventLogRepo:
                 break
             current_from = next_block
 
+        _note_partial_reason(partial_reason, event_address=event_address, repo="hypersync")
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
             confidence="partial" if partial_reason else "enumerable",
