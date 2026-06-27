@@ -63,6 +63,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
+from utils.secrets import sanitize_obj, sanitize_string
+
 if TYPE_CHECKING:
     from schemas.stage_errors import StageError
 
@@ -131,6 +133,22 @@ _RESERVED_RECORD_ATTRS = frozenset(
 )
 
 
+def _scrub_field(value: Any) -> Any:
+    """Scrub secrets from a structured ``extra={...}`` log field.
+
+    A value can carry a credentialed URL (RPC endpoint, provider key) as a
+    bare string or nested inside a dict/list. Strings go through
+    :func:`sanitize_string` and containers through :func:`sanitize_obj`;
+    non-string scalars (counts, flags, block numbers) can't carry a URL
+    secret and pass through untouched.
+    """
+    if isinstance(value, str):
+        return sanitize_string(value)
+    if isinstance(value, (dict, list)):
+        return sanitize_obj(value)
+    return value
+
+
 class JsonFormatter(logging.Formatter):
     """Render each ``LogRecord`` as a single-line JSON object.
 
@@ -157,11 +175,15 @@ class JsonFormatter(logging.Formatter):
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(timespec="milliseconds")
         if ts.endswith("+00:00"):
             ts = ts[: -len("+00:00")] + "Z"
+        # The formatter is the last hop before the log sink, so it is where
+        # secret-scrubbing is enforced for every record regardless of call
+        # site: the message, each ``extra={}`` field, and the rendered
+        # ``exc_info``/``stack_info`` are routed through ``utils.secrets``.
         payload: dict[str, Any] = {
             "timestamp": ts,
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": sanitize_string(record.getMessage()),
         }
         for key, var in self._CONTEXT_FIELDS:
             value = var.get()
@@ -172,11 +194,11 @@ class JsonFormatter(logging.Formatter):
                 continue
             if attr in payload:
                 continue
-            payload[attr] = value
+            payload[attr] = _scrub_field(value)
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = sanitize_string(self.formatException(record.exc_info))
         if record.stack_info:
-            payload["stack_info"] = self.formatStack(record.stack_info)
+            payload["stack_info"] = sanitize_string(self.formatStack(record.stack_info))
         return json.dumps(payload, default=str)
 
 

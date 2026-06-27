@@ -7,6 +7,7 @@ network — both run purely against stdlib ``subprocess``/``logging``.
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.config
 import sys
@@ -101,3 +102,46 @@ def test_uvicorn_log_config_level_defaults_from_env(monkeypatch):
     monkeypatch.setenv("PSAT_LOG_LEVEL", "warning")
     cfg = uvicorn_log_config()
     assert cfg["loggers"]["uvicorn"]["level"] == "WARNING"
+
+
+def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
+    # The formatter is the last hop before the sink, so a credentialed URL must
+    # not survive into the JSON whether it rides in the message, an extra={}
+    # field (bare string or nested), or a rendered exception traceback.
+    fmt = JsonFormatter()
+    secret_url = "https://eth-mainnet.g.alchemy.com/v2/SUPERSECRETKEY123"
+
+    record = logging.LogRecord(
+        name="test.scrub",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="calling %s",
+        args=(secret_url,),
+        exc_info=None,
+    )
+    record.endpoint = secret_url  # bare-string extra
+    record.payload = {"rpc_url": secret_url}  # nested-dict extra
+    record.count = 7  # non-string scalar passes through untouched
+
+    out = json.loads(fmt.format(record))
+    assert "SUPERSECRETKEY123" not in json.dumps(out)
+    assert "<redacted>" in out["message"]
+    assert "<redacted>" in json.dumps(out["payload"])
+    assert out["count"] == 7
+
+    try:
+        raise RuntimeError(f"connect failed for {secret_url}")
+    except RuntimeError:
+        exc_record = logging.LogRecord(
+            name="test.scrub",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="boom",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+    exc_out = json.loads(fmt.format(exc_record))
+    assert "exc_info" in exc_out
+    assert "SUPERSECRETKEY123" not in json.dumps(exc_out)
