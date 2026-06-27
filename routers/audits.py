@@ -212,6 +212,7 @@ def refresh_company_coverage(
             verify_source_equivalence=verify_source_equivalence,
         )
         session.commit()
+        deps.log_admin_mutation("refresh_coverage", id=company_name, count=inserted)
         return {
             "company": company_name,
             "protocol_id": protocol_row.id,
@@ -245,6 +246,7 @@ def reextract_audit_scope(audit_id: int) -> dict[str, Any]:
         ar.scope_extraction_worker = None
         ar.scope_extraction_started_at = None
         session.commit()
+    deps.log_admin_mutation("reextract_scope", id=audit_id)
     return {"audit_id": audit_id, "reset": True}
 
 
@@ -291,6 +293,7 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> dict[str, Any]
         session.add(ar)
         session.commit()
         session.refresh(ar)
+        deps.log_admin_mutation("add_audit", id=ar.id, company=company_name)
         return _audit_report_to_dict(ar)
 
 
@@ -306,4 +309,5 @@ def delete_audit(audit_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Audit not found")
         session.delete(ar)
         session.commit()
+    deps.log_admin_mutation("delete_audit", id=audit_id)
     return {"audit_id": audit_id, "deleted": True}

@@ -19,6 +19,7 @@ without querying the DB or scraping logs:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,6 +45,8 @@ from db.queue import (
 )
 
 from .audits_pipeline import build_audits_pipeline
+
+logger = logging.getLogger(__name__)
 
 # Per-process display metadata + staleness window. ``interval_s`` is the
 # loop cadence; a process is flagged ``stale`` when its last beat is older
@@ -79,6 +82,29 @@ def _bucket_counts(bucket: Any) -> dict[str, Any]:
     if not isinstance(bucket, dict):
         return {}
     return {k: (len(v) if isinstance(v, list) else v) for k, v in bucket.items()}
+
+
+def _warn_stale_daemon(process: str, beat_age_s: float | None) -> None:
+    """WARNING that a heartbeat-backed daemon has gone stale (likely crashed or
+    wedged), so the death is captured server-side even when nobody is watching
+    ``/api/fleet``. Facts in ``extra`` so an alert can key on ``process``."""
+    # Keyed ``daemon`` not ``process``: ``process`` is a reserved LogRecord
+    # attribute (the PID) and stdlib logging raises on the extra-key collision.
+    logger.warning(
+        "fleet: daemon %s is stale",
+        process,
+        extra={"daemon": process, "beat_age_s": beat_age_s},
+    )
+
+
+def _warn_lagging_cursors(lagging_cursors: int, block_spread: int | None) -> None:
+    """WARNING that one or more event-indexer cursors lag the leader by more
+    than ``_CURSOR_LAG_BLOCKS`` — the backfill-stall signature."""
+    logger.warning(
+        "fleet: %d event-indexer cursor(s) lagging the leader",
+        lagging_cursors,
+        extra={"lagging_cursors": lagging_cursors, "block_spread": block_spread},
+    )
 
 
 def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
@@ -150,6 +176,11 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
             ).scalar()
             or 0
         )
+    if idx_lagging:
+        _warn_lagging_cursors(
+            idx_lagging,
+            idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None,
+        )
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
@@ -193,6 +224,8 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         beat_at = hb.beat_at if hb else None
         age = _age_seconds(beat_at, now)
         stale_after = max(3 * meta["interval_s"], 120)
+        if age is None or age >= stale_after:
+            _warn_stale_daemon(process, age)
         daemons.append(
             {
                 "process": process,

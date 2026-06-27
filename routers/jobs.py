@@ -47,6 +47,7 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.defillama_scan)
         else:
             job = deps.create_job(session, req_dict)
+        deps.log_admin_mutation("analyze_create", id=str(job.id), stage=job.stage.value)
         return job.to_dict()
 
 
@@ -102,6 +103,7 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
             session.commit()
             queued.append({"job_id": str(job.id), "address": contract.address})
 
+        deps.log_admin_mutation("analyze_remaining", id=company_name, count=len(queued))
         return {"queued": len(queued), "jobs": queued}
 
 
@@ -127,6 +129,7 @@ def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
         )
         deleted = [str(row_id) for (row_id,) in result]
         session.commit()
+    deps.log_admin_mutation("cancel_queued_jobs", id=company_name, count=len(deleted))
     return {"company": company_name, "cancelled": len(deleted), "job_ids": deleted}
 
 
@@ -158,6 +161,7 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Address not found for this protocol")
         session.delete(contract)
         session.commit()
+    deps.log_admin_mutation("delete_company_address", id=address, company=company_name)
     return {"company": company_name, "address": address, "deleted": True}
 
 
@@ -352,6 +356,7 @@ def retry_job(job_id: str) -> dict[str, Any]:
             data=StageErrors(errors=prior).model_dump(mode="json"),
         )
         session.refresh(job)
+        deps.log_admin_mutation("job_retry", id=str(job.id))
         return job.to_dict()
 
 
@@ -415,6 +420,15 @@ def get_job_stage_timings(job_id: str) -> dict[str, Any]:
             for stage, (key, content_type) in storage_lookups.items():
                 body = bodies.get(key)
                 if body is None:
+                    # A stage_timing row points at a storage key whose object
+                    # is gone — distinct from a stage that never ran. Surface it
+                    # so a lost artifact doesn't silently read as "no timing".
+                    logger.warning(
+                        "stage_timing body missing from storage for job %s stage %s",
+                        resolved_job_id,
+                        stage,
+                        extra={"job_id": resolved_job_id, "stage": stage, "storage_key": key},
+                    )
                     continue
                 value = deps.deserialize_artifact(body, content_type)
                 if isinstance(value, dict):

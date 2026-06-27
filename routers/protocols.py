@@ -67,6 +67,7 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, A
         from services.monitoring.enrollment import enroll_protocol_contracts
 
         enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain)
+        deps.log_admin_mutation("re_enroll", id=protocol_id, count=len(enrolled))
         return {
             "status": "enrolled",
             "protocol_id": protocol_id,
@@ -104,6 +105,7 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
         session.add(sub)
         session.commit()
         session.refresh(sub)
+        deps.log_admin_mutation("subscribe", id=str(sub.id), protocol_id=protocol_id)
         return {
             "id": str(sub.id),
             "protocol_id": sub.protocol_id,
@@ -144,6 +146,7 @@ def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
             raise HTTPException(status_code=404, detail="Subscription not found")
         session.delete(sub)
         session.commit()
+        deps.log_admin_mutation("delete_subscription", id=sub_id)
         return {"status": "removed"}
 
 
