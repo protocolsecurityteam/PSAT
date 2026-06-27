@@ -76,6 +76,8 @@ EQUIVALENCE_STATUSES = frozenset(
         "no_reviewed_commit",  # audit text had no commit SHA — cannot verify
         "no_source_repo",  # audit.source_repo is NULL — can't look it up
         "not_attempted",  # row predates verification rollout; needs backfill
+        "row_vanished",  # concurrent coverage rebuild deleted the row mid-verify
+
         # Deferred-verification states owned by ``workers.coverage_verify``.
         # ``pending`` is the initial state coverage refresh writes for any
         # row that *could* be verified later (audit has reviewed_commits +

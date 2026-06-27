@@ -43,10 +43,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
+from sqlalchemy.orm.exc import StaleDataError
 
 from db.models import SessionLocal
 from db.queue import HEARTBEAT_COVERAGE_VERIFY, record_heartbeat
-from utils.logging import configure_logging, log_timed_phase
+from utils.logging import configure_logging, record_stage_metric, worker_id_var
 from utils.memory import (
     cgroup_memory_current_bytes,
     cgroup_memory_max_bytes,
@@ -83,6 +84,29 @@ _STALE_VERIFY_TIMEOUT = int(os.getenv("PSAT_COVERAGE_VERIFY_STALE_TIMEOUT", "600
 # Run stale recovery every N polls so an idle queue's recovery query
 # fires roughly once per ~5 minutes at the default poll interval.
 _STALE_RECOVERY_EVERY_N_POLLS = 10
+
+# Per-pass hash_mismatch alerting. The source-equivalence verdict the
+# system most wants to watch is hash_mismatch (the audit's declared
+# commit fetched cleanly on both sides but the bytes differ). A pass
+# where most terminal verdicts are hash_mismatch points at a
+# candidate-path or source-fetch regression rather than genuinely
+# divergent code, so we surface it as a single WARNING with the rate in
+# ``extra`` instead of letting it hide in per-row lines. Gated on a
+# minimum sample so a 1-of-1 pass can't trip the alert.
+_HASH_MISMATCH_WARN_RATE = float(os.getenv("PSAT_COVERAGE_VERIFY_HASH_MISMATCH_WARN_RATE", "0.5"))
+_HASH_MISMATCH_WARN_MIN = int(os.getenv("PSAT_COVERAGE_VERIFY_HASH_MISMATCH_WARN_MIN", "4"))
+
+
+def _crash_status(exc: BaseException) -> str:
+    """Verdict status for a row whose verify thread raised.
+
+    A concurrent coverage rebuild can delete the row mid-verify; SQLAlchemy
+    surfaces that as ``StaleDataError``. That is a benign race — the row
+    vanished — not a GitHub outage, so it gets its own terminal status and
+    must not inflate the ``github_fetch_failed`` transient signal that ops
+    use to spot real GitHub trouble.
+    """
+    return "row_vanished" if isinstance(exc, StaleDataError) else "github_fetch_failed"
 
 
 # --- Worker --------------------------------------------------------------
@@ -232,12 +256,22 @@ class CoverageVerifyWorker:
         from services.audits.coverage import verify_one_coverage_row
 
         github_token = os.environ.get("GITHUB_TOKEN") or None
-        empty_ctx: dict[str, object] = {}
         session = SessionLocal()
         try:
             try:
-                with log_timed_phase(logger, "verify_row", record_metric=False, row_id=row_id):
-                    status = verify_one_coverage_row(session, row_id, github_token=github_token)
+                # Per-row timing is hot-path detail (one line per claimed
+                # row, ~1k/run), so it belongs at DEBUG — not the INFO that
+                # ``log_timed_phase`` hard-codes. We still fold the duration
+                # into the stage metric so the latency distribution survives
+                # even when DEBUG lines are filtered in prod.
+                _row_start = time.monotonic()
+                status = verify_one_coverage_row(session, row_id, github_token=github_token)
+                _row_ms = int((time.monotonic() - _row_start) * 1000)
+                record_stage_metric("phase_ms_verify_row", _row_ms)
+                logger.debug(
+                    "verify_row complete",
+                    extra={"phase": "verify_row", "duration_ms": _row_ms, "row_id": row_id},
+                )
                 session.commit()
                 # Re-read so the log line carries the post-verify state
                 # (the row may have been deleted by a concurrent rebuild,
@@ -262,7 +296,36 @@ class CoverageVerifyWorker:
                     session.rollback()
                 except Exception:
                     logger.debug("rollback failed in _process_row", exc_info=True)
-                return row_id, None, exc, empty_ctx
+                # Re-read identity in a fresh session so the crash line can
+                # name the audit/contract pair (the rolled-back session can't
+                # be read from). A None re-read means the row vanished — the
+                # benign-rebuild race — which the outcome line surfaces.
+                return row_id, None, exc, self._read_row_identity(row_id)
+        finally:
+            session.close()
+
+    def _read_row_identity(self, row_id: int) -> dict[str, object]:
+        """Best-effort re-read of a row's identity for the outcome log.
+
+        Used by the crash path, where the working session was rolled back.
+        Returns an empty dict if the row vanished or the read itself fails —
+        the caller treats an empty identity as "row no longer present".
+        """
+        from db.models import AuditContractCoverage
+
+        session = SessionLocal()
+        try:
+            row = session.get(AuditContractCoverage, row_id)
+            if row is None:
+                return {}
+            return {
+                "audit_id": row.audit_report_id,
+                "contract_id": row.contract_id,
+                "matched_name": row.matched_name,
+            }
+        except Exception:
+            logger.debug("identity re-read failed for row %s", row_id, exc_info=True)
+            return {}
         finally:
             session.close()
 
@@ -273,50 +336,57 @@ class CoverageVerifyWorker:
         exc: BaseException | None,
         ctx: dict[str, object],
     ) -> None:
-        """Per-row outcome line — same shape audit_row_worker emits.
+        """Per-row outcome line — facts in ``extra={}``, message constant.
 
-        ``Coverage row <id> → <status> (audit=… contract=… name=…)`` for
-        the common case; proven rows tack on ``kind=… sha=…`` so the
-        forensic flags (``pre_fix_unpatched`` etc.) are visible without
-        a DB lookup. Crashes log at WARNING with the exception summary
-        and route into ``_handle_crash`` afterwards for the DB stamp.
+        The source-equivalence verdict (``equivalence_status``) plus the
+        ``audit_id`` / ``contract_id`` / ``matched_name`` / ``sha`` identity
+        all go in ``extra`` so verdict distributions are a single Loki/jq
+        aggregation rather than a message-regex. Crashes log at WARNING
+        with ``exc_type`` (and ``crash_status`` so a benign ``row_vanished``
+        race is distinguishable from a ``github_fetch_failed`` outage) and
+        route into ``_handle_crash`` afterwards for the DB stamp.
         """
-        audit_id = ctx.get("audit_id")
-        contract_id = ctx.get("contract_id")
-        matched_name = ctx.get("matched_name")
+        base: dict[str, object] = {
+            "row_id": row_id,
+            "audit_id": ctx.get("audit_id"),
+            "contract_id": ctx.get("contract_id"),
+            "matched_name": ctx.get("matched_name"),
+        }
         if exc is not None:
+            crash_status = _crash_status(exc)
             logger.warning(
-                "Coverage row %s → crashed (audit=%s contract=%s name=%s): %s: %s",
+                "Coverage row %s verify crashed",
                 row_id,
-                audit_id,
-                contract_id,
-                matched_name,
-                type(exc).__name__,
-                exc,
+                extra={
+                    **base,
+                    "exc_type": type(exc).__name__,
+                    "crash_status": crash_status,
+                    "row_present": bool(ctx),
+                },
             )
             return
         if status == "proven":
-            proof_kind = ctx.get("proof_kind")
-            matched_commit_sha = ctx.get("matched_commit_sha") or ""
+            sha = str(ctx.get("matched_commit_sha") or "")[:12]
             logger.info(
-                "Coverage row %s → proven (audit=%s contract=%s name=%s kind=%s sha=%s)",
+                "Coverage row %s proven",
                 row_id,
-                audit_id,
-                contract_id,
-                matched_name,
-                proof_kind,
-                str(matched_commit_sha)[:12],
+                extra={
+                    **base,
+                    "equivalence_status": status,
+                    "proof_kind": ctx.get("proof_kind"),
+                    "sha": sha,
+                },
             )
             return
-        reason = ctx.get("reason") or ""
+        reason = str(ctx.get("reason") or "")[:200]
         logger.info(
-            "Coverage row %s → %s (audit=%s contract=%s name=%s)%s",
+            "Coverage row %s verdict",
             row_id,
-            status or "(vanished)",
-            audit_id,
-            contract_id,
-            matched_name,
-            f" — {str(reason)[:200]}" if reason else "",
+            extra={
+                **base,
+                "equivalence_status": status or "vanished",
+                "reason": reason,
+            },
         )
 
     def _handle_crash(self, row_id: int, exc: BaseException) -> None:
@@ -326,13 +396,14 @@ class CoverageVerifyWorker:
         propagate into this write. If the row vanished between claim
         and crash (rebuild raced), the UPDATE is simply a no-op.
         """
+        crash_status = _crash_status(exc)
         session = SessionLocal()
         try:
             session.execute(
                 text(
                     """
                     UPDATE audit_contract_coverage
-                    SET equivalence_status = 'github_fetch_failed',
+                    SET equivalence_status = :status,
                         equivalence_reason = :reason,
                         equivalence_checked_at = NOW(),
                         proof_kind = NULL,
@@ -343,6 +414,7 @@ class CoverageVerifyWorker:
                 ),
                 {
                     "id": row_id,
+                    "status": crash_status,
                     "reason": f"verify thread crashed: {type(exc).__name__}: {exc}"[:1000],
                 },
             )
@@ -359,6 +431,41 @@ class CoverageVerifyWorker:
                 logger.debug("rollback failed in _handle_crash", exc_info=True)
         finally:
             session.close()
+
+    def _summarize_pass(self, claimed_count: int, verdicts: dict[str, int]) -> float:
+        """Emit the per-pass verdict rollup: heartbeat detail + a threshold WARNING.
+
+        Daemons can't use ``record_stage_metric``/``record_degraded`` (the
+        job-scoped accumulators are unbound), so the per-pass verdict counts
+        ride in the heartbeat ``detail`` — the daemon substitute per the
+        house standard. A pass dominated by ``hash_mismatch`` is the
+        suspicious signal (likely a candidate-path / source-fetch
+        regression, not genuinely divergent code), so it also gets a single
+        WARNING carrying the rate in ``extra``. Returns the rate for tests.
+        """
+        total = sum(verdicts.values())
+        mismatches = verdicts.get("hash_mismatch", 0)
+        rate = (mismatches / total) if total else 0.0
+        record_heartbeat(
+            HEARTBEAT_COVERAGE_VERIFY,
+            status="running",
+            detail={
+                "verified_last_pass": claimed_count,
+                "verdicts": dict(verdicts),
+                "hash_mismatch_rate": round(rate, 3),
+            },
+        )
+        if total >= _HASH_MISMATCH_WARN_MIN and rate >= _HASH_MISMATCH_WARN_RATE:
+            logger.warning(
+                "coverage verify pass: elevated hash_mismatch rate",
+                extra={
+                    "hash_mismatch_rate": round(rate, 3),
+                    "hash_mismatch": mismatches,
+                    "verdicts_total": total,
+                    "verdicts": dict(verdicts),
+                },
+            )
+        return rate
 
     # -- Main loop -----------------------------------------------------
 
@@ -398,6 +505,13 @@ class CoverageVerifyWorker:
             max_workers=self.max_concurrent,
             thread_name_prefix=self.thread_name_prefix,
         )
+
+        # Bind worker_id for the daemon's lifetime so every line this loop
+        # (and its copy_context'd worker threads) emits carries the same
+        # queryable identity the BaseWorker pipeline gets for free. The
+        # process runs this loop until shutdown, so a lifetime bind via the
+        # contextvar is the daemon analogue of BaseWorker's per-job bind.
+        worker_id_var.set(self.worker_id)
 
         rss_at_boot = boot_rss
         batch_counter = 0
@@ -459,6 +573,7 @@ class CoverageVerifyWorker:
                 for row_id in claimed_ids:
                     ctx = contextvars.copy_context()
                     futures[executor.submit(ctx.run, self._process_row, row_id)] = row_id
+                verdicts: dict[str, int] = {}
                 for future in as_completed(futures):
                     try:
                         row_id, status, exc, row_ctx = future.result()
@@ -468,6 +583,14 @@ class CoverageVerifyWorker:
                     self._log_outcome(row_id, status, exc, row_ctx)
                     if exc is not None:
                         self._handle_crash(row_id, exc)
+                        verdict = _crash_status(exc)
+                    else:
+                        verdict = status or "vanished"
+                    verdicts[verdict] = verdicts.get(verdict, 0) + 1
+
+                # Per-pass verdict rollup (heartbeat detail + hash_mismatch
+                # WARNING) — the daemon substitute for a stage metric.
+                self._summarize_pass(len(claimed_ids), verdicts)
 
                 batch_counter += 1
                 rss_after = current_rss_bytes()
