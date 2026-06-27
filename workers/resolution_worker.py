@@ -136,7 +136,17 @@ class ResolutionWorker(BaseWorker):
         )
         # Keep as artifact — policy stage reads it as JSON
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
-        record_stage_metric("controllers_resolved", len(snapshot.get("controller_values", {})))
+        # A reverting controller read is recorded as an ``eth_call_error`` NULL
+        # entry (see build_control_snapshot); counting those as resolved hid the
+        # etherfi NULL-controller incident. Split the count so the resolved metric
+        # reflects only real values and the read errors chart on their own.
+        _controller_values = snapshot.get("controller_values", {})
+        _controllers_errored = sum(
+            1 for cv in _controller_values.values() if cv.get("observed_via") == "eth_call_error"
+        )
+        record_stage_metric("controllers_resolved", len(_controller_values) - _controllers_errored)
+        if _controllers_errored:
+            record_stage_metric("controllers_read_error", _controllers_errored)
         if snapshot.get("block_number") is not None:
             record_stage_metric("block_number", snapshot.get("block_number"))
 

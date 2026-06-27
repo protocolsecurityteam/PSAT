@@ -55,12 +55,15 @@ import contextvars
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
+
+from utils.secrets import sanitize_obj, sanitize_string
 
 if TYPE_CHECKING:
     from schemas.stage_errors import StageError
@@ -130,6 +133,22 @@ _RESERVED_RECORD_ATTRS = frozenset(
 )
 
 
+def _scrub_field(value: Any) -> Any:
+    """Scrub secrets from a structured ``extra={...}`` log field.
+
+    A value can carry a credentialed URL (RPC endpoint, provider key) as a
+    bare string or nested inside a dict/list. Strings go through
+    :func:`sanitize_string` and containers through :func:`sanitize_obj`;
+    non-string scalars (counts, flags, block numbers) can't carry a URL
+    secret and pass through untouched.
+    """
+    if isinstance(value, str):
+        return sanitize_string(value)
+    if isinstance(value, (dict, list)):
+        return sanitize_obj(value)
+    return value
+
+
 class JsonFormatter(logging.Formatter):
     """Render each ``LogRecord`` as a single-line JSON object.
 
@@ -156,11 +175,15 @@ class JsonFormatter(logging.Formatter):
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(timespec="milliseconds")
         if ts.endswith("+00:00"):
             ts = ts[: -len("+00:00")] + "Z"
+        # The formatter is the last hop before the log sink, so it is where
+        # secret-scrubbing is enforced for every record regardless of call
+        # site: the message, each ``extra={}`` field, and the rendered
+        # ``exc_info``/``stack_info`` are routed through ``utils.secrets``.
         payload: dict[str, Any] = {
             "timestamp": ts,
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": sanitize_string(record.getMessage()),
         }
         for key, var in self._CONTEXT_FIELDS:
             value = var.get()
@@ -171,11 +194,11 @@ class JsonFormatter(logging.Formatter):
                 continue
             if attr in payload:
                 continue
-            payload[attr] = value
+            payload[attr] = _scrub_field(value)
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = sanitize_string(self.formatException(record.exc_info))
         if record.stack_info:
-            payload["stack_info"] = self.formatStack(record.stack_info)
+            payload["stack_info"] = sanitize_string(self.formatStack(record.stack_info))
         return json.dumps(payload, default=str)
 
 
@@ -371,6 +394,93 @@ def log_timed_phase(
             )
 
 
+def stream_subprocess(
+    cmd: "list[str] | str",
+    *,
+    logger: logging.Logger,
+    source: str,
+    level: int = logging.DEBUG,
+    **popen_kwargs: Any,
+) -> int:
+    """Run *cmd* and stream its combined stdout+stderr line-by-line into *logger*.
+
+    Every output line is logged at *level* (DEBUG by default) carrying
+    ``extra={"source": source}`` so subprocess chatter rides the bound
+    trace context and stays queryable by the producing tool (``forge``,
+    ``slither``, ``hypersync``, ``git``, …) instead of leaking as raw
+    inherited plaintext on the parent's fds. On a non-zero exit one
+    WARNING is emitted (same ``source`` plus ``returncode``); the exit
+    code is returned so the caller decides whether that's fatal.
+
+    Dependency-light: only stdlib ``subprocess`` + ``logging``. ``stderr``
+    is merged into ``stdout`` so interleaving is preserved and a single
+    reader drains both without a deadlock. Extra ``popen_kwargs`` (``cwd``,
+    ``env``, …) pass straight through; ``stdout``/``stderr``/``text`` are
+    fixed by this helper and must not be overridden.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        **popen_kwargs,
+    )
+    # ``stdout`` is always a pipe here (we set it above); the guard keeps
+    # the type-checker happy and is cheap insurance against a future edit.
+    if proc.stdout is not None:
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line:
+                logger.log(level, "%s", line, extra={"source": source})
+    returncode = proc.wait()
+    if returncode != 0:
+        logger.warning(
+            "subprocess exited non-zero",
+            extra={"source": source, "returncode": returncode},
+        )
+    return returncode
+
+
+def uvicorn_log_config(level: int | str | None = None) -> dict[str, Any]:
+    """Return a ``logging.config.dictConfig`` routing uvicorn through :class:`JsonFormatter`.
+
+    Pass the result as uvicorn's ``log_config`` (``uvicorn.run(...,
+    log_config=uvicorn_log_config())``) so the ``uvicorn``, ``uvicorn.error``
+    and ``uvicorn.access`` loggers emit the same single-line JSON — and pick
+    up the same six contextvars — as the rest of the system, instead of
+    uvicorn's default plaintext access/error lines that bypass the formatter.
+
+    ``disable_existing_loggers`` is ``False`` so applying this never silences
+    the application's own loggers. Level defaults to ``PSAT_LOG_LEVEL`` (then
+    INFO) to match :func:`configure_logging`. Wiring it into the server is the
+    API agent's job — this helper only builds the config.
+    """
+    if level is None:
+        level = os.getenv("PSAT_LOG_LEVEL", "INFO").upper()
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            # The ``()`` key tells dictConfig to call this factory, so the
+            # access+error records render through our JsonFormatter.
+            "json": {"()": f"{__name__}.JsonFormatter"},
+        },
+        "handlers": {
+            "json": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+                "formatter": "json",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["json"], "level": level, "propagate": False},
+            "uvicorn.error": {"handlers": ["json"], "level": level, "propagate": False},
+            "uvicorn.access": {"handlers": ["json"], "level": level, "propagate": False},
+        },
+    }
+
+
 __all__ = [
     "JsonFormatter",
     "bind_trace_context",
@@ -379,6 +489,8 @@ __all__ = [
     "log_timed_phase",
     "record_degraded",
     "record_stage_metric",
+    "stream_subprocess",
+    "uvicorn_log_config",
     "stage_metrics_var",
     "trace_id_var",
     "job_id_var",

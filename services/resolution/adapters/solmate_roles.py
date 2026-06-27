@@ -20,12 +20,15 @@ a present-set keyed by one member; it cannot express this two-event join
 
 from __future__ import annotations
 
+import logging
 from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
 from ..capabilities import CapabilityExpr, Condition, ExternalCheck
 from . import EvaluationContext
+
+logger = logging.getLogger(__name__)
 
 
 def _t0(signature: str) -> str:
@@ -147,6 +150,15 @@ class SolmateRolesAuthorityAdapter:
 
         if public:
             # Capability is open to everyone — anyone may call.
+            logger.debug(
+                "solmate_roles decision",
+                extra={
+                    "adapter": "solmate_roles_authority",
+                    "address": authority,
+                    "decision": "public",
+                    "reason": "public_capability",
+                },
+            )
             return CapabilityExpr.conditional_universal(
                 Condition(kind="business", description="public RolesAuthority capability")
             )
@@ -184,6 +196,17 @@ class SolmateRolesAuthorityAdapter:
             # closed to a probe; this adapter is correct-by-construction only for
             # confirmed RolesAuthorities.
             return _check_only(authority, descriptor, ["authority_unconfirmed_no_role_events"])
+        logger.debug(
+            "solmate_roles decision",
+            extra={
+                "adapter": "solmate_roles_authority",
+                "address": authority,
+                "decision": "finite_set",
+                "reason": "canCall_enumerated",
+                "members": len(members),
+                "roles": sorted(roles_for_target_sig),
+            },
+        )
         return CapabilityExpr.finite_set(
             sorted(members),
             quality="exact",
@@ -204,6 +227,15 @@ def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> Ca
     # the reconciler re-resolve forever.
     if "no_index_cursor" in basis:
         extra["deferred_pending_index"] = True
+    logger.debug(
+        "solmate_roles decision",
+        extra={
+            "adapter": "solmate_roles_authority",
+            "address": authority,
+            "decision": "deferred" if "no_index_cursor" in basis else "external_check",
+            "reason": ",".join(basis),
+        },
+    )
     return CapabilityExpr.external_check_only(
         ExternalCheck(
             target_address=authority,

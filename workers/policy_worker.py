@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -33,7 +32,7 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
 
@@ -42,22 +41,23 @@ logger = logging.getLogger("workers.policy_worker")
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
 
-
-def _log_policy_phase(phase: str, t0: float, durations_ms: dict[str, int], **fields: Any) -> None:
-    """Emit one ``policy phase complete`` line + fold ``phase_ms_<phase>`` into the
-    stage_timing artifact, mirroring the inline per-phase pattern in
-    ``resolution_worker``/``static_worker``. ``process()`` had lifecycle markers but
-    no sub-step timing, so a slow run (e.g. the 780s CumulativeMerkleDrop policy job)
-    was an opaque single number; these lines attribute it to a named sub-step."""
-    ms = int((time.monotonic() - t0) * 1000)
-    durations_ms[phase] = ms
-    record_stage_metric(f"phase_ms_{phase}", ms)
-    logger.info(
-        "policy phase complete: %s (%dms)",
-        phase,
-        ms,
-        extra={"duration_ms": ms, "phase": phase, **fields},
-    )
+# Phase timing convention for ``process()``.
+#
+# Each pipeline sub-step below is wrapped in ``utils.logging.log_timed_phase``
+# (the canonical facility shared with ``resolution_worker``/``static_worker``)
+# rather than a bespoke timer. On a clean exit it emits one ``phase complete``
+# INFO line carrying ``duration_ms``/``phase`` and folds ``phase_ms_<phase>``
+# into the ``stage_timing`` artifact the monitor UI reads; the duration is
+# recorded in ``finally`` so a raising sub-step still books its partial cost.
+#
+# The motivation is historical: ``process()`` used to carry only lifecycle
+# markers and no sub-step timing, so a pathologically slow run (the 780s
+# CumulativeMerkleDrop policy job) surfaced as one opaque ``[JOB] elapsed_s``
+# number with nothing to attribute it to. The named phases below — semantic
+# capabilities, effective permissions, row writes, principal history, graph
+# refresh, principal labels, cross-contract enrichment, auto-enrollment —
+# let a slow job be localised to the offending step without grepping logs.
+# ``durations_ms`` accumulates per-phase totals for the closing profile line.
 
 
 def _make_principal_type_resolver(
@@ -357,11 +357,16 @@ class PolicyWorker(BaseWorker):
             )
             authority_snapshot = authority_result.get("authority_snapshot")
             principal_resolution = authority_result.get("principal_resolution", principal_resolution)
+            authority_status = principal_resolution.get("status", "unknown")
+            record_stage_metric("authority_status", authority_status)
             logger.info(
-                "Policy stage authority resolution for job %s address=%s status=%s",
+                "Policy stage authority resolution complete for job %s",
                 job.id,
-                job.address or "0x0",
-                principal_resolution.get("status", "unknown"),
+                extra={
+                    "address": (job.address or "0x0"),
+                    "authority_status": authority_status,
+                    "authority_reason": principal_resolution.get("reason"),
+                },
             )
 
         # Build effective permissions
@@ -374,39 +379,29 @@ class PolicyWorker(BaseWorker):
         capability_resolver_output: dict[str, dict[str, Any]] | None = None
         if isinstance(predicate_trees, dict) and job.address:
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            cap_t0 = time.monotonic()
-            capability_resolver_output = _resolve_semantic_capabilities(
-                session,
-                contract_address=(job.address or "").lower(),
-                job_id=job.id,
-                chain=job_chain if isinstance(job_chain, str) else None,
-            )
-            _log_policy_phase(
-                "semantic_capabilities",
-                cap_t0,
-                durations_ms,
-                function_count=len(capability_resolver_output or {}),
-            )
+            with log_timed_phase(logger, "semantic_capabilities", durations_ms=durations_ms) as ph:
+                capability_resolver_output = _resolve_semantic_capabilities(
+                    session,
+                    contract_address=(job.address or "").lower(),
+                    job_id=job.id,
+                    chain=job_chain if isinstance(job_chain, str) else None,
+                )
+                ph["function_count"] = len(capability_resolver_output or {})
 
-        ep_t0 = time.monotonic()
-        ep_data: dict = cast(
-            dict,
-            build_effective_permissions(
-                contract_analysis,
-                target_snapshot=control_snapshot,
-                authority_snapshot=authority_snapshot,
-                principal_resolution=principal_resolution,
-                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
-                capability_resolver_output=capability_resolver_output,
-                effects=effects_artifact if isinstance(effects_artifact, dict) else None,
-            ),
-        )
-        _log_policy_phase(
-            "effective_permissions",
-            ep_t0,
-            durations_ms,
-            function_count=len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0,
-        )
+        with log_timed_phase(logger, "effective_permissions", durations_ms=durations_ms) as ph:
+            ep_data: dict = cast(
+                dict,
+                build_effective_permissions(
+                    contract_analysis,
+                    target_snapshot=control_snapshot,
+                    authority_snapshot=authority_snapshot,
+                    principal_resolution=principal_resolution,
+                    predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                    capability_resolver_output=capability_resolver_output,
+                    effects=effects_artifact if isinstance(effects_artifact, dict) else None,
+                ),
+            )
+            ph["function_count"] = len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
@@ -416,22 +411,38 @@ class PolicyWorker(BaseWorker):
             (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
         )
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
+        # All three DB writes below (effective_functions, principal_history,
+        # principal_labels) are gated on contract_row. A missing row means the
+        # job completes green while writing zero rows — DB and artifacts then
+        # disagree. Make that explicit and chartable rather than silent.
+        record_stage_metric("rows_written", contract_row is not None)
+        if contract_row is None:
+            logger.warning(
+                "Policy stage found no Contract row for job %s; wrote zero DB rows",
+                job.id,
+                extra={"address": (job.address or "0x0")},
+            )
+            record_degraded(
+                phase="policy_db_write",
+                exc=RuntimeError("no Contract row for job; zero policy rows written"),
+                context={"job_id": str(job.id), "address": job.address or "0x0"},
+            )
         if contract_row and isinstance(ep_data, dict):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
-            rows_t0 = time.monotonic()
-            fp_added = write_effective_function_rows(
-                session,
-                contract_id=contract_row.id,
-                function_records=ep_data.get("functions", []),
-                capability_by_function=capability_resolver_output,
-                safe_address_lookup=safe_lookup or None,
-                resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
-                deployment_address=deployment_address,
-            )
-            session.commit()
-            _log_policy_phase("effective_function_rows", rows_t0, durations_ms, function_principals=fp_added)
+            with log_timed_phase(logger, "effective_function_rows", durations_ms=durations_ms) as ph:
+                fp_added = write_effective_function_rows(
+                    session,
+                    contract_id=contract_row.id,
+                    function_records=ep_data.get("functions", []),
+                    capability_by_function=capability_resolver_output,
+                    safe_address_lookup=safe_lookup or None,
+                    resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
+                    deployment_address=deployment_address,
+                )
+                session.commit()
+                ph["function_principals"] = fp_added
             record_stage_metric("function_principals", fp_added)
 
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
@@ -439,47 +450,46 @@ class PolicyWorker(BaseWorker):
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain_id = CHAIN_IDS.get(str(job_chain or "ethereum").lower(), 1)
-            ph_t0 = time.monotonic()
-            try:
-                state_var_values = _load_state_var_values(
-                    session,
-                    contract_row.address,
-                    job_id=job.id,
-                    chain=job_chain if isinstance(job_chain, str) else None,
-                )
-                principal_history = build_principal_history(
-                    contract_address=contract_row.address,
-                    chain_id=chain_id,
-                    predicate_trees=predicate_trees,
-                    state_var_values=state_var_values,
-                )
-            except Exception as exc:
-                record_degraded(
-                    phase="principal_history",
-                    exc=exc,
-                    context={"job_id": str(job.id), "address": contract_row.address},
-                )
-                logger.warning(
-                    "principal history skipped for job %s address=%s: %s",
-                    job.id,
-                    contract_row.address,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
-                principal_history = {
-                    "schema_version": "principal_history.v1",
-                    "contract_address": contract_row.address.lower(),
-                    "chain_id": chain_id,
-                    "status": "error",
-                    "reason": str(exc),
-                    "sources": [],
-                    "role_membership": [],
-                    "capability_roles": [],
-                    "function_permissions": [],
-                    "public_capabilities": [],
-                }
-            store_artifact(session, job.id, "principal_history", data=principal_history)
-            _log_policy_phase("principal_history", ph_t0, durations_ms)
+            with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
+                try:
+                    state_var_values = _load_state_var_values(
+                        session,
+                        contract_row.address,
+                        job_id=job.id,
+                        chain=job_chain if isinstance(job_chain, str) else None,
+                    )
+                    principal_history = build_principal_history(
+                        contract_address=contract_row.address,
+                        chain_id=chain_id,
+                        predicate_trees=predicate_trees,
+                        state_var_values=state_var_values,
+                    )
+                except Exception as exc:
+                    record_degraded(
+                        phase="principal_history",
+                        exc=exc,
+                        context={"job_id": str(job.id), "address": contract_row.address},
+                    )
+                    logger.warning(
+                        "principal history skipped for job %s address=%s: %s",
+                        job.id,
+                        contract_row.address,
+                        exc,
+                        extra={"exc_type": type(exc).__name__},
+                    )
+                    principal_history = {
+                        "schema_version": "principal_history.v1",
+                        "contract_address": contract_row.address.lower(),
+                        "chain_id": chain_id,
+                        "status": "error",
+                        "reason": str(exc),
+                        "sources": [],
+                        "role_membership": [],
+                        "capability_roles": [],
+                        "function_permissions": [],
+                        "public_capabilities": [],
+                    }
+                store_artifact(session, job.id, "principal_history", data=principal_history)
 
         logger.info(
             "Policy stage effective permissions complete for job %s address=%s name=%s",
@@ -499,64 +509,56 @@ class PolicyWorker(BaseWorker):
         # re-traversing the graph.
         root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
         root_bundle["effective_permissions"] = ep_data
-        graph_t0 = time.monotonic()
-        refreshed_graph, refreshed_nested = resolve_control_graph(
-            root_artifacts=root_bundle,
-            rpc_url=rpc_url,
-            max_depth=RECURSION_MAX_DEPTH,
-            workspace_prefix="recursive",
-            nested_artifacts_override=nested_artifacts,
-            # Reuse the resolution stage's classification results — every
-            # entry here saves one classify_resolved_address call (6-10 RPCs).
-            classify_cache=classify_cache,
-            # Pre-seed with the resolution stage's graph: every nested
-            # contract was already analyzed in the first walk and has
-            # its effective_permissions baked in. The refresh's only job
-            # is projecting the root's now-computed role principals onto
-            # the existing graph, which the BFS handles by re-walking
-            # ONLY the root and any newly-discovered downstream nodes.
-            initial_graph=cast(Any, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None,
-        )
-        if refreshed_graph:
-            resolved_control_graph = refreshed_graph
-            store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
-            # Persist any newly materialized nested artifacts (rare — most come
-            # from resolution stage already).
-            new_addresses = set(refreshed_nested) - set(nested_artifacts)
-            if new_addresses:
-                store_nested_artifacts(
-                    session,
-                    job.id,
-                    {addr: refreshed_nested[addr] for addr in new_addresses},
-                )
-        _log_policy_phase(
-            "graph_refresh",
-            graph_t0,
-            durations_ms,
-            graph_nodes=len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0,
-        )
+        with log_timed_phase(logger, "graph_refresh", durations_ms=durations_ms) as ph:
+            refreshed_graph, refreshed_nested = resolve_control_graph(
+                root_artifacts=root_bundle,
+                rpc_url=rpc_url,
+                max_depth=RECURSION_MAX_DEPTH,
+                workspace_prefix="recursive",
+                nested_artifacts_override=nested_artifacts,
+                # Reuse the resolution stage's classification results — every
+                # entry here saves one classify_resolved_address call (6-10 RPCs).
+                classify_cache=classify_cache,
+                # Pre-seed with the resolution stage's graph: every nested
+                # contract was already analyzed in the first walk and has
+                # its effective_permissions baked in. The refresh's only job
+                # is projecting the root's now-computed role principals onto
+                # the existing graph, which the BFS handles by re-walking
+                # ONLY the root and any newly-discovered downstream nodes.
+                initial_graph=cast(Any, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None,
+            )
+            if refreshed_graph:
+                resolved_control_graph = refreshed_graph
+                store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
+                # Persist any newly materialized nested artifacts (rare — most come
+                # from resolution stage already).
+                new_addresses = set(refreshed_nested) - set(nested_artifacts)
+                if new_addresses:
+                    store_nested_artifacts(
+                        session,
+                        job.id,
+                        {addr: refreshed_nested[addr] for addr in new_addresses},
+                    )
+            ph["graph_nodes"] = (
+                len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0
+            )
 
         # Label principals
         self.update_detail(session, job, "Labeling principals")
-        labels_t0 = time.monotonic()
-        pl_data = build_principal_labels(
-            ep_data,
-            resolved_control_graph=(
-                cast(dict, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None
-            ),
-            rpc_url=rpc_url,
-            # Same cache the resolution stage populated. Without this, labeling
-            # re-runs classify_resolved_address (6-10 RPCs each) for every
-            # principal — the dominant cost on big protocols (etherfi LP impl
-            # spent 14+ min here on shared-cpu-2x).
-            classify_cache=classify_cache,
-        )
-        _log_policy_phase(
-            "principal_labels",
-            labels_t0,
-            durations_ms,
-            principal_count=len(pl_data.get("principals", [])),
-        )
+        with log_timed_phase(logger, "principal_labels", durations_ms=durations_ms) as ph:
+            pl_data = build_principal_labels(
+                ep_data,
+                resolved_control_graph=(
+                    cast(dict, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None
+                ),
+                rpc_url=rpc_url,
+                # Same cache the resolution stage populated. Without this, labeling
+                # re-runs classify_resolved_address (6-10 RPCs each) for every
+                # principal — the dominant cost on big protocols (etherfi LP impl
+                # spent 14+ min here on shared-cpu-2x).
+                classify_cache=classify_cache,
+            )
+            ph["principal_count"] = len(pl_data.get("principals", []))
 
         # Write to principal_labels table
         if contract_row:
@@ -593,12 +595,11 @@ class PolicyWorker(BaseWorker):
         )
 
         # Cross-contract effect enrichment: propagate labels across contract boundaries
-        enrich_t0 = time.monotonic()
-        enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
-        if enriched and ep_data is not None:
-            self._apply_effect_label_updates(ep_data, enriched)
-            store_artifact(session, job.id, "effective_permissions", data=ep_data)
-        _log_policy_phase("cross_contract_enrichment", enrich_t0, durations_ms)
+        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
+            enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
+            if enriched and ep_data is not None:
+                self._apply_effect_label_updates(ep_data, enriched)
+                store_artifact(session, job.id, "effective_permissions", data=ep_data)
 
         self.update_detail(
             session,
@@ -615,79 +616,78 @@ class PolicyWorker(BaseWorker):
 
         # Auto-enroll protocol contracts into unified monitoring
         if job.protocol_id:
-            enroll_t0 = time.monotonic()
-            try:
-                from services.monitoring.enrollment import maybe_enroll_protocol
+            with log_timed_phase(logger, "auto_enrollment", durations_ms=durations_ms):
+                try:
+                    from services.monitoring.enrollment import maybe_enroll_protocol
 
-                enrolled = maybe_enroll_protocol(
-                    session,
-                    job.protocol_id,
-                    rpc_url,
-                    chain="ethereum",
-                    exclude_job_id=job.id,
-                )
-                record_stage_metric("enrolled", bool(enrolled))
-                if enrolled:
-                    logger.info(
-                        "Auto-enrolled protocol %s contracts into monitoring",
+                    enrolled = maybe_enroll_protocol(
+                        session,
                         job.protocol_id,
+                        rpc_url,
+                        chain="ethereum",
+                        exclude_job_id=job.id,
                     )
-                    # Fetch DeFiLlama TVL so the protocol has a number immediately.
-                    # Per-contract tracked value is already in contract_balances
-                    # from the resolution stage — the hourly loop will create
-                    # a full snapshot combining both.
-                    try:
-                        from db.models import Protocol, TvlSnapshot
-                        from services.monitoring.tvl import fetch_defillama_tvl
-
-                        proto = session.get(Protocol, job.protocol_id)
-                        dl = fetch_defillama_tvl(proto.name) if proto else None
-                        if dl:
-                            session.add(
-                                TvlSnapshot(
-                                    protocol_id=job.protocol_id,
-                                    defillama_tvl=round(dl["tvl"], 2) if dl["tvl"] else None,
-                                    chain_breakdown=dl["chain_breakdown"],
-                                    source="defillama",
-                                )
-                            )
-                            session.commit()
-                    except Exception as exc:
-                        # Failed TVL commit poisons the session; roll back
-                        # before record_degraded reads job.protocol_id.
-                        session.rollback()
-                        record_degraded(
-                            phase="initial_tvl_snapshot",
-                            exc=exc,
-                            context={"protocol_id": job.protocol_id},
-                        )
-                        logger.warning(
-                            "Initial TVL snapshot failed for protocol %s: %s",
+                    record_stage_metric("enrolled", bool(enrolled))
+                    if enrolled:
+                        logger.info(
+                            "Auto-enrolled protocol %s contracts into monitoring",
                             job.protocol_id,
-                            exc,
-                            extra={"exc_type": type(exc).__name__},
                         )
-            except Exception as exc:
-                # A failed enroll (e.g. a benign concurrent (address, chain)
-                # race) leaves the session pending-rollback. Roll back BEFORE
-                # reading any job attribute below and before returning to the
-                # worker's success path, so the non-fatal hiccup degrades to a
-                # logged warning instead of escalating to a terminal job failure
-                # when the poisoned session next lazy-loads. A rollback that
-                # itself fails propagates to base.py's failure handler.
-                session.rollback()
-                record_degraded(
-                    phase="auto_enrollment",
-                    exc=exc,
-                    context={"protocol_id": job.protocol_id},
-                )
-                logger.warning(
-                    "Auto-enrollment failed for protocol %s: %s",
-                    job.protocol_id,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
-            _log_policy_phase("auto_enrollment", enroll_t0, durations_ms)
+                        # Fetch DeFiLlama TVL so the protocol has a number immediately.
+                        # Per-contract tracked value is already in contract_balances
+                        # from the resolution stage — the hourly loop will create
+                        # a full snapshot combining both.
+                        try:
+                            from db.models import Protocol, TvlSnapshot
+                            from services.monitoring.tvl import fetch_defillama_tvl
+
+                            proto = session.get(Protocol, job.protocol_id)
+                            dl = fetch_defillama_tvl(proto.name) if proto else None
+                            if dl:
+                                session.add(
+                                    TvlSnapshot(
+                                        protocol_id=job.protocol_id,
+                                        defillama_tvl=round(dl["tvl"], 2) if dl["tvl"] else None,
+                                        chain_breakdown=dl["chain_breakdown"],
+                                        source="defillama",
+                                    )
+                                )
+                                session.commit()
+                        except Exception as exc:
+                            # Failed TVL commit poisons the session; roll back
+                            # before record_degraded reads job.protocol_id.
+                            session.rollback()
+                            record_degraded(
+                                phase="initial_tvl_snapshot",
+                                exc=exc,
+                                context={"protocol_id": job.protocol_id},
+                            )
+                            logger.warning(
+                                "Initial TVL snapshot failed for protocol %s: %s",
+                                job.protocol_id,
+                                exc,
+                                extra={"exc_type": type(exc).__name__},
+                            )
+                except Exception as exc:
+                    # A failed enroll (e.g. a benign concurrent (address, chain)
+                    # race) leaves the session pending-rollback. Roll back BEFORE
+                    # reading any job attribute below and before returning to the
+                    # worker's success path, so the non-fatal hiccup degrades to a
+                    # logged warning instead of escalating to a terminal job failure
+                    # when the poisoned session next lazy-loads. A rollback that
+                    # itself fails propagates to base.py's failure handler.
+                    session.rollback()
+                    record_degraded(
+                        phase="auto_enrollment",
+                        exc=exc,
+                        context={"protocol_id": job.protocol_id},
+                    )
+                    logger.warning(
+                        "Auto-enrollment failed for protocol %s: %s",
+                        job.protocol_id,
+                        exc,
+                        extra={"exc_type": type(exc).__name__},
+                    )
 
         # Send completion webhook for re-analysis jobs
         request = job.request if isinstance(job.request, dict) else {}

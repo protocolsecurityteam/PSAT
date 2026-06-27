@@ -26,6 +26,7 @@ correct, just unfilled.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -56,6 +57,8 @@ from .permissionless_shapes import (
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
+
+logger = logging.getLogger(__name__)
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
@@ -263,7 +266,18 @@ def evaluate_tree(
         leaf = tree.get("leaf")
         if leaf is None:
             return CapabilityExpr.unsupported("empty_leaf")
-        return _evaluate_leaf(leaf, ctx)
+        cap = _evaluate_leaf(leaf, ctx)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "predicate leaf decision",
+                extra={
+                    "adapter": "predicate_evaluator",
+                    "address": ctx.contract_address,
+                    "decision": cap.kind,
+                    "reason": leaf.get("authority_role") or leaf.get("kind") or "unknown",
+                },
+            )
+        return cap
     children = tree.get("children") or []
     if not children:
         return CapabilityExpr.unsupported("empty_branch")

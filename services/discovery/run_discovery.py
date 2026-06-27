@@ -31,6 +31,7 @@ from services.discovery.audit_reports_llm import _parse_json_object
 from services.discovery.chain_resolver import validate_claimed_chains
 from utils import exa, llm
 from utils.chains import canonical_chain
+from utils.logging import log_timed_phase, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -502,81 +503,86 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     original_search = inventory_domain_mod._tavily_search  # type: ignore[attr-defined]
     original_classify = audit_reports_mod.classify_search_results  # type: ignore[attr-defined]
 
-    # 1a. Deep Research for audit seeds
-    audit_seeds: list[dict] = []
-    audit_seed_metadata: dict[str, dict[str, Any]] = {}
-    try:
-        budget.charge_research()
-        r = _cached_deep_research(_audit_research_instructions(protocol), schema=_AUDIT_SCHEMA)
-        for item in r.get("data", {}).get("auditReports", []):
-            url = str(item.get("url") or "").strip()
-            if not url:
-                continue
-            snippet = f"{item.get('auditor') or ''} audit report for {protocol}. {item.get('date') or ''}".strip()
-            metadata = _audit_metadata_from_ai(item, provenance="ai_returned")
-            audit_seed_metadata[_audit_key(url)] = metadata
-            if item.get("pdf_url"):
-                audit_seed_metadata[_audit_key(item.get("pdf_url"))] = metadata
-            audit_seeds.append(
-                {
-                    "url": url,
-                    "title": f"{item.get('auditor') or 'Audit'} — {protocol}",
-                    "content": snippet,
-                    "score": 1.0,
-                }
-            )
-    except Exception as exc:
-        logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
+    with log_timed_phase(logger, "discovery_audits") as ph_audit:
+        # 1a. Deep Research for audit seeds
+        audit_seeds: list[dict] = []
+        audit_seed_metadata: dict[str, dict[str, Any]] = {}
+        try:
+            budget.charge_research()
+            r = _cached_deep_research(_audit_research_instructions(protocol), schema=_AUDIT_SCHEMA)
+            for item in r.get("data", {}).get("auditReports", []):
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                snippet = f"{item.get('auditor') or ''} audit report for {protocol}. {item.get('date') or ''}".strip()
+                metadata = _audit_metadata_from_ai(item, provenance="ai_returned")
+                audit_seed_metadata[_audit_key(url)] = metadata
+                if item.get("pdf_url"):
+                    audit_seed_metadata[_audit_key(item.get("pdf_url"))] = metadata
+                audit_seeds.append(
+                    {
+                        "url": url,
+                        "title": f"{item.get('auditor') or 'Audit'} — {protocol}",
+                        "content": snippet,
+                        "score": 1.0,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
 
-    # 1b. Full pipeline: exa/deep-lite search + research_plus classifier bypass
-    _patch_search(_make_search_fn("deep-lite", budget, research_seeds=audit_seeds))
-    _patch_classify_with_seeds(audit_seeds)
-    try:
-        audit_result = audit_reports_mod.search_audit_reports(
-            protocol,
-            official_domain=official_domain,
-            max_queries=4,
-            debug=False,
-        )
-    finally:
-        _restore_search(original_search)
-        audit_reports_mod.classify_search_results = original_classify  # type: ignore[attr-defined]
-    _merge_ai_audit_metadata(audit_result, audit_seed_metadata)
+        # 1b. Full pipeline: exa/deep-lite search + research_plus classifier bypass
+        _patch_search(_make_search_fn("deep-lite", budget, research_seeds=audit_seeds))
+        _patch_classify_with_seeds(audit_seeds)
+        try:
+            audit_result = audit_reports_mod.search_audit_reports(
+                protocol,
+                official_domain=official_domain,
+                max_queries=4,
+                debug=False,
+            )
+        finally:
+            _restore_search(original_search)
+            audit_reports_mod.classify_search_results = original_classify  # type: ignore[attr-defined]
+        _merge_ai_audit_metadata(audit_result, audit_seed_metadata)
+        ph_audit["audit_seeds"] = len(audit_seeds)
+        ph_audit["reports"] = len(audit_result.get("reports", []))
 
     # ---- Addresses ----
-    _patch_search(_make_search_fn("auto", budget))  # exa/regular
-    try:
-        inventory_result = inventory_mod.search_protocol_inventory(
-            protocol,
-            chain=chain,
-            limit=500,
-            max_queries=4,
-            run_deployer=True,
-            debug=False,
-        )
-    finally:
-        _restore_search(original_search)
-
-    # Attach address-side Deep Research output as additional evidence.
-    try:
-        budget.charge_research()
-        r_addr = _cached_deep_research(_address_research_instructions(protocol), schema=_ADDRESS_SCHEMA)
-        for item in r_addr.get("data", {}).get("contracts", []):
-            addr = str(item.get("address") or "").strip().lower()
-            if not addr.startswith("0x") or len(addr) != 42:
-                continue
-            inventory_result.setdefault("contracts", []).append(
-                {
-                    "name": item.get("name"),
-                    "address": addr,
-                    "chains": [chain_key] if (chain_key := canonical_chain(item.get("chain"))) else [],
-                    "confidence": 1.0,
-                    "source": ["exa_deep_research"],
-                    "evidence": {"deep_research": 1},
-                }
+    with log_timed_phase(logger, "discovery_addresses") as ph_addr:
+        _patch_search(_make_search_fn("auto", budget))  # exa/regular
+        try:
+            inventory_result = inventory_mod.search_protocol_inventory(
+                protocol,
+                chain=chain,
+                limit=500,
+                max_queries=4,
+                run_deployer=True,
+                debug=False,
             )
-    except Exception as exc:
-        logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
+        finally:
+            _restore_search(original_search)
+
+        # Attach address-side Deep Research output as additional evidence.
+        try:
+            budget.charge_research()
+            r_addr = _cached_deep_research(_address_research_instructions(protocol), schema=_ADDRESS_SCHEMA)
+            for item in r_addr.get("data", {}).get("contracts", []):
+                addr = str(item.get("address") or "").strip().lower()
+                if not addr.startswith("0x") or len(addr) != 42:
+                    continue
+                inventory_result.setdefault("contracts", []).append(
+                    {
+                        "name": item.get("name"),
+                        "address": addr,
+                        "chains": [chain_key] if (chain_key := canonical_chain(item.get("chain"))) else [],
+                        "confidence": 1.0,
+                        "source": ["exa_deep_research"],
+                        "evidence": {"deep_research": 1},
+                    }
+                )
+        except Exception as exc:
+            logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
+        ph_addr["contracts"] = len(inventory_result.get("contracts", []))
 
     try:
         inventory_result["contracts"] = validate_claimed_chains(
@@ -595,8 +601,11 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     )
     if dependency_pass_triggered:
         logger.info("dependency classifier selected %s for two-pass", protocol)
-        for dep_audit in _dependency_research(protocol, budget):
-            audit_result.setdefault("reports", []).append(dep_audit)
+        with log_timed_phase(logger, "discovery_dependency_pass") as ph_dep:
+            dep_audits = _dependency_research(protocol, budget)
+            for dep_audit in dep_audits:
+                audit_result.setdefault("reports", []).append(dep_audit)
+            ph_dep["dependency_audits"] = len(dep_audits)
     else:
         logger.info("dependency classifier skipped two-pass for %s", protocol)
 
@@ -605,6 +614,15 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
     enrich_audit_reports(audit_result, protocol, debug=False)
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
+
+    # Fold the per-protocol budget counters into the stage_timing artifact so
+    # the monitor UI can attribute discovery cost/call-volume per job (a no-op
+    # outside a worker job context, e.g. standalone runs / tests).
+    record_stage_metric("search_calls", budget.search_calls)
+    record_stage_metric("research_calls", budget.research_calls)
+    record_stage_metric("estimated_cost_usd", round(budget.estimated_cost_usd, 3))
+    record_stage_metric("dependency_pass_triggered", dependency_pass_triggered)
+
     return {
         "audits": audit_result,
         "addresses": inventory_result,

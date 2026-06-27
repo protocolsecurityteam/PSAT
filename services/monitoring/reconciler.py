@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 from db.models import Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
 from services.monitoring.enrollment import enroll_protocol_contracts
+from utils.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,7 @@ def run_enrollment_reconciler_loop(
 
 def main() -> None:
     """CLI entry point — used by ``workers/protocol_monitor.py --reconcile``."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        force=True,
-    )
+    configure_logging()
     stop_event = Event()
 
     def handle_signal(signum, _frame):

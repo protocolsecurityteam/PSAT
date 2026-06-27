@@ -56,6 +56,7 @@ from db.models import (
     Contract,
     UpgradeEvent,
 )
+from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -699,6 +700,13 @@ def match_contracts_for_audit(session: Session, audit_id: int) -> list[CoverageM
     for c in candidates:
         matched_name = scope_lookup.get(_normalize_name(c.contract_name))
         if not matched_name:
+            # Candidate the name-IN query returned but whose normalized name
+            # no longer maps to a live scope entry (trimmed by the address
+            # pass above). Per-iteration detail → DEBUG.
+            logger.debug(
+                "coverage match skip",
+                extra={"reason": "scope_name_trimmed", "contract_id": c.id, "audit_id": audit.id},
+            )
             continue
         windows = windows_by_id.get(c.id, [])
         if windows:
@@ -850,6 +858,10 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
         scope_names = audit.scope_contracts or []
         matched_name = next((n for n in scope_names if _normalize_name(n) == name_key), None)
         if not matched_name:
+            logger.debug(
+                "coverage match skip",
+                extra={"reason": "no_name_match", "contract_id": contract.id, "audit_id": audit.id},
+            )
             continue
         if windows:
             confidence, window = _confidence_for_impl_era(audit_ts, windows)
@@ -1224,10 +1236,15 @@ def _apply_equivalence_http(
                     f"fetch_etherscan_source_files returned {type(raw_fetch).__name__}, expected EtherscanFetch"
                 )
         except Exception as exc:
-            logger.exception(
+            # Swallowed-and-continue: a fetch failure degrades this match to
+            # a transient status, it does not fail the job — so WARNING +
+            # record_degraded, not an ERROR-level logger.exception.
+            logger.warning(
                 "source-equivalence Etherscan fetch crashed for contract %s",
                 contract_id,
+                extra={"exc_type": type(exc).__name__, "contract_id": contract_id},
             )
+            record_degraded(phase="coverage_etherscan_fetch", exc=exc, context={"contract_id": contract_id})
             # Synthesize a fetch_failed envelope so the branches below
             # treat this uniformly with API-returned errors.
             fetch = EtherscanFetch(source=None, status="fetch_failed", detail=f"crash: {exc}")
@@ -1282,10 +1299,20 @@ def _apply_equivalence_http(
                 fallback_repos=list(data.referenced_repos),
             )
         except Exception as exc:
-            logger.exception(
+            logger.warning(
                 "source-equivalence check crashed for audit %s / contract %s",
                 m.audit_report_id,
                 m.contract_id,
+                extra={
+                    "exc_type": type(exc).__name__,
+                    "audit_id": m.audit_report_id,
+                    "contract_id": m.contract_id,
+                },
+            )
+            record_degraded(
+                phase="coverage_source_equivalence",
+                exc=exc,
+                context={"audit_id": m.audit_report_id, "contract_id": m.contract_id},
             )
             return _stamp(m, status="github_fetch_failed", reason=f"crash: {exc}")
 
@@ -1572,10 +1599,12 @@ def verify_one_coverage_row(
         try:
             fetch = fetch_etherscan_source_files(contract.address)
         except Exception as exc:
-            logger.exception(
+            logger.warning(
                 "verify_one_coverage_row: etherscan fetch crashed for contract %s",
                 contract.id,
+                extra={"exc_type": type(exc).__name__, "contract_id": contract.id},
             )
+            record_degraded(phase="coverage_etherscan_fetch", exc=exc, context={"contract_id": contract.id})
             _stamp_coverage_row(session, row, status="etherscan_fetch_failed", reason=f"crash: {exc}")
             return row.equivalence_status
         if isinstance(fetch, EtherscanFetch):
@@ -1617,11 +1646,22 @@ def verify_one_coverage_row(
             fallback_repos=referenced_repos,
         )
     except Exception as exc:
-        logger.exception(
+        logger.warning(
             "verify_one_coverage_row: verify crashed for row %s (audit=%s contract=%s)",
             coverage_row_id,
             row.audit_report_id,
             row.contract_id,
+            extra={
+                "exc_type": type(exc).__name__,
+                "row_id": coverage_row_id,
+                "audit_id": row.audit_report_id,
+                "contract_id": row.contract_id,
+            },
+        )
+        record_degraded(
+            phase="coverage_source_equivalence",
+            exc=exc,
+            context={"row_id": coverage_row_id, "audit_id": row.audit_report_id, "contract_id": row.contract_id},
         )
         _stamp_coverage_row(session, row, status="github_fetch_failed", reason=f"crash: {exc}")
         return row.equivalence_status
@@ -1693,11 +1733,13 @@ def upsert_coverage_for_audit(
         return 0
 
     matches = match_contracts_for_audit(session, audit_id)
+    record_stage_metric("coverage_matches", len(matches))
     if not matches:
         logger.info(
             "coverage: audit %s has scope but no Contract rows matched in protocol %s",
             audit_id,
             audit.protocol_id,
+            extra={"audit_id": audit_id, "protocol_id": audit.protocol_id, "matches": 0},
         )
         _persist_coverage_for_audit(session, audit_id, [])
         return 0
@@ -1740,6 +1782,7 @@ def upsert_coverage_for_contract(
     on the dedicated ``CoverageVerifyWorker`` instead.
     """
     matches = match_audits_for_contract(session, contract_id)
+    record_stage_metric("coverage_matches", len(matches))
     if matches:
         equiv_inputs = _preload_equivalence_inputs(session, matches) if verify_source_equivalence else None
         session.commit()

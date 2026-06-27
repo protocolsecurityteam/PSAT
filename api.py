@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from routers import (
@@ -31,11 +33,15 @@ from routers import (
     protocols,
     spa,
 )
-from utils.logging import bind_trace_context, configure_logging
+from utils.logging import bind_trace_context, configure_logging, trace_id_var
 
 logger = logging.getLogger(__name__)
 
 TRACE_ID_HEADER = "X-PSAT-Trace-Id"
+
+# A request slower than this is logged at WARNING even on a 2xx — a slow
+# endpoint is degraded service worth surfacing without a separate alert rule.
+_SLOW_REQUEST_MS = 1000
 
 
 @asynccontextmanager
@@ -50,8 +56,15 @@ async def lifespan(app: FastAPI):
         with engine.connect() as conn:
             conn.execute(select(1))
         logger.info("Database connection verified")
-    except Exception:
-        logger.warning("Database not reachable at startup - endpoints will fail until DB is available")
+    except Exception as exc:
+        # Degraded-but-continuing: the app boots so it can serve a 503 once the
+        # DB returns. Carry the root cause as a queryable field instead of a
+        # bare message (matches routers/meta.py's exc_type convention).
+        logger.warning(
+            "Database not reachable at startup - endpoints will fail until DB is available: %s",
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
     yield
 
 
@@ -64,6 +77,61 @@ if not ALLOWED_ORIGINS:
     )
 
 app = FastAPI(title="PSAT Demo", version="0.1.0", lifespan=lifespan)
+
+
+def _log_request(*, method: str, path: str, status_code: int, duration_ms: int, trace_id: str) -> None:
+    """Emit one structured line per served request.
+
+    INFO for a healthy fast response; WARNING when the response is a 5xx or
+    when the request crossed the slow threshold — both are degraded service.
+    Facts go in ``extra`` so request rate, latency, and error spikes are
+    single Loki aggregations rather than message-regex over uvicorn plaintext.
+    """
+    level = logging.INFO
+    if status_code >= 500 or duration_ms >= _SLOW_REQUEST_MS:
+        level = logging.WARNING
+    logger.log(
+        level,
+        "request %s %s -> %d (%dms)",
+        method,
+        path,
+        status_code,
+        duration_ms,
+        extra={
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+            "trace_id": trace_id,
+        },
+    )
+
+
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler for exceptions that escape a route.
+
+    Logs at ERROR with the traceback and the request's ``trace_id`` — this is
+    a genuinely request-failing path (it returns a 500), so ERROR + ``exc_info``
+    is the correct level here, not a swallowed-continue WARNING. FastAPI routes
+    ``HTTPException`` through its own handler, so this only fires on a truly
+    unhandled error.
+    """
+    logger.error(
+        "unhandled exception serving %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "trace_id": trace_id_var.get(),
+            "exc_type": type(exc).__name__,
+        },
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
 @app.middleware("http")
@@ -82,8 +150,19 @@ async def trace_id_middleware(request: Request, call_next):
     """
     incoming = request.headers.get(TRACE_ID_HEADER)
     trace_id = incoming if incoming else uuid.uuid4().hex[:16]
+    started = time.monotonic()
     with bind_trace_context(trace_id=trace_id):
         response = await call_next(request)
+        # Logged inside the bound context so the line also carries the
+        # contextvar-injected trace_id. A request that raises is logged by
+        # ``unhandled_exception_handler`` (registered above) instead.
+        _log_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            trace_id=trace_id,
+        )
     response.headers[TRACE_ID_HEADER] = trace_id
     return response
 

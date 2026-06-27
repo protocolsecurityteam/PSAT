@@ -1,12 +1,40 @@
 """Configurable LLM client with streaming SSE support."""
 
 import json
+import logging
 import os
+import time
 from pathlib import Path
 from typing import Iterator
 
 import requests
 from dotenv import load_dotenv
+
+from utils.logging import record_stage_metric, stage_metrics_var
+
+logger = logging.getLogger(__name__)
+
+
+def _record_llm_call() -> None:
+    """Increment the per-stage ``llm_calls`` counter (no-op outside a job)."""
+    metrics = stage_metrics_var.get()
+    prior = metrics.get("llm_calls", 0) if isinstance(metrics, dict) else 0
+    record_stage_metric("llm_calls", (prior or 0) + 1)
+
+
+def _raise_for_status_loud(response: requests.Response, model: str) -> None:
+    """``raise_for_status`` but emit a LOUD WARNING first on a 402/429 — the
+    out-of-credits (402) and rate-limit (429) signatures behind the silent
+    discovery collapses. Facts go in ``extra`` so they're queryable."""
+    status = response.status_code
+    if status in (402, 429):
+        kind = "payment_required" if status == 402 else "rate_limited"
+        logger.warning(
+            "LLM request rejected (%s)",
+            kind,
+            extra={"model": model, "status_code": status, "failure_kind": kind},
+        )
+    response.raise_for_status()
 
 
 class LLMClient:
@@ -45,10 +73,13 @@ class LLMClient:
             "stream": True,
         }
 
+        resolved_model = model or self.default_model
+        started = time.monotonic()
         response = requests.post(self.url, headers=headers, json=payload, stream=True, timeout=120)
-        response.raise_for_status()
+        _raise_for_status_loud(response, resolved_model)
 
         content_parts = []
+        finish_reason: str | None = None
         for line in response.iter_lines():
             if not line:
                 continue
@@ -67,10 +98,26 @@ class LLMClient:
                 content = delta.get("content")
                 if content:
                     content_parts.append(content)
+                if choices[0].get("finish_reason"):
+                    finish_reason = choices[0]["finish_reason"]
             except json.JSONDecodeError:
                 continue
 
-        return "".join(content_parts)
+        result = "".join(content_parts)
+        # One INFO per real completion (lifecycle event). An empty result here is
+        # otherwise indistinguishable from a legitimate empty answer.
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "LLM completion",
+            extra={
+                "model": resolved_model,
+                "duration_ms": duration_ms,
+                "finish_reason": finish_reason,
+                "content_len": len(result),
+            },
+        )
+        _record_llm_call()
+        return result
 
     def tool_chat(
         self,
@@ -109,7 +156,7 @@ class LLMClient:
         }
 
         response = requests.post(self.url, headers=headers, json=payload, stream=True, timeout=180)
-        response.raise_for_status()
+        _raise_for_status_loud(response, model or self.default_model)
 
         # Tool calls arrive as deltas keyed by index. OpenRouter normalizes
         # most providers to OpenAI's shape: choices[0].delta.tool_calls[] with

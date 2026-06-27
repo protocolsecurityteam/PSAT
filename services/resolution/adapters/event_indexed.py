@@ -9,6 +9,7 @@ adapter consumes those records directly with no per-standard adapter.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from ..capabilities import CapabilityExpr, ExternalCheck
@@ -16,6 +17,8 @@ from . import EnumerationResult, EvaluationContext
 
 if TYPE_CHECKING:
     from ..repos.event_logs_pg import ValueFoldResult
+
+logger = logging.getLogger(__name__)
 
 _CALLER_KEY_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
@@ -209,6 +212,17 @@ class EventIndexedAdapter:
                     result.last_indexed_block if last_block is None else min(last_block, result.last_indexed_block)
                 )
 
+        logger.debug(
+            "event_indexed decision",
+            extra={
+                "adapter": "event_indexed",
+                "address": ctx.contract_address,
+                "decision": "finite_set",
+                "reason": "event_history_folded",
+                "members": len(merged),
+                "confidence": worst_confidence,
+            },
+        )
         return CapabilityExpr.finite_set(
             merged,
             quality="exact" if worst_confidence == "enumerable" else "lower_bound",
@@ -237,9 +251,19 @@ class EventIndexedAdapter:
         # are not waiting on the index and are left unmarked.
         if "no_index_cursor" in basis:
             extra["deferred_pending_index"] = True
+        target = _resolve_event_address(descriptor, hint, ctx)
+        logger.debug(
+            "event_indexed decision",
+            extra={
+                "adapter": "event_indexed",
+                "address": target,
+                "decision": "deferred" if "no_index_cursor" in basis else "external_check",
+                "reason": ",".join(basis),
+            },
+        )
         return CapabilityExpr.external_check_only(
             ExternalCheck(
-                target_address=_resolve_event_address(descriptor, hint, ctx),
+                target_address=target,
                 target_call_selector=descriptor.get("callee_selector"),
                 extra=extra,
             )

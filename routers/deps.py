@@ -13,8 +13,9 @@ import hmac
 import logging
 import os
 import re
+from typing import Any
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from db.models import SessionLocal
 from db.queue import (
@@ -29,6 +30,7 @@ from db.storage import (
     deserialize_artifact,
     get_storage_client,
 )
+from utils.logging import trace_id_var
 from utils.rpc import default_rpc_url
 
 logger = logging.getLogger(__name__)
@@ -46,10 +48,39 @@ MAX_TVL_HISTORY_DAYS = 90
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
-def require_admin_key(x_psat_admin_key: str | None = Header(default=None)) -> None:
+def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
     """Reject any non-GET request that does not carry a valid admin key."""
-    if not ADMIN_KEY or not x_psat_admin_key or not hmac.compare_digest(x_psat_admin_key, ADMIN_KEY):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin key required")
+    if not ADMIN_KEY:
+        reason = "admin_key_not_configured"
+    elif not x_psat_admin_key:
+        reason = "missing_key"
+    elif not hmac.compare_digest(x_psat_admin_key, ADMIN_KEY):
+        reason = "key_mismatch"
+    else:
+        return
+    # The rejection itself is the fact worth alerting on (admin-key drift,
+    # probing). Never log the supplied key — only the discriminating reason.
+    logger.warning(
+        "admin key rejected on %s",
+        request.url.path,
+        extra={"trace_id": trace_id_var.get(), "path": request.url.path, "reason": reason},
+    )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin key required")
+
+
+def log_admin_mutation(action: str, **fields: Any) -> None:
+    """Emit one INFO audit line per successful admin mutation.
+
+    ``action`` names the operation (e.g. ``"job_retry"``); ``fields`` carry the
+    affected id(s)/counts. All go in ``extra`` so the audit trail (who changed
+    what) is a queryable stream, correlatable by ``trace_id`` to the request
+    line emitted by the API middleware.
+    """
+    extra: dict[str, Any] = {"action": action, **fields}
+    tid = trace_id_var.get()
+    if tid is not None:
+        extra["trace_id"] = tid
+    logger.info("admin mutation: %s", action, extra=extra)
 
 
 def _normalize_address_or_400(address: str) -> str:
@@ -74,5 +105,6 @@ __all__ = [
     "get_all_artifacts",
     "get_artifact",
     "get_storage_client",
+    "log_admin_mutation",
     "require_admin_key",
 ]

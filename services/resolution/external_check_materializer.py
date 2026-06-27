@@ -185,7 +185,28 @@ def materialize_external_check_from_events(
         if decode_bool_word(raw):
             allowed.append(candidate)
     if not allowed:
+        logger.debug(
+            "external_check materialize decision",
+            extra={
+                "adapter": "external_check_materializer",
+                "address": checker_address.lower(),
+                "decision": "none",
+                "reason": "no_candidate_allowed",
+                "candidate_count": len(candidates),
+            },
+        )
         return None
+    logger.debug(
+        "external_check materialize decision",
+        extra={
+            "adapter": "external_check_materializer",
+            "address": checker_address.lower(),
+            "decision": "finite_set",
+            "reason": "candidates_eth_call",
+            "candidate_count": len(candidates),
+            "allowed_count": len(allowed),
+        },
+    )
     return CapabilityExpr.finite_set(
         allowed,
         quality="lower_bound",

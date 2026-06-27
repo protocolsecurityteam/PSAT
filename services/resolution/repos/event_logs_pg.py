@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,8 +12,49 @@ from sqlalchemy.orm import Session
 
 from db.models import IndexedEventCursor, IndexedEventLog
 from services.resolution.adapters import EnumerationResult
+from utils.logging import record_stage_metric
+
+logger = logging.getLogger(__name__)
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+# Tally of partial fold outcomes broken out by ``partial_reason`` — bounded
+# because the reason set is finite (cold index, unresolved key, HyperSync
+# timeout / page-cap / typed transport error). A module-scoped counter gives an
+# inspectable running total; ``_note_partial_reason`` also folds it into the
+# resolution stage's timing artifact (when called under a worker job) so a spike
+# in cold-index defers or HyperSync timeouts is chartable rather than silent.
+_PARTIAL_REASON_COUNTS: "Counter[str]" = Counter()
+# Reasons that signal a genuine upstream degradation (vs. an expected cold-index
+# defer or a descriptor-shape miss) — these log at WARNING, the rest at DEBUG.
+_DEGRADED_PARTIAL_REASONS = {"hypersync_timeout", "hypersync_max_pages"}
+
+
+def _note_partial_reason(partial_reason: str | None, *, event_address: str, repo: str) -> int:
+    """Count + log one partial fold outcome, keyed by ``partial_reason``.
+
+    Returns the running count for that reason. A no-op for ``None`` (a complete
+    fold). The ``record_stage_metric`` write is a no-op outside a worker job
+    context, so repos can call this unconditionally.
+    """
+    if not partial_reason:
+        return 0
+    _PARTIAL_REASON_COUNTS[partial_reason] += 1
+    count = _PARTIAL_REASON_COUNTS[partial_reason]
+    record_stage_metric(f"event_fold_partial_{partial_reason}", count)
+    level = logging.WARNING if partial_reason in _DEGRADED_PARTIAL_REASONS else logging.DEBUG
+    logger.log(
+        level,
+        "event fold returned partial result: %s",
+        partial_reason,
+        extra={
+            "partial_reason": partial_reason,
+            "partial_reason_count": count,
+            "event_address": event_address,
+            "repo": repo,
+        },
+    )
+    return count
 
 
 @dataclass(frozen=True)
@@ -85,6 +128,7 @@ class PostgresEventLogRepo:
         # on ``backfill_complete`` so a cold/mid-backfill cursor defers to the
         # adapter's inline fallback instead of folding a partial history.
         if cursor_block is None or not complete:
+            _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
                 confidence="partial",
@@ -156,6 +200,7 @@ class PostgresEventLogRepo:
         complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
         last_indexed_block = min(complete_blocks) if complete_blocks else None
         if len(complete_blocks) != len(topic0s):
+            _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
                 confidence="partial",
@@ -230,6 +275,7 @@ class PostgresEventLogRepo:
         cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         complete = all(c_block is not None and done for c_block, done in cursor_states.values())
         if not complete:
+            _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
             return ValueFoldResult(entries=[], complete=False, partial_reason="no_index_cursor")
 
         rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=block)

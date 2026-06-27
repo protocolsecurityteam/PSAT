@@ -17,6 +17,7 @@ from typing import Callable
 
 from services.crawlers.defillama.core_assets import build_address_to_chain_map, load_core_assets
 from services.crawlers.defillama.extract import extract_addresses_from_file, extract_protocol
+from utils.logging import record_degraded, record_stage_metric, stream_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +37,42 @@ def clone_or_update_repo(repo_path: Path, progress: ProgressCallback | None = No
     if (repo_path / ".git").exists():
         logger.info("Updating existing repo at %s", repo_path)
         _emit_progress(progress, "Refreshing DefiLlama adapters repo")
-        subprocess.run(
+        rc = stream_subprocess(
             ["git", "-C", str(repo_path), "pull", "--ff-only"],
-            capture_output=True,
+            logger=logger,
+            source="git",
         )
+        # A failed pull (network blip, non-fast-forward) is non-fatal: the
+        # existing checkout is still scannable, just potentially stale. Surface
+        # it as degraded so a silently-stale repo missing new protocols is
+        # visible, rather than swallowing it via the old capture_output discard.
+        if rc != 0:
+            logger.warning(
+                "DefiLlama repo pull failed; scanning existing (possibly stale) checkout",
+                extra={"returncode": rc, "repo_path": str(repo_path)},
+            )
+            record_degraded(
+                phase="defillama_repo_pull",
+                exc=RuntimeError(f"git pull --ff-only exited {rc}"),
+                context={"repo_path": str(repo_path)},
+            )
     else:
         logger.info("Cloning DefiLlama-Adapters (shallow)...")
         _emit_progress(progress, "Cloning DefiLlama adapters repo")
         repo_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "clone", "--depth", "1", "https://github.com/DefiLlama/DefiLlama-Adapters.git", str(repo_path)],
-            check=True,
-        )
+        clone_cmd = [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "https://github.com/DefiLlama/DefiLlama-Adapters.git",
+            str(repo_path),
+        ]
+        rc = stream_subprocess(clone_cmd, logger=logger, source="git")
+        # Clone failure is fatal — there's nothing to scan. Preserve the prior
+        # check=True semantic by re-raising the same exception type.
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, clone_cmd)
 
 
 def _discover_protocols(projects_dir: Path) -> list[Path]:
@@ -127,8 +152,21 @@ def scan_protocol(
     protocol_dirs = _discover_protocols(projects_dir)
     matching = _find_matching_protocol(protocol_name, protocol_dirs)
     if not matching:
-        logger.warning("Protocol '%s' not found in DefiLlama-Adapters", protocol_name)
+        # A "not found" is indistinguishable from a matched-but-empty scan at
+        # the address-count level, so flag it explicitly: the metric lets the
+        # monitor chart the no-match rate, and record_degraded lands the miss
+        # in /api/jobs/{id}/errors instead of completing as a silent success.
+        logger.warning(
+            "Protocol not found in DefiLlama-Adapters",
+            extra={"protocol": protocol_name},
+        )
         _emit_progress(progress, f"No adapter match found for {protocol_name}")
+        record_stage_metric("protocol_matched", False)
+        record_degraded(
+            phase="defillama_match",
+            exc=RuntimeError(f"protocol {protocol_name!r} not found in DefiLlama-Adapters"),
+            context={"protocol": protocol_name},
+        )
         return {
             "protocol": protocol_name,
             "addresses": [],
@@ -136,6 +174,7 @@ def scan_protocol(
             "scan_time": 0,
         }
 
+    record_stage_metric("protocol_matched", True)
     start = time.time()
     proto_path = matching[0]
     _emit_progress(progress, f"Matched adapter {proto_path.stem}")

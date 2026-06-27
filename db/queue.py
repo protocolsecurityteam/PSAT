@@ -65,6 +65,13 @@ HEARTBEAT_EVENT_INDEXER = "event_log_indexer"
 HEARTBEAT_ENROLLMENT_RECONCILER = "enrollment_reconciler"
 HEARTBEAT_AUDIT_TEXT = "audit_text_extraction"
 HEARTBEAT_AUDIT_SCOPE = "audit_scope_extraction"
+# The three monitoring-daemon loops (scan/poll/TVL) run outside BaseWorker,
+# so each emits its own per-cycle ``record_heartbeat(detail={...})`` rather
+# than job-scoped metrics. Names are shared by the writers (the loops) and
+# the ``/api/fleet`` reader so the two can't drift.
+HEARTBEAT_PROTOCOL_SCANNER = "protocol_scanner"
+HEARTBEAT_PROTOCOL_POLLER = "protocol_poller"
+HEARTBEAT_PROTOCOL_TVL = "protocol_tvl"
 
 
 def record_heartbeat(process: str, *, status: str = "running", detail: dict[str, Any] | None = None) -> None:

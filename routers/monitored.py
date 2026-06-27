@@ -100,6 +100,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
 
         session.commit()
         session.refresh(existing)
+        deps.log_admin_mutation("monitoring_upsert", id=str(existing.id), protocol_id=protocol_id)
         return _monitored_contract_payload(existing)
 
 
@@ -120,6 +121,7 @@ def update_monitored_contract(contract_id: str, request: UpdateMonitoredContract
 
         session.commit()
         session.refresh(mc)
+        deps.log_admin_mutation("monitored_contract_update", id=str(mc.id))
         return _monitored_contract_payload(mc)
 
 

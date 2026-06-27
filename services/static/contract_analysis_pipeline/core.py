@@ -15,6 +15,7 @@ from typing import Any
 from slither.slither import Slither
 
 from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
+from utils.logging import record_degraded, record_stage_metric
 
 from .effects import EffectsArtifact, apply_authority_effect_labels, build_effects
 from .predicate_artifacts import (
@@ -205,7 +206,12 @@ def collect_contract_analysis_with_artifacts(
         with _phase("predicate_trees", durations_ms):
             predicate_trees_artifact, pause_info = build_predicate_artifacts_with_pause_info(subject_contract)
     except Exception as exc:
-        logger.exception("semantic predicate_trees emit failed for %s", project_dir)
+        logger.warning(
+            "semantic predicate_trees emit failed for %s",
+            project_dir,
+            extra={"exc_type": type(exc).__name__, "phase": "predicate_trees_emit"},
+        )
+        record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
         predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
         pause_info = {
             "pause_state_vars": [],
@@ -219,7 +225,12 @@ def collect_contract_analysis_with_artifacts(
         with _phase("effects", durations_ms):
             effects_artifact = build_effects(subject_contract)
     except Exception as exc:
-        logger.exception("semantic effects emit failed for %s", project_dir)
+        logger.warning(
+            "semantic effects emit failed for %s",
+            project_dir,
+            extra={"exc_type": type(exc).__name__, "phase": "effects_emit"},
+        )
+        record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
     # Cross-reference the two artifacts: label ownership/role mutation from the
@@ -228,8 +239,13 @@ def collect_contract_analysis_with_artifacts(
     with _phase("authority_effect_labels", durations_ms):
         try:
             apply_authority_effect_labels(subject_contract, effects_artifact, predicate_trees_artifact)
-        except Exception:
-            logger.exception("authority effect-label post-pass failed for %s", project_dir)
+        except Exception as exc:
+            logger.warning(
+                "authority effect-label post-pass failed for %s",
+                project_dir,
+                extra={"exc_type": type(exc).__name__, "phase": "authority_effect_labels"},
+            )
+            record_degraded(phase="authority_effect_labels", exc=exc, context={"project_dir": str(project_dir)})
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)
@@ -257,9 +273,15 @@ def collect_contract_analysis_with_artifacts(
     with _phase("secondary_impl_pointers", durations_ms):
         try:
             secondary_impl_pointers = detect_secondary_impl_pointers(subject_contract)
-        except Exception:
-            logger.exception("secondary-impl pointer detection failed for %s", project_dir)
+        except Exception as exc:
+            logger.warning(
+                "secondary-impl pointer detection failed for %s",
+                project_dir,
+                extra={"exc_type": type(exc).__name__, "phase": "secondary_impl_slot"},
+            )
+            record_degraded(phase="secondary_impl_slot", exc=exc, context={"project_dir": str(project_dir)})
             secondary_impl_pointers = []
+    record_stage_metric("secondary_impl_pointers", len(secondary_impl_pointers))
     slither_summary = _summarize_slither(slither_output)
     audit_alignment: AuditAlignment = {
         "status": "not_checked",
@@ -333,6 +355,12 @@ def _emit_pipeline_profile(
         ``durations_ms`` map and ``total_ms``.
     """
     threshold = _phase_log_threshold_ms()
+    # Fold every phase duration into the stage_timing artifact so the monitor UI
+    # can attribute analysis-phase cost — independent of the log-volume threshold
+    # below, which only governs the human-readable per-phase INFO lines.
+    for phase, ms in durations_ms.items():
+        record_stage_metric(f"phase_ms_{phase}", ms)
+    record_stage_metric("contract_analysis_total_ms", total_ms)
     for phase, ms in durations_ms.items():
         if ms < threshold:
             continue

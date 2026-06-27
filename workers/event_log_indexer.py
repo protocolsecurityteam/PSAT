@@ -20,7 +20,7 @@ from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from utils.etherscan import get_contract_creation_block
-from utils.logging import log_timed_phase
+from utils.logging import configure_logging, log_timed_phase
 from utils.rpc import require_rpc_url
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -134,6 +134,24 @@ class ScanSummary:
     # True when the pass stopped on its per-pass window budget (more cursors were
     # likely left unserviced) — the backfill loop uses this to re-run sooner.
     budget_exhausted: bool = False
+    # Address groups whose scan raised and was swallowed-and-continued this pass.
+    # Surfaced so the heartbeat can degrade on a total outage (every group failed,
+    # ``windows_scanned == 0``) instead of leaving a per-group traceback storm as
+    # the only evidence.
+    failed_groups: int = 0
+
+
+def _heartbeat_status_for_pass(status: str, summary: ScanSummary) -> str:
+    """Degrade a non-error pass whose every attempted group failed.
+
+    ``failed_groups > 0`` with ``windows_scanned == 0`` means no group advanced a
+    single window — a total upstream outage — which is degraded-but-continuing.
+    A partial failure (some groups scanned, one raised) stays ``running``: that's
+    ordinary per-group churn, not a daemon-health signal worth alerting on.
+    """
+    if status == "running" and summary.failed_groups and summary.windows_scanned == 0:
+        return "degraded"
+    return status
 
 
 def enroll_event_cursor(
@@ -219,6 +237,19 @@ def index_event_group_step(
         observed_hash = _hash_at(last)
         if observed_hash is not None and observed_hash != cursor.last_indexed_block_hash:
             rewind_to = max(0, last - confirmation_depth)
+            # A reorg rewind DELETEs already-indexed logs; without this line the
+            # data loss left no trail. WARNING (degraded-but-continuing): the
+            # indexer re-fetches the rewound range on the next pass.
+            logger.warning(
+                "event-log reorg detected; rewinding indexed logs before re-scan",
+                extra={
+                    "chain_id": chain_id,
+                    "event_address": event_address.lower(),
+                    "rewind_to": rewind_to,
+                    "rewind_from": last,
+                    "depth": last - rewind_to,
+                },
+            )
             # The delete is address-wide (all topics), so every sibling cursor
             # above the rewind point must come back with it — otherwise its
             # already-indexed range would be silently emptied.
@@ -358,6 +389,7 @@ def scan_enrolled_events(
     inserted = 0
     windows_scanned = 0
     caught_up_cursors = 0
+    failed_groups = 0
     pass_budget = max(1, max_windows_per_pass)
     # One confirmed-head target and one block-hash memo per pass: the head is a
     # per-chain fact, and hash lookups repeat across groups (every cursor
@@ -411,13 +443,21 @@ def scan_enrolled_events(
                 group_members_at_target = result.members_at_target
                 if result.group_complete:
                     break
-        except Exception:
+        except Exception as exc:
             session.rollback()
-            logger.exception(
-                "event indexer pass failed for chain=%s address=%s topics=%s",
-                chain_id,
-                event_address,
-                sorted(entry["topics"]),
+            failed_groups += 1
+            # Swallowed-and-continued: the next group still runs and the cursor
+            # resumes next pass. WARNING + exc_type (not logger.exception) — an
+            # outage once emitted 2,172 ERROR tracebacks here; the per-pass
+            # heartbeat carries the aggregate via ``failed_groups`` instead.
+            logger.warning(
+                "event indexer group scan failed; continuing to next group",
+                extra={
+                    "chain_id": chain_id,
+                    "event_address": event_address,
+                    "topics": sorted(entry["topics"]),
+                    "exc_type": type(exc).__name__,
+                },
             )
         caught_up_cursors += group_members_at_target
     return ScanSummary(
@@ -426,6 +466,7 @@ def scan_enrolled_events(
         caught_up_cursors=caught_up_cursors,
         total_cursors=len(rows),
         budget_exhausted=windows_scanned >= pass_budget,
+        failed_groups=failed_groups,
     )
 
 
@@ -722,11 +763,29 @@ def run_event_log_indexer_loop(
                         )
                         ph["windows_scanned"] = summary.windows_scanned
                         ph["inserted"] = summary.inserted
-                if enrolled or summary.inserted:
-                    logger.info("event log indexer pass: enrolled=%d inserted=%d", enrolled, summary.inserted)
             except Exception:
                 logger.exception("event log indexer backfill pass failed")
                 status = "error"
+            # One UNCONDITIONAL per-pass INFO carrying the cursor triad. The old
+            # line was gated on ``enrolled or inserted``, so it went silent during
+            # exactly the case that needs watching: a cold from-0 backfill grinding
+            # empty getLogs windows (0 inserted) while the heartbeat says "caught
+            # up". Emitting every pass makes that throughput stall visible.
+            status = _heartbeat_status_for_pass(status, summary)
+            logger.info(
+                "event log indexer pass complete",
+                extra={
+                    "enrolled": enrolled,
+                    "inserted": summary.inserted,
+                    "windows_scanned": summary.windows_scanned,
+                    "caught_up_cursors": summary.caught_up_cursors,
+                    "total_cursors": summary.total_cursors,
+                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                    "budget_exhausted": summary.budget_exhausted,
+                    "failed_groups": summary.failed_groups,
+                    "status": status,
+                },
+            )
             with state_lock:
                 published["summary"] = summary
                 published["enrolled"] = enrolled
@@ -799,11 +858,10 @@ def run_event_log_indexer_loop(
 def main() -> None:
     from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        force=True,
-    )
+    # JsonFormatter on the root logger so every line this daemon emits — and
+    # every ``extra={}`` field it already attaches (windows_scanned, inserted,
+    # exc_type, the cursor triad) — ships as queryable JSON instead of plaintext.
+    configure_logging()
     stop_event = Event()
 
     def handle_signal(signum, _frame):

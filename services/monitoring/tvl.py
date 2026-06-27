@@ -27,6 +27,8 @@ from db.models import (
     SessionLocal,
     TvlSnapshot,
 )
+from db.queue import record_heartbeat
+from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -337,20 +339,36 @@ def take_tvl_snapshot(
 
 def refresh_all_protocols(session: Session) -> int:
     """Take TVL snapshots for all protocols. Returns count of snapshots."""
+    started = time.monotonic()
     protocols = session.execute(select(Protocol)).scalars().all()
     count = 0
+    failures = 0
     for protocol in protocols:
         try:
             snapshot = take_tvl_snapshot(session, protocol.id)
             if snapshot:
                 count += 1
         except Exception as exc:
+            failures += 1
             logger.warning(
                 "TVL snapshot failed for protocol %s: %s",
                 protocol.name,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+    # One unconditional per-cycle summary even when nothing snapshotted, so a
+    # wedged TVL tracker is detectable. ``contracts_scanned`` carries the
+    # protocol count (TVL has no block range -> ``blocks_scanned=0``);
+    # ``events_found`` is snapshots written; any per-protocol failure -> partial.
+    emit_monitor_cycle(
+        HEARTBEAT_PROTOCOL_TVL,
+        started=started,
+        contracts_scanned=len(protocols),
+        blocks_scanned=0,
+        events_found=count,
+        partial=failures > 0,
+        note=f"{failures}_failed" if failures else None,
+    )
     return count
 
 
@@ -370,4 +388,11 @@ def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
                     logger.info("TVL refresh complete: %d protocol(s) snapshotted", count)
         except Exception as exc:
             logger.warning("TVL refresh cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            # ``refresh_all_protocols`` raised before it could emit its own
+            # cycle summary — still beat so the fleet view sees a degraded cycle.
+            record_heartbeat(
+                HEARTBEAT_PROTOCOL_TVL,
+                status="degraded",
+                detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
+            )
         time.sleep(interval)

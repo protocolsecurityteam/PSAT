@@ -46,11 +46,19 @@ def _bump_materialize_metric(key: str) -> None:
     copy_context — so guard the read-modify-write. A cache-hit-rate collapse
     here is the canonical cause of a resolution stage silently multiplying its
     forge/Slither spend run-over-run. No-op outside a worker job context."""
+    _bump_stage_metric(key)
+
+
+def _bump_stage_metric(key: str, n: int = 1) -> None:
+    """Thread-safe ``+n`` to a per-job stage metric. ``record_stage_metric``
+    overwrites, but the BFS fan-out (and the per-contract mapping/proxy folds)
+    need an increment across contracts and worker threads, which inherit
+    ``stage_metrics_var`` via copy_context. No-op outside a worker job context."""
     metrics = stage_metrics_var.get()
     if metrics is None:
         return
     with _MATERIALIZE_METRIC_LOCK:
-        metrics[key] = metrics.get(key, 0) + 1
+        metrics[key] = metrics.get(key, 0) + n
 
 
 class LoadedArtifacts(TypedDict):
@@ -309,7 +317,14 @@ def _materialize_contract_artifacts(
         if classification.get("type") == "proxy":
             impl = classification.get("implementation")
             if impl:
-                logger.info("Recursive resolve: %s is a proxy, using impl %s", address, impl)
+                # Per-contract redirect (one per nested proxy in the BFS); was the
+                # single loudest INFO in recursive output. DEBUG per-iteration + a
+                # folded ``proxies_redirected`` count for the lifecycle signal.
+                logger.debug(
+                    "Recursive resolve: proxy redirect to impl",
+                    extra={"address": address, "implementation": impl},
+                )
+                _bump_stage_metric("proxies_redirected")
                 effective_address = impl
     except Exception as exc:
         logger.debug("Recursive resolve: proxy check failed for %s: %s", address, exc)
@@ -658,10 +673,12 @@ def _replay_mapping_principals(
     """
     hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
     logger.info(
-        "mapping_enumerator: %s has %d writer-event specs, token=%s",
-        address,
-        len(mapping_specs),
-        "present" if hypersync_token else "missing",
+        "mapping_enumerator: writer-event specs collected",
+        extra={
+            "address": address,
+            "spec_count": len(mapping_specs),
+            "token": "present" if hypersync_token else "missing",
+        },
     )
     if not hypersync_token:
         return "skipped"
@@ -670,7 +687,10 @@ def _replay_mapping_principals(
 
     scan_floor = resolve_scan_floor(address, 1)
     if scan_floor is None:
-        logger.info("mapping_enumerator: %s deferring replay (no scan floor resolved)", address)
+        logger.info(
+            "mapping_enumerator: deferring replay (no scan floor resolved)",
+            extra={"address": address, "decision": "deferred_no_floor"},
+        )
         return "deferred_no_floor"
 
     from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
@@ -696,18 +716,32 @@ def _replay_mapping_principals(
     enumerated = list(result["principals"])
     enumeration_status = result["status"]
     if enumeration_status != "complete":
+        # A truncated/errored scan returns a partial present-set: authorized
+        # addresses past the bound are silently absent. Surface it as a degraded
+        # breadcrumb + a chartable count, not just a WARNING line.
+        record_degraded(
+            phase="mapping_enum_incomplete",
+            exc=RuntimeError(f"mapping enumeration {enumeration_status}"),
+            context={
+                "address": address,
+                "status": enumeration_status,
+                "pages_fetched": result["pages_fetched"],
+                "last_block_scanned": result["last_block_scanned"],
+            },
+        )
+        _bump_stage_metric("mapping_enum_incomplete")
         logger.warning(
-            "mapping_enumerator: %s INCOMPLETE status=%s pages=%d last_block=%d (principal set may be missing entries)",
-            address,
-            enumeration_status,
-            result["pages_fetched"],
-            result["last_block_scanned"],
+            "mapping_enumerator: incomplete enumeration (principal set may be missing entries)",
+            extra={
+                "address": address,
+                "enumeration_status": enumeration_status,
+                "pages_fetched": result["pages_fetched"],
+                "last_block_scanned": result["last_block_scanned"],
+            },
         )
     logger.info(
-        "mapping_enumerator: %s returned %d principals (status=%s)",
-        address,
-        len(enumerated),
-        enumeration_status,
+        "mapping_enumerator: enumeration complete",
+        extra={"address": address, "principals": len(enumerated), "enumeration_status": enumeration_status},
     )
 
     for principal in enumerated:

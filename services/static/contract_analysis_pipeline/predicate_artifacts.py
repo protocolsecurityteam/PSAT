@@ -32,6 +32,8 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from utils.logging import record_stage_metric
+
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
@@ -240,6 +242,7 @@ def build_predicate_artifacts_with_pause_info(
     per_function_ms: list[tuple[str, int]] = []
     slow_threshold_ms = _slow_function_threshold_ms()
     pass_durations_ms: dict[str, int] = {}
+    fns_attempted = 0
 
     started = time.monotonic()
     # Scope a per-contract helper-engine cache for the cross-fn
@@ -269,6 +272,7 @@ def build_predicate_artifacts_with_pause_info(
         for fn in getattr(contract, "functions_entry_points", []) or []:
             if not _is_externally_callable(fn):
                 continue
+            fns_attempted += 1
             canonical = _canonical_signature(fn)
             if canonical is not None and canonical != fn.full_name:
                 canonical_signatures[fn.full_name] = canonical
@@ -340,6 +344,14 @@ def build_predicate_artifacts_with_pause_info(
 
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}
+
+    # Built-vs-attempted split: ``fns_attempted`` is every externally-callable
+    # entry point we ran the builder over; ``len(trees)`` is how many produced a
+    # guard tree. A guard-less function (``build_predicate_tree`` -> ``None``) is
+    # the *normal* unguarded case, so the gap is expected — these are chartable
+    # counts, not a degraded signal, so no WARNING is paired here.
+    record_stage_metric("predicate_fns_attempted", fns_attempted)
+    record_stage_metric("predicate_trees_built", len(trees))
 
     artifact = {
         "schema_version": SCHEMA_VERSION,

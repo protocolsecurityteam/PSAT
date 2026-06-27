@@ -55,6 +55,7 @@ def upsert_address_label(address: str, payload: AddressLabelUpsert) -> dict[str,
             row.name = payload.name.strip()
             row.note = payload.note
         session.commit()
+        deps.log_admin_mutation("address_label_upsert", id=a)
         return {
             "address": a,
             "name": row.name,
@@ -72,4 +73,5 @@ def delete_address_label(address: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Label not found")
         session.delete(row)
         session.commit()
+        deps.log_admin_mutation("address_label_delete", id=a)
         return {"address": a, "deleted": True}
