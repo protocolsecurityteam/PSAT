@@ -126,10 +126,8 @@ class SelectionWorker(BaseWorker):
         if job is None:
             return None
         logger.warning(
-            "Worker %s: claiming stuck selection job %s past %ss timeout — DApp/DefiLlama sibling(s) did not settle",
-            self.worker_id,
-            job.id,
-            _STUCK_SELECTION_TIMEOUT,
+            "Claiming stuck selection job past timeout — DApp/DefiLlama sibling(s) did not settle",
+            extra={"stuck_timeout_s": _STUCK_SELECTION_TIMEOUT},
         )
         job.status = JobStatus.processing
         job.worker_id = self.worker_id
@@ -150,10 +148,8 @@ class SelectionWorker(BaseWorker):
 
         self.update_detail(session, job, f"Preparing selection for {job.company or 'protocol'}")
         logger.info(
-            "Selection started for job %s: protocol_id=%s, analyze_limit=%d",
-            job.id,
-            job.protocol_id,
-            analyze_limit,
+            "Selection started",
+            extra={"protocol_id": job.protocol_id, "analyze_limit": analyze_limit},
         )
 
         # Skip superseded historical impls (audit-coverage anchors only); the
@@ -170,9 +166,10 @@ class SelectionWorker(BaseWorker):
             .scalars()
             .all()
         )
+        record_stage_metric("candidates", len(candidates))
 
         if not candidates:
-            logger.info("Selection job %s: no unanalyzed candidates", job.id)
+            logger.info("Selection found no unanalyzed candidates")
             self._finish(session, job, ranked=[], child_ids=[])
             return
 
@@ -192,12 +189,17 @@ class SelectionWorker(BaseWorker):
             )
             >= MIN_CONFIDENCE_THRESHOLD
         ]
+        dropped = len(candidates) - len(eligible_rows)
+        record_stage_metric("eligible", len(eligible_rows))
+        record_stage_metric("dropped", dropped)
         if not eligible_rows:
             logger.info(
-                "Selection job %s: %d candidates, none cleared confidence threshold %.2f",
-                job.id,
-                len(candidates),
-                MIN_CONFIDENCE_THRESHOLD,
+                "Selection: no candidates cleared confidence threshold",
+                extra={
+                    "candidates": len(candidates),
+                    "dropped": dropped,
+                    "threshold": MIN_CONFIDENCE_THRESHOLD,
+                },
             )
             session.commit()
             self._finish(session, job, ranked=[], child_ids=[])
@@ -206,6 +208,14 @@ class SelectionWorker(BaseWorker):
         with log_timed_phase(logger, "ranking") as ph:
             ranked_dicts = rank_contract_rows(eligible_rows)
             ph["count"] = len(eligible_rows)
+
+        # On-chain activity is fetched per-contract during ranking; a row with no
+        # last_active fell back to the neutral 0.5 (Etherscan unavailable /
+        # unsupported chain). Splitting the count surfaces ranking made on neutral
+        # data — otherwise indistinguishable from a legitimately-inactive contract.
+        activity_fetched = sum(1 for d in ranked_dicts if (d.get("activity") or {}).get("last_active") is not None)
+        record_stage_metric("activity_fetched", activity_fetched)
+        record_stage_metric("activity_neutral", len(ranked_dicts) - activity_fetched)
 
         # Persist rank_score onto the row so UI listings see the same ordering the selector picked.
         by_key: dict[tuple[str, str | None], dict] = {(d["__row_address"], d["__row_chain"]): d for d in ranked_dicts}
@@ -244,10 +254,8 @@ class SelectionWorker(BaseWorker):
         remaining = max(0, analyze_limit - already_used)
         if remaining == 0:
             logger.info(
-                "Selection job %s: analyze_limit %d already filled (%d existing children)",
-                job.id,
-                analyze_limit,
-                already_used,
+                "Selection budget already filled",
+                extra={"analyze_limit": analyze_limit, "existing_children": already_used},
             )
             return []
 
@@ -264,26 +272,34 @@ class SelectionWorker(BaseWorker):
             if existing is not None:
                 if not is_known_proxy(session, addr, chain=chain):
                     logger.info(
-                        "Selection job %s: address %s already has job %s, skipping",
-                        job.id,
-                        addr,
-                        existing.id,
+                        "Skipping candidate: address already has a job",
+                        extra={
+                            "address": addr,
+                            "chain": chain,
+                            "existing_job_id": str(existing.id),
+                            "reason": "existing_job",
+                        },
                     )
                     continue
                 if force and _existing_in_same_cascade(session, addr, chain, root_job_id):
                     logger.info(
-                        "Selection job %s: proxy %s already has job %s in this cascade, "
-                        "skipping (--force in-cascade dedupe)",
-                        job.id,
-                        addr,
-                        existing.id,
+                        "Skipping candidate: proxy already queued in this cascade",
+                        extra={
+                            "address": addr,
+                            "chain": chain,
+                            "existing_job_id": str(existing.id),
+                            "reason": "in_cascade_dedupe",
+                        },
                     )
                     continue
                 logger.info(
-                    "Selection job %s: proxy %s has existing job %s but re-queuing for upgrade check",
-                    job.id,
-                    addr,
-                    existing.id,
+                    "Re-queuing proxy for upgrade check",
+                    extra={
+                        "address": addr,
+                        "chain": chain,
+                        "existing_job_id": str(existing.id),
+                        "reason": "proxy_upgrade_recheck",
+                    },
                 )
             selected.append(entry)
 
@@ -321,12 +337,15 @@ class SelectionWorker(BaseWorker):
                 }
             )
             logger.info(
-                "Selection job %s: queued %s (%s, sources=%s, rank=%.4f)",
-                job.id,
-                addr,
-                name,
-                ",".join(sources) if sources else "unknown",
-                entry.get("rank_score") or 0.0,
+                "Queued analysis child for candidate",
+                extra={
+                    "address": addr,
+                    "chain": chain,
+                    "contract_name": name,
+                    "discovery_sources": list(sources),
+                    "rank_score": entry.get("rank_score"),
+                    "child_job_id": str(child_job.id),
+                },
             )
         return child_ids
 
@@ -365,10 +384,24 @@ class SelectionWorker(BaseWorker):
         record_stage_metric("queued", len(child_ids))
         if child_ids:
             detail = f"Selection complete: queued {len(child_ids)} of {len(ranked)} ranked candidates"
+            outcome = "queued"
         elif ranked:
             detail = f"Selection complete: {len(ranked)} candidates, none queued (budget full or all deduped)"
+            outcome = "none_queued"
         else:
             detail = "Selection complete: no eligible candidates"
+            outcome = "no_candidates"
+        logger.info(
+            "Selection complete",
+            extra={
+                "outcome": outcome,
+                "ranked_count": len(ranked),
+                "queued_count": len(child_ids),
+                "selected": [
+                    {"address": c.get("address"), "rank_score": c.get("rank_score")} for c in child_ids
+                ],
+            },
+        )
         complete_job(session, job.id, detail)
         raise JobHandledDirectly()
 
