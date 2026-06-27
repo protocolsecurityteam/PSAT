@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from typing import Any, TypeVar
 
+from utils.logging import record_degraded
 from utils.rpc import MAX_BATCH_SIZE, rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,13 @@ def _call_heartbeat(heartbeat: Callable[[], None] | None) -> None:
     except Exception as exc:
         if _is_lease_lost(exc):
             raise
-        logger.exception("parallel_map: heartbeat raised — continuing")
+        # Swallowed-continue: a failed heartbeat must not kill the fan-out, so
+        # this is degraded-but-continuing (WARNING), not a job-failing ERROR.
+        logger.warning(
+            "parallel_map: heartbeat raised — continuing",
+            extra={"exc_type": type(exc).__name__},
+        )
+        record_degraded(phase="parallel_heartbeat", exc=exc)
 
 
 def parallel_map(
@@ -262,8 +269,15 @@ def parallel_rpc_calls(
         offset = futures[fut]
         try:
             chunk_results = fut.result()
-        except Exception:
-            logger.exception("parallel_rpc_calls: chunk at offset %d failed wholesale", offset)
+        except Exception as exc:
+            # Swallowed-continue: this chunk's slots keep their (None, True)
+            # error default and the remaining chunks proceed, so it is
+            # degraded-but-continuing (WARNING + exc_type), not a job ERROR.
+            logger.warning(
+                "parallel_rpc_calls: chunk failed wholesale — continuing",
+                extra={"chunk_start": offset, "exc_type": type(exc).__name__},
+            )
+            record_degraded(phase="parallel_rpc_chunk", exc=exc, context={"chunk_start": offset})
             continue
         for i, item in enumerate(chunk_results):
             results[offset + i] = item

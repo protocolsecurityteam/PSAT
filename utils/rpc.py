@@ -13,6 +13,8 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
+from utils.logging import record_degraded
+
 logger = logging.getLogger(__name__)
 
 JSON_RPC_TIMEOUT_SECONDS = 10
@@ -454,6 +456,9 @@ def rpc_request(
             payload = response.json()
             if payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
+            # Per-call DEBUG — hot path, so never above DEBUG. Facts in extra
+            # so a single RPC can be correlated by method under a bound trace.
+            logger.debug("rpc call", extra={"method": method, "attempt": attempt})
             return payload.get("result")
         except (requests.ConnectionError, requests.Timeout, OSError) as exc:
             if attempt < retries:
@@ -698,10 +703,16 @@ def rpc_batch_request_with_status(
             )
             response.raise_for_status()
             payload = response.json()
-        except Exception:
+        except Exception as exc:
             # Whole-chunk failure — leave defaults as (None, True). This
             # is the conservative choice: caller will skip caching and
-            # treat results as transient.
+            # treat results as transient. Degraded-but-continuing, so
+            # WARNING (not ERROR) with the chunk offset for correlation.
+            logger.warning(
+                "rpc batch chunk failed wholesale — slots flagged transient",
+                extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
+            )
+            record_degraded(phase="rpc_batch_chunk", exc=exc, context={"chunk_start": chunk_start})
             continue
 
         if isinstance(payload, dict):
@@ -823,6 +834,14 @@ def eth_call_batch(
             from utils.secrets import sanitize_string
 
             msg = f"transport: {sanitize_string(str(exc))}"
+            # Whole-chunk transport failure — every slot flagged success=False
+            # with no revert data (caller withholds, never upgrades). Degraded
+            # but continuing, so WARNING + the chunk offset for correlation.
+            logger.warning(
+                "eth_call batch chunk failed wholesale — slots flagged transient",
+                extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
+            )
+            record_degraded(phase="eth_call_batch_chunk", exc=exc, context={"chunk_start": chunk_start})
             for i in range(len(chunk)):
                 results[chunk_start + i] = EthCallResult(False, "0x", None, msg)
             continue

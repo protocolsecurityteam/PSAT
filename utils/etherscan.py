@@ -17,6 +17,8 @@ import requests
 from dotenv import load_dotenv
 from eth_utils.crypto import keccak
 
+from utils.logging import record_degraded
+
 logger = logging.getLogger(__name__)
 
 ETHERSCAN_API = "https://api.etherscan.io/v2/api"
@@ -329,11 +331,17 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
 
         result_str = str(data.get("result", ""))
         if "rate limit" in result_str.lower() and attempt < _RATE_LIMIT_RETRIES:
-            logger.warning(
-                "Etherscan rate limit hit, retrying in %.1fs (attempt %d/%d)",
-                backoff,
-                attempt + 1,
-                _RATE_LIMIT_RETRIES,
+            # Per-retry line is per-iteration detail → DEBUG (one summary
+            # WARNING is emitted once on exhaustion below, not per attempt).
+            logger.debug(
+                "Etherscan rate limit hit, retrying",
+                extra={
+                    "module": module,
+                    "action": action,
+                    "backoff_s": backoff,
+                    "attempt": attempt + 1,
+                    "max_retries": _RATE_LIMIT_RETRIES,
+                },
             )
             time.sleep(backoff)
             backoff *= 2
@@ -341,7 +349,15 @@ def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
 
         raise RuntimeError(f"Etherscan error: {data.get('message', 'unknown')} - {result_str}")
 
-    raise RuntimeError("Etherscan rate limit: max retries exceeded")
+    # Single WARNING on retry exhaustion — the one degraded summary for a
+    # sustained rate-limit, replacing the per-attempt noise above.
+    exhausted = RuntimeError("Etherscan rate limit: max retries exceeded")
+    logger.warning(
+        "Etherscan rate limit: max retries exceeded",
+        extra={"module": module, "action": action, "max_retries": _RATE_LIMIT_RETRIES},
+    )
+    record_degraded(phase="etherscan_rate_limit", exc=exhausted, context={"module": module, "action": action})
+    raise exhausted
 
 
 def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str | None = None) -> int | None:
@@ -469,9 +485,22 @@ def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
     try:
         data = get("contract", "getsourcecode", address=address)
         result = data["result"][0]
-    except Exception:
+    except Exception as exc:
+        # Errored fetch (network/rate-limit/shape) — distinct from a verified
+        # contract that simply has no name. WARNING so an upstream outage is a
+        # visible breadcrumb instead of silently collapsing to an empty result.
+        logger.warning(
+            "Etherscan getsourcecode failed",
+            extra={"address": address, "exc_type": type(exc).__name__},
+        )
+        record_degraded(phase="etherscan_getsourcecode", exc=exc, context={"address": address})
         return None, {}
     name = (result.get("ContractName") or "").strip() or None
+    if name is None:
+        # Not an error: an unverified contract returns status=1 with empty
+        # source/name. DEBUG keeps it off the WARNING channel the errored
+        # fetch above owns.
+        logger.debug("Etherscan: contract unverified (empty name)", extra={"address": address})
     selector_map = _build_selector_map(result.get("ABI", ""))
     return name, selector_map
 
