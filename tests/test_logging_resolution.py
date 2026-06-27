@@ -42,7 +42,7 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
         with bind_trace_context(trace_id="t", job_id="j", stage="resolution", worker_id="w"):
             status = recursive._replay_mapping_principals(
                 address="0x" + "ab" * 20,
-                mapping_specs=[{"mapping_name": "allow"}],
+                mapping_specs=[{"mapping_name": "allow"}],  # type: ignore[arg-type]
                 contract_node_id="address:0x" + "ab" * 20,
                 depth=0,
                 nodes={},
@@ -89,7 +89,7 @@ def test_event_indexed_external_check_emits_decision_extra(caplog):
     descriptor = {"callee_selector": None}
     hint = {"topic0": "0x" + "11" * 32, "direction": "add"}
     with caplog.at_level(logging.DEBUG, logger="services.resolution.adapters.event_indexed"):
-        event_indexed.EventIndexedAdapter()._external_check(descriptor, hint, ctx, ["event_address_unresolved"])
+        event_indexed.EventIndexedAdapter()._external_check(descriptor, hint, ctx, ["event_address_unresolved"])  # type: ignore[arg-type]
 
     rec = next(r for r in caplog.records if getattr(r, "adapter", None) == "event_indexed")
     assert rec.decision == "external_check"
@@ -99,7 +99,7 @@ def test_event_indexed_external_check_emits_decision_extra(caplog):
 def test_predicate_evaluator_leaf_decision_extra(caplog):
     tree = {"op": "LEAF", "leaf": {"kind": "unsupported", "unsupported_reason": "x"}}
     with caplog.at_level(logging.DEBUG, logger="services.resolution.predicate_evaluator"):
-        cap = evaluate_tree(tree, EvaluationContext())
+        cap = evaluate_tree(tree, EvaluationContext())  # type: ignore[arg-type]
 
     assert cap.kind == "unsupported"
     rec = next(r for r in caplog.records if getattr(r, "adapter", None) == "predicate_evaluator")

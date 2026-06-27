@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -79,9 +80,7 @@ def test_request_log_helper_warns_on_5xx_and_slow():
     assert records[-1].status_code == 503
     # Slow 2xx → WARNING on duration alone.
     with _capture(log) as records:
-        api._log_request(
-            method="GET", path="/x", status_code=200, duration_ms=api._SLOW_REQUEST_MS + 1, trace_id="t"
-        )
+        api._log_request(method="GET", path="/x", status_code=200, duration_ms=api._SLOW_REQUEST_MS + 1, trace_id="t")
     assert records[-1].levelno == logging.WARNING
 
 
@@ -189,7 +188,7 @@ class _capture:
         self._logger = logger
         self._handler = _ListHandler()
 
-    def __enter__(self) -> list[logging.LogRecord]:
+    def __enter__(self) -> list[Any]:
         self._prev_level = self._logger.level
         self._logger.setLevel(logging.DEBUG)
         self._logger.addHandler(self._handler)

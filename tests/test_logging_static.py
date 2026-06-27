@@ -74,11 +74,15 @@ def _stub_analysis_phases(monkeypatch):
     monkeypatch.setattr(core, "_select_subject_contract", lambda *_a, **_k: subject)
     monkeypatch.setattr(core, "build_effects", lambda *_a, **_k: {})
     monkeypatch.setattr(core, "apply_authority_effect_labels", lambda *_a, **_k: None)
-    monkeypatch.setattr(core, "_detect_contract_classification", lambda *_a, **_k: {
-        "standards": [],
-        "is_factory": False,
-        "is_nft": False,
-    })
+    monkeypatch.setattr(
+        core,
+        "_detect_contract_classification",
+        lambda *_a, **_k: {
+            "standards": [],
+            "is_factory": False,
+            "is_nft": False,
+        },
+    )
     monkeypatch.setattr(core, "_build_semantic_control_summary", lambda *_a, **_k: {"role_definitions": []})
     monkeypatch.setattr(core, "build_controller_tracking", lambda *_a, **_k: {})
     monkeypatch.setattr(core, "_detect_upgradeability", lambda *_a, **_k: {"is_upgradeable": False})
@@ -130,7 +134,7 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
     assert getattr(rec, "exc_type", None) == "RuntimeError"
 
     # Pipeline continued: degraded artifact + stage metrics still emitted.
-    assert trees["error"]
+    assert trees is not None and trees["error"]
     assert analysis["analysis_status"]["static_analysis_completed"] is True
     assert metrics["secondary_impl_pointers"] == 0
     assert any(k.startswith("phase_ms_") for k in metrics)

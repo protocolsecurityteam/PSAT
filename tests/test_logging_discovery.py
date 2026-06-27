@@ -89,9 +89,7 @@ def test_classifier_no_fallback_metric_is_zero(monkeypatch):
 def test_run_discovery_folds_budget_metrics(monkeypatch):
     from services.discovery import run_discovery as rd
 
-    monkeypatch.setattr(
-        rd, "_cached_deep_research", lambda *a, **k: {"data": {"auditReports": [], "contracts": []}}
-    )
+    monkeypatch.setattr(rd, "_cached_deep_research", lambda *a, **k: {"data": {"auditReports": [], "contracts": []}})
     monkeypatch.setattr(rd.audit_reports_mod, "search_audit_reports", lambda *a, **k: {"reports": []})
     monkeypatch.setattr(rd.inventory_mod, "search_protocol_inventory", lambda *a, **k: {"contracts": []})
     monkeypatch.setattr(rd, "_needs_dependency_pass", lambda *a, **k: False)

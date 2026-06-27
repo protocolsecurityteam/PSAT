@@ -17,11 +17,7 @@ from utils.logging import JsonFormatter, stream_subprocess, uvicorn_log_config
 
 def test_stream_subprocess_streams_lines_at_debug_with_source(caplog):
     logger = logging.getLogger("test.stream_subprocess.ok")
-    code = (
-        "import sys; "
-        "print('out-line'); "
-        "print('err-line', file=sys.stderr)"
-    )
+    code = "import sys; print('out-line'); print('err-line', file=sys.stderr)"
     with caplog.at_level(logging.DEBUG, logger=logger.name):
         rc = stream_subprocess(
             [sys.executable, "-c", code],

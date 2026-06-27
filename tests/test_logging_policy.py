@@ -158,11 +158,7 @@ def test_zero_write_path_degrades_and_records_metric(monkeypatch: pytest.MonkeyP
     assert len(db_write_degraded) == 1
     assert db_write_degraded[0].severity == "degraded"
 
-    warnings = [
-        r
-        for r in records
-        if r.levelno == logging.WARNING and "wrote zero DB rows" in r.getMessage()
-    ]
+    warnings = [r for r in records if r.levelno == logging.WARNING and "wrote zero DB rows" in r.getMessage()]
     assert len(warnings) == 1
     # The address is a queryable field, not only in the message text.
     assert getattr(warnings[0], "address", None) == TARGET_ADDRESS

@@ -63,10 +63,10 @@ def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
     sentinel = object()
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
         summary = scan_enrolled_events(
-            session,
-            fetchers={1: sentinel},
+            session,  # type: ignore[arg-type]
+            fetchers={1: sentinel},  # type: ignore[arg-type]
             head_fetchers={1: _BoomHead()},
-            block_hash_fetchers={1: sentinel},
+            block_hash_fetchers={1: sentinel},  # type: ignore[arg-type]
         )
 
     assert summary.failed_groups == 1
@@ -147,9 +147,7 @@ def test_note_partial_reason_counts_and_levels(caplog):
     assert metrics["event_fold_partial_no_index_cursor"] == 2
     assert metrics["event_fold_partial_hypersync_timeout"] == 1
 
-    by_reason = {
-        (r.partial_reason, r.levelno) for r in caplog.records if r.name == event_logs_pg.__name__
-    }
+    by_reason = {(r.partial_reason, r.levelno) for r in caplog.records if r.name == event_logs_pg.__name__}
     assert ("no_index_cursor", logging.DEBUG) in by_reason
     assert ("hypersync_timeout", logging.WARNING) in by_reason
 

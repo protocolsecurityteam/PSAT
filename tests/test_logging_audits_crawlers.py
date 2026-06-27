@@ -184,9 +184,7 @@ def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
     monkeypatch.setattr(
         scope_mod,
         "locate_scope_section",
-        lambda text: [
-            ScopeSection(start_page=1, end_page=1, header="Scope", text_slice="MyContract")
-        ],
+        lambda text: [ScopeSection(start_page=1, end_page=1, header="Scope", text_slice="MyContract")],
     )
 
     def _boom(*a, **k):

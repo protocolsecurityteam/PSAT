@@ -245,9 +245,7 @@ def collect_contract_analysis_with_artifacts(
                 project_dir,
                 extra={"exc_type": type(exc).__name__, "phase": "authority_effect_labels"},
             )
-            record_degraded(
-                phase="authority_effect_labels", exc=exc, context={"project_dir": str(project_dir)}
-            )
+            record_degraded(phase="authority_effect_labels", exc=exc, context={"project_dir": str(project_dir)})
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)
@@ -281,9 +279,7 @@ def collect_contract_analysis_with_artifacts(
                 project_dir,
                 extra={"exc_type": type(exc).__name__, "phase": "secondary_impl_slot"},
             )
-            record_degraded(
-                phase="secondary_impl_slot", exc=exc, context={"project_dir": str(project_dir)}
-            )
+            record_degraded(phase="secondary_impl_slot", exc=exc, context={"project_dir": str(project_dir)})
             secondary_impl_pointers = []
     record_stage_metric("secondary_impl_pointers", len(secondary_impl_pointers))
     slither_summary = _summarize_slither(slither_output)

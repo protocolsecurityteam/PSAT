@@ -397,9 +397,7 @@ class SelectionWorker(BaseWorker):
                 "outcome": outcome,
                 "ranked_count": len(ranked),
                 "queued_count": len(child_ids),
-                "selected": [
-                    {"address": c.get("address"), "rank_score": c.get("rank_score")} for c in child_ids
-                ],
+                "selected": [{"address": c.get("address"), "rank_score": c.get("rank_score")} for c in child_ids],
             },
         )
         complete_job(session, job.id, detail)
