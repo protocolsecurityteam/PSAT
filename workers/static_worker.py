@@ -9,7 +9,6 @@ import re
 import shutil
 import tempfile
 import textwrap
-import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -971,23 +970,15 @@ class StaticWorker(BaseWorker):
                 # CLI subprocess that produced detector findings was removed;
                 # vulnerability triage is now an out-of-band concern, not part
                 # of the cascade pipeline).
-                t0 = time.monotonic()
-                analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
-                logger.info(
-                    "static phase complete: contract analysis",
-                    extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "contract_analysis"},
-                )
+                with log_timed_phase(logger, "contract_analysis"):
+                    analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
 
                 if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
                 # Phase 2: Control tracking plan
-                t0 = time.monotonic()
-                self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
-                logger.info(
-                    "static phase complete: tracking plan",
-                    extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "tracking_plan"},
-                )
+                with log_timed_phase(logger, "tracking_plan"):
+                    self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
                 secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
 
             # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
@@ -1481,14 +1472,9 @@ class StaticWorker(BaseWorker):
         def _hb() -> None:
             self._heartbeat(session, job)
 
-        t0 = time.monotonic()
         sub_phases = [("static", run_static), ("dynamic", run_dynamic), ("upgrade_history", run_upgrade_history)]
-        results = parallel_map(lambda task: task[1](), sub_phases, max_workers=3, heartbeat=_hb)
-        elapsed_parallel = time.monotonic() - t0
-        logger.info(
-            "static phase complete: dependency parallel section",
-            extra={"duration_ms": int(elapsed_parallel * 1000), "phase": "dependency_parallel"},
-        )
+        with log_timed_phase(logger, "dependency_parallel"):
+            results = parallel_map(lambda task: task[1](), sub_phases, max_workers=3, heartbeat=_hb)
 
         outcomes: dict[str, object | BaseException] = {
             name: outcome for (name, _fn), (_task, outcome) in zip(sub_phases, results)
@@ -1595,7 +1581,6 @@ class StaticWorker(BaseWorker):
             )
             record_stage_metric("dependencies", len(unique_deps))
             try:
-                t0 = time.monotonic()
                 from services.discovery.static_dependencies import normalize_address
 
                 pre_classified = {}
@@ -1612,31 +1597,25 @@ class StaticWorker(BaseWorker):
                         if cls_addr not in pre_classified:
                             pre_classified[cls_addr] = cls_info
 
-                cls_output = classify_contracts(
-                    address,
-                    unique_deps,
-                    resolved_rpc,
-                    dynamic_edges=(dyn_output or {}).get("dependency_graph"),
-                    code_cache=None,
-                    pre_classified=pre_classified or None,
-                )
-                # Store classifications artifact for future cache hits
-                store_artifact(session, job.id, "classifications", data=cls_output)
-                record_stage_metric("discovered_addresses", len(cls_output.get("discovered_addresses", [])))
-                logger.info(
-                    "static phase complete: classification (%d deps)",
-                    len(unique_deps),
-                    extra={
-                        "duration_ms": int((time.monotonic() - t0) * 1000),
-                        "phase": "classification",
-                        "dep_count": len(unique_deps),
-                    },
-                )
+                with log_timed_phase(logger, "classification", dep_count=len(unique_deps)) as ph:
+                    cls_output = classify_contracts(
+                        address,
+                        unique_deps,
+                        resolved_rpc,
+                        dynamic_edges=(dyn_output or {}).get("dependency_graph"),
+                        code_cache=None,
+                        pre_classified=pre_classified or None,
+                    )
+                    # Store classifications artifact for future cache hits
+                    store_artifact(session, job.id, "classifications", data=cls_output)
+                    discovered_count = len(cls_output.get("discovered_addresses", []))
+                    record_stage_metric("discovered_addresses", discovered_count)
+                    ph["discovered"] = discovered_count
                 logger.info(
                     "Static stage dependency classification complete for job %s address=%s discovered=%d",
                     job.id,
                     address,
-                    len(cls_output.get("discovered_addresses", [])),
+                    discovered_count,
                 )
             except Exception as exc:
                 record_degraded(
@@ -1669,12 +1648,8 @@ class StaticWorker(BaseWorker):
                     if isinstance(_data, dict):
                         info_cache[_addr] = (_data.get("name"), _data.get("selectors", {}))
 
-            t0 = time.monotonic()
-            enrich_dependency_metadata(unified, info_cache=info_cache)
-            logger.info(
-                "static phase complete: dependency enrichment",
-                extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "enrichment"},
-            )
+            with log_timed_phase(logger, "enrichment"):
+                enrich_dependency_metadata(unified, info_cache=info_cache)
 
             # Store updated enrichment cache (includes any newly fetched entries)
             enrichment_data = {
