@@ -665,7 +665,7 @@ def main() -> None:
         authority_snapshot_path=Path(args.authority_snapshot) if args.authority_snapshot else None,
         output_path=Path(args.out) if args.out else None,
     )
-    print(f"Effective permissions: {output_path}")
+    logger.info("Effective permissions written", extra={"output_path": str(output_path)})
 
 
 if __name__ == "__main__":
