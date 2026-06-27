@@ -51,7 +51,7 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
-from utils.logging import record_stage_metric
+from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import eth_call_batch, require_rpc_url, rpc_request
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
@@ -880,12 +880,16 @@ def _load_state_var_values(
             )
             return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
     else:
+        # No job context → address-only lookup can surface controller rows from a
+        # different job/chain (cross-tenant leakage). Degrade + breadcrumb.
+        record_degraded(
+            phase="state_var_values_no_job_id",
+            exc=RuntimeError("_load_state_var_values called without job_id"),
+            context={"address": address, "chain": chain},
+        )
         logger.warning(
-            "_load_state_var_values called without job_id for address=%s; "
-            "falling back to address-only Contract lookup. "
-            "Capability resolution may surface controller rows from a "
-            "different job/chain.",
-            address,
+            "_load_state_var_values called without job_id; falling back to address-only lookup",
+            extra={"address": address, "chain": chain},
         )
 
     stmt = select(Contract).where(func.lower(Contract.address) == address.lower())

@@ -351,10 +351,12 @@ async def enumerate_mapping_allowlist(
         if len(directions) <= 1:
             continue
         logger.warning(
-            "mapping_enumerator: skipping ambiguous writer event topic0=%s directions=%s specs=%s",
-            topic0,
-            sorted(directions),
-            [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
+            "mapping_enumerator: skipping ambiguous writer event",
+            extra={
+                "topic0": topic0,
+                "directions": sorted(directions),
+                "specs": [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
+            },
         )
         del topic0_to_specs[topic0]
     if not topic0_to_specs:
@@ -373,14 +375,16 @@ async def enumerate_mapping_allowlist(
 
     topic0s = sorted(topic0_to_specs.keys())
     logger.info(
-        "mapping_enumerator: address=%s from_block=%d to_block=%s timeout=%.1fs max_pages=%d topic0s=%s specs=%s",
-        contract_address,
-        from_block,
-        to_block,
-        eff_timeout,
-        eff_max_pages,
-        topic0s,
-        [(s["event_signature"], s["direction"], s.get("key_position")) for s in writer_specs],
+        "mapping_enumerator: scan start",
+        extra={
+            "address": contract_address,
+            "from_block": from_block,
+            "to_block": to_block,
+            "timeout_s": eff_timeout,
+            "max_pages": eff_max_pages,
+            "topic0s": topic0s,
+            "specs": [(s["event_signature"], s["direction"], s.get("key_position")) for s in writer_specs],
+        },
     )
     query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
 
@@ -396,20 +400,20 @@ async def enumerate_mapping_allowlist(
         if time.monotonic() - started > eff_timeout:
             status = "incomplete_timeout"
             logger.warning(
-                "mapping_enumerator: TIMEOUT after %.1fs at page %d, address=%s last_block=%d",
-                eff_timeout,
-                page_count,
-                contract_address,
-                current_from,
+                "mapping_enumerator: scan timeout",
+                extra={
+                    "address": contract_address,
+                    "timeout_s": eff_timeout,
+                    "page_count": page_count,
+                    "last_block": current_from,
+                },
             )
             break
         if page_count >= eff_max_pages:
             status = "incomplete_max_pages"
             logger.warning(
-                "mapping_enumerator: MAX_PAGES (%d) hit at address=%s last_block=%d",
-                eff_max_pages,
-                contract_address,
-                current_from,
+                "mapping_enumerator: max pages hit",
+                extra={"address": contract_address, "max_pages": eff_max_pages, "last_block": current_from},
             )
             break
 
@@ -420,10 +424,12 @@ async def enumerate_mapping_allowlist(
             status = "error"
             error = str(exc)
             logger.warning(
-                "mapping_enumerator: RPC error at page %d for address=%s: %s",
-                page_count,
-                contract_address,
-                exc,
+                "mapping_enumerator: RPC error during scan",
+                extra={
+                    "address": contract_address,
+                    "page_count": page_count,
+                    "exc_type": type(exc).__name__,
+                },
             )
             break
 
@@ -435,12 +441,14 @@ async def enumerate_mapping_allowlist(
             logs = data_obj
         else:
             logs = list(getattr(result, "logs", None) or [])
-        logger.info(
-            "mapping_enumerator page %d: %d logs at from_block=%d, next_block=%s",
-            page_count,
-            len(logs),
-            current_from,
-            getattr(result, "next_block", None),
+        logger.debug(
+            "mapping_enumerator: page fetched",
+            extra={
+                "page": page_count,
+                "logs": len(logs),
+                "from_block": current_from,
+                "next_block": getattr(result, "next_block", None),
+            },
         )
         for raw_log in logs:
             topics = _topics_from_log(raw_log)
@@ -527,11 +535,13 @@ def enumerate_mapping_allowlist_sync(
         if cached is not None:
             result, inserted_at = cached
             if now - inserted_at < _cache_ttl_s():
-                logger.info(
-                    "mapping_enumerator: L1 CACHE HIT address=%s status=%s principals=%d",
-                    contract_address,
-                    result["status"],
-                    len(result["principals"]),
+                logger.debug(
+                    "mapping_enumerator: L1 cache hit",
+                    extra={
+                        "address": contract_address,
+                        "enumeration_status": result["status"],
+                        "principals": len(result["principals"]),
+                    },
                 )
                 return result
             del _CACHE[cache_key]
@@ -549,19 +559,20 @@ def enumerate_mapping_allowlist_sync(
             )
         except Exception as exc:
             logger.warning(
-                "mapping_enumerator: L2 read failed for %s, falling through to scan: %s",
-                contract_address,
-                exc,
+                "mapping_enumerator: L2 read failed, falling through to scan",
+                extra={"address": contract_address, "exc_type": type(exc).__name__},
             )
             db_hit = None
             specs_hash = None
         else:
             if db_hit is not None:
-                logger.info(
-                    "mapping_enumerator: L2 CACHE HIT address=%s status=%s principals=%d",
-                    contract_address,
-                    db_hit["status"],
-                    len(db_hit["principals"]),
+                logger.debug(
+                    "mapping_enumerator: L2 cache hit",
+                    extra={
+                        "address": contract_address,
+                        "enumeration_status": db_hit["status"],
+                        "principals": len(db_hit["principals"]),
+                    },
                 )
                 result = EnumerationResult(**db_hit)  # type: ignore[typeddict-item]
                 with _CACHE_LOCK:
@@ -584,9 +595,8 @@ def enumerate_mapping_allowlist_sync(
             )
         except Exception as exc:
             logger.warning(
-                "mapping_enumerator: L2 write failed for %s: %s",
-                contract_address,
-                exc,
+                "mapping_enumerator: L2 write failed",
+                extra={"address": contract_address, "exc_type": type(exc).__name__},
             )
 
     with _CACHE_LOCK:

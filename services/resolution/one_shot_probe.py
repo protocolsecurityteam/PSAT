@@ -351,14 +351,26 @@ def resolve_one_shot_state(
     transcript["latch_value"] = value
     transcript["latch_standard"] = chosen.get("standard")
     if classified == "consumed":
-        return LatchReadResult("consumed", value, target_kind, transcript)
-    if classified == "armed" and target_kind != "unverified":
+        state = "consumed"
+    elif classified == "armed" and target_kind != "unverified":
         # The latch would admit a caller AND the address is a confirmed live
         # deployment: a real live one-shot.
-        return LatchReadResult("live", value, target_kind, transcript)
-    # Armed-but-unconfirmed (a bare impl/template with an empty latch reads
-    # exactly like this) or an unevaluable guard: never claim live.
-    return LatchReadResult("indeterminate", value, target_kind, transcript)
+        state = "live"
+    else:
+        # Armed-but-unconfirmed (a bare impl/template with an empty latch reads
+        # exactly like this) or an unevaluable guard: never claim live.
+        state = "indeterminate"
+    logger.debug(
+        "one_shot probe decision",
+        extra={
+            "adapter": "one_shot_probe",
+            "address": address,
+            "decision": state,
+            "reason": classified,
+            "target_kind": target_kind,
+        },
+    )
+    return LatchReadResult(state, value, target_kind, transcript)
 
 
 # ---------------------------------------------------------------------------

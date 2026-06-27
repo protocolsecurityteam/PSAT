@@ -15,6 +15,7 @@ from eth_abi.abi import decode
 from schemas.contract_analysis import AssociatedEvent, ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from utils.logging import record_degraded
 from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
@@ -694,9 +695,37 @@ def build_control_snapshot(
             # its real value instead of being recorded null.
             if getter_fallback_address and getter_fallback_address.lower() != str(plan["contract_address"]).lower():
                 try:
-                    return controller_id, _read_entry(getter_fallback_address, "eth_call_impl_fallback")
+                    entry = _read_entry(getter_fallback_address, "eth_call_impl_fallback")
                 except Exception:
                     pass
+                else:
+                    logger.debug(
+                        "controller read recovered via impl getter-fallback",
+                        extra={
+                            "controller_id": controller_id,
+                            "address": plan["contract_address"],
+                            "fallback_address": getter_fallback_address,
+                            "decision": "impl_getter_fallback",
+                        },
+                    )
+                    return controller_id, entry
+            # Both the proxy read and the impl getter-fallback (if any) reverted —
+            # the controller value is recorded NULL. Surface it as a degraded
+            # breadcrumb + WARNING so the under-resolution is visible in
+            # stage_errors instead of being counted as a resolved controller.
+            record_degraded(
+                phase="controller_read",
+                exc=exc,
+                context={"controller_id": controller_id, "address": plan["contract_address"]},
+            )
+            logger.warning(
+                "controller read reverted; recording NULL value",
+                extra={
+                    "controller_id": controller_id,
+                    "address": plan["contract_address"],
+                    "exc_type": type(exc).__name__,
+                },
+            )
             return controller_id, {
                 "source": source,
                 "value": None,
