@@ -17,6 +17,7 @@ import json
 import logging
 
 from services.discovery.static_dependencies import get_code, normalize_address, rpc_call
+from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
@@ -550,10 +551,18 @@ def classify_contracts(
         addrs_to_classify,
         max_workers=8,
     )
+    # A swallowed classify error silently downgrades a contract to "regular",
+    # which can drop a proxy's implementation/beacon edge. Count the fallbacks
+    # and surface a representative exception once after the fan-out completes
+    # (per-iteration stays at DEBUG; the swallow is summarised, not spammed).
+    classify_fallbacks = 0
+    classify_fallback_exc: BaseException | None = None
     classified_phase1: dict[str, dict] = {}
     for addr, result in parallel_results:
         if isinstance(result, BaseException):
             logger.debug("Phase 1: classify error for %s (%s) — defaulting to regular", addr, result)
+            classify_fallbacks += 1
+            classify_fallback_exc = result
             classified_phase1[addr] = {"address": addr, "type": "regular"}
         else:
             classified_phase1[addr] = result
@@ -593,9 +602,25 @@ def classify_contracts(
     )
     for addr, result in discovered_results:
         if isinstance(result, BaseException):
+            logger.debug("Phase 1 (discovered): classify error for %s (%s) — defaulting to regular", addr, result)
+            classify_fallbacks += 1
+            classify_fallback_exc = result
             classifications[addr] = {"address": addr, "type": "regular"}
         else:
             classifications[addr] = result
+
+    record_stage_metric("classify_fallbacks", classify_fallbacks)
+    if classify_fallbacks and classify_fallback_exc is not None:
+        logger.warning(
+            "Classification fell back to 'regular' for %d address(es); proxy edges may be lost",
+            classify_fallbacks,
+            extra={"classify_fallbacks": classify_fallbacks, "exc_type": type(classify_fallback_exc).__name__},
+        )
+        record_degraded(
+            phase="classify",
+            exc=classify_fallback_exc,
+            context={"classify_fallbacks": classify_fallbacks, "target": target},
+        )
 
     # Phase 2 -- relational: mark implementations and beacons
     for addr, info in classifications.items():

@@ -9,10 +9,12 @@ Given a company/protocol name or domain, this module:
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from typing import Any
 
 from utils.chains import canonical_chain, canonical_chain_list
+from utils.logging import record_degraded
 
 from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
 from .deployer import expand_from_deployers
@@ -27,6 +29,8 @@ from .inventory_domain import (
 )
 from .inventory_extract import extract_inventory_entries_from_pages
 from .ranking import score_inventory_evidence
+
+logger = logging.getLogger(__name__)
 
 
 def _collect_source_urls(evidence: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
@@ -373,7 +377,11 @@ def search_protocol_inventory(
             deployer_entries = expand_from_deployers(seed_addresses, debug=debug)
             notes.append(f"Deployer expansion: {len(deployer_entries)} contract(s)")
         except Exception as exc:
-            _debug_log(debug, f"Deployer expansion failed: {exc!r}")
+            logger.warning(
+                "Deployer expansion failed; corroboration source dropped",
+                extra={"phase": "deployer_expansion", "exc_type": type(exc).__name__, "seeds": len(seed_addresses)},
+            )
+            record_degraded(phase="deployer_expansion", exc=exc, context={"seeds": len(seed_addresses)})
             notes.append(f"Deployer expansion failed: {exc}")
 
     entries = tavily_entries + deployer_entries
@@ -392,14 +400,23 @@ def search_protocol_inventory(
             resolved = unknown_count - sum(1 for c in contracts if _primary_chain(c) == "unknown")
             notes.append(f"Chain resolution: resolved {resolved}/{unknown_count} unknown chain(s)")
         except Exception as exc:
-            _debug_log(debug, f"Chain resolution failed: {exc!r}")
+            logger.warning(
+                "Chain resolution failed; %d contract(s) left on unknown chain",
+                unknown_count,
+                extra={"phase": "chain_resolution", "exc_type": type(exc).__name__, "unknown_count": unknown_count},
+            )
+            record_degraded(phase="chain_resolution", exc=exc, context={"unknown_count": unknown_count})
             notes.append(f"Chain resolution failed: {exc}")
 
     if any("exa_deep_research" in (c.get("source") or []) for c in contracts):
         try:
             contracts = validate_claimed_chains(contracts, source_names=("exa_deep_research",), debug=debug)
         except Exception as exc:
-            _debug_log(debug, f"Claimed-chain sanity check failed: {exc!r}")
+            logger.warning(
+                "Claimed-chain sanity check failed",
+                extra={"phase": "claimed_chain_validation", "exc_type": type(exc).__name__},
+            )
+            record_degraded(phase="claimed_chain_validation", exc=exc, context={"company": company})
             notes.append(f"Claimed-chain sanity check failed: {exc}")
 
     # Activity ranking intentionally does NOT run here. The worker

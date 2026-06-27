@@ -3,12 +3,14 @@
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
 from utils.etherscan import get as etherscan_get
+from utils.logging import record_degraded, record_stage_metric
 
 from .static_dependencies import (
     get_code,
@@ -16,6 +18,8 @@ from .static_dependencies import (
     normalize_address,
     rpc_call,
 )
+
+logger = logging.getLogger(__name__)
 
 TRACE_OPS = {"CALL", "STATICCALL", "DELEGATECALL", "CALLCODE", "CREATE", "CREATE2"}
 
@@ -377,6 +381,7 @@ def find_dynamic_dependencies(
     all_edges = []
     trace_methods = set()
     trace_errors: list[dict] = []
+    first_trace_exc: BaseException | None = None
 
     # Trace calls are RTT-dominated and independent — fan out across the shared
     # executor and reassemble results in input order so trace_errors stays
@@ -391,7 +396,9 @@ def find_dynamic_dependencies(
         block_number = tx["block_number"]
         if isinstance(result, RuntimeError):
             trace_errors.append({"tx_hash": tx_hash, "error": str(result)})
-            print(f"         Warning: trace failed for {tx_hash}: {result}")
+            if first_trace_exc is None:
+                first_trace_exc = result
+            logger.debug("trace failed for %s: %s", tx_hash, result, extra={"tx_hash": tx_hash})
             continue
         if isinstance(result, BaseException):
             # Non-RuntimeError unexpected failure — preserve the existing surface
@@ -402,9 +409,28 @@ def find_dynamic_dependencies(
         trace_methods.add(method)
         all_edges.extend(extract_edges_from_trace(method, trace_result, tx_hash, block_number))
 
+    record_stage_metric("trace_failures", len(trace_errors))
+    record_stage_metric("traces_attempted", len(selected_txs))
+
     if not trace_methods and trace_errors:
         raise RuntimeError(
             f"All {len(trace_errors)} transaction trace(s) failed. First error: {trace_errors[0]['error']}"
+        )
+
+    # Partial failure: some traces succeeded, so dynamic deps are still emitted
+    # but built on an incomplete call graph — record it as degraded so a
+    # truncated dependency set is attributable rather than silently smaller.
+    if trace_errors and first_trace_exc is not None:
+        logger.warning(
+            "Partial trace failure: %d/%d transaction trace(s) failed; dependency graph may be incomplete",
+            len(trace_errors),
+            len(selected_txs),
+            extra={"trace_failures": len(trace_errors), "traces_attempted": len(selected_txs)},
+        )
+        record_degraded(
+            phase="dynamic_trace",
+            exc=first_trace_exc,
+            context={"trace_failures": len(trace_errors), "traces_attempted": len(selected_txs), "target": target},
         )
 
     edges = _dedupe_edges(all_edges)

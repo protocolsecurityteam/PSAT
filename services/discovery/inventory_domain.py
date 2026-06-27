@@ -10,6 +10,7 @@ This module provides the infrastructure layer for the inventory discovery pipeli
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from collections import defaultdict
@@ -22,6 +23,8 @@ import requests as _requests
 from utils import llm, tavily
 
 from .static_dependencies import normalize_address as _normalize_address
+
+logger = logging.getLogger(__name__)
 
 # -- Constants ---------------------------------------------------------------
 
@@ -100,6 +103,13 @@ class RateLimiter:
 
 
 def _debug_log(enabled: bool, message: str) -> None:
+    # Route the inventory pipeline's per-step diagnostics through the module
+    # logger at DEBUG so they carry the bound trace context and are queryable
+    # as JSON under the house JsonFormatter. The worker pipeline always calls
+    # with ``enabled=False`` (no stderr), so the production path no longer
+    # leaks plaintext; the legacy stderr line is retained only for the
+    # standalone CLI/dev case (``debug=True``).
+    logger.debug("%s", message)
     if enabled:
         ts = datetime.now().isoformat(timespec="seconds")
         print(f"[{ts}] [debug] {message}", file=sys.stderr, flush=True)

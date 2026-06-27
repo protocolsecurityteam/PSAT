@@ -27,6 +27,7 @@ deploy-as-a-service providers while keeping genuine protocol ops wallets.
 from __future__ import annotations
 
 import contextvars
+import logging
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -34,6 +35,8 @@ from typing import Any
 from services.discovery.inventory_domain import _debug_log
 from services.discovery.static_dependencies import normalize_address
 from utils import etherscan
+
+logger = logging.getLogger(__name__)
 
 # A deployer must have created at least this many seed contracts.
 _MIN_SEED_COUNT = 3
@@ -124,8 +127,12 @@ def _batch_get_names(
                 addr, name = future.result()
                 if name:
                     names[addr] = name
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "name resolution failed for %s",
+                    futures[future],
+                    extra={"address": futures[future], "exc_type": type(exc).__name__},
+                )
 
     _debug_log(debug, f"Resolved names for {len(names)}/{len(addresses)} address(es)")
     return names
