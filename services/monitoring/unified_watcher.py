@@ -25,6 +25,12 @@ from db.models import (
     UpgradeEvent,
     WatchedProxy,
 )
+from db.queue import record_heartbeat
+from services.monitoring import (
+    HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_SCANNER,
+    emit_monitor_cycle,
+)
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
@@ -69,6 +75,7 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     addresses and all event topic0s. Returns list of new MonitoredEvent
     records created.
     """
+    started = time.monotonic()
     contracts = (
         session.execute(
             select(MonitoredContract).where(MonitoredContract.is_active == True)  # noqa: E712
@@ -77,6 +84,18 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
         .all()
     )
     if not contracts:
+        # Nothing enrolled yet — still emit a cycle so a dead watcher (or a
+        # never-populated monitored_contracts table) is distinguishable from
+        # a healthy idle one.
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_SCANNER,
+            started=started,
+            contracts_scanned=0,
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="no_active_contracts",
+        )
         return []
 
     contract_by_address: dict[str, MonitoredContract] = {c.address.lower(): c for c in contracts}
@@ -107,6 +126,15 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
 
     if from_block >= latest_block:
         logger.debug("Scan: no new blocks (from=%d, latest=%d)", from_block, latest_block)
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_SCANNER,
+            started=started,
+            contracts_scanned=len(contracts),
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="no_new_blocks",
+        )
         return []
 
     logger.debug(
@@ -118,6 +146,10 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     )
 
     new_events: list[MonitoredEvent] = []
+    # Set when an eth_getLogs chunk fails mid-scan: the cursor stops early so
+    # this pass covered only part of the requested range — surfaced as
+    # ``partial=True`` in the cycle summary (degraded heartbeat).
+    partial = False
     # Union the hand-rolled global registry with per-contract topic0s
     # discovered from the analysis tracking_plan. The hand-rolled set
     # owns OZ / Safe / Timelock / proxy events (semantics beyond raw
@@ -182,6 +214,7 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+            partial = True
             break
 
         if not isinstance(logs, list):
@@ -304,6 +337,14 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             mc.last_scanned_block = last_successful_block
 
     session.commit()
+    emit_monitor_cycle(
+        HEARTBEAT_PROTOCOL_SCANNER,
+        started=started,
+        contracts_scanned=len(contracts),
+        blocks_scanned=max(last_successful_block - from_block, 0),
+        events_found=len(new_events),
+        partial=partial,
+    )
     return new_events
 
 
@@ -860,6 +901,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     backfills the plan within its interval (default 600s) so this is a
     bounded transient on freshly-migrated rows.
     """
+    started = time.monotonic()
     contracts = (
         session.execute(
             select(MonitoredContract).where(
@@ -871,6 +913,15 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         .all()
     )
     if not contracts:
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_POLLER,
+            started=started,
+            contracts_scanned=0,
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="no_active_contracts",
+        )
         return []
 
     batch_calls: list[tuple[str, list]] = []
@@ -891,12 +942,30 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             batch_calls.append(call)
 
     if not batch_calls:
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_POLLER,
+            started=started,
+            contracts_scanned=len(contracts),
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="no_poll_entries",
+        )
         return []
 
     try:
         results = rpc_batch_request(rpc_url, batch_calls)
     except Exception as exc:
         logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_POLLER,
+            started=started,
+            contracts_scanned=len(contracts),
+            blocks_scanned=0,
+            events_found=0,
+            partial=True,
+            note="batch_rpc_failed",
+        )
         return []
 
     new_events: list[MonitoredEvent] = []
@@ -1025,6 +1094,14 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             )
 
     session.commit()
+    emit_monitor_cycle(
+        HEARTBEAT_PROTOCOL_POLLER,
+        started=started,
+        contracts_scanned=len(contracts),
+        blocks_scanned=0,
+        events_found=len(new_events),
+        partial=False,
+    )
     return new_events
 
 
@@ -1068,6 +1145,13 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
                         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
         except Exception as exc:
             logger.warning("Scan cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            # ``scan_for_events`` raised before it could emit its own cycle
+            # summary — still beat so the fleet view sees a degraded cycle.
+            record_heartbeat(
+                HEARTBEAT_PROTOCOL_SCANNER,
+                status="degraded",
+                detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
+            )
         time.sleep(interval)
 
 
@@ -1089,4 +1173,11 @@ def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None
                         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
         except Exception as exc:
             logger.warning("Poll cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            # ``poll_for_state_changes`` raised before it could emit its own
+            # cycle summary — still beat so the fleet view sees a degraded cycle.
+            record_heartbeat(
+                HEARTBEAT_PROTOCOL_POLLER,
+                status="degraded",
+                detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
+            )
         time.sleep(interval)

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from utils.logging import configure_logging
 from utils.rpc import default_rpc_url
 from utils.secrets import sanitize_url
 
@@ -21,7 +22,7 @@ DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    configure_logging()
 
     parser = argparse.ArgumentParser(description="Unified protocol monitor worker")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help="Ethereum RPC URL")
