@@ -596,8 +596,9 @@ def test_run_agent_stream_init_failure_emits_error(monkeypatch, db_session, seed
 
 
 class _FakeResponse:
-    def __init__(self, lines: list[str]):
+    def __init__(self, lines: list[str], status_code: int = 200):
         self._lines = [line.encode("utf-8") for line in lines]
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
