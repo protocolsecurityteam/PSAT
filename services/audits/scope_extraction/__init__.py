@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass, field
 
 from db.storage import StorageUnavailable, get_storage_client
+from utils.logging import record_degraded, record_stage_metric
 
 from ._artifact import SCOPE_ARTIFACT_CONTENT_TYPE, _store_artifact, build_artifact_payload
 from ._chunk_scan import _split_text_into_chunks, extract_scope_via_chunk_scan
@@ -147,10 +148,24 @@ def process_audit_scope(
                 sections, audit_title, auditor
             )
         except LLMUnavailableError as exc:
+            failure_kind = getattr(exc, "failure_kind", "api")
             logger.warning(
-                "scope: LLM unavailable for audit %s (%s); falling back to regex",
-                audit_report_id,
-                exc,
+                "scope: LLM unavailable; falling back to regex",
+                extra={
+                    "audit_report_id": audit_report_id,
+                    "exc_type": type(exc).__name__,
+                    "failure_kind": failure_kind,
+                },
+            )
+            # Split the no-match cause: an ``api`` failure is the 402/outage
+            # signature, a ``parse`` failure is a model/parser bug — conflating
+            # them hid the 55→4 collapse. Degrade so the loss of structured
+            # extraction lands in /api/jobs/{id}/errors, not just a log line.
+            record_stage_metric("scope_llm_failure_kind", failure_kind)
+            record_degraded(
+                phase="scope_llm",
+                exc=exc,
+                context={"audit_report_id": audit_report_id, "failure_kind": failure_kind},
             )
             combined = "\n".join(s.text_slice for s in sections)
             names = extract_contracts_regex_fallback(combined)
@@ -180,10 +195,20 @@ def process_audit_scope(
                 winning_chunk,
             ) = extract_scope_via_chunk_scan(raw_text, audit_title, auditor)
         except LLMUnavailableError as exc:
+            failure_kind = getattr(exc, "failure_kind", "api")
             logger.warning(
-                "scope: chunk-scan unavailable for audit %s: %s",
-                audit_report_id,
-                exc,
+                "scope: chunk-scan unavailable",
+                extra={
+                    "audit_report_id": audit_report_id,
+                    "exc_type": type(exc).__name__,
+                    "failure_kind": failure_kind,
+                },
+            )
+            record_stage_metric("scope_chunk_scan_failure_kind", failure_kind)
+            record_degraded(
+                phase="scope_chunk_scan",
+                exc=exc,
+                context={"audit_report_id": audit_report_id, "failure_kind": failure_kind},
             )
             cs_names, cs_entries, cs_commits, cs_response, cs_model, chunks_used, winning_chunk = (
                 [],

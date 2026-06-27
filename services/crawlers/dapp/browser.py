@@ -18,6 +18,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright  # pyrig
 from services.crawlers.dapp.inject import build_provider_script
 from services.crawlers.dapp.interaction_log import InteractionLog
 from services.crawlers.dapp.wallet import HoneypotWallet
+from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,10 @@ class DAppCrawler:
         self.headless = headless
         self.interaction_log = InteractionLog()
         self._provider_script = build_provider_script(wallet, chain_id, eth_balance, token_balance)
+        # Running tally of swallowed sniffer failures, surfaced as a crawl-level
+        # stage metric so a site that consistently breaks address sniffing is
+        # visible instead of every exception vanishing into ``except: pass``.
+        self._sniff_errors = 0
 
     # ------------------------------------------------------------------ #
     #  Page setup & message handling                                       #
@@ -55,6 +60,22 @@ class DAppCrawler:
 
     # Regex to match Ethereum addresses in text
     _ADDR_RE = __import__("re").compile(r"0x[a-fA-F0-9]{40}")
+
+    def _record_sniff_error(self, exc: Exception, source: str) -> None:
+        """Surface a swallowed sniffer failure instead of dropping it silently.
+
+        A single sniff failure is degraded-but-continuing (one response failed
+        to yield addresses; the crawl proceeds), so it carries ``exc_type`` and
+        lands in the job's degraded-errors artifact while the running
+        ``sniff_errors`` count rides the stage metrics for the monitor UI.
+        """
+        self._sniff_errors += 1
+        logger.warning(
+            "dapp sniffer failed",
+            extra={"exc_type": type(exc).__name__, "source": source},
+        )
+        record_degraded(phase="dapp_sniff", exc=exc, context={"source": source})
+        record_stage_metric("sniff_errors", self._sniff_errors)
 
     async def _setup_page(self, page: Page):
         """Inject the spoofed provider and network interceptors."""
@@ -202,8 +223,8 @@ class DAppCrawler:
                             "data": f"api:{url[:200]}",
                         }
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_sniff_error(exc, source="api_response")
 
     async def _sniff_js_bundle(self, response, page_url: str):
         """
@@ -273,8 +294,8 @@ class DAppCrawler:
                             "data": f"js:{url.split('/')[-1][:100]}",
                         }
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_sniff_error(exc, source="js_bundle")
 
     async def _handle_capture(self, entry_json: str):
         """Process a captured interaction from the browser."""

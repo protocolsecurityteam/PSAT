@@ -194,7 +194,9 @@ def _call_llm(prompt: str) -> tuple[str, str]:
         default = base / "_default.json"
         if default.exists():
             return default.read_text(), "stub:_default"
-        raise LLMUnavailableError(f"no LLM stub for prompt digest {digest} in {stub_dir}")
+        raise LLMUnavailableError(
+            f"no LLM stub for prompt digest {digest} in {stub_dir}", failure_kind="stub_missing"
+        )
 
     try:
         from utils.llm import openrouter
@@ -396,5 +398,7 @@ def extract_scope_with_llm(
     # Fall back to legacy array form.
     parsed = _parse_json_array(response)
     if parsed is None:
-        raise LLMUnavailableError(f"LLM returned unparseable output: {response[:200]!r}")
+        raise LLMUnavailableError(
+            f"LLM returned unparseable output: {response[:200]!r}", failure_kind="parse"
+        )
     return _dedupe_names(parsed), [], [], response, model
