@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 
 import ProtocolLogo from "../ProtocolLogo.jsx";
 
-export default function RunsPage({ analyses, onSelect, onDiscoverMore, onSelectCompany }) {
+export default function RunsPage({ analyses, onSelect, onSelectCompany }) {
   const [search, setSearch] = useState("");
   const protocolSectionRef = useRef(null);
 

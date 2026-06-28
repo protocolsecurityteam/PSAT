@@ -12,7 +12,9 @@ export default function HamburgerMenu({ onClose, viewMode, companyName, companyT
         <nav className="hamburger-nav">
           <div className="hamburger-section-label">Navigation</div>
           <button className={`hamburger-link ${viewMode === "default" ? "active" : ""}`} onClick={() => { onNavigate("/", "default"); onClose(); }}>Runs</button>
-          <button className={`hamburger-link ${viewMode === "monitor" ? "active" : ""}`} onClick={() => { onNavigate("/monitor", "monitor"); onClose(); }}>Monitor</button>
+          {isAdmin && (
+            <button className={`hamburger-link ${viewMode === "monitor" ? "active" : ""}`} onClick={() => { onNavigate("/monitor", "monitor"); onClose(); }}>Monitor</button>
+          )}
         </nav>
         {companyName && (
           <nav className="hamburger-nav hamburger-company-section">

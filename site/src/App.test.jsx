@@ -86,6 +86,8 @@ describe("App router smoke tests", () => {
   });
 
   it("renders the job monitor at /monitor", async () => {
+    // /monitor is operator-only; without an admin key the route redirects home.
+    window.localStorage.setItem("psat_admin_key", "test-key");
     navigateTo("/monitor");
     render(<App />);
     // The monitor page renders the Active/History zones + the fleet strip

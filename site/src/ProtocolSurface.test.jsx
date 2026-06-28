@@ -58,7 +58,15 @@ function renderSurface() {
 
 async function clickSidebarTab(label) {
   const user = userEvent.setup();
-  const tab = await screen.findByRole("button", {
+  // Scope to the sidebar tab bar: in Detail mode the DetailEmptyState radar
+  // also renders example buttons (e.g. "Upgrades …") that would otherwise
+  // collide with the same-named tab.
+  const tabBar = await waitFor(() => {
+    const el = document.querySelector(".ps-sidebar-tabs");
+    expect(el).toBeTruthy();
+    return el;
+  });
+  const tab = await within(tabBar).findByRole("button", {
     name: new RegExp(`^${label}`, "i"),
   });
   await user.click(tab);
@@ -83,6 +91,8 @@ describe("ProtocolSurface — sidebar tabs", () => {
   });
 
   it("opens the Monitor tab", async () => {
+    // The Agent + Monitor sidebar tabs are operator-only.
+    window.localStorage.setItem("psat_admin_key", "test-key");
     renderSurface();
     await clickSidebarTab("Monitor");
     await waitFor(() => {

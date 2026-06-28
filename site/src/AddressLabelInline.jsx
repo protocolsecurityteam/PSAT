@@ -1,4 +1,5 @@
 import React from "react";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 import {
   upsertAddressLabel,
   deleteAddressLabel,
@@ -16,8 +17,20 @@ import {
 //   caller can refresh its labels map
 // - size: "sm" (default) | "xs"
 export default function AddressLabelInline({ address, labels, refreshAll, size = "sm" }) {
+  const isAdmin = useIsAdmin();
   const addrLower = String(address || "").toLowerCase();
   const current = labels?.get ? labels.get(addrLower) : null;
+
+  // Non-admins see the label read-only: the name when one is set, and no
+  // edit affordance at all when it isn't.
+  if (!isAdmin) {
+    if (!current) return null;
+    return (
+      <span className={`ps-address-label ps-address-label-${size}`}>
+        <span className="ps-address-label-name">{current}</span>
+      </span>
+    );
+  }
 
   const onEdit = async () => {
     const next = window.prompt(

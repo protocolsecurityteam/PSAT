@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "./api/client.js";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 
 // Admin-only audits manager. Lists every AuditReport for a company,
 // shows extraction + scope state at a glance, and provides three
@@ -9,6 +10,7 @@ import { api } from "./api/client.js";
 // coverage pipeline). Read-only endpoints are safe for non-admin
 // viewers; mutating actions prompt for the admin key on 401.
 export default function AuditsAdminModal({ companyName, onClose }) {
+  const isAdmin = useIsAdmin();
   const [audits, setAudits] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null); // {auditId, kind}
@@ -146,21 +148,24 @@ export default function AuditsAdminModal({ companyName, onClose }) {
             </h2>
           </div>
           <div className="ps-audit-modal-actions">
-            <button
-              type="button"
-              className="ps-audit-modal-btn"
-              onClick={onRefreshCoverage}
-              disabled={busy?.kind === "coverage"}
-              title="Rebuild audit_contract_coverage rows for every scoped audit"
-            >
-              {busy?.kind === "coverage" ? "Refreshing…" : "Refresh all coverage"}
-            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                className="ps-audit-modal-btn"
+                onClick={onRefreshCoverage}
+                disabled={busy?.kind === "coverage"}
+                title="Rebuild audit_contract_coverage rows for every scoped audit"
+              >
+                {busy?.kind === "coverage" ? "Refreshing…" : "Refresh all coverage"}
+              </button>
+            )}
             <button type="button" className="ps-audit-modal-btn" onClick={onClose} title="Close">
               ✕
             </button>
           </div>
         </div>
 
+        {isAdmin && (
         <form className="ps-addresses-modal-add ps-audits-admin-add" onSubmit={onAdd}>
           <input
             type="text"
@@ -206,6 +211,7 @@ export default function AuditsAdminModal({ companyName, onClose }) {
             </span>
           )}
         </form>
+        )}
 
         <div className="ps-addresses-modal-body">
           {error && <p className="ps-audit-modal-empty">Failed to load: {error}</p>}
@@ -221,7 +227,7 @@ export default function AuditsAdminModal({ companyName, onClose }) {
                   <th>Auditor / Title</th>
                   <th style={{ width: 100 }}>Date</th>
                   <th style={{ width: 260 }}>Status</th>
-                  <th style={{ width: 230 }}>Actions</th>
+                  {isAdmin && <th style={{ width: 230 }}>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -259,37 +265,39 @@ export default function AuditsAdminModal({ companyName, onClose }) {
                         </span>
                       </div>
                     </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button
-                          type="button"
-                          className="ps-audit-modal-btn"
-                          onClick={() => onReextract(a.id)}
-                          disabled={
-                            (busy?.auditId === a.id && busy?.kind === "reextract") ||
-                            a.text_extraction_status !== "success"
-                          }
-                          title={
-                            a.text_extraction_status !== "success"
-                              ? "Text must extract successfully first"
-                              : "Reset scope-extraction state; worker will re-pick"
-                          }
-                        >
-                          {busy?.auditId === a.id && busy?.kind === "reextract"
-                            ? "…"
-                            : "Re-scope"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ps-audit-modal-btn"
-                          onClick={() => onDelete(a)}
-                          disabled={busy?.auditId === a.id && busy?.kind === "delete"}
-                          style={{ color: "#f87171", borderColor: "rgba(248, 113, 113, 0.35)" }}
-                        >
-                          {busy?.auditId === a.id && busy?.kind === "delete" ? "…" : "Delete"}
-                        </button>
-                      </div>
-                    </td>
+                    {isAdmin && (
+                      <td>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="ps-audit-modal-btn"
+                            onClick={() => onReextract(a.id)}
+                            disabled={
+                              (busy?.auditId === a.id && busy?.kind === "reextract") ||
+                              a.text_extraction_status !== "success"
+                            }
+                            title={
+                              a.text_extraction_status !== "success"
+                                ? "Text must extract successfully first"
+                                : "Reset scope-extraction state; worker will re-pick"
+                            }
+                          >
+                            {busy?.auditId === a.id && busy?.kind === "reextract"
+                              ? "…"
+                              : "Re-scope"}
+                          </button>
+                          <button
+                            type="button"
+                            className="ps-audit-modal-btn"
+                            onClick={() => onDelete(a)}
+                            disabled={busy?.auditId === a.id && busy?.kind === "delete"}
+                            style={{ color: "#f87171", borderColor: "rgba(248, 113, 113, 0.35)" }}
+                          >
+                            {busy?.auditId === a.id && busy?.kind === "delete" ? "…" : "Delete"}
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

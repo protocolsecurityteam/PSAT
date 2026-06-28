@@ -66,6 +66,9 @@ beforeEach(() => {
   resetFetchMock();
   // Reset URL to a clean state so each test starts at "/".
   window.history.replaceState({}, "", "/");
+  // Clear the admin key so each test starts as a non-admin (keyless); tests
+  // that exercise operator controls set "psat_admin_key" explicitly.
+  window.localStorage.clear();
 });
 
 afterEach(() => {

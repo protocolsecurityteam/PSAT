@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
 import { blockExplorerAddressUrl } from "../blockExplorer.js";
 import { proxyDisplayName } from "../displayName.js";
 import { shortenAddress } from "../graph.js";
@@ -403,6 +404,7 @@ export default function ProtocolMonitoringPage({ companyName }) {
 // -------------------------------------------------------------------- subviews
 
 function StatusBar({ health, headBlock, activeCount, totalCount, reEnrolling, onReEnroll }) {
+  const isAdmin = useIsAdmin();
   return (
     <div className="pm-statusbar" data-testid="pm-statusbar">
       <span className={`pm-pulse ${health.tone}`}>
@@ -412,9 +414,11 @@ function StatusBar({ health, headBlock, activeCount, totalCount, reEnrolling, on
       <span className="pm-meta">·</span>
       <span className="pm-meta">{activeCount} of {totalCount} contracts active</span>
       <span className="pm-spacer" />
-      <button className="pm-btn" disabled={reEnrolling} onClick={onReEnroll} title="Re-run protocol enrollment to discover newly added contracts. Existing per-contract active toggles are preserved.">
-        {reEnrolling ? "Re-enrolling…" : "Re-enroll"}
-      </button>
+      {isAdmin && (
+        <button className="pm-btn" disabled={reEnrolling} onClick={onReEnroll} title="Re-run protocol enrollment to discover newly added contracts. Existing per-contract active toggles are preserved.">
+          {reEnrolling ? "Re-enrolling…" : "Re-enroll"}
+        </button>
+      )}
     </div>
   );
 }
@@ -491,6 +495,7 @@ function ContractGroup({ group, selectedId, lastEventTimes, friendlyName, onSele
 }
 
 function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, onToggleActive }) {
+  const isAdmin = useIsAdmin();
   const rows = useMemo(() => stateRows(contract), [contract]);
   const badge = contract.contract_type || "regular";
   const name = friendlyName(contract.address);
@@ -516,18 +521,20 @@ function ContractRow({ contract, selected, lastEvent, friendlyName, onSelect, on
         <div className="pm-k">Last event</div>
         <div className="pm-v muted">{lastEvent ? relativeTime(lastEvent) : "none recorded"}</div>
       </div>
-      <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
-        <span
-          role="button"
-          tabIndex={0}
-          className="pm-btn-link"
-          onClick={onToggleActive}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onToggleActive(e); }}
-          style={{ fontSize: 11, color: contract.is_active ? "var(--status-ok)" : "var(--muted)" }}
-        >
-          {contract.is_active ? "● active" : "○ paused"}
-        </span>
-      </div>
+      {isAdmin && (
+        <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
+          <span
+            role="button"
+            tabIndex={0}
+            className="pm-btn-link"
+            onClick={onToggleActive}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onToggleActive(e); }}
+            style={{ fontSize: 11, color: contract.is_active ? "var(--status-ok)" : "var(--muted)" }}
+          >
+            {contract.is_active ? "● active" : "○ paused"}
+          </span>
+        </div>
+      )}
     </button>
   );
 }
@@ -655,6 +662,7 @@ function EventRow({ evt, friendlyName, chainOf, isAllView }) {
 }
 
 function NotifMini({ count, onOpen }) {
+  const isAdmin = useIsAdmin();
   return (
     <div className="pm-notif" data-testid="pm-notif">
       <span>
@@ -664,9 +672,11 @@ function NotifMini({ count, onOpen }) {
           <><b>{count}</b> Discord {count === 1 ? "webhook" : "webhooks"} active</>
         )}
       </span>
-      <button className="pm-notif-cta" onClick={onOpen}>
-        {count === 0 ? "+ Add →" : "Manage →"}
-      </button>
+      {isAdmin && (
+        <button className="pm-notif-cta" onClick={onOpen}>
+          {count === 0 ? "+ Add →" : "Manage →"}
+        </button>
+      )}
     </div>
   );
 }
@@ -686,6 +696,7 @@ function WebhookModal({
   onToggleType,
   onTogglePicker,
 }) {
+  const isAdmin = useIsAdmin();
   const overlayRef = useRef(null);
   useEffect(() => {
     function onKey(e) { if (e.key === "Escape") onClose(); }
@@ -706,6 +717,7 @@ function WebhookModal({
           <button className="pm-modal-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="pm-modal-body">
+          {isAdmin && (
           <section className="pm-modal-section">
             <h3>Add a webhook</h3>
             <form onSubmit={onSubmit}>
@@ -754,6 +766,7 @@ function WebhookModal({
               </div>
             </form>
           </section>
+          )}
 
           <section className="pm-modal-section">
             <h3>Existing ({subscriptions.length})</h3>
@@ -772,7 +785,9 @@ function WebhookModal({
                       <span className="pm-sub-filter">
                         {filterTypes.length > 0 ? `${filterTypes.length} type${filterTypes.length === 1 ? "" : "s"}` : "all events"}
                       </span>
-                      <button className="pm-sub-remove" onClick={() => onRemove(s.id)}>remove</button>
+                      {isAdmin && (
+                        <button className="pm-sub-remove" onClick={() => onRemove(s.id)}>remove</button>
+                      )}
                     </div>
                   );
                 })}
