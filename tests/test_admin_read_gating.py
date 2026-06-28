@@ -171,7 +171,9 @@ def test_health_pool_only_for_admin(monkeypatch) -> None:
     import api
     import db.models as dbm
 
-    monkeypatch.setattr(dbm, "engine", SimpleNamespace(pool=QueuePool(lambda: None)))
+    # The pool's connection counters (size/checkedin/...) read by /api/health
+    # never call the creator, so a no-op creator is enough for this stub.
+    monkeypatch.setattr(dbm, "engine", SimpleNamespace(pool=QueuePool(lambda: None)))  # type: ignore[reportArgumentType]
     monkeypatch.setattr("routers.deps.ADMIN_KEY", ADMIN_KEY)
 
     session = MagicMock()
