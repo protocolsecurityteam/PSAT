@@ -708,11 +708,18 @@
 
 .ps-node-proxy {
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #9a8a6e;
+}
+
+.ps-node-proxy svg {
+  flex-shrink: 0;
 }
 
 /* Lane indicator tags on node edges */
