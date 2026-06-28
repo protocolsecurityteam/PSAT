@@ -19,7 +19,7 @@ from . import deps
 router = APIRouter()
 
 
-@router.get("/api/audits/pipeline")
+@router.get("/api/audits/pipeline", dependencies=[Depends(deps.require_admin_key)])
 def audits_pipeline() -> dict[str, Any]:
     """In-flight audit text + scope extraction, grouped by bucket.
 

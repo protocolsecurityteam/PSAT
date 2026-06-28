@@ -35,6 +35,13 @@ pytestmark = [requires_postgres, requires_storage]
 # ---------------------------------------------------------------------------
 
 
+def _admin_headers() -> dict[str, str]:
+    """Header carrying the configured admin key, for now-gated internal reads."""
+    from routers import deps
+
+    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
+
+
 @pytest.fixture()
 def api_with(monkeypatch, db_session, storage_bucket):
     """Wire the FastAPI app to the test DB session and storage bucket."""
@@ -214,7 +221,7 @@ def test_artifact_endpoint_serves_storage_backed_json(api_with, db_session, stor
     store_artifact(db_session, job.id, "contract_analysis", data=payload)
 
     client = TestClient(api_with.app)
-    resp = client.get("/api/analyses/json-test/artifact/contract_analysis.json")
+    resp = client.get("/api/analyses/json-test/artifact/contract_analysis.json", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json() == payload
 
@@ -228,7 +235,7 @@ def test_artifact_endpoint_serves_storage_backed_text(api_with, db_session, stor
     store_artifact(db_session, job.id, "analysis_report", text_data=body)
 
     client = TestClient(api_with.app)
-    resp = client.get("/api/analyses/text-test/artifact/analysis_report.txt")
+    resp = client.get("/api/analyses/text-test/artifact/analysis_report.txt", headers=_admin_headers())
     assert resp.status_code == 200
     assert body in resp.text
 
@@ -331,7 +338,11 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     assert "contract_analysis" in payload["available_artifacts"]
     assert payload["contract_analysis"]["subject"]["name"] == "Main"
 
-    artifact = client.get("/api/analyses/e2e-test/artifact/slither_results.json", follow_redirects=True)
+    artifact = client.get(
+        "/api/analyses/e2e-test/artifact/slither_results.json",
+        headers=_admin_headers(),
+        follow_redirects=True,
+    )
     assert artifact.status_code == 200
     assert artifact.json() == {"results": {"detectors": []}}
 

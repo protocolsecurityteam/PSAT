@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/jobs")
+@router.get("/api/jobs", dependencies=[Depends(deps.require_admin_key)])
 def list_jobs() -> list[dict[str, Any]]:
     with deps.SessionLocal() as session:
         stmt = select(Job).order_by(Job.created_at.desc())
@@ -165,7 +165,7 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
     return {"company": company_name, "address": address, "deleted": True}
 
 
-@router.get("/api/jobs/{job_id}")
+@router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin_key)])
 def get_job(job_id: str) -> dict[str, Any]:
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)
@@ -184,7 +184,11 @@ class JobErrorsResponse(BaseModel):
     errors: list[StageError]
 
 
-@router.get("/api/jobs/{job_id}/errors", response_model=JobErrorsResponse)
+@router.get(
+    "/api/jobs/{job_id}/errors",
+    response_model=JobErrorsResponse,
+    dependencies=[Depends(deps.require_admin_key)],
+)
 def get_job_errors(job_id: str) -> JobErrorsResponse:
     """Return the deserialized ``stage_errors`` artifact for a job.
 
@@ -360,7 +364,7 @@ def retry_job(job_id: str) -> dict[str, Any]:
         return job.to_dict()
 
 
-@router.get("/api/jobs/{job_id}/stage_timings")
+@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)])
 def get_job_stage_timings(job_id: str) -> dict[str, Any]:
     """Return all per-stage timing artifacts the worker fleet wrote for
     this job, keyed by stage name. Schema-v2 layout (one
@@ -368,11 +372,9 @@ def get_job_stage_timings(job_id: str) -> dict[str, Any]:
     harness to populate ``worker_elapsed_seconds`` reliably without
     scraping Fly logs.
 
-    Public: the payload is execution telemetry (per-stage durations, status,
-    metric counts) plus worker_id — and worker_id is already exposed by the
-    public ``/api/jobs`` and ``/api/jobs/{id}/errors`` endpoints, so nothing
-    here is more sensitive than what the monitor page already serves
-    unauthenticated.
+    Admin-gated: the payload is operator execution telemetry (per-stage
+    durations, status, metric counts, worker_id) served only to the monitor
+    dashboard, not part of the public consumer surface.
     """
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)

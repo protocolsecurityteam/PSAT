@@ -49,7 +49,12 @@ _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
-    """Reject any non-GET request that does not carry a valid admin key."""
+    """Gate the depending route on a valid ``X-PSAT-Admin-Key`` header.
+
+    Wired via ``dependencies=[Depends(require_admin_key)]`` on every operator
+    route — admin mutations and ops/internal GET reads alike. Raises 401 unless
+    a key is configured and the supplied header matches it.
+    """
     if not ADMIN_KEY:
         reason = "admin_key_not_configured"
     elif not x_psat_admin_key:
@@ -66,6 +71,16 @@ def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(de
         extra={"trace_id": trace_id_var.get(), "path": request.url.path, "reason": reason},
     )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin key required")
+
+
+def admin_key_valid(x_psat_admin_key: str | None) -> bool:
+    """True when *x_psat_admin_key* matches the configured admin key.
+
+    Non-raising, non-logging companion to :func:`require_admin_key` for the
+    endpoints that broaden their *response* for an authenticated caller
+    (e.g. extra fields) rather than rejecting an anonymous one outright.
+    """
+    return bool(ADMIN_KEY) and bool(x_psat_admin_key) and hmac.compare_digest(x_psat_admin_key, ADMIN_KEY)
 
 
 def log_admin_mutation(action: str, **fields: Any) -> None:
@@ -99,6 +114,7 @@ __all__ = [
     "StorageUnavailable",
     "_ADDRESS_RE",
     "_normalize_address_or_400",
+    "admin_key_valid",
     "create_job",
     "deserialize_artifact",
     "find_existing_job_for_address",

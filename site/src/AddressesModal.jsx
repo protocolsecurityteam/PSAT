@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api/client.js";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 import { listAddressLabels } from "./api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import {
-  bulkAnalyzeCandidates,
   computeCurrentImplAddrs,
   isPureHistorical,
 } from "./addressFilter.js";
@@ -33,6 +33,7 @@ function parseAddressList(raw) {
 }
 
 export default function AddressesModal({ companyName, onClose, onSelectContract }) {
+  const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [labels, setLabels] = useState(new Map());
@@ -46,7 +47,6 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
   const [compareInput, setCompareInput] = useState("");
   const [busyAddr, setBusyAddr] = useState(null); // address currently being deleted/analyzed
   const [showHistorical, setShowHistorical] = useState(false);
-  const [bulkAnalyzing, setBulkAnalyzing] = useState(false);
 
   const refresh = useCallback(() => {
     let cancelled = false;
@@ -217,47 +217,6 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
     }
   };
 
-  // Bulk-analyze every discovered-but-not-analyzed row in the current
-  // view. `bulkAnalyzeCandidates` re-applies the historical filter so it
-  // stays safe even when the user toggled "Show N historical" — those
-  // never get auto-queued.
-  const bulkPendingRows = useMemo(
-    () => (compareOpen ? [] : bulkAnalyzeCandidates(rows, currentImplAddrs)),
-    [rows, currentImplAddrs, compareOpen],
-  );
-
-  const onBulkAnalyzePending = async () => {
-    if (bulkPendingRows.length === 0) return;
-    const ok = window.confirm(
-      `Queue analysis for ${bulkPendingRows.length} pending address`
-        + `${bulkPendingRows.length === 1 ? "" : "es"}`
-        + ` in the current view?`,
-    );
-    if (!ok) return;
-    setBulkAnalyzing(true);
-    try {
-      for (const r of bulkPendingRows) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await api("/api/analyze", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              address: r.address,
-              company: companyName,
-              name: r.name || null,
-            }),
-          });
-        } catch (err) {
-          console.error("Queue failed for", r.address, err);
-        }
-      }
-      setTimeout(refresh, 2000);
-    } finally {
-      setBulkAnalyzing(false);
-    }
-  };
-
   const onAnalyzeAllMissing = async () => {
     if (!compareSummary || compareSummary.missing === 0) return;
     const ok = window.confirm(
@@ -375,7 +334,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                   <span style={{ color: "#94a3b8", fontSize: 11 }}>
                     of {compareSummary.total} parsed
                   </span>
-                  {compareSummary.missing > 0 && (
+                  {isAdmin && compareSummary.missing > 0 && (
                     <button
                       type="button"
                       className="ps-addresses-modal-compare-analyze"
@@ -411,23 +370,10 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                 <option value="address">Address</option>
               </select>
             </div>
-            {bulkPendingRows.length > 0 && (
-              <button
-                type="button"
-                className="ps-addresses-modal-bulk-analyze"
-                disabled={bulkAnalyzing}
-                onClick={onBulkAnalyzePending}
-                title="Queue analysis for every discovered-but-not-analyzed row in the current view. Historical impls are never included."
-              >
-                {bulkAnalyzing
-                  ? "Queuing…"
-                  : `Analyze ${bulkPendingRows.length} pending`}
-              </button>
-            )}
           </div>
         )}
 
-        {!compareOpen && (
+        {isAdmin && !compareOpen && (
           <form className="ps-addresses-modal-add" onSubmit={onAnalyze}>
             <input
               type="text"
@@ -473,7 +419,7 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                   <th>Name / Label</th>
                   <th>Address</th>
                   <th style={{ width: 100 }}>Status</th>
-                  <th style={{ width: 130 }}>Actions</th>
+                  {isAdmin && <th style={{ width: 130 }}>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -534,28 +480,30 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                           <span className="ps-addresses-modal-chip pending">discovered</span>
                         )}
                       </td>
-                      <td onClick={(e) => e.stopPropagation()}>
-                        {isMissing ? (
-                          <button
-                            type="button"
-                            className="ps-audit-modal-btn"
-                            disabled={busyAddr === r.address}
-                            onClick={() => onAnalyzeMissing(r.address)}
-                          >
-                            {busyAddr === r.address ? "…" : "Analyze"}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="ps-audit-modal-btn ps-addresses-modal-delete-btn"
-                            disabled={busyAddr === r.address}
-                            onClick={() => onDeleteAddress(r)}
-                            title="Remove from protocol"
-                          >
-                            {busyAddr === r.address ? "…" : "Delete"}
-                          </button>
-                        )}
-                      </td>
+                      {isAdmin && (
+                        <td onClick={(e) => e.stopPropagation()}>
+                          {isMissing ? (
+                            <button
+                              type="button"
+                              className="ps-audit-modal-btn"
+                              disabled={busyAddr === r.address}
+                              onClick={() => onAnalyzeMissing(r.address)}
+                            >
+                              {busyAddr === r.address ? "…" : "Analyze"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="ps-audit-modal-btn ps-addresses-modal-delete-btn"
+                              disabled={busyAddr === r.address}
+                              onClick={() => onDeleteAddress(r)}
+                              title="Remove from protocol"
+                            >
+                              {busyAddr === r.address ? "…" : "Delete"}
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}

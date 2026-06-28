@@ -1,7 +1,8 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
 import { shortenAddress } from "./graph.js";
-import { api } from "./api/client.js";
+import { api, getAdminKey, setAdminKey } from "./api/client.js";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
@@ -68,6 +69,17 @@ export default function App() {
   const analysesRef = useRef([]);
   const activeTabRef = useRef(parseLocationPath(window.location.pathname).tab);
   const doneTimerRef = useRef(null);
+  const isAdmin = useIsAdmin();
+
+  // First-run admin login: ?admin=1 prompts once for the key when none is
+  // stored. This is the only key-entry path now that operator controls are
+  // hidden from non-admins.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("admin") === "1" && !getAdminKey()) {
+      const entered = window.prompt("Paste your PSAT admin key:");
+      if (entered) setAdminKey(entered);
+    }
+  }, []);
 
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
@@ -76,6 +88,11 @@ export default function App() {
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [menuOpen]);
+
+  // /monitor is operator-only: a non-admin landing there is sent home.
+  useEffect(() => {
+    if (viewMode === "monitor" && !isAdmin) navigate("/", "default");
+  }, [viewMode, isAdmin]);
 
   function navigate(path, mode) {
     const m = mode || parseLocationPath(path).mode;
@@ -188,7 +205,7 @@ export default function App() {
     async function poll() {
       if (stopped) return;
       try {
-        const allJobs = await api("/api/jobs");
+        const allJobs = await api("/api/jobs", { silent: true });
         if (stopped) return;
         const now = new Date();
         const treeIds = getJobTree(allJobs, job.job_id);
@@ -235,13 +252,6 @@ export default function App() {
     } finally { setLoading(false); }
   }
 
-  async function discoverMore(company) {
-    try {
-      const nextJob = await api("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ company, analyze_limit: 5 }) });
-      setJob(nextJob);
-    } catch (err) { console.error("Failed to start discovery:", err); }
-  }
-
   function handleTabChange(tab) {
     const nextTab = normalizeTab(tab);
     setActiveTab(nextTab);
@@ -284,9 +294,11 @@ export default function App() {
           {companyName && <span className="top-nav-context">{companyName}</span>}
         </div>
         <div className="top-nav-right">
-          <button className="top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
-            {formOpen ? "Close" : "+ New Analysis"}
-          </button>
+          {isAdmin && isMonitor && (
+            <button className="top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
+              {formOpen ? "Close" : "+ New Analysis"}
+            </button>
+          )}
         </div>
       </nav>
 
@@ -297,13 +309,14 @@ export default function App() {
           viewMode={viewMode}
           companyName={companyName}
           companyTab={companyTab}
+          isAdmin={isAdmin}
           onNavigate={(path, mode) => { navigate(path, mode); refreshAnalyses(); }}
           onNavigateCompanyTab={navigateCompanyTab}
         />
       )}
 
       {/* Submit form dropdown */}
-      {formOpen && (
+      {isAdmin && isMonitor && formOpen && (
         <div className="submit-dropdown">
           <form className="submit-form" onSubmit={submit}>
             <label><span>Address or company</span><input value={form.target} onChange={(e) => setForm((c) => ({ ...c, target: e.target.value }))} placeholder="0x... or etherfi" required /></label>
@@ -316,7 +329,7 @@ export default function App() {
       )}
 
       {/* Page content */}
-      {isMonitor && <PipelineDashboard />}
+      {isMonitor && isAdmin && <PipelineDashboard />}
 
       {isDetail && selectedDetail && (
         <div className="page">
@@ -376,7 +389,6 @@ export default function App() {
           <RunsPage
             analyses={analyses}
             onSelect={(runId) => loadAnalysis(runId, { history: "push" })}
-            onDiscoverMore={discoverMore}
             onSelectCompany={openCompany}
           />
         </>

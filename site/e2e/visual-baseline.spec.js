@@ -99,6 +99,12 @@ const ANALYSIS_DETAIL = {
 // Mocked API + animation-killer style. Animations and transitions are
 // disabled so snapshots don't flake on hover/focus mid-render.
 async function setupPage(page) {
+  // Operator controls (monitor dashboard, surface Agent/Monitor tabs, the
+  // admin modals) are admin-gated; seed an admin key so the baselines keep
+  // capturing the full control surface.
+  await page.addInitScript(() => {
+    try { window.localStorage.setItem("psat_admin_key", "e2e-admin-key"); } catch {}
+  });
   await page.addInitScript(() => {
     const style = document.createElement("style");
     style.textContent = `*, *::before, *::after {

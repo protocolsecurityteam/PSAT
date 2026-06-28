@@ -30,10 +30,6 @@ export function getTimeline(contractId) {
   return api(`/api/contracts/${encodeURIComponent(contractId)}/audit_timeline`);
 }
 
-export function getPipeline() {
-  return api(`/api/audits/pipeline`);
-}
-
 // Admin-only: both trip the 401 flow in api() if the admin key is missing.
 export function refreshCoverage(company, { verifySourceEquivalence = false } = {}) {
   const params = new URLSearchParams();

@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 
 import { api } from "../api/client.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
 import { computeProtocolScore } from "../protocolScore.js";
 import LoadingFallback from "../LoadingFallback.jsx";
@@ -12,6 +13,7 @@ const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
 const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
 
 export default function CompanyOverview({ companyName, onSelectContract, onNavigateToSurface }) {
+  const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [auditCoverage, setAuditCoverage] = useState(null);
@@ -124,24 +126,38 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
           </div>
 
           <div className="company-hero-stats">
-            <button
-              type="button"
-              className="company-hero-stat company-hero-stat--clickable"
-              onClick={() => setAddressesModalOpen(true)}
-              title="Browse all addresses"
-            >
-              <div className="company-hero-stat-value">{contracts.length}</div>
-              <div className="company-hero-stat-label">Contracts ↗</div>
-            </button>
-            <button
-              type="button"
-              className="company-hero-stat company-hero-stat--clickable"
-              onClick={() => setAuditsAdminOpen(true)}
-              title="Manage audits (admin)"
-            >
-              <div className="company-hero-stat-value">{auditCoverage?.audit_count ?? "—"}</div>
-              <div className="company-hero-stat-label">Reports ↗</div>
-            </button>
+            {isAdmin ? (
+              <button
+                type="button"
+                className="company-hero-stat company-hero-stat--clickable"
+                onClick={() => setAddressesModalOpen(true)}
+                title="Browse all addresses"
+              >
+                <div className="company-hero-stat-value">{contracts.length}</div>
+                <div className="company-hero-stat-label">Contracts ↗</div>
+              </button>
+            ) : (
+              <div className="company-hero-stat">
+                <div className="company-hero-stat-value">{contracts.length}</div>
+                <div className="company-hero-stat-label">Contracts</div>
+              </div>
+            )}
+            {isAdmin ? (
+              <button
+                type="button"
+                className="company-hero-stat company-hero-stat--clickable"
+                onClick={() => setAuditsAdminOpen(true)}
+                title="Manage audits (admin)"
+              >
+                <div className="company-hero-stat-value">{auditCoverage?.audit_count ?? "—"}</div>
+                <div className="company-hero-stat-label">Reports ↗</div>
+              </button>
+            ) : (
+              <div className="company-hero-stat">
+                <div className="company-hero-stat-value">{auditCoverage?.audit_count ?? "—"}</div>
+                <div className="company-hero-stat-label">Reports</div>
+              </div>
+            )}
             <div className="company-hero-stat">
               <div className="company-hero-stat-value">{coveredContracts}</div>
               <div className="company-hero-stat-label">Covered</div>
@@ -169,40 +185,44 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
             </h2>
           </div>
           <div className="company-surface-band-actions">
-            <button
-              type="button"
-              className="company-surface-action"
-              onClick={() => setAddressesModalOpen(true)}
-              title="Browse, label, and compare addresses"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M3 7h18" />
-                <path d="M3 12h18" />
-                <path d="M3 17h18" />
-                <circle cx="5" cy="7" r="0.5" fill="currentColor" />
-                <circle cx="5" cy="12" r="0.5" fill="currentColor" />
-                <circle cx="5" cy="17" r="0.5" fill="currentColor" />
-              </svg>
-              <span>Addresses</span>
-              <span className="company-surface-action-count">
-                {data.all_addresses_count ?? contracts.length}
-              </span>
-            </button>
-            <button
-              type="button"
-              className="company-surface-action"
-              onClick={() => setAuditsAdminOpen(true)}
-              title="Manage audit reports"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 2 4 6v6c0 5 3.5 9.3 8 10 4.5-.7 8-5 8-10V6l-8-4Z" />
-                <path d="m9 12 2 2 4-4" />
-              </svg>
-              <span>Audits</span>
-              {auditCoverage?.audit_count != null && (
-                <span className="company-surface-action-count">{auditCoverage.audit_count}</span>
-              )}
-            </button>
+            {isAdmin && (
+              <>
+                <button
+                  type="button"
+                  className="company-surface-action"
+                  onClick={() => setAddressesModalOpen(true)}
+                  title="Browse, label, and compare addresses"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 7h18" />
+                    <path d="M3 12h18" />
+                    <path d="M3 17h18" />
+                    <circle cx="5" cy="7" r="0.5" fill="currentColor" />
+                    <circle cx="5" cy="12" r="0.5" fill="currentColor" />
+                    <circle cx="5" cy="17" r="0.5" fill="currentColor" />
+                  </svg>
+                  <span>Addresses</span>
+                  <span className="company-surface-action-count">
+                    {data.all_addresses_count ?? contracts.length}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="company-surface-action"
+                  onClick={() => setAuditsAdminOpen(true)}
+                  title="Manage audit reports"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 2 4 6v6c0 5 3.5 9.3 8 10 4.5-.7 8-5 8-10V6l-8-4Z" />
+                    <path d="m9 12 2 2 4-4" />
+                  </svg>
+                  <span>Audits</span>
+                  {auditCoverage?.audit_count != null && (
+                    <span className="company-surface-action-count">{auditCoverage.audit_count}</span>
+                  )}
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="company-surface-action primary"

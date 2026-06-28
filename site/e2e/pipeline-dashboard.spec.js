@@ -9,6 +9,11 @@ test.describe("job monitor", () => {
     const now = Date.now();
     const iso = (msAgo) => new Date(now - msAgo).toISOString();
 
+    // /monitor is operator-only; seed an admin key so the route renders.
+    await page.addInitScript(() => {
+      try { window.localStorage.setItem("psat_admin_key", "e2e-admin-key"); } catch {}
+    });
+
     // Catch-all first so the specific routes registered after it win.
     await page.route(
       (url) => url.pathname.startsWith("/api/"),

@@ -4,6 +4,7 @@ import "@xyflow/react/dist/style.css";
 
 import { isBytecodeVerifiedAudit } from "./auditCoverage.js";
 import { api } from "./api/client.js";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 import { listAddressLabels } from "./api/addressLabels.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
@@ -34,6 +35,7 @@ export default function ProtocolSurface({
   initialFunctions = null,
   embedded = false,
 }) {
+  const isAdmin = useIsAdmin();
   // initialData / initialFunctions let a parent (CompanyOverview) hand
   // us the /api/company/{name} payload and /functions map it already
   // fetched, so we don't fire duplicate requests on mount. Fixtures
@@ -104,12 +106,18 @@ export default function ProtocolSurface({
   const [headerCollapsed, setHeaderCollapsed] = useState(true);
   const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
 
-  // Right sidebar mode: "detail" (default), "agent", "audits",
-  // "monitoring", or "upgrades".
-  // Default to Agent in both embedded and fullscreen views — the chat
-  // interface is the most useful entry point on first load. A canvas
-  // click switches to Detail in both modes (handlers below).
-  const [sidebarMode, setSidebarMode] = useState("agent");
+  // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
+  // "upgrades". Agent and Monitor are admin-only, so non-admins open in
+  // Detail; admins open in Agent (the chat is the most useful first stop).
+  // A canvas click switches to Detail in all modes (handlers below).
+  const [sidebarMode, setSidebarMode] = useState(() => (isAdmin ? "agent" : "detail"));
+  // If the admin key clears while an admin-only tab is open, fall back to
+  // Detail so the hidden tab's content can't linger.
+  useEffect(() => {
+    if (!isAdmin && (sidebarMode === "agent" || sidebarMode === "monitoring")) {
+      setSidebarMode("detail");
+    }
+  }, [isAdmin, sidebarMode]);
   // Per-proxy upgrade history cache, keyed by job_id. Server's
   // /api/company/{name} returns upgrade_count=null for protocols whose
   // chain monitor hasn't ingested events yet (the static-analysis blob in
@@ -730,6 +738,7 @@ export default function ProtocolSurface({
             onSetMode={setSidebarMode}
             auditCount={coverageData?.audit_count}
             showDetail
+            isAdmin={isAdmin}
           />
           {sidebarMode === "audits" && (
             <AuditsListPanel
@@ -742,7 +751,7 @@ export default function ProtocolSurface({
               selectedMachine={selectedMachine}
             />
           )}
-          {sidebarMode === "monitoring" && (
+          {isAdmin && sidebarMode === "monitoring" && (
             <SurfaceMonitoringPanel
               companyData={companyData}
               machines={allMachines}
@@ -799,7 +808,7 @@ export default function ProtocolSurface({
           {sidebarMode === "detail" && !selectedPrincipal && !radarExampleSelection && (
             <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
           )}
-          {sidebarMode === "agent" && (
+          {isAdmin && sidebarMode === "agent" && (
             <AgentPanel
               companyName={companyName}
               selectedMachine={selectedMachine}

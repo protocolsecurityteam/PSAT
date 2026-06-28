@@ -202,6 +202,8 @@ describe("ProtocolMonitoringPage accessibility", () => {
     // Screen readers don't announce placeholders as the field's name, so
     // a user navigating by Tab hears "edit, blank" with no idea what to
     // type. Fix requires aria-label or a wrapping <label>.
+    // The webhook CTA + add-form are operator-only, so sign in as admin.
+    window.localStorage.setItem("psat_admin_key", "test-key");
     const regular = makeContract({ id: "reg-1", contract_type: "regular", address: "0xcccc000000000000000000000000000000000003" });
     mountWithContracts([regular]);
 

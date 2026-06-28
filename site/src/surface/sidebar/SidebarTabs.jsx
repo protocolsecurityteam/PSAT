@@ -1,4 +1,4 @@
-export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true }) {
+export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true, isAdmin = false }) {
   return (
     <div className="ps-sidebar-tabs">
       {/* showDetail is on by default in both embedded and fullscreen
@@ -13,24 +13,28 @@ export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true }) 
           Detail
         </button>
       )}
-      <button
-        className={`ps-sidebar-tab ${mode === "agent" ? "active" : ""}`}
-        onClick={() => onSetMode("agent")}
-      >
-        Agent
-      </button>
+      {isAdmin && (
+        <button
+          className={`ps-sidebar-tab ${mode === "agent" ? "active" : ""}`}
+          onClick={() => onSetMode("agent")}
+        >
+          Agent
+        </button>
+      )}
       <button
         className={`ps-sidebar-tab ${mode === "audits" ? "active" : ""}`}
         onClick={() => onSetMode("audits")}
       >
         Audits{auditCount != null ? `(${auditCount})` : ""}
       </button>
-      <button
-        className={`ps-sidebar-tab ${mode === "monitoring" ? "active" : ""}`}
-        onClick={() => onSetMode("monitoring")}
-      >
-        Monitor
-      </button>
+      {isAdmin && (
+        <button
+          className={`ps-sidebar-tab ${mode === "monitoring" ? "active" : ""}`}
+          onClick={() => onSetMode("monitoring")}
+        >
+          Monitor
+        </button>
+      )}
       <button
         className={`ps-sidebar-tab ${mode === "upgrades" ? "active" : ""}`}
         onClick={() => onSetMode("upgrades")}

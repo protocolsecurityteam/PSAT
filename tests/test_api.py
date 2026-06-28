@@ -59,6 +59,13 @@ def make_client() -> TestClient:
     return TestClient(api.app)
 
 
+def _admin_headers() -> dict[str, str]:
+    """Header carrying the configured admin key, for now-gated internal reads."""
+    from routers import deps
+
+    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
+
+
 def test_build_company_function_entry_filters_generic_authority_contract_when_specific_principals_exist() -> None:
     from services.governance.principals import _build_company_function_entry
 
@@ -437,8 +444,8 @@ def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
-    json_response = client.get("/api/analyses/demo_run/artifact/contract_analysis.json")
-    txt_response = client.get("/api/analyses/demo_run/artifact/analysis_report.txt")
+    json_response = client.get("/api/analyses/demo_run/artifact/contract_analysis.json", headers=_admin_headers())
+    txt_response = client.get("/api/analyses/demo_run/artifact/analysis_report.txt", headers=_admin_headers())
 
     assert json_response.status_code == 200, json_response.text
     assert json_response.json()["summary"]["control_model"] == "ownable"
@@ -568,14 +575,11 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls) -> None:
     assert resp.status_code == 404
 
 
-def test_stage_timings_endpoint_is_public() -> None:
-    """Per-job stage timings are intentionally public. The payload is execution
-    telemetry (durations, status, metric counts) plus worker_id — and worker_id
-    is already exposed by the public ``/api/jobs`` and ``/api/jobs/{id}/errors``
-    endpoints, so nothing here is more sensitive than what the monitor page
-    already serves unauthenticated. Verified at the route-definition level
-    because conftest's ``_bypass_admin_key`` autouse fixture stubs the auth
-    dependency for every test, so an HTTP-status assertion can never fire."""
+def test_stage_timings_endpoint_is_admin_gated() -> None:
+    """Per-job stage timings are operator execution telemetry, served only to the
+    admin monitor dashboard. Verified at the route-definition level because
+    conftest's ``_bypass_admin_key`` autouse fixture stubs the auth dependency
+    for every test, so an HTTP-status assertion can never fire."""
     import api
     from routers.deps import require_admin_key
 
@@ -584,11 +588,7 @@ def test_stage_timings_endpoint_is_public() -> None:
     assert matching, f"route {target_path} is not registered"
     route = matching[0]
     route_deps = [dep.call for dep in route.dependant.dependencies]  # type: ignore[attr-defined]
-    assert require_admin_key not in route_deps, (
-        "stage_timings is intentionally public (telemetry + worker_id, already "
-        "public via /api/jobs and /errors); re-gating it reintroduces the "
-        "no-admin-key 'flash then disappear' bug on /monitor"
-    )
+    assert require_admin_key in route_deps, "stage_timings must require an admin key"
 
 
 # ---------------------------------------------------------------------------
