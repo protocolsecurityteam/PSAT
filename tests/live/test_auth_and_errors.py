@@ -27,15 +27,34 @@ def test_analyze_malformed_address_rejected(live_base_url: str, live_admin_key: 
     assert r.status_code == 400, f"malformed address should 400, got {r.status_code}: {r.text}"
 
 
-def test_unknown_job_id_returns_404(live_base_url: str):
+def test_unknown_job_id_returns_404(live_base_url: str, live_admin_key: str):
+    # The job read is operator-gated: an anonymous caller gets 401; a valid key
+    # reaches the handler, where a non-existent id is the 404 we're pinning.
     missing_id = "00000000-0000-0000-0000-000000000000"
-    r = requests.get(live_base_url + f"/api/jobs/{missing_id}", timeout=15)
+    url = live_base_url + f"/api/jobs/{missing_id}"
+
+    anon = requests.get(url, timeout=15)
+    assert anon.status_code == 401, f"gated job read without key should 401, got {anon.status_code}: {anon.text}"
+
+    r = requests.get(url, headers={"X-PSAT-Admin-Key": live_admin_key}, timeout=15)
     assert r.status_code == 404, f"unknown job_id should 404, got {r.status_code}: {r.text}"
 
 
-def test_unknown_run_name_returns_404(live_base_url: str):
-    r = requests.get(
-        live_base_url + "/api/analyses/psat-live-test-unknown-run/artifact/contract_analysis.json",
-        timeout=15,
-    )
-    assert r.status_code == 404, f"unknown run_name should 404, got {r.status_code}: {r.text}"
+def test_unknown_run_name_returns_404(live_base_url: str, live_admin_key: str):
+    # Artifact reads split by name: consumer-safe names stay public, every other
+    # name is operator-gated before any lookup. Either way an authorized caller
+    # gets a 404 for a missing run — that not-found contract is what we pin here.
+    base = live_base_url + "/api/analyses/psat-live-test-unknown-run/artifact/"
+    gated = base + "contract_analysis.json"
+
+    # Consumer-safe name: no key needed; an unknown run is a clean 404, not a leak.
+    pub = requests.get(base + "dependencies.json", timeout=15)
+    assert pub.status_code == 404, f"public artifact, unknown run should 404, got {pub.status_code}: {pub.text}"
+
+    # Gated name without a key: 401 before the lookup runs (no existence signal).
+    anon = requests.get(gated, timeout=15)
+    assert anon.status_code == 401, f"gated artifact without key should 401, got {anon.status_code}: {anon.text}"
+
+    # Gated name with a key: reaches the lookup, where the unknown run is a 404.
+    r = requests.get(gated, headers={"X-PSAT-Admin-Key": live_admin_key}, timeout=15)
+    assert r.status_code == 404, f"gated artifact, unknown run should 404, got {r.status_code}: {r.text}"

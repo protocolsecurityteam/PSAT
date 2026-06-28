@@ -37,7 +37,7 @@ def _first_listed_run_name(base_url: str) -> str | None:
     return None
 
 
-def test_other_prs_artifacts_not_readable(live_client: LiveClient, live_base_url: str):
+def test_other_prs_artifacts_not_readable(live_client: LiveClient, live_base_url: str, live_admin_key: str):
     other_url = _other_pr_base_url(live_base_url)
     if other_url is None:
         pytest.skip(
@@ -49,8 +49,11 @@ def test_other_prs_artifacts_not_readable(live_client: LiveClient, live_base_url
         pytest.skip(f"no analyses listed on {other_url} to use as a tenancy probe")
 
     # Confirm the probe artifact is actually served on the other PR, else the negative below is moot.
+    # contract_analysis is operator-gated, so the probe authenticates — the same posture as the own-PR
+    # read below, so the 200-vs-404 contrast isolates DB tenancy, not auth. Previews share one admin key.
     other_resp = requests.get(
         f"{other_url}/api/analyses/{other_run}/artifact/contract_analysis.json",
+        headers={"X-PSAT-Admin-Key": live_admin_key},
         timeout=15,
     )
     if other_resp.status_code != 200:
