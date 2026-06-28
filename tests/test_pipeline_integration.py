@@ -1221,6 +1221,7 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
     from fastapi.testclient import TestClient
 
     import api
+    from routers import deps
 
     client = TestClient(api.app)
     fake_job = _fake_api_job(name="test_run")
@@ -1239,7 +1240,10 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
 
     mock_get_artifact.side_effect = _get_artifact
 
-    resp = client.get("/api/analyses/test_run/artifact/effective_permissions.json")
+    resp = client.get(
+        "/api/analyses/test_run/artifact/effective_permissions.json",
+        headers={"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""},
+    )
     assert resp.status_code == 200
     # First call should be with stripped name
     assert call_names[0] == "effective_permissions"

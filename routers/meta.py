@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from sqlalchemy import distinct, func, select, text
 
@@ -26,8 +26,13 @@ def index():
 
 
 @router.get("/api/health")
-def health():
-    """Liveness/readiness probe — verifies the database and object storage are reachable."""
+def health(x_psat_admin_key: str | None = Header(default=None)):
+    """Liveness/readiness probe — verifies the database and object storage are reachable.
+
+    The status/db/storage booleans stay public for load-balancer probes; the
+    ``pool`` connection-stats sub-object is operator detail, included only for a
+    caller presenting a valid admin key.
+    """
     from db.models import engine as _engine
 
     body: dict[str, Any] = {"status": "ok", "db": "ok", "storage": "inline"}
@@ -47,7 +52,7 @@ def health():
     # NullPool (used in some test setups) lacks these counters.
     from sqlalchemy.pool import QueuePool
 
-    if isinstance(_engine.pool, QueuePool):
+    if deps.admin_key_valid(x_psat_admin_key) and isinstance(_engine.pool, QueuePool):
         pool = _engine.pool
         body["pool"] = {
             "size": pool.size(),
@@ -86,7 +91,7 @@ def config() -> dict[str, str]:
     return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
 
 
-@router.get("/api/stats")
+@router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)])
 def pipeline_stats() -> dict[str, Any]:
     """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:

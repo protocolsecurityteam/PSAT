@@ -39,6 +39,13 @@ def _make_client() -> TestClient:
     return TestClient(api.app)
 
 
+def _admin_headers() -> dict[str, str]:
+    """Header carrying the configured admin key, for now-gated internal reads."""
+    from routers import deps
+
+    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
+
+
 def _mock_session_ctx(mock_session_cls, mock_session):
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -393,7 +400,7 @@ def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.return_value = {"data": "value"}
 
-    response = client.get(f"/api/analyses/{job_id}/artifact/contract_analysis")
+    response = client.get(f"/api/analyses/{job_id}/artifact/contract_analysis", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json() == {"data": "value"}
 
@@ -428,7 +435,7 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.return_value = {"found": True}
 
-    response = client.get(f"/api/analyses/{addr}/artifact/contract_analysis")
+    response = client.get(f"/api/analyses/{addr}/artifact/contract_analysis", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json()["found"] is True
 
@@ -449,7 +456,7 @@ def test_artifact_not_found(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.return_value = None
 
-    response = client.get("/api/analyses/test_job/artifact/nonexistent.json")
+    response = client.get("/api/analyses/test_job/artifact/nonexistent.json", headers=_admin_headers())
     assert response.status_code == 404
 
 
@@ -538,7 +545,7 @@ def test_artifact_txt_extension_stripping(mock_session_cls, mock_get_artifact):
     # First call with stripped name returns None, second with original returns data
     mock_get_artifact.side_effect = [None, "report text"]
 
-    response = client.get("/api/analyses/job1/artifact/analysis_report.txt")
+    response = client.get("/api/analyses/job1/artifact/analysis_report.txt", headers=_admin_headers())
     assert response.status_code == 200
     assert "report text" in response.text
 
@@ -558,7 +565,7 @@ def test_artifact_json_extension_stripping(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.side_effect = [{"key": "val"}]
 
-    response = client.get("/api/analyses/job1/artifact/contract_analysis.json")
+    response = client.get("/api/analyses/job1/artifact/contract_analysis.json", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json() == {"key": "val"}
 
@@ -576,7 +583,7 @@ def test_artifact_job_not_found_returns_404(mock_session_cls):
     mock_session.execute.return_value = mock_exec
     mock_session.get.return_value = None
 
-    response = client.get("/api/analyses/nonexistent/artifact/contract_analysis")
+    response = client.get("/api/analyses/nonexistent/artifact/contract_analysis", headers=_admin_headers())
     assert response.status_code == 404
 
 

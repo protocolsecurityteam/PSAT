@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
@@ -18,6 +18,20 @@ from . import deps
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Artifact names the consumer frontend fetches via ``/artifact/``. Any other
+# name is operator/internal and gated behind a valid admin key. Compared
+# against the requested name after extension-stripping and lower-casing.
+_CONSUMER_SAFE_ARTIFACTS = frozenset({"upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"})
+
+# Internal/operator artifacts excluded from the public ``/api/analyses``
+# listing so their existence isn't enumerable to anonymous callers.
+_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "control_tracking_plan"})
+
+
+def _is_internal_artifact_name(name: str) -> bool:
+    n = name.lower()
+    return n in _INTERNAL_ARTIFACT_NAMES or n.startswith("stage_timing_") or n.endswith("error") or n.endswith("plan")
 
 
 @router.get("/api/analyses")
@@ -102,7 +116,9 @@ def analyses(response: Response) -> list[dict]:
             "implementation_address": contract.implementation if contract else None,
             "proxy_address": request.get("proxy_address"),
         }
-        entry["available_artifacts"] = sorted(artifact_names_by_job.get(job.id, []))
+        entry["available_artifacts"] = sorted(
+            n for n in artifact_names_by_job.get(job.id, []) if not _is_internal_artifact_name(n)
+        )
 
         # Hide proxy entries until the impl is completed — otherwise the
         # listing renders a half-populated card that mutates once the impl
@@ -129,13 +145,32 @@ def analyses(response: Response) -> list[dict]:
 
 
 @router.get("/api/analyses/{run_name:path}/artifact/{artifact_name:path}")
-def analysis_artifact(run_name: str, artifact_name: str):
+def analysis_artifact(
+    run_name: str,
+    artifact_name: str,
+    request: Request,
+    x_psat_admin_key: str | None = Header(default=None),
+):
     """Get a specific artifact for an analysis.
 
     Storage-backed artifacts are fetched from object storage transparently;
     inline (legacy) artifacts are served from Postgres. Either way, the body
     is returned directly to the client.
+
+    Only the consumer-safe artifacts are public; any other name requires a
+    valid admin key, enforced before any lookup so an unauthorized name yields
+    no existence signal and no storage I/O.
     """
+    # Strip .json/.txt extension for artifact lookup.
+    lookup_name = artifact_name
+    if artifact_name.endswith(".json"):
+        lookup_name = artifact_name[:-5]
+    elif artifact_name.endswith(".txt"):
+        lookup_name = artifact_name[:-4]
+
+    if lookup_name.lower() not in _CONSUMER_SAFE_ARTIFACTS:
+        deps.require_admin_key(request, x_psat_admin_key)
+
     with deps.SessionLocal() as session:
         # Find job by name or id or address
         stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
@@ -154,13 +189,6 @@ def analysis_artifact(run_name: str, artifact_name: str):
             ).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
-
-        # Strip .json/.txt extension for artifact lookup
-        lookup_name = artifact_name
-        if artifact_name.endswith(".json"):
-            lookup_name = artifact_name[:-5]
-        elif artifact_name.endswith(".txt"):
-            lookup_name = artifact_name[:-4]
 
         artifact: Any = None
         try:
