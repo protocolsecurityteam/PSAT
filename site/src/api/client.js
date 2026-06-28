@@ -16,6 +16,9 @@ export function setAdminKey(key) {
   try {
     if (key) window.localStorage.setItem(ADMIN_KEY_STORAGE, key);
     else window.localStorage.removeItem(ADMIN_KEY_STORAGE);
+    // Notify same-tab listeners (useIsAdmin) so gated UI re-renders on
+    // login/logout; the native 'storage' event only fires in other tabs.
+    window.dispatchEvent(new Event("psat:adminkey"));
   } catch {
     // localStorage unavailable (private mode, etc.) — admin actions will
     // require re-entering the key on every request.

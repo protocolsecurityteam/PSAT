@@ -1,7 +1,8 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
 import { shortenAddress } from "./graph.js";
-import { api } from "./api/client.js";
+import { api, getAdminKey, setAdminKey } from "./api/client.js";
+import { useIsAdmin } from "./api/useIsAdmin.js";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
@@ -68,6 +69,17 @@ export default function App() {
   const analysesRef = useRef([]);
   const activeTabRef = useRef(parseLocationPath(window.location.pathname).tab);
   const doneTimerRef = useRef(null);
+  const isAdmin = useIsAdmin();
+
+  // First-run admin login: ?admin=1 prompts once for the key when none is
+  // stored. This is the only key-entry path now that operator controls are
+  // hidden from non-admins.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("admin") === "1" && !getAdminKey()) {
+      const entered = window.prompt("Paste your PSAT admin key:");
+      if (entered) setAdminKey(entered);
+    }
+  }, []);
 
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
@@ -297,6 +309,7 @@ export default function App() {
           viewMode={viewMode}
           companyName={companyName}
           companyTab={companyTab}
+          isAdmin={isAdmin}
           onNavigate={(path, mode) => { navigate(path, mode); refreshAnalyses(); }}
           onNavigateCompanyTab={navigateCompanyTab}
         />
