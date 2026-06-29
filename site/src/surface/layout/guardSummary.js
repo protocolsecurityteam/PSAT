@@ -6,6 +6,68 @@ import { formatDelay, shortAddr } from "../format.js";
 import { collectPrincipals } from "./controlGraph.js";
 import { oneShotState } from "../../oneShot.js";
 
+// Address → on-canvas contract name (the cards collapse a proxy onto its
+// implementation name). Also maps a contract's implementation / secondary-impl
+// addresses to that name, so a caller referenced by an implementation address
+// resolves to the same collapsed name the canvas shows. Cached per payload.
+const _nameMapCache = new WeakMap();
+function contractDisplayNames(companyData) {
+  if (!companyData) return new Map();
+  const cached = _nameMapCache.get(companyData);
+  if (cached) return cached;
+  const m = new Map();
+  for (const c of companyData.contracts || []) {
+    if (c.address && c.name) m.set(c.address.toLowerCase(), c.name);
+  }
+  for (const c of companyData.contracts || []) {
+    if (!c.name) continue;
+    if (c.implementation && !m.has(c.implementation.toLowerCase())) {
+      m.set(c.implementation.toLowerCase(), c.name);
+    }
+    for (const s of c.secondary_implementations || []) {
+      if (s && !m.has(s.toLowerCase())) m.set(s.toLowerCase(), c.name);
+    }
+  }
+  _nameMapCache.set(companyData, m);
+  return m;
+}
+
+// Per-caller display descriptor (type glyph kind + name + sub), generalising the
+// single-principal label logic so each direct caller can render as its own button.
+function describeCaller(principal, companyData) {
+  const kind = principal.resolvedType === "unknown" ? "address" : (principal.resolvedType || "address");
+  const meta = TYPE_META[kind] || TYPE_META.unknown;
+  const owners = Array.isArray(principal.details?.owners) ? principal.details.owners.length : 0;
+  const threshold = Number(principal.details?.threshold);
+  const delay = formatDelay(principal.details?.delay);
+  let name;
+  let sub = null;
+  if (kind === "safe") {
+    name = "Safe";
+    sub = owners
+      ? (Number.isFinite(threshold) && threshold > 0 ? `${threshold}/${owners}` : `${owners} sig`)
+      : shortAddr(principal.address);
+  } else if (kind === "timelock") {
+    name = "Timelock";
+    sub = delay || shortAddr(principal.address);
+  } else if (kind === "contract") {
+    // Resolve to the same name the canvas renders — a proxy caller collapses to
+    // its implementation name — keyed by the caller's address or impl address.
+    name = contractDisplayNames(companyData).get(principal.address?.toLowerCase())
+      || principal.label
+      || "Contract";
+  } else if (kind === "eoa") {
+    name = principal.label || "EOA";
+    sub = shortAddr(principal.address);
+  } else if (kind === "proxy_admin") {
+    name = principal.label || "Proxy admin";
+    sub = shortAddr(principal.address);
+  } else {
+    name = principal.label || shortAddr(principal.address);
+  }
+  return { kind, name, sub, accent: meta.accent };
+}
+
 function isExactEmptyCapability(cap) {
   if (!cap || typeof cap !== "object") return false;
   if (cap.kind === "finite_set") {
@@ -45,7 +107,7 @@ export function guardSummary(fn, companyData) {
   // `principals` stays as the direct list for backward compatibility — every
   // consumer that reads `fnView.guard.principals` only cares about who can
   // actually call the function *now*, not the governance chain above that.
-  const principals = direct;
+  const principals = direct.map((p) => ({ ...p, display: describeCaller(p, companyData) }));
 
   if (!direct.length) {
     // One-shot initializers split the "open" badge by their on-chain latch: a
