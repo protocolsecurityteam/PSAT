@@ -63,3 +63,30 @@ describe("ContractNode — proxy indicator", () => {
     expect(c.querySelector(".ps-node-proxy")).toBeNull();
   });
 });
+
+describe("ContractNode — timelock marker", () => {
+  it("shows a TIMELOCK line and flips the role label for a timelock contract", () => {
+    const c = renderNode({ address: "0x9f26", name: "EtherFiTimelock", role: "value_handler", isTimelock: true, timelockDelay: 172800 });
+    const el = c.querySelector(".ps-node-timelock");
+    expect(el).toBeTruthy();
+    expect(el.querySelector("svg")).toBeTruthy();
+    expect(el.textContent).toMatch(/TIMELOCK/);
+    // role label is replaced (not the classifier's "Value Handler")
+    expect(c.querySelector(".ps-node-role").textContent).toBe("Timelock");
+  });
+
+  it("shows the delay when known and omits it otherwise", () => {
+    const c1 = renderNode({ address: "0x1", name: "TL", role: "utility", isTimelock: true, timelockDelay: 172800 });
+    expect(c1.querySelector(".ps-node-timelock").textContent).toMatch(/2d delay/);
+    const c2 = renderNode({ address: "0x2", name: "TL2", role: "utility", isTimelock: true, timelockDelay: null });
+    const t2 = c2.querySelector(".ps-node-timelock").textContent;
+    expect(t2).toMatch(/TIMELOCK/);
+    expect(t2).not.toMatch(/delay/);
+  });
+
+  it("leaves a non-timelock contract untouched", () => {
+    const c = renderNode({ address: "0x3", name: "WeETH", role: "value_handler", isTimelock: false });
+    expect(c.querySelector(".ps-node-timelock")).toBeNull();
+    expect(c.querySelector(".ps-node-role").textContent).toBe("Value Handler");
+  });
+});

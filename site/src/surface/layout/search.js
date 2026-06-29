@@ -30,6 +30,31 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         principal: p,
       });
     }
+    // Timelock contracts (control-graph type=timelock) aren't principals, but
+    // they belong under the Timelocks filter just like timelock principals.
+    // Surface them as contract results, deduped against any principal already
+    // added at the same address.
+    if (mode === "timelock") {
+      const seen = new Set(items.map((i) => i.address?.toLowerCase()));
+      for (const m of machines) {
+        if (!m.isTimelock) continue;
+        const lc = m.address?.toLowerCase();
+        if (seen.has(lc)) continue;
+        seen.add(lc);
+        items.push({
+          kind: "contract",
+          address: m.address,
+          name: m.name || "",
+          type: "timelock",
+          value: m.total_usd || 0,
+          signers: 0,
+          delay: m.timelockDelay || 0,
+          functions: m.totalFunctions || 0,
+          machine: m,
+          principal: null,
+        });
+      }
+    }
   } else {
     // Show contracts
     for (const m of machines) {

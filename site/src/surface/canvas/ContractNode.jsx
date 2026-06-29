@@ -1,16 +1,26 @@
 import { Handle, Position } from "@xyflow/react";
 
-import { formatUsd, shortAddr } from "../format.js";
+import { formatDelay, formatUsd, shortAddr } from "../format.js";
 import { ROLE_META } from "../meta.js";
 
 export function ContractNode({ data }) {
   const m = data.machine;
   const roleColor = (ROLE_META[m.role] || ROLE_META.utility).color;
+  // A passthrough timelock contract (control-graph type=timelock) defaults to
+  // its functional role label; surface the timelock identity so it isn't read
+  // as a plain contract and lines up with the Timelocks filter. Owner
+  // attribution is unchanged — this re-labels, it doesn't re-attribute.
+  const TIMELOCK_COLOR = "#9a8a6e";
+  const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
+  const roleLabel = m.isTimelock
+    ? "Timelock"
+    : (ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "");
+  const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
   return (
     <div
       className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}`}
-      style={{ borderLeftColor: roleColor }}
+      style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >
       {chip?.out && (
@@ -52,6 +62,19 @@ export function ContractNode({ data }) {
         </button>
       )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
+      {/* Timelock marker. A timelock contract is owned by a Safe (passthrough),
+          so by default it renders as whatever functional role the classifier
+          gave it ("Value Handler") with nothing flagging the delay-gated
+          control surface it actually is. */}
+      {m.isTimelock && (
+        <div className="ps-node-timelock" title={`timelock${delayStr ? ` · ${delayStr} delay` : ""}`}>
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <circle cx="6" cy="6.4" r="4.4" stroke="#9a8a6e" strokeWidth="1.1" />
+            <path d="M6 4v2.6l1.7 1.1" stroke="#9a8a6e" strokeWidth="1.1" strokeLinecap="round" />
+          </svg>
+          <span>TIMELOCK{delayStr ? ` · ${delayStr} delay` : ""}</span>
+        </div>
+      )}
       {/* Proxy marker. Without it the card is identical to a regular
           contract, hiding that most protocol contracts are upgradeable —
           the single most security-relevant attribute on the canvas. The
@@ -76,7 +99,7 @@ export function ContractNode({ data }) {
           </span>
         </div>
       )}
-      <div className="ps-node-role" style={{ color: roleColor }}>{(ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "")}</div>
+      <div className="ps-node-role" style={{ color: accent }}>{roleLabel}</div>
       {m.total_usd ? <div className="ps-node-balance">{formatUsd(m.total_usd)}</div> : null}
     </div>
   );

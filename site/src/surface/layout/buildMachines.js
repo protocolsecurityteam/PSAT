@@ -9,10 +9,13 @@ import {
   lanePriority,
   toneForFunction,
 } from "../lane.js";
-import { collectPrincipals } from "./controlGraph.js";
+import { buildControlGraphIndex, collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 
 export function buildMachines(companyData, functionData, { functionsLoading = false } = {}) {
+  // Node-type index over every contract's control_graph; used to flag
+  // passthrough timelock contracts (their own node is typed "timelock").
+  const { nodeInfo } = buildControlGraphIndex(companyData);
   return companyData.contracts
     .map((contract) => {
       const rawFunctions = (functionData[contract.address] || [])
@@ -52,10 +55,17 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
       }
 
       const totalFunctions = lanes.top.length + lanes.ops.length + lanes.left.length + lanes.right.length;
+      const tlNode = nodeInfo.get((contract.address || "").toLowerCase());
+      const isTimelock = tlNode?.type === "timelock";
       return {
         ...contract,
         totalFunctions,
         lanes,
+        // Passthrough timelock contracts: typed "timelock" in the control
+        // graph but owned by a Safe (still credited via primary_for). Flagged
+        // so the card + Timelocks filter can identify them.
+        isTimelock,
+        timelockDelay: isTimelock ? tlNode?.details?.delay ?? null : null,
       };
     })
     .filter((machine) =>
