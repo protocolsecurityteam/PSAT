@@ -5,11 +5,11 @@ import { test, expect } from "@playwright/test";
  * Minimal API fixture for /api/company/testco.
  *
  * Contains one contract ("Vault") with four functions, each guarded by
- * a different principal configuration:
- *   - setSafe:        single safe principal
- *   - setTimelock:    single timelock principal
- *   - setOwner:       single contract (proxy admin) principal
- *   - setMixed:       two principals (safe + timelock) → "2P mixed"
+ * a different direct-caller configuration:
+ *   - setSafe:        single safe caller
+ *   - setTimelock:    single timelock caller
+ *   - setOwner:       single contract caller
+ *   - setMixed:       two callers (safe + timelock) → one button each
  */
 const SAFE_ADDR = "0xaaaa000000000000000000000000000000000001";
 const TL_ADDR = "0xbbbb000000000000000000000000000000000002";
@@ -127,108 +127,97 @@ async function goToSurface(page) {
   await page.waitForSelector(".react-flow__node", { timeout: 15000 });
 }
 
+/** Open the Vault contract's detail panel (the function lanes). */
+async function openVaultDetail(page) {
+  await page.locator(".ps-node").first().click();
+  await page.waitForSelector(".ps-machine", { timeout: 5000 });
+}
+
+/** The .ps-port lane card for a given function name. */
+function portFor(page, fnName) {
+  return page.locator(".ps-port", {
+    has: page.locator(".ps-port-name", { hasText: fnName }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-test.describe("Guard badge navigation", () => {
-  test("clicking SAFE badge navigates to safe principal detail", async ({ page }) => {
+test.describe("Caller button navigation", () => {
+  test("single safe caller button navigates to the safe principal detail", async ({ page }) => {
     await goToSurface(page);
+    await openVaultDetail(page);
 
-    // Click the Vault contract node to select it
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
+    const safePort = portFor(page, "setSafe");
+    const safeBtn = safePort.locator(".ps-caller-btn");
+    await expect(safeBtn).toHaveCount(1);
+    await expect(safeBtn).toContainText("Safe");
+    // A single caller renders no "callable by" header.
+    await expect(safePort.locator(".ps-callers-label")).toHaveCount(0);
 
-    // Find the guard button for setSafe — it should show "SAFE"
-    const safeGuard = page.locator(".ps-guard-button", { hasText: "SAFE" }).first();
-    await expect(safeGuard).toBeVisible();
+    await safeBtn.click();
 
-    // Click it
-    await safeGuard.click();
-
-    // Should navigate to principal detail — sidebar shows safe info
-    const principalHeader = page.locator(".ps-machine-name");
-    await expect(principalHeader).toBeVisible({ timeout: 5000 });
-
-    // URL should have focus param
-    await expect(page).toHaveURL(/focus=/);
-
-    // Should show the principal's address in the sidebar
-    const addrText = page.locator(".ps-machine-address");
-    await expect(addrText).toContainText(SAFE_ADDR.slice(0, 6));
+    // Sidebar swaps to the principal detail.
+    await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".ps-machine-address")).toContainText(SAFE_ADDR.slice(0, 6));
+    // Focus follows the navigation target.
+    await expect(page).toHaveURL(new RegExp(`focus=${SAFE_ADDR}`));
   });
 
-  test("clicking TL badge navigates to timelock principal detail", async ({ page }) => {
+  test("single timelock caller button navigates to the timelock principal detail", async ({ page }) => {
     await goToSurface(page);
+    await openVaultDetail(page);
 
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
+    const tlBtn = portFor(page, "setTimelock").locator(".ps-caller-btn");
+    await expect(tlBtn).toHaveCount(1);
+    await expect(tlBtn).toContainText("Timelock");
+    await tlBtn.click();
 
-    const tlGuard = page.locator(".ps-guard-button", { hasText: "TL" }).first();
-    await expect(tlGuard).toBeVisible();
-    await tlGuard.click();
-
-    // Should show timelock detail
-    const principalHeader = page.locator(".ps-machine-name");
-    await expect(principalHeader).toBeVisible({ timeout: 5000 });
-
-    const addrText = page.locator(".ps-machine-address");
-    await expect(addrText).toContainText(TL_ADDR.slice(0, 6));
+    await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".ps-machine-address")).toContainText(TL_ADDR.slice(0, 6));
   });
 
-  test("clicking CON badge navigates to contract", async ({ page }) => {
+  test("single contract caller renders its own button", async ({ page }) => {
     await goToSurface(page);
+    await openVaultDetail(page);
 
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
-
-    const conGuard = page.locator(".ps-guard-button", { hasText: "CON" }).first();
-    await expect(conGuard).toBeVisible();
-    await conGuard.click();
-
-    // URL should update with focus param pointing to the contract principal
+    const conBtn = portFor(page, "setOwner").locator(".ps-caller-btn");
+    await expect(conBtn).toHaveCount(1);
+    await expect(conBtn).toContainText("Contract");
+    // Clicking is a no-op here (the contract isn't an in-scope node), but it
+    // must not throw — the focus param stays on the previously-selected node.
+    await conBtn.click();
     await expect(page).toHaveURL(/focus=/);
   });
 
-  test("clicking 2P badge navigates to first principal and shows tour nav", async ({ page }) => {
+  test("a multi-caller function renders one button per caller, each navigating directly", async ({ page }) => {
     await goToSurface(page);
+    await openVaultDetail(page);
 
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
+    const mixedPort = portFor(page, "setMixed");
+    // Two distinct callers → "callable by" header + two buttons (no tour).
+    await expect(mixedPort.locator(".ps-callers-label")).toBeVisible();
+    const mixedBtns = mixedPort.locator(".ps-caller-btn");
+    await expect(mixedBtns).toHaveCount(2);
+    await expect(mixedBtns.filter({ hasText: "Safe" })).toHaveCount(1);
+    await expect(mixedBtns.filter({ hasText: "Timelock" })).toHaveCount(1);
 
-    const mixedGuard = page.locator(".ps-guard-button", { hasText: "2P" }).first();
-    await expect(mixedGuard).toBeVisible();
-    await mixedGuard.click();
-
-    // Should show tour navigator on the canvas
-    const tourNav = page.locator(".ps-tour-nav");
-    await expect(tourNav).toBeVisible({ timeout: 5000 });
-
-    // Should show counter "1 / 2"
-    const counter = page.locator(".ps-tour-counter");
-    await expect(counter).toContainText("1 / 2");
-
-    // Click next arrow to go to second principal
-    await page.locator(".ps-tour-controls button", { hasText: "▶" }).click();
-    await expect(counter).toContainText("2 / 2");
-
-    // Click back button to return to source contract
-    await page.locator(".ps-tour-back").click();
-    await expect(tourNav).not.toBeVisible();
+    // The timelock button navigates straight to the timelock — no intermediate
+    // "first principal + tour" hop.
+    await mixedPort.locator(".ps-caller-btn", { hasText: "Timelock" }).click();
+    await expect(page).toHaveURL(new RegExp(`focus=${TL_ADDR}`));
   });
 
-  test("clicking function name opens guard inspector (not navigation)", async ({ page }) => {
+  test("clicking the function name opens the guard inspector (not navigation)", async ({ page }) => {
     await goToSurface(page);
+    await openVaultDetail(page);
 
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
-
-    // Click the function name text, not the guard badge
+    // Click the function name text, not a caller button.
     const fnName = page.locator(".ps-port-name", { hasText: "setSafe" }).first();
     await expect(fnName).toBeVisible();
     await fnName.click();
 
-    // Should show guard inspector
     const inspector = page.locator(".ps-inspector");
     await expect(inspector).toBeVisible({ timeout: 5000 });
     await expect(inspector.locator("h3")).toContainText("setSafe");
@@ -251,37 +240,15 @@ test.describe("URL focus parameter", () => {
 
   test("navigating updates focus param to new target", async ({ page }) => {
     await goToSurface(page);
-
-    // Click a node to select it
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
+    await openVaultDetail(page);
 
     // URL should have focus on the vault contract
     await expect(page).toHaveURL(new RegExp(`focus=${VAULT_ADDR}`));
 
-    // Click safe guard badge to navigate to the safe principal
-    const safeGuard = page.locator(".ps-guard-button", { hasText: "SAFE" }).first();
-    await safeGuard.click();
+    // Click the safe caller button to navigate to the safe principal
+    await portFor(page, "setSafe").locator(".ps-caller-btn").click();
 
     // URL focus should now point to the safe address, not the vault
     await expect(page).toHaveURL(new RegExp(`focus=${SAFE_ADDR}`));
-  });
-});
-
-test.describe("Breadcrumbs", () => {
-  test("navigating from contract to principal adds breadcrumb", async ({ page }) => {
-    await goToSurface(page);
-
-    // Select the vault
-    await page.locator(".ps-node").first().click();
-    await page.waitForSelector(".ps-machine", { timeout: 5000 });
-
-    // Click safe guard to navigate
-    const safeGuard = page.locator(".ps-guard-button", { hasText: "SAFE" }).first();
-    await safeGuard.click();
-
-    // Breadcrumb should appear with the previous contract
-    const breadcrumb = page.locator(".ps-breadcrumb");
-    await expect(breadcrumb.first()).toBeVisible({ timeout: 5000 });
   });
 });

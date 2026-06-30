@@ -101,17 +101,6 @@ export function GuardGlyph({ kind, accent, title }) {
     );
   }
 
-  if (kind === "many") {
-    return (
-      <svg {...common}>
-        <circle cx="5.7" cy="6.2" r="2" stroke={accent} strokeWidth="1.3" fill={`${accent}18`} />
-        <circle cx="10.5" cy="5.6" r="1.8" stroke={accent} strokeWidth="1.3" fill={`${accent}10`} />
-        <path d="M3.7 12.2C4.2 10.8 5.2 10.1 6.5 10.1C7.8 10.1 8.8 10.8 9.3 12.2" stroke={accent} strokeWidth="1.3" strokeLinecap="round" />
-        <path d="M9.4 11.4C9.8 10.5 10.5 10 11.4 10" stroke={accent} strokeWidth="1.3" strokeLinecap="round" />
-      </svg>
-    );
-  }
-
   return (
     <span
       className="ps-guard-svg-mask"

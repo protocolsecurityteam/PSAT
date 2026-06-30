@@ -16,7 +16,6 @@ import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
 import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
-import { Breadcrumbs } from "./surface/sidebar/Breadcrumbs.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
 import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
@@ -75,7 +74,6 @@ export default function ProtocolSurface({
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
   const [searchMode, setSearchMode] = useState("all");
-  const [breadcrumbs, setBreadcrumbs] = useState([]);
   const [focusAddress, setFocusAddress] = useState(null);
   const [focusedAddress, setFocusedAddress] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -100,8 +98,6 @@ export default function ProtocolSurface({
     }
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
-  // Multi-principal tour state: { principals: [...], index: 0, sourceContract: "0x...", sourceFunction: "fn" }
-  const [principalTour, setPrincipalTour] = useState(null);
   const [error, setError] = useState(null);
   const [headerCollapsed, setHeaderCollapsed] = useState(true);
   const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
@@ -428,7 +424,6 @@ export default function ProtocolSurface({
     setSelectedMachine(null);
     setSelectedGuard(null);
     setRadarExampleSelection(null);
-    setPrincipalTour(null);
     // opts.focus === false selects without moving the camera (controller-row
     // clicks just want the highlight, not a pan/zoom to the principal's node).
     if (principal.address && opts?.focus !== false) triggerFocus(principal.address);
@@ -463,35 +458,8 @@ export default function ProtocolSurface({
   }, [machines, visiblePrincipals, triggerFocus]);
 
   const handleNavigate = useCallback((target) => {
-    // Push current view to breadcrumbs before navigating
-    setBreadcrumbs((prev) => {
-      const current = selectedPrincipal
-        ? { type: selectedPrincipal.type, address: selectedPrincipal.address, label: selectedPrincipal.label }
-        : selectedMachine
-        ? { type: "contract", address: selectedMachine.address, label: selectedMachine.name }
-        : null;
-      return current ? [...prev, current] : prev;
-    });
-
-    const hasPrincipalTour = target._allPrincipals && target._allPrincipals.length > 1;
-    if (hasPrincipalTour) {
-      setPrincipalTour({
-        principals: target._allPrincipals,
-        index: 0,
-        sourceContract: target._sourceContract,
-        sourceFunction: target._sourceFunction,
-      });
-    } else {
-      setPrincipalTour(null);
-    }
-
-    // Surface the navigation result in the Detail panel. Without this,
-    // clicking a guard chip from the Agent tab silently mutates state
-    // the user can't see — looks like "nothing happened" until they
-    // manually click Detail. The chip click is an explicit drill-in
-    // request, so swapping to Detail is the right behavior.
+    // Surface the navigation result in the Detail panel.
     setSidebarMode("detail");
-
     if (target.type === "contract") {
       const machine = machines.find((m) => m.address?.toLowerCase() === target.address?.toLowerCase());
       if (machine) {
@@ -504,19 +472,7 @@ export default function ProtocolSurface({
     } else {
       navigateToPrincipal(target);
     }
-  }, [machines, visiblePrincipals, selectedMachine, selectedPrincipal, triggerFocus, navigateToPrincipal]);
-
-  const handleBreadcrumbNav = useCallback((item, index) => {
-    // Truncate breadcrumbs to this point
-    setBreadcrumbs((prev) => prev.slice(0, index));
-    if (item.type === "contract") {
-      const machine = machines.find((m) => m.address?.toLowerCase() === item.address?.toLowerCase());
-      if (machine) { setSelectedMachine(machine); setSelectedPrincipal(null); setSelectedGuard(null); setRadarExampleSelection(null); }
-    } else {
-      const principal = visiblePrincipals.find((p) => p.address?.toLowerCase() === item.address?.toLowerCase());
-      if (principal) { setSelectedPrincipal(principal); setSelectedMachine(null); setSelectedGuard(null); setRadarExampleSelection(null); }
-    }
-  }, [machines, visiblePrincipals]);
+  }, [machines, navigateToPrincipal, triggerFocus]);
 
   const totals = useMemo(() => {
     return machines.reduce(
@@ -664,7 +620,6 @@ export default function ProtocolSurface({
             window.history.replaceState({}, "", url.toString());
             return;
           }
-          setBreadcrumbs([]);
           if (item.kind === "principal" && item.principal) {
             setSelectedPrincipal(item.principal);
             setSelectedMachine(item.machine);
@@ -705,30 +660,6 @@ export default function ProtocolSurface({
             onSelectPrincipal={(p, opts) => {
               if (p && sidebarMode !== "detail") setSidebarMode("detail");
               handleSelectPrincipal(p, opts);
-            }}
-            principalTour={principalTour}
-            onTourGo={(nextIndex) => {
-              const p = principalTour.principals[nextIndex];
-              setPrincipalTour((prev) => ({ ...prev, index: nextIndex }));
-              navigateToPrincipal({
-                type: p.resolvedType || "unknown",
-                address: p.address,
-                label: p.label,
-                details: p.details,
-              });
-            }}
-            onTourBack={() => {
-              setPrincipalTour(null);
-              if (principalTour?.sourceContract) {
-                const machine = machines.find((m) => m.address?.toLowerCase() === principalTour.sourceContract?.toLowerCase());
-                if (machine) {
-                  setSelectedMachine(machine);
-                  setSelectedPrincipal(null);
-                  setSelectedGuard(null);
-                  setRadarExampleSelection(null);
-                  triggerFocus(machine.address);
-                }
-              }
             }}
           />
         </ReactFlowProvider>
@@ -771,9 +702,6 @@ export default function ProtocolSurface({
               cache={upgradeHistoryCache}
               onCache={cacheUpgradeHistory}
             />
-          )}
-          {sidebarMode === "detail" && (
-            <Breadcrumbs items={breadcrumbs} onNavigate={handleBreadcrumbNav} />
           )}
           {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarExampleSelection) && (
             <DetailEmptyState

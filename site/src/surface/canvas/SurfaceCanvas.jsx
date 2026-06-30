@@ -13,7 +13,6 @@ import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
 import { FocusOnNode } from "./FocusOnNode.jsx";
 import { GroupNode } from "./GroupNode.jsx";
-import { PrincipalTourNav } from "./PrincipalTourNav.jsx";
 
 // Co-controllers live inside the owning group's Controllers accordion now, so
 // the canvas only renders contract cards and their owning group boxes — there
@@ -43,7 +42,7 @@ function SelectionLegend() {
   );
 }
 
-export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress, focusAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, principalTour, onTourGo, onTourBack }) {
+export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress, focusAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
@@ -393,11 +392,6 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         <Background color="#1e293b" gap={24} size={1} />
         <Controls showInteractive={false} />
         <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} />
-        {principalTour && principalTour.principals.length > 1 && (
-          <Panel position="top-right">
-            <PrincipalTourNav tour={principalTour} onGo={onTourGo} onBack={onTourBack} />
-          </Panel>
-        )}
         {selectedAddress && (
           <Panel position="top-center">
             <SelectionLegend />
