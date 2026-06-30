@@ -1134,11 +1134,13 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
          rows physically live on) is attributed to the governance Safe,
          resolved *through* the Timelock.
 
-      2. A fee-destination Safe — typed ``safe`` in the control graph (so it
-         IS a principal) but holding no ``FunctionPrincipal`` row — is
-         attributed to nothing. This is the ``payoutAddress`` fee-sink the
-         parent PR deliberately excluded; the transitive resolution must not
-         resurrect it, because it only follows call-authority (FP) edges.
+      2. A fee-destination Safe — typed ``safe`` in the control graph but
+         holding no ``FunctionPrincipal`` row on any contract — is FP-gated
+         out of the principals list entirely. It is a ``payoutAddress``
+         fee-sink, not a controller: the second-pass CGN walk keeps a
+         safe/eoa/timelock principal only when it holds real call-authority
+         (an FP row) on the contract, so this beneficiary never becomes a
+         principal nor appears in any principal's ``controls``.
     """
     p = _add_protocol(db_session, f"timelock-gov-{uuid.uuid4().hex[:8]}")
 
@@ -1225,7 +1227,10 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
     principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
 
     assert gov_safe in principals, "governance Safe should surface as a principal"
-    assert fee_safe in principals, "fee-destination Safe is a typed principal (just must own nothing)"
+    assert fee_safe not in principals, (
+        "a fee-destination Safe with no FunctionPrincipal authority must be FP-gated out of the "
+        "principals list entirely — it is a payoutAddress beneficiary, not a controller"
+    )
 
     gov_primary = {a.lower() for a in (principals[gov_safe].get("primary_for") or [])}
     assert proxy_addr.lower() in gov_primary, (
@@ -1237,9 +1242,84 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         "primary_for must be keyed on the rendered proxy address, never the "
         "implementation address the FunctionPrincipal rows physically live on"
     )
-    assert principals[fee_safe].get("primary_for") == [], (
-        "a Safe with no FunctionPrincipal authority must never become a primary "
-        "controller — this is the payoutAddress fee-sink the parent PR excluded"
+    assert all(fee_safe not in (pr.get("controls") or []) for pr in payload["principals"]), (
+        "the FP-gated fee-destination Safe must not appear in any surviving principal's controls"
+    )
+
+
+def test_second_pass_cgn_principal_requires_function_principal_authority(db_session):
+    """The second-pass ControlGraphNode walk in ``_build_flows_and_principals``
+    must FP-gate the principals it emits: a safe/eoa/timelock CGN node earns a
+    ``principals`` entry (and a ``controls`` edge) only when it holds a real
+    ``FunctionPrincipal`` call-right on the contract.
+
+    Without the gate, every safe-typed CGN node becomes a principal regardless
+    of authority — re-introducing the ether.fi over-attribution where fee /
+    treasury / payout beneficiaries (``treasury`` / ``feeRecipient`` /
+    ``_owner`` / ``accountantState.payoutAddress``) were listed as controllers
+    of contracts they cannot call. This exercises BOTH branches of the gate:
+
+      * ``drop_safe`` — typed ``safe`` in the control graph, NO FP row → skipped
+        (the regression assertion; fails if the gate is reverted).
+      * ``keep_safe`` — typed ``safe`` AND holding an FP row on the contract →
+        survives, with ``controls`` containing ONLY that contract.
+    """
+    p = _add_protocol(db_session, f"fp-gate-secondpass-{uuid.uuid4().hex[:8]}")
+
+    vault_addr = _addr("vault").lower()
+    keep_safe = _addr("keepsafe").lower()
+    drop_safe = _addr("dropsafe").lower()
+
+    vault_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="Vault")
+    vault_contract = _add_contract(
+        db_session, address=vault_addr, job=vault_job, protocol_id=p.id, contract_name="Vault"
+    )
+
+    # Vault.setFee is owner-gated and resolves, in FunctionPrincipal, to
+    # ``keep_safe`` — a real call-right on this contract.
+    ef = EffectiveFunction(
+        contract_id=vault_contract.id,
+        function_name="setFee",
+        selector="0x33333333",
+        abi_signature="setFee(uint256)",
+        authority_public=False,
+    )
+    db_session.add(ef)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=keep_safe,
+            resolved_type="safe",
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+
+    # Both addresses are typed ``safe`` in the control graph, but only
+    # ``keep_safe`` backs that with an FP call-right. ``drop_safe`` is a bare
+    # beneficiary node (the payoutAddress-style fee sink).
+    db_session.add(ControlGraphNode(contract_id=vault_contract.id, address=keep_safe, resolved_type="safe"))
+    db_session.add(ControlGraphNode(contract_id=vault_contract.id, address=drop_safe, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+
+    assert keep_safe in principals, (
+        "a safe-typed CGN node WITH a FunctionPrincipal call-right on the contract must surface as a principal"
+    )
+    assert principals[keep_safe].get("controls") == [vault_addr], (
+        "the FP-backed principal's controls must contain ONLY the contract it can actually call. "
+        f"Got controls={principals[keep_safe].get('controls')}"
+    )
+
+    assert drop_safe not in principals, (
+        "a safe-typed CGN node with NO FunctionPrincipal row must be FP-gated out of the principals "
+        "list — reverting the gate re-adds it (the over-attribution regression)"
+    )
+    assert all(drop_safe not in (pr.get("controls") or []) for pr in payload["principals"]), (
+        "the FP-gated beneficiary Safe must not appear in any principal's controls"
     )
 
 

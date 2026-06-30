@@ -1225,6 +1225,7 @@ def build_governance_view(
         cgn_by_cid,
         cge_by_cid,
         fp_in_contract_by_cid,
+        fp_all_addrs_by_cid,
         principal_lookup,
     )
 
@@ -1444,6 +1445,7 @@ def _build_flows_and_principals(
     cgn_by_cid: dict[int, list[ControlGraphNode]],
     cge_by_cid: dict[int, list[ControlGraphEdge]],
     fp_in_contract_by_cid: dict[int, set[str]],
+    fp_all_addrs_by_cid: dict[int, set[str]],
     principal_lookup: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
@@ -1574,6 +1576,16 @@ def _build_flows_and_principals(
             if resolved_type not in ("safe", "timelock", "proxy_admin", "eoa"):
                 continue
             if node_addr == "0x0000000000000000000000000000000000000000":
+                continue
+            # Gate on FunctionPrincipal authority: a safe/eoa/timelock/
+            # proxy_admin CGN node earns a principal + controls edge only if it
+            # can actually call a function on this contract. Without it, a
+            # zero-authority beneficiary stored in a state var (treasury /
+            # feeRecipient / _owner / payoutAddress) becomes a spurious
+            # principal claiming control it doesn't hold. Mirrors the
+            # controller-flow gate above and the FP third pass below;
+            # cgn_by_cid and fp_all_addrs_by_cid are both keyed by lookup_c.id.
+            if node_addr not in fp_all_addrs_by_cid.get(lookup_c.id, set()):
                 continue
 
             if node_addr not in principal_map:
