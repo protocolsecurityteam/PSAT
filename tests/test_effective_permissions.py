@@ -686,3 +686,64 @@ def test_build_effective_permissions_uses_resolved_role_principals_and_skips_non
             "notes": [],
         }
     ]
+
+
+def _public_default_target() -> dict:
+    return {
+        "subject": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "name": "Target",
+        },
+        "semantic_control": {"semantic_functions": []},
+    }
+
+
+def _external_call_effect() -> dict:
+    # A sensitive-sink, tree-less, capability-less entry point: the exact
+    # population the resolver-ran branch would otherwise default to public.
+    return _effects(
+        _effect(
+            "sweep(address)",
+            targets=["token.transfer"],
+            labels=["external_contract_call"],
+            summary="Calls an external contract from the contract context.",
+            sink_kind="external_call",
+        )
+    )
+
+
+def test_guard_extraction_uncertain_marker_absent_defaults_public():
+    """Control: with no ``guard_extraction_uncertain`` marker, a tree-less
+    sensitive-sink entry point still defaults to public when the resolver
+    ran — the historical behavior the marker must NOT change wholesale."""
+    payload = build_effective_permissions(
+        _public_default_target(),
+        capability_resolver_output={},
+        effects=_external_call_effect(),
+        predicate_trees={"schema_version": "semantic", "trees": {}},
+    )
+    fn = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
+    assert fn.get("status") == "public"
+    assert fn["authority_public"] is True
+
+
+def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
+    """Fail-closed policy gate: when the static stage flags a tree-less sig as
+    a caller-authority guard it could not lower (``guard_extraction_uncertain``),
+    the policy resolves it ``unsupported`` instead of public — closing the
+    fail-open default for that signature only. Carries the explicit reason and
+    drops ``authority_public`` (never projected permissionless)."""
+    payload = build_effective_permissions(
+        _public_default_target(),
+        capability_resolver_output={},
+        effects=_external_call_effect(),
+        predicate_trees={
+            "schema_version": "semantic",
+            "trees": {},
+            "guard_extraction_uncertain": ["sweep(address)"],
+        },
+    )
+    fn = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
+    assert fn.get("status") == "unsupported"
+    assert fn.get("authority_public") is not True
+    assert fn.get("capability_expr", {}).get("unsupported_reason") == "guard_extraction_uncertain"

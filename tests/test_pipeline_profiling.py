@@ -81,7 +81,7 @@ def test_predicate_summary_emits_structured_log_with_top_slow_functions(caplog, 
 
     # Patch the per-function builders to sleep on the "slow" function so
     # we don't need a real Slither subject to exercise the threshold.
-    def _fake_build_predicate_tree(fn: Any) -> Any:
+    def _fake_build_predicate_tree(fn: Any, **_kwargs: Any) -> Any:
         if getattr(fn, "slow", False):
             import time as _t
 
@@ -140,7 +140,7 @@ def test_predicate_summary_suppressed_for_cheap_contract(caplog):
 
     with caplog.at_level(logging.INFO, logger=predicate_artifacts.logger.name):
         with (
-            patch.object(predicate_artifacts, "build_predicate_tree", lambda fn: None),
+            patch.object(predicate_artifacts, "build_predicate_tree", lambda fn, **_k: None),
             patch.object(predicate_artifacts, "build_return_predicate_tree", lambda fn: None),
             patch.object(predicate_artifacts, "apply_writer_gate_pass", lambda c, t: None),
             patch.object(predicate_artifacts, "apply_mapping_event_hint_pass", lambda c, t: None),

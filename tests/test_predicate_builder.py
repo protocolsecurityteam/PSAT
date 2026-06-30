@@ -950,3 +950,38 @@ def test_confidence_high_for_time_gate(tmp_path):
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "time"
     assert leaves[0]["confidence"] == "high"  # type: ignore[typeddict-item]
+
+
+def test_multi_statement_caller_guard_yields_caller_authority_leaf(tmp_path):
+    """#115 -> #114 end-to-end at the builder: a multi-statement caller guard
+    ``if (msg.sender != owner) { emit Denied(...); revert(); }`` (the revert is
+    two hops below the IF) recovers the same ``caller_authority`` equality leaf
+    as the single-statement ``require(msg.sender == owner)``. HEAD produced no
+    gate -> ``None`` tree -> the function defaulted to public; the fix restores
+    correct owner attribution so the policy no longer projects it public."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public n;
+            event Denied(address caller);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    emit Denied(msg.sender);
+                    revert();
+                }
+                n = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    leaves = _all_leaves(build_predicate_tree(fn))
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "equality"
+    assert leaf["operator"] == "eq"  # ne flipped to eq via allowed_when_false polarity
+    assert leaf["authority_role"] == "caller_authority"
+    assert leaf["references_msg_sender"] is True
