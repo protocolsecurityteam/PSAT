@@ -13,8 +13,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from services.discovery.classifier import ClassificationIncompleteError
 from workers.static_worker import StaticWorker
 
 # ---------------------------------------------------------------------------
@@ -572,3 +575,41 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
     assert len(created_jobs) == 1
     assert created_jobs[0]["address"] == _FACET1
     assert created_jobs[0]["name"] == "TestContract: (facet 1)"
+
+
+# ---------------------------------------------------------------------------
+# #121 — proxy-slot read failure fails closed (re-raise), never analyze a shell
+# ---------------------------------------------------------------------------
+
+
+def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
+    """A ClassificationIncompleteError (proxy-slot read failed, transient RPC)
+    must NOT be swallowed into an ``is_proxy=False`` shell that the static stage
+    then Slithers. ``_resolve_proxy`` records the degradation and re-raises so the
+    static stage fails closed into the worker retry path (registered transient)."""
+    worker = StaticWorker()
+    session = MagicMock()
+    job = _job()
+
+    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
+
+    def _raise(address, rpc_url):
+        raise ClassificationIncompleteError("proxy slots unread")
+
+    monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)
+
+    degraded: list = []
+    monkeypatch.setattr(
+        "workers.static_worker.record_degraded",
+        lambda *, phase, exc, context: degraded.append((phase, exc)),
+    )
+
+    with pytest.raises(ClassificationIncompleteError):
+        worker._resolve_proxy(session, job, _ADDR, "TestContract")
+
+    # Degradation recorded, and crucially NO is_proxy=False contract_flags shell
+    # artifact was written (which would have let the stage analyze the shell).
+    assert degraded and degraded[0][0] == "proxy_classification"
+    assert isinstance(degraded[0][1], ClassificationIncompleteError)
+    assert all(name != "contract_flags" for name, _data, _text in store_calls)
+    assert created_jobs == []

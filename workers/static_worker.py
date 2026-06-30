@@ -1004,7 +1004,7 @@ class StaticWorker(BaseWorker):
         to ``classify_contracts(pre_classified=...)`` and avoid duplicate RPC calls.
         Returns ``None`` when classification was skipped or failed.
         """
-        from services.discovery.classifier import classify_single
+        from services.discovery.classifier import ClassificationIncompleteError, classify_single
 
         request = job.request if isinstance(job.request, dict) else {}
         rpc_url = _request_rpc_url(request)
@@ -1020,6 +1020,26 @@ class StaticWorker(BaseWorker):
 
         try:
             classification = classify_single(address, rpc_url)
+        except ClassificationIncompleteError as exc:
+            # #121: the proxy-detection slots could not be read (transient RPC).
+            # Storing is_proxy=False here and analyzing the address as-is would
+            # silently erase a real implementation's access-control surface.
+            # Record the degradation and re-raise so the static stage fails
+            # closed into the worker retry path (registered transient) rather
+            # than completing a confident clean model of a proxy shell.
+            from utils.secrets import sanitize_string
+
+            record_degraded(
+                phase="proxy_classification",
+                exc=exc,
+                context={"address": address},
+            )
+            logger.warning(
+                "Job %s: proxy classification incomplete (proxy-slot read failed); retrying: %s",
+                job.id,
+                sanitize_string(str(exc)),
+            )
+            raise
         except Exception as exc:
             from utils.secrets import sanitize_string
 
