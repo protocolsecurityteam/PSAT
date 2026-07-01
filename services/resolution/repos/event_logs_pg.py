@@ -71,6 +71,48 @@ class ValueFoldResult:
     partial_reason: str | None = None
 
 
+def _cursor_covers_block(cursor_block: int | None, block: int | None) -> bool:
+    """A warm (``backfill_complete``) cursor proves the member set is complete
+    only up to ``cursor_block``. ``enumerable``/``exact`` may be claimed only when
+    that cursor demonstrably COVERS the evaluated point ``block``:
+
+      * ``block is None`` == evaluate at the live head. The durable cursor lags
+        live head by at least ``confirmation_depth`` + the poll interval (more if
+        the indexer is stopped), so head-coverage can never be asserted -> not
+        covered. The resolver pins a finalized head into ``block`` so a
+        keeping-up cursor stays exact; an unpinned ``None`` here cannot.
+      * ``block is not None`` -> covered iff the cursor reached it.
+
+    Not covered -> the fold returns ``partial``/``cursor_behind_block``, which the
+    adapter demotes to ``lower_bound`` (NOT a forever-defer like the cold
+    ``no_index_cursor`` path: steady-state lag never "warms to head")."""
+    if cursor_block is None:
+        return False
+    if block is None:
+        return False
+    return cursor_block >= block
+
+
+def _row_ceiling(frontier_block: int | None, block: int | None) -> int | None:
+    """Upper block bound for a fold's ROW scan — DECOUPLED from the finality pin.
+
+    Rows are included up to the durable index frontier (``frontier_block``, the
+    cursor), NEVER truncated at the resolver's lower finality pin (``block``).
+    The pin (``RESOLVER_FINALITY_MARGIN`` behind head) governs only the
+    exact-vs-lower_bound gate (``_cursor_covers_block``); using it as the row
+    ceiling would drop an already-indexed write in ``(block, frontier_block]``.
+    For a positive allowlist that silently drops a real (indexed) controller; for
+    a ``falsy``/denylist leaf that is negated into a cofinite blacklist it is
+    FAIL-OPEN — a recently-blocked but indexed address would fall out of the
+    blacklist and read PUBLIC while the set is still labelled exact. The cursor
+    is the indexer's confirmed (``confirmation_depth``-deep) frontier, so folding
+    up to it is itself reorg-safe. With no cursor (cold path) fall back to the
+    requested ``block``."""
+    if frontier_block is None:
+        return block
+    return frontier_block
+
+
 class PostgresEventLogRepo:
     """Fold generic indexed logs according to a descriptor's event hint."""
 
@@ -97,6 +139,8 @@ class PostgresEventLogRepo:
         if key_filters is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
+        cursor_block, complete = self._cursor_state(chain_id, event_address, topic0)
+
         q = (
             select(IndexedEventLog)
             .where(IndexedEventLog.chain_id == chain_id)
@@ -108,8 +152,11 @@ class PostgresEventLogRepo:
                 IndexedEventLog.log_index.asc(),
             )
         )
-        if block is not None:
-            q = q.where(IndexedEventLog.block_number <= block)
+        # Fold rows up to the index frontier (cursor), not the finality pin: the
+        # pin only gates exactness below (``_cursor_covers_block``). See _row_ceiling.
+        row_ceiling = _row_ceiling(cursor_block, block)
+        if row_ceiling is not None:
+            q = q.where(IndexedEventLog.block_number <= row_ceiling)
 
         state: dict[str, bool] = {}
         for row in self.session.execute(q).scalars():
@@ -121,7 +168,6 @@ class PostgresEventLogRepo:
                 continue
             state[member] = True
 
-        cursor_block, complete = self._cursor_state(chain_id, event_address, topic0)
         # Trust the durable index only once its historical backfill has reached
         # head. Cursors are seeded at the event address's deploy block, so a
         # positive ``last_indexed_block`` no longer implies "fully indexed" — gate
@@ -134,6 +180,14 @@ class PostgresEventLogRepo:
                 confidence="partial",
                 partial_reason="no_index_cursor",
                 last_indexed_block=None,
+            )
+        if not _cursor_covers_block(cursor_block, block):
+            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
+            return EnumerationResult(
+                members=sorted(addr for addr, present in state.items() if present),
+                confidence="partial",
+                partial_reason="cursor_behind_block",
+                last_indexed_block=cursor_block,
             )
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
@@ -163,6 +217,12 @@ class PostgresEventLogRepo:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
         topic0s = sorted(hints_by_topic)
+        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        # Fold rows up to the HIGHEST per-topic index frontier (every topic's rows
+        # only exist up to its own cursor, so the max admits all indexed rows and no
+        # phantom ones), not the finality pin — the pin only gates exactness below.
+        frontier = max((b for b, _ in cursor_states.values() if b is not None), default=None)
+
         q = (
             select(IndexedEventLog)
             .where(IndexedEventLog.chain_id == chain_id)
@@ -174,8 +234,9 @@ class PostgresEventLogRepo:
                 IndexedEventLog.log_index.asc(),
             )
         )
-        if block is not None:
-            q = q.where(IndexedEventLog.block_number <= block)
+        row_ceiling = _row_ceiling(frontier, block)
+        if row_ceiling is not None:
+            q = q.where(IndexedEventLog.block_number <= row_ceiling)
 
         state: dict[str, bool] = {}
         for row in self.session.execute(q).scalars():
@@ -194,7 +255,6 @@ class PostgresEventLogRepo:
                     continue
                 state[member] = hint["direction"] == "add"
 
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         # As in fold_event_writes: a topic counts as indexed only when its
         # backfill is complete, not merely because its cursor advanced past 0.
         complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
@@ -208,6 +268,14 @@ class PostgresEventLogRepo:
                 last_indexed_block=last_indexed_block,
             )
 
+        if not _cursor_covers_block(last_indexed_block, block):
+            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
+            return EnumerationResult(
+                members=sorted(addr for addr, present in state.items() if present),
+                confidence="partial",
+                partial_reason="cursor_behind_block",
+                last_indexed_block=last_indexed_block,
+            )
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
             confidence="enumerable",
@@ -277,8 +345,17 @@ class PostgresEventLogRepo:
         if not complete:
             _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
             return ValueFoldResult(entries=[], complete=False, partial_reason="no_index_cursor")
+        # Warm cursors only prove completeness up to their height; a fold that
+        # evaluates past the cursor (or at an unpinned live head) is a lower_bound.
+        warm_block = min(c_block for c_block, _done in cursor_states.values() if c_block is not None)
+        if not _cursor_covers_block(warm_block, block):
+            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
+            return ValueFoldResult(entries=[], complete=False, partial_reason="cursor_behind_block")
 
-        rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=block)
+        # Scan up to the index frontier (max cursor), not the lower finality pin —
+        # the pin already gated completeness above via ``warm_block`` (min cursor).
+        frontier = max(c_block for c_block, _done in cursor_states.values() if c_block is not None)
+        rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=frontier)
 
         # (member) -> (value_hex, block, tx_index, log_index) — keep the latest.
         state: dict[str, tuple[str, int, int, int]] = {}

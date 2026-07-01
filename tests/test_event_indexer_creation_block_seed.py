@@ -492,11 +492,16 @@ def test_pg_repo_not_backfill_complete_is_not_trusted(session):
     cursor.backfill_complete = True
     session.commit()
     assert repo.min_indexed_block(chain_id=1, event_address=addr, topic0s=[topic]) == 19_000_000
+    # Evaluate at a height the (now backfilled) cursor covers — the resolver pins a
+    # finalized height for this purpose (#119). A bare ``block=None`` would mean
+    # "evaluate at live head", which the durable cursor structurally lags, so the
+    # coverage gate correctly demotes that to lower_bound.
     hist2 = repo.fold_event_history(
         chain_id=1,
         event_address=addr,
         event_hints=[{"topic0": topic, "direction": "add", "topics_to_keys": {1: 0}, "data_to_keys": {}}],
         key_sources=[{"source": "msg_sender"}],
+        block=19_000_000,
     )
     assert hist2.confidence == "enumerable"
     assert hist2.members == [member]
