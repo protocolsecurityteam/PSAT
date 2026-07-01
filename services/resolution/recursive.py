@@ -18,6 +18,7 @@ from typing_extensions import NotRequired
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
+from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
@@ -31,6 +32,18 @@ from .tracking import (
 from .tracking_plan import build_control_tracking_plan
 
 logger = logging.getLogger(__name__)
+
+
+class UnresolvedProxyError(RuntimeError):
+    """Raised when a proxy classification has no resolvable single implementation.
+
+    Covers EIP-2535 diamonds, beacon proxies whose ``implementation()`` failed,
+    and short-bytecode ``unknown`` proxies with no probe target. Analyzing the
+    delegatecall shell yields an empty guard set that downstream renders as
+    permissionless, so the materialization fails closed and the BFS records a
+    degraded, un-analyzed node instead.
+    """
+
 
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
@@ -310,24 +323,52 @@ def _materialize_contract_artifacts(
     # Proxy check — analyze the implementation but read storage from the proxy.
     effective_address = address
     snapshot_address = address
+
+    # Classify in its OWN try so a generic classify hiccup degrades to
+    # "analyze the address as-is" (historical behavior). The retarget /
+    # fail-closed decision runs OUTSIDE this except — otherwise the
+    # ``UnresolvedProxyError`` raise below would be swallowed into a silent
+    # shell analysis. ``ClassificationIncompleteError`` (proxy-slot read
+    # failure) is propagated, not swallowed, for the same reason.
+    classification: dict | None = None
     try:
         from services.discovery.classifier import classify_single
 
         classification = classify_single(address, rpc_url)
-        if classification.get("type") == "proxy":
-            impl = classification.get("implementation")
-            if impl:
-                # Per-contract redirect (one per nested proxy in the BFS); was the
-                # single loudest INFO in recursive output. DEBUG per-iteration + a
-                # folded ``proxies_redirected`` count for the lifecycle signal.
-                logger.debug(
-                    "Recursive resolve: proxy redirect to impl",
-                    extra={"address": address, "implementation": impl},
-                )
-                _bump_stage_metric("proxies_redirected")
-                effective_address = impl
+    except ClassificationIncompleteError:
+        # #121: the proxy-detection slots could not be read (transient RPC).
+        # Refuse to analyze this address as a confident clean contract; propagate
+        # so the BFS records a degraded, un-analyzed node and the worker retries
+        # when the RPC heals.
+        raise
     except Exception as exc:
         logger.debug("Recursive resolve: proxy check failed for %s: %s", address, exc)
+
+    if classification is not None and classification.get("type") == "proxy":
+        impl = classification.get("implementation")
+        if impl:
+            # Per-contract redirect (one per nested proxy in the BFS); was the
+            # single loudest INFO in recursive output. DEBUG per-iteration + a
+            # folded ``proxies_redirected`` count for the lifecycle signal.
+            logger.debug(
+                "Recursive resolve: proxy redirect to impl",
+                extra={"address": address, "implementation": impl},
+            )
+            _bump_stage_metric("proxies_redirected")
+            effective_address = impl
+        else:
+            # #122: a proxy with no resolvable single implementation — an
+            # eip2535 diamond, a beacon whose ``implementation()`` failed, or a
+            # short-bytecode ``unknown`` proxy with no probe target. The address
+            # is a delegatecall shell with no business logic; analyzing it yields
+            # an empty guard set that downstream renders as permissionless. Fail
+            # closed: refuse the shell and let the BFS record a degraded,
+            # un-analyzed node (facet-union recall is a separate follow-up).
+            _bump_stage_metric("proxies_unresolved")
+            raise UnresolvedProxyError(
+                f"proxy {address} (type={classification.get('proxy_type')}) implementation "
+                "unresolved; refusing to analyze the proxy shell"
+            )
 
     # Resolve bytecode_keccak so the persistent contract_materializations
     # row is keyed on byte-exact code match: identical-bytecode contracts

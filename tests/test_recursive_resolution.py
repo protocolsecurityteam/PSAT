@@ -7,8 +7,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from schemas.resolved_control_graph import ResolvedGraphEdge
+from services.discovery.classifier import ClassificationIncompleteError
+from services.resolution import recursive
 from services.resolution.recursive import (
     LoadedArtifacts,
+    UnresolvedProxyError,
     _add_edge,
     _mapping_writer_specs_from_predicate_trees,
     _materialize_contract_artifacts,
@@ -508,6 +511,159 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
     )
 
     assert loaded.get("effective_permissions") is marker
+
+
+# ---------------------------------------------------------------------------
+# #122 — no-impl proxy must fail closed (refuse to analyze the shell);
+# #121 coupling — the ClassificationIncompleteError raise must propagate here.
+# ---------------------------------------------------------------------------
+
+
+def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
+    """#122: a proxy classification with NO resolvable implementation (eip2535
+    diamond) must raise UnresolvedProxyError — refusing to analyze the
+    delegatecall shell — instead of silently falling through and Slithering the
+    proxy stub (whose empty guard set downstream renders as permissionless)."""
+    diamond = "0x" + "11" * 20
+
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda address, rpc_url: {
+            "address": address,
+            "type": "proxy",
+            "proxy_type": "eip2535",
+            "facets": ["0x" + "ab" * 20, "0x" + "cd" * 20],
+        },
+    )
+
+    with pytest.raises(UnresolvedProxyError):
+        _materialize_contract_artifacts(diamond, "http://rpc.example", workspace_prefix="t")
+
+
+def test_materialize_contract_artifacts_propagates_classification_incomplete(monkeypatch):
+    """#121 coupling: a ClassificationIncompleteError from classify_single must
+    PROPAGATE out of _materialize_contract_artifacts (so the BFS records a
+    degraded, un-analyzed node), never be swallowed into an analyze-the-shell
+    fall-through. This is why the proxy decision lives OUTSIDE the classify
+    except block."""
+
+    def _raise(address, rpc_url):
+        raise ClassificationIncompleteError("proxy slots unread")
+
+    monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)
+
+    with pytest.raises(ClassificationIncompleteError):
+        _materialize_contract_artifacts("0x" + "11" * 20, "http://rpc.example", workspace_prefix="t")
+
+
+def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeypatch):
+    """Control for #122: a proxy WITH a resolved implementation still retargets to
+    the impl (unchanged path). The fail-closed branch fires only for no-impl."""
+    proxy = "0x" + "11" * 20
+    impl = "0x" + "22" * 20
+
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda address, rpc_url: {"address": address, "type": "proxy", "implementation": impl},
+    )
+
+    captured: dict = {}
+
+    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix):
+        captured["effective_address"] = effective_address
+        analysis = {"subject": {"address": effective_address, "name": "Impl"}}
+        plan = {"contract_address": effective_address, "controllers": []}
+        return "Impl", analysis, plan, None
+
+    monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
+    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc: {"controllers": []})
+    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
+
+    loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
+
+    assert captured["effective_address"] == impl  # retargeted to the logic contract
+    assert loaded["analysis"]["subject"]["address"] == impl
+
+
+def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypatch):
+    """The restructure preserves the historical swallow: a *generic* classify
+    error (not ClassificationIncompleteError, not a no-impl proxy) degrades to
+    analyze-the-address-as-is and never propagates."""
+    addr = "0x" + "33" * 20
+
+    def _raise_generic(address, rpc_url):
+        raise RuntimeError("classify hiccup")
+
+    monkeypatch.setattr("services.discovery.classifier.classify_single", _raise_generic)
+
+    captured: dict = {}
+
+    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix):
+        captured["effective_address"] = effective_address
+        analysis = {"subject": {"address": effective_address, "name": "AsIs"}}
+        plan = {"contract_address": effective_address, "controllers": []}
+        return "AsIs", analysis, plan, None
+
+    monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
+    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc: {"controllers": []})
+    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: None)
+
+    loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
+
+    # Swallowed → analyze the address as-is (no retarget, no raise).
+    assert captured["effective_address"] == addr
+    assert loaded["analysis"]["subject"]["address"] == addr
+
+
+def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch):
+    """#122 end-to-end: a nested controller that classifies as a no-impl proxy
+    (eip2535 diamond) becomes a degraded analyzed=False node with a
+    materialize_error — the shell's empty guard set never enters nested_artifacts,
+    so nothing it would guard is reported permissionless."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    diamond_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    root_bundle = _bundle(
+        root_address,
+        "Vault",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "block_number": 1,
+            "controller_values": {
+                "external_contract:authority": {
+                    "source": "authority",
+                    "value": diamond_address,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "contract",
+                    "details": {"address": diamond_address},
+                }
+            },
+        },
+    )
+
+    # The REAL _materialize_contract_artifacts runs; only classify_single is
+    # steered to report the nested controller as a no-impl diamond.
+    def fake_classify(address, rpc_url):
+        if address.lower() == diamond_address:
+            return {"address": address, "type": "proxy", "proxy_type": "eip2535", "facets": ["0x" + "bb" * 20]}
+        return {"address": address, "type": "regular"}
+
+    monkeypatch.setattr("services.discovery.classifier.classify_single", fake_classify)
+
+    graph, nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        max_depth=2,
+    )
+
+    nodes = {node["address"]: node for node in graph["nodes"]}
+    assert nodes[diamond_address]["analyzed"] is False
+    assert "materialize_error" in nodes[diamond_address]["details"]
+    assert "implementation unresolved" in nodes[diamond_address]["details"]["materialize_error"]
+    assert diamond_address not in nested  # shell never entered the artifact map
 
 
 def test_resolve_control_graph_skips_failed_nested_materialization(monkeypatch):
