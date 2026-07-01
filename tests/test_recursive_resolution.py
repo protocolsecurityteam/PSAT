@@ -662,7 +662,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
     nodes = {node["address"]: node for node in graph["nodes"]}
     assert nodes[diamond_address]["analyzed"] is False
     assert "materialize_error" in nodes[diamond_address]["details"]
-    assert "implementation unresolved" in nodes[diamond_address]["details"]["materialize_error"]
+    assert "implementation unresolved" in str(nodes[diamond_address]["details"]["materialize_error"])
     assert diamond_address not in nested  # shell never entered the artifact map
 
 
