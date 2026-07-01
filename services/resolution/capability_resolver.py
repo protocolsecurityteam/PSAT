@@ -74,6 +74,25 @@ from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 
+# Finality margin (in blocks) the resolver steps back from live head when it pins
+# the per-pass event-fold evaluation height (#119). It is INTENTIONALLY deeper than
+# the event indexer's own confirmation depth (``PSAT_EVENT_INDEXER_FINALITY_DEPTH``,
+# default 12): a keeping-up durable cursor sits at ``indexer_head - depth`` as of the
+# indexer's last pass, while the resolver reads a fresher ``resolver_head >=
+# indexer_head``. Pinning ``resolver_head - depth`` would race — a perfectly healthy
+# cursor falls a few blocks short of it whenever any block arrived since the indexer's
+# last pass — and degenerate to a blanket demotion. Stepping back a margin LARGER than
+# ``depth + (blocks per indexer poll interval)`` makes the pinned height one the
+# keeping-up cursor has provably already covered, so coverage is deterministic:
+# ``cursor >= pin`` is stably TRUE for a healthy cursor (no flap), and a stalled cursor
+# (frozen while head advances) falls below ``pin`` and demotes. Because ``pin <=
+# cursor`` whenever it stays exact, the index is COMPLETE up to the read height — the
+# ``exact`` label is truthful, never a fail-open. Default 64 comfortably covers the
+# ~12s/2s-block chains (Ethereum/Base/Optimism/Polygon); raise it for sub-second chains
+# (e.g. Arbitrum) where a healthy cursor lags further. Larger only delays stall
+# detection; it never manufactures a false ``exact``.
+RESOLVER_FINALITY_MARGIN = int(os.getenv("PSAT_RESOLVER_FINALITY_MARGIN", "64"))
+
 
 def _capability_function_slow_ms() -> int:
     """Per-function log threshold for the resolver profiler — mirrors
@@ -364,6 +383,17 @@ def resolve_contract_capabilities(
     # + caching consistency, §6.2). A None block (non-archive node / blocknum read
     # failure) disables probing for the pass — the probe is strictly additive (§7.1),
     # so its absence is exactly the current behavior.
+    # Pin a finalized head for the WHOLE pass (#119). An unpinned ``block=None``
+    # evaluates "at live head", which a durable event index structurally lags, so
+    # every event-indexed allowlist would demote to ``lower_bound``. Pin a height
+    # stepped back ``RESOLVER_FINALITY_MARGIN`` from head — deeper than the indexer's
+    # confirmation depth — so a keeping-up cursor DETERMINISTICALLY covers it (no
+    # resolver-vs-indexer head race) and stays ``exact``, while a stalled cursor falls
+    # below it and demotes. Reads every function at one replayable height. ``None``
+    # (no RPC / blocknum read failure) leaves ``block`` unpinned -> the fold's
+    # coverage gate demotes, the safe direction. The differential probe keeps its own
+    # shallower head-12 height (default OFF), independent of this coverage pin.
+    resolution_block: int | None = _resolve_resolution_block(rpc_url, block)
     probe_block: int | None = _resolve_probe_block(rpc_url, block) if differential_probe_enabled() else None
     # One-shot consumed/live probe (default ON). The runtime address IS a proxy
     # when the analysis artifact came from an implementation child job, or the
@@ -382,7 +412,7 @@ def resolve_contract_capabilities(
         ctx = EvaluationContext(
             chain_id=chain_id,
             contract_address=runtime_addr,
-            block=block,
+            block=resolution_block,
             event_log_repo=event_log_repo,
             bytecode=bytecode_repo,
             rpc_url=rpc_url,
@@ -520,6 +550,28 @@ def _resolve_probe_block(rpc_url: str | None, block: int | None) -> int | None:
     except Exception:
         return None
     return max(1, head - 12)
+
+
+def _resolve_resolution_block(rpc_url: str | None, block: int | None) -> int | None:
+    """Pin the per-pass evaluation height for event-indexed coverage (#119).
+
+    Prefer the caller's explicit ``block`` (a deliberate as-of height). Otherwise
+    read live head and step back ``RESOLVER_FINALITY_MARGIN`` — deeper than the
+    indexer's confirmation depth so a keeping-up durable cursor provably COVERS the
+    pinned height (``cursor >= pin``) despite the poll-interval gap between the
+    indexer's last pass and this read, making the fold-coverage gate deterministic.
+    ``None`` on no-RPC / blocknum-read-failure leaves the height unpinned, so the
+    fold's coverage gate demotes event-indexed sets to ``lower_bound`` — the safe
+    (never-fabricates) direction, and exactly the offline/non-archive behavior."""
+    if isinstance(block, int) and block > 0:
+        return block
+    if not rpc_url:
+        return None
+    try:
+        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1), 16)
+    except Exception:
+        return None
+    return max(1, head - RESOLVER_FINALITY_MARGIN)
 
 
 def _should_differential_probe(cap: CapabilityExpr) -> bool:

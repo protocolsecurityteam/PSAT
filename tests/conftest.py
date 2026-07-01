@@ -436,6 +436,29 @@ def _force_differential_probe_off(monkeypatch):
     monkeypatch.setenv("PSAT_DIFFERENTIAL_PROBE", "0")
 
 
+@pytest.fixture(autouse=True)
+def _stub_resolution_finality_head_read(monkeypatch):
+    """Keep the offline suite hermetic against the #119 finality-margin head pin.
+
+    ``resolve_contract_capabilities`` now reads live head once per pass
+    (``_resolve_resolution_block`` -> ``eth_blockNumber``) to pin the event-fold
+    evaluation height. Unlike the default-OFF differential probe, this read is
+    UNCONDITIONAL, and offline the resolver still resolves a real eRPC ``rpc_url``
+    (``require_rpc_url``) — so the read would hit the network and trip the offline
+    guard. Making the resolver's ``rpc_request`` raise reproduces the exact
+    "blocknum read failure -> unpinned ``block=None`` -> fold demotes to
+    lower_bound" path the code already takes when the head read fails, so offline
+    behaviour is byte-identical without the wire. ``_resolve_probe_block`` (probe,
+    already flag-gated off above) shares this binding and stays a no-op too. The
+    dedicated #119 tests monkeypatch ``rpc_request`` in the test body (which runs
+    after this fixture) to feed a canned head, so they still exercise the real pin."""
+
+    def _no_head_read(*a, **k):
+        raise RuntimeError("offline: resolution head read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("services.resolution.capability_resolver.rpc_request", _no_head_read)
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 
