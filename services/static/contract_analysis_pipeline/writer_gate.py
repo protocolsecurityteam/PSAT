@@ -169,11 +169,29 @@ def _maybe_promote_leaf(
             ]
         return
 
-    # Path 2: comparison leaf with threshold shape — the F2
-    # authority-derived state inference (codex round-7).
-    # ``map[k] >= threshold`` promotes if writers ADD to the
-    # counter and are themselves authority-gated.
+    # Path 2: comparison leaf with threshold shape.
+    # ``map[msg.sender] >= threshold`` is an authority gate (not a
+    # self-service quantity check) when the keyed value cannot be
+    # self-acquired — i.e. the mapping's writers are themselves
+    # authority-gated (admin-curated tier/level/allowance). That is the
+    # same writer-gating signal the 1-key membership path uses, applied
+    # to the caller-keyed READ. The F2 authority-derived M-of-N counter
+    # (additive, parameter-keyed) is the second promotion shape.
     if leaf.get("kind") == "comparison" and leaf.get("operator") in ("gt", "gte", "lt", "lte"):
+        keys = descriptor.get("key_sources") or []
+        caller_keyed = len(keys) == 1 and keys[0].get("source") in (
+            "msg_sender",
+            "tx_origin",
+            "signature_recovery",
+        )
+        if caller_keyed:
+            classification = _classify_writers(storage_var, writers, all_trees)
+            if classification in ("promote", "promote_self_admin"):
+                leaf["authority_role"] = "caller_authority"
+                leaf["basis"] = list(leaf.get("basis", [])) + [
+                    f"threshold-promote: {storage_var} writers are authority-gated",
+                ]
+                return
         if _is_authority_derived_counter(storage_var, writers, all_trees):
             leaf["authority_role"] = "caller_authority"
             leaf["basis"] = list(leaf.get("basis", [])) + [

@@ -26,11 +26,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.resolution.capabilities import CapabilityExpr  # noqa: E402
+from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.permissionless_shapes import (  # noqa: E402
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
-from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
+from services.resolution.predicate_evaluator import (  # noqa: E402
+    EvaluationContext,
+    evaluate_tree,
+)
 from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
     build_predicate_tree,
 )
@@ -755,3 +760,155 @@ def test_caller_equals_nullary_getter_stays_gated(tmp_path, earned_public):
     )
     cap = _cap_for(sl, "adminOp()")
     assert cap.kind == "finite_set" and not cap.members and cap.membership_quality == "lower_bound"
+
+
+# ---------------------------------------------------------------------------
+# #111 / #112 — admin-curated caller-keyed THRESHOLD: promote + fail-closed.
+#
+# ``tier[msg.sender] >= K`` written only by an ``onlyOwner`` setter is an
+# admin-curated authority — a caller cannot self-acquire the level — so the
+# writer-gate promotes it from ``business`` to ``caller_authority`` (Part A),
+# and the comparison branch enumerates it instead of re-opening to public via
+# the role-blind permissionless-shape rule (Part B). A populated holder set
+# (warm) or an authoritative empty (``exact`` = provably nobody now, #112) is
+# honored; any cold / unsupported / no-adapter result fails CLOSED to an
+# ``external_check_only`` carrying a ``CALLER_GATE_BASIS_TAGS`` tag (#111),
+# never ``conditional_universal`` public.
+#
+# The discriminator's safe side: a self-acquirable ``points[msg.sender] >= K``
+# written only by a self-keyed ``+=`` stays ``business`` and keeps opening to
+# public when cold — the blanket "empty caller-keyed comparison => closed"
+# alternative would wrongly gate this self-service threshold.
+# ---------------------------------------------------------------------------
+
+_ADMIN_CURATED_THRESHOLD = """
+    pragma solidity ^0.8.19;
+    contract C {
+        address public owner;
+        bool public open;
+        mapping(address => uint256) public tier;
+        constructor() { owner = msg.sender; }
+        function setTier(address a, uint256 t) external {
+            require(msg.sender == owner, "only owner");
+            tier[a] = t;
+        }
+        function gated() external {
+            require(open, "closed");
+            require(tier[msg.sender] >= 2, "tier too low");
+        }
+    }
+"""
+
+_SELF_SERVICE_THRESHOLD = """
+    pragma solidity ^0.8.19;
+    contract C {
+        bool public open;
+        mapping(address => uint256) public points;
+        function earn() external { points[msg.sender] += 1; }
+        function gated() external {
+            require(open, "closed");
+            require(points[msg.sender] >= 5, "need points");
+        }
+    }
+"""
+
+
+class _StubAdapter:
+    """Returns its configured capability for any descriptor — models the
+    production adapter outcomes (warm holders / authoritative-empty) without
+    smuggling in the routing decision the evaluator under test must make. A
+    ``None`` adapter falls back to ``_NullAdapter`` (the cold / no-adapter
+    state)."""
+
+    def __init__(self, cap: Any) -> None:
+        self._cap = cap
+
+    def enumerate(self, descriptor: Any, contract_address: Any) -> Any:  # noqa: ARG002
+        return self._cap
+
+
+def _gate_comparison_subtree(tree: dict) -> Any:
+    for child in tree.get("children") or []:
+        leaf = child.get("leaf") or {}
+        if leaf.get("kind") == "comparison":
+            return child
+    raise AssertionError("gate tree has no comparison leaf")
+
+
+def _threshold_caps(sl, full_name: str, adapter: Any = None):
+    """REAL pipeline: build_predicate_tree + writer_gate + evaluate. Returns
+    (gate_leaf_role, gate_leaf_cap, end_to_end_surface). The gate-leaf cap is
+    the comparison subtree alone; the surface is the whole ``gated()`` tree
+    (the caller gate AND-ed with the public ``require(open)`` sibling — the
+    end-to-end path the projection blocker must suppress)."""
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    tree = trees[full_name]
+    gate_subtree = _gate_comparison_subtree(tree)
+    role = (gate_subtree.get("leaf") or {}).get("authority_role")
+    ctx = EvaluationContext(contract_address="0x" + "11" * 20, adapter=adapter)
+    gate_cap = evaluate_tree(gate_subtree, ctx)
+    surface = project_capability_surface(capability_to_dict(evaluate_tree(tree, ctx)))
+    return role, gate_cap, surface
+
+
+def test_admin_curated_threshold_promotes_to_caller_authority(tmp_path, earned_public):
+    """Part A (writer-gate discriminator): an ``onlyOwner``-curated
+    ``tier[msg.sender] >= K`` is not self-acquirable, so it promotes from
+    ``business`` to ``caller_authority``."""
+    role, _cap, _surface = _threshold_caps(_compile(tmp_path, _ADMIN_CURATED_THRESHOLD), "gated()")
+    assert role == "caller_authority"
+
+
+def test_admin_curated_threshold_cold_fails_closed(tmp_path, earned_public):
+    """#111: a promoted authority threshold whose enumeration is cold /
+    no-adapter must GATE — ``external_check_only`` carrying a caller-gate basis
+    tag — never the ``conditional_universal`` public default. Revert-proof for
+    BOTH the static promotion (Part A) and the comparison-branch re-open drop
+    (Part B): reverting either re-opens the gate and fails this assertion."""
+    sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
+    role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=None)
+    assert role == "caller_authority"
+    assert gate_cap.kind == "external_check_only", f"cold admin threshold must gate, got {gate_cap.kind}"
+    basis = capability_to_dict(gate_cap)["check"]["extra"]["basis"]
+    assert basis == ["caller_tainted_authority_unresolved"]
+    # end-to-end: the sibling ``require(open)`` public path is suppressed.
+    assert not surface.authority_public
+
+
+def test_admin_curated_threshold_exact_empty_is_resolved_not_public(tmp_path, earned_public):
+    """#112: an authoritative ``finite_set([], exact)`` (provably nobody now)
+    is honored as resolved-empty, never coerced to public."""
+    sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
+    empty_exact = CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+    role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=_StubAdapter(empty_exact))
+    assert role == "caller_authority"
+    assert gate_cap.kind == "finite_set"
+    assert gate_cap.members == []
+    assert gate_cap.membership_quality == "exact"
+    assert not surface.authority_public
+
+
+def test_admin_curated_threshold_warm_enumerates_restricted_holders(tmp_path, earned_public):
+    """Warm: the populated holder set is honored (restricted callers), gated —
+    the polarity the cold/empty cells must agree with, not invert from."""
+    sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
+    holders = ["0x" + "aa" * 20, "0x" + "bb" * 20]
+    warm = CapabilityExpr.finite_set(holders, quality="lower_bound", confidence="partial")
+    _role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=_StubAdapter(warm))
+    assert gate_cap.kind == "finite_set"
+    assert gate_cap.members == holders
+    assert not surface.authority_public
+
+
+def test_self_service_threshold_stays_public_when_cold(tmp_path, earned_public):
+    """The discriminator's safe side (no over-gate): a self-acquirable
+    ``points[msg.sender] >= K`` written only by a self-keyed ``+=`` stays
+    ``business`` and keeps opening to public when cold. The blanket
+    "empty caller-keyed comparison => closed" alternative would wrongly gate
+    this — guards against that over-gate regression."""
+    sl = _compile(tmp_path, _SELF_SERVICE_THRESHOLD)
+    role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=None)
+    assert role == "business"
+    assert gate_cap.kind == "conditional_universal", f"self-service threshold must stay open, got {gate_cap.kind}"
+    assert surface.authority_public
