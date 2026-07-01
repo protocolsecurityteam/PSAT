@@ -454,6 +454,27 @@ def _function_records_from_semantic_artifacts(
         abi_mutability_signatures - set(capability_dicts) - set(predicate_trees_by_function) - sink_signatures
     )
 
+    # A state-changing entry point whose visible state effect originates from
+    # inline assembly (sstore/delegatecall) has the same authority blindness as
+    # an abi-only mutator: its gate may also be inline assembly and therefore
+    # invisible to the predicate pipeline. It now carries a sink (so it left
+    # ``abi_only_signatures`` above), but with no capability and no tree it must
+    # stay fail-closed (unsupported), never projected public.
+    #
+    # Scoped to state-changing entry points on purpose: a fallback/receive that
+    # only assembly-delegatecalls (an EIP-1967 proxy passthrough) has no
+    # authority gate by design, so it stays a genuine ``public`` row carrying
+    # its ``delegatecall_execution`` label rather than being hidden.
+    assembly_only_signatures = (
+        {
+            signature
+            for signature, record in effects_by_function.items()
+            if record.get("assembly_state_access") and _effect_record_is_state_changing_entry_point(record)
+        }
+        - set(capability_dicts)
+        - set(predicate_trees_by_function)
+    )
+
     records: list[dict[str, Any]] = []
     for signature in sorted(signatures):
         effect_info = effects_by_function.get(signature) or {}
@@ -468,7 +489,7 @@ def _function_records_from_semantic_artifacts(
             if signature in predicate_trees_by_function:
                 record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
                 record["status"] = "unsupported"
-            elif signature in abi_only_signatures:
+            elif signature in abi_only_signatures or signature in assembly_only_signatures:
                 record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
                 record["status"] = "unsupported"
             elif signature in guard_uncertain_signatures:
