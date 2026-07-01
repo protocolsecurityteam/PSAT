@@ -346,6 +346,18 @@ def _predicate_trees_by_function(predicate_trees: Mapping[str, Any] | None) -> d
     return {str(fn_sig): tree for fn_sig, tree in trees.items() if isinstance(tree, dict)}
 
 
+def _guard_uncertain_signatures(predicate_trees: Mapping[str, Any] | None) -> frozenset[str]:
+    """Full-names the static stage flagged as a caller-authority guard it could
+    not lower into a tree (``guard_extraction_uncertain``). The policy fails
+    these closed (``unsupported``) instead of defaulting them to public."""
+    if not isinstance(predicate_trees, dict):
+        return frozenset()
+    flagged = predicate_trees.get("guard_extraction_uncertain")
+    if not isinstance(flagged, (list, set, tuple)):
+        return frozenset()
+    return frozenset(str(sig) for sig in flagged)
+
+
 def _controller_refs_from_tree(tree: Mapping[str, Any] | None) -> list[str]:
     if not isinstance(tree, dict):
         return []
@@ -409,6 +421,7 @@ def _function_records_from_semantic_artifacts(
     effects_by_function: Mapping[str, dict[str, Any]],
     predicate_trees_by_function: Mapping[str, dict[str, Any]],
     resolver_output_available: bool,
+    guard_uncertain_signatures: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Build effective-permission function records from semantic resolver/effects data.
 
@@ -457,6 +470,12 @@ def _function_records_from_semantic_artifacts(
                 record["status"] = "unsupported"
             elif signature in abi_only_signatures:
                 record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
+                record["status"] = "unsupported"
+            elif signature in guard_uncertain_signatures:
+                # The static stage found a caller-authority (msg.sender EQ/NEQ)
+                # guard it could not lower into a tree. Absence here is "guard
+                # not extracted", not "unguarded" — fail closed, never public.
+                record["capability_expr"] = _unsupported_capability("guard_extraction_uncertain")
                 record["status"] = "unsupported"
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
@@ -513,11 +532,13 @@ def build_effective_permissions(
     capability_dicts = _normalize_capability_output(capability_resolver_output)
     effects_by_function = _effects_by_function(effects)
     predicate_tree_functions = _predicate_trees_by_function(predicate_trees)
+    guard_uncertain_signatures = _guard_uncertain_signatures(predicate_trees)
     function_records = _function_records_from_semantic_artifacts(
         capability_dicts=capability_dicts,
         effects_by_function=effects_by_function,
         predicate_trees_by_function=predicate_tree_functions,
         resolver_output_available=capability_resolver_output is not None,
+        guard_uncertain_signatures=guard_uncertain_signatures,
     )
 
     functions: list[EffectiveFunctionPermission] = []

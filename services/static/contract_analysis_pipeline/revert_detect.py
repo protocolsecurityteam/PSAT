@@ -379,37 +379,46 @@ class RevertDetector:
                     self._call_stack.pop()
                     self._call_chain_irs.pop()
 
-        # Cases 3-4: if (C) revert ErrorName / SolidityCall(revert) in
-        # the THIS node OR a one-hop successor (slither splits these).
+        # Cases 3-4: if (C) revert ErrorName / SolidityCall(revert) where the
+        # revert can sit ANY number of hops below the IF — Slither lowers a
+        # multi-statement guard body (`if(C){ emit/assign…; revert; }`) into a
+        # chain of EXPRESSION nodes, so a one-hop son scan misses it.
         condition_ir = self._extract_condition_ir(node)
         if condition_ir is None:
             return
 
-        # Look at successor nodes — does any one-hop successor revert?
-        for son in getattr(node, "sons", []) or []:
-            for ir in getattr(son, "irs_ssa", None) or getattr(son, "irs", []) or []:
-                if _ir_is_solidity_revert(ir):
-                    # The revert is reached via this branch of the IF.
-                    # Polarity: if Slither's CFG follows true→son,
-                    # the condition being true takes the revert branch,
-                    # so allowed_when_false. (If the false branch
-                    # contains the revert, polarity is allowed_when_true.)
-                    polarity = self._branch_polarity(node, son)
-                    self._gates.append(
-                        RevertGate(
-                            kind="custom_revert"
-                            if "revert " in str(getattr(getattr(ir, "function", None), "name", ""))
-                            else "if_revert",
-                            condition_value=getattr(condition_ir, "value", None),
-                            polarity=polarity,
-                            node=node,
-                            containing_function=container,
-                            call_chain=list(self._call_chain_irs),
-                            expression_text=self._expression_text(node),
-                            basis=[f"if-revert via successor {son.type}"],
-                        )
-                    )
-                    return
+        # A guard is a fork where exactly ONE branch is a pure revert path (every
+        # path leaving it reverts before escaping the function); the other branch
+        # is the normal continuation. Both-revert => unconditional revert (not an
+        # access gate); neither => any revert below is conditional and belongs to
+        # a nested IF, scanned independently.
+        son_true = getattr(node, "son_true", None)
+        son_false = getattr(node, "son_false", None)
+        t_rev, t_ir = self._branch_always_reverts(son_true) if son_true is not None else (False, None)
+        f_rev, f_ir = self._branch_always_reverts(son_false) if son_false is not None else (False, None)
+        chosen_son, chosen_ir = (None, None)
+        if t_rev and not f_rev:
+            chosen_son, chosen_ir = son_true, t_ir
+        elif f_rev and not t_rev:
+            chosen_son, chosen_ir = son_false, f_ir
+        if chosen_son is not None:
+            ir = chosen_ir
+            polarity = self._branch_polarity(node, chosen_son)
+            self._gates.append(
+                RevertGate(
+                    kind="custom_revert"
+                    if "revert " in str(getattr(getattr(ir, "function", None), "name", ""))
+                    else "if_revert",
+                    condition_value=getattr(condition_ir, "value", None),
+                    polarity=polarity,
+                    node=node,
+                    containing_function=container,
+                    call_chain=list(self._call_chain_irs),
+                    expression_text=self._expression_text(node),
+                    basis=["if-revert via always-reverting branch"],
+                )
+            )
+            return
 
         # Case 5: inline assembly conditional revert — limited support.
         if self._node_has_assembly_revert(node):
@@ -445,6 +454,45 @@ class RevertDetector:
             expression_text=self._expression_text(node),
             basis=[f"{kind}({cond})" if cond is not None else kind],
         )
+
+    def _branch_always_reverts(self, start: Any) -> tuple[bool, Any]:
+        """True iff EVERY path leaving ``start`` hits a revert before escaping
+        the function (reaching a no-successor / RETURN node).
+
+        Revert nodes are sinks: their successors (the merge/ENDIF link Slither
+        keeps for CFG completeness) are NOT followed, so a guard's revert never
+        leaks into post-merge code. Returns ``(True, first_revert_ir)`` when the
+        branch always reverts, else ``(False, None)``. Cycle-safe via a seen-set
+        (loops/back-edges); a worklist that drains with no revert seen — e.g. a
+        ``while(true)`` with no revert/return — escapes (not a guard)."""
+        return_type = getattr(NodeType, "RETURN", -997)
+        seen: set[int] = set()
+        work = [start]
+        first_rev = None
+        while work:
+            node = work.pop()
+            nid = id(node)
+            if nid in seen:
+                continue
+            seen.add(nid)
+            for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
+                if _ir_is_solidity_revert(ir):
+                    if first_rev is None:
+                        first_rev = ir
+                    break
+            else:
+                sons = getattr(node, "sons", []) or []
+                if not sons or getattr(node, "type", None) == return_type:
+                    # reached function exit / a return without reverting -> escapes
+                    return (False, None)
+                work.extend(sons)
+                continue
+            # this node reverts: it is a sink, don't follow its successors
+        # Worklist drained. If a revert was seen on every explored path the branch
+        # always reverts; if it drained with NO revert seen, the only way out was
+        # an unbounded cycle (``while(true)`` with no revert/return) — that is not
+        # a guard, so report escape rather than fabricating an if_revert gate.
+        return (first_rev is not None, first_rev)
 
     def _extract_condition_ir(self, node: Any) -> Any | None:
         """If `node` is an IF node, return its Condition IR (the value

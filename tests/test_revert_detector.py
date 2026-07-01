@@ -665,3 +665,172 @@ def test_expression_text_cache_is_instance_scoped(tmp_path):
     d2 = RevertDetector(fn)
     assert d2._expression_text_cache == {}
     assert d2._expression_text_cache is not d1._expression_text_cache
+
+
+# ---------------------------------------------------------------------------
+# #115: multi-statement guard body — the revert sits >=2 hops below the IF.
+# Slither lowers ``if(C){ emit/assign…; revert; }`` into a chain of EXPRESSION
+# nodes; the historical one-hop son scan missed the revert and returned ``[]``,
+# defaulting the function to public (fail-OPEN). The "exactly one branch always
+# reverts" CFG walk recovers exactly one gate.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_statement_emit_then_revert_is_recovered(tmp_path):
+    """``if (msg.sender != owner) { emit Denied(...); revert(); }`` — the
+    revert is two hops below the IF (after the emit). HEAD returned ``[]`` and
+    the function defaulted to public; the walk must recover one if-revert gate
+    with allowed_when_false (the guarded branch is the condition-true side)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            event Denied(address caller);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    emit Denied(msg.sender);
+                    revert();
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert len(if_gates) == 1, f"expected the recovered guard, got: {_gate_kinds(gates)}"
+    assert if_gates[0].polarity == "allowed_when_false"
+
+
+def test_multi_statement_assign_then_revert_is_recovered(tmp_path):
+    """Same shape with an assignment (not an emit) between the IF and a bare
+    ``revert()`` — still recovered as exactly one gate."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public n;
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    n = 0;
+                    revert();
+                }
+                n = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
+    """Shape A (the prior approach's live fail-open): ``if(outer){ if(flag){
+    emit;} revert(); }``. Both inner arms reconverge into the trailing revert,
+    so EVERY path leaving the outer-true branch reverts -> the OUTER guard
+    always reverts -> exactly one gate. The inner IF reverts on both arms
+    (not exactly one) -> no spurious inner gate. (BFS-to-ENDIF would have
+    dropped the outer guard = fail-open.)"""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            bool public flag;
+            event E(address a);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    if (flag) { emit E(msg.sender); }
+                    revert();
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
+    """Shape B: ``if(outer){ if(flag){ revert(); } }``. The outer-true branch
+    can ESCAPE (the inner false arm falls through without reverting), so the
+    outer IF does NOT always revert -> no outer gate. Only the inner flag-IF
+    always reverts on exactly one arm -> exactly one gate. Guards against
+    BFS over-attribution that would emit two gates (outer AND inner)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            bool public flag;
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    if (flag) { revert(); }
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_both_branches_revert_emits_no_if_gate(tmp_path):
+    """``if(c){ revert A(); } else { revert B(); }`` — BOTH arms always revert
+    (the function reverts unconditionally), which is not a conditional access
+    fork, so no if-revert gate is fabricated (matches the real ENS both-arms
+    case the always-reverts model correctly drops)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            error A();
+            error B();
+            function f(bool c) external pure {
+                if (c) { revert A(); } else { revert B(); }
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert [g for g in gates if g.kind in ("if_revert", "custom_revert")] == [], _gate_kinds(gates)
+
+
+def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
+    """White-box hardening for ``_branch_always_reverts``: a branch whose only
+    exit is an unbounded cycle (no revert, no return — e.g. ``while(true){…}``)
+    must report ESCAPE ``(False, None)``, never a fabricated always-reverts
+    gate. Built on minimal fake CFG nodes so it pins the drain-with-no-revert
+    branch independent of Slither's loop lowering."""
+    from types import SimpleNamespace
+
+    # Two nodes forming a cycle; neither reverts nor returns.
+    a = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
+    b = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
+    a.sons = [b]
+    b.sons = [a]
+    detector = RevertDetector(SimpleNamespace(nodes=[]))
+    assert detector._branch_always_reverts(a) == (False, None)
+
+    # Positive control: a node that reverts always-reverts and returns its IR.
+    class SolidityCall:  # type-name drives _ir_is_solidity_revert
+        def __init__(self) -> None:
+            self.function = SimpleNamespace(name="revert()")
+
+    rev_ir = SolidityCall()
+    r = SimpleNamespace(irs=[rev_ir], irs_ssa=None, type=None, sons=[])
+    assert detector._branch_always_reverts(r) == (True, rev_ir)

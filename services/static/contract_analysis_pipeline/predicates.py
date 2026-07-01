@@ -143,9 +143,19 @@ def _cache_key_for(callee: Any, bindings: dict[str, Any]) -> tuple | None:
         return None
 
 
-def build_predicate_tree(function: Any) -> PredicateTree | None:
+def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None) -> PredicateTree | None:
     """Construct a PredicateTree for one function. Returns None if
-    the function has no revert paths."""
+    the function has no revert paths.
+
+    ``uncertain_out`` (optional): when the function has gates but produces NO
+    tree, and at least one of those un-modeled gates is a direct caller
+    (``msg.sender``/``tx.origin``) EQ/NEQ comparison — a caller-authority guard
+    shape the builder could not lower into a leaf — the function's ``full_name``
+    is added to this set. This is the NARROW ``guard_extraction_uncertain``
+    marker: a tree-less function carrying such a marker is a missed access
+    guard, NOT a genuinely-public function, so the policy must not default it to
+    public. Value comparisons (``require(amt>0)``) and mapping-index reads
+    (``balances[msg.sender]>=x``) are excluded by construction."""
     if not SLITHER_AVAILABLE:
         raise RuntimeError("predicate builder requires slither")
     detector = RevertDetector(function)
@@ -158,16 +168,54 @@ def build_predicate_tree(function: Any) -> PredicateTree | None:
     prov = engine.provenance
 
     subtrees: list[PredicateTree] = []
+    caller_eq_unmodeled = False
     for gate in gates:
         subtree = _build_subtree_from_gate(gate, prov, function)
         if subtree is not None:
             subtrees.append(subtree)
+        elif uncertain_out is not None and _gate_condition_is_caller_eq_neq(gate, prov, function):
+            caller_eq_unmodeled = True
 
     if not subtrees:
+        if caller_eq_unmodeled and uncertain_out is not None:
+            full_name = getattr(function, "full_name", None)
+            if full_name:
+                uncertain_out.add(full_name)
         return None
     tree = make_and_node(subtrees)
     apply_confidence_to_tree(tree)
     return tree
+
+
+def _gate_condition_is_caller_eq_neq(gate: RevertGate, prov: ProvenanceMap, function: Any) -> bool:
+    """True iff the gate's IF-condition is a direct ``msg.sender``/``tx.origin``
+    EQ/NEQ comparison against a non-constant operand.
+
+    This is the discriminating shape for a caller-authority guard the builder
+    failed to model (e.g. a struct-member compare ``msg.sender == cfg.admin``
+    whose operand provenance didn't resolve to a clean leaf). It deliberately
+    excludes: non-IF/non-Binary gate conditions (require value checks, external
+    call-success, inline-asm), order comparisons (``>=``/``<`` thresholds), and
+    caller-vs-constant checks (``msg.sender != address(0)``) — none of which are
+    access gates, keeping the marker false-positive-free on public surfaces."""
+    cond = getattr(gate, "condition_value", None)
+    if cond is None:
+        return False
+    defining = _find_defining_ir(cond, getattr(gate, "node", None), function)
+    if not isinstance(defining, Binary):
+        return False
+    if _binary_op(getattr(defining, "type", None)) not in ("eq", "ne"):
+        return False
+    operands = [
+        _operand_for_value(getattr(defining, "variable_left", None), prov),
+        _operand_for_value(getattr(defining, "variable_right", None), prov),
+    ]
+    caller_sources = {"msg_sender", "tx_origin"}
+    has_caller = any(op.get("source") in caller_sources for op in operands)
+    other_non_constant = any(
+        op.get("source") not in caller_sources and op.get("source") != "constant" for op in operands
+    )
+    return has_caller and other_non_constant
 
 
 def build_return_predicate_tree(function: Any) -> PredicateTree | None:
