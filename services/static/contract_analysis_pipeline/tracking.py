@@ -116,26 +116,43 @@ def _oz_v5_ownership_getter_for_accessor(accessor: str | None) -> str | None:
 
 
 def _abi_type(type_obj) -> str:
+    """Canonical ABI type string (recursive); see ``mapping_events._abi_type``.
+
+    Feeds both the ``inputs`` metadata and, via ``_event_signature``, the event
+    ``topic0`` that the runtime watch plan subscribes to. Must collapse every
+    non-elementary type to its canonical ABI head (contract/interface->address,
+    enum->uint8, UDVT->underlying, array->canonical(elem)+suffix,
+    struct->parenthesized member tuple) or the watcher subscribes to a topic0
+    that never fires.
+    """
     if type_obj is None:
         return "unknown"
+    from slither.core.declarations.contract import Contract
+    from slither.core.declarations.enum import Enum
+    from slither.core.declarations.structure import Structure
+    from slither.core.solidity_types.array_type import ArrayType
+    from slither.core.solidity_types.type_alias import TypeAlias
+    from slither.core.solidity_types.user_defined_type import UserDefinedType
 
-    type_name = type(type_obj).__name__
-    if type_name == "ElementaryType":
-        return str(type_obj)
-    if type_name == "UserDefinedType":
+    if isinstance(type_obj, ArrayType):
+        inner = _abi_type(getattr(type_obj, "type", None))
+        length = getattr(type_obj, "length_value", None)
+        if length is not None:
+            return f"{inner}[{length}]"
+        return f"{inner}[]"
+    if isinstance(type_obj, TypeAlias):
+        return _abi_type(getattr(type_obj, "underlying_type", None))
+    if isinstance(type_obj, UserDefinedType):
         underlying = getattr(type_obj, "type", None)
-        underlying_name = type(underlying).__name__
-        if underlying_name == "Contract":
+        if isinstance(underlying, Contract):
             return "address"
-        if underlying_name == "Enum":
+        if isinstance(underlying, Enum):
             return "uint8"
-        return str(type_obj)
-    if type_name == "ArrayType":
-        base = _abi_type(getattr(type_obj, "type", None))
-        length = getattr(type_obj, "length", None)
-        if length is None:
-            return f"{base}[]"
-        return f"{base}[{length}]"
+        if isinstance(underlying, Structure):
+            members = ",".join(
+                _abi_type(getattr(elem, "type", None)) for elem in getattr(underlying, "elems_ordered", []) or []
+            )
+            return f"({members})"
     return str(type_obj)
 
 

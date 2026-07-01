@@ -155,15 +155,49 @@ def _direction_of_write(value_var: Any) -> Literal["add", "remove", "set"] | Non
 
 
 def _abi_type(type_obj: Any) -> str:
+    """Canonical ABI type string used to derive the event topic0.
+
+    The topic0 keccak must hash the *canonical* ABI signature (the one solc
+    emits), where every non-elementary type is collapsed to its ABI head:
+    contract/interface -> ``address``, enum -> ``uint8``, user-defined value
+    type -> its underlying elementary type, array -> ``canonical(elem)[N?]``,
+    struct -> ``(canonical members...)``. Slither's ``str(type)`` and
+    ``Event.full_name`` instead carry the *declared* names (``IGem``,
+    ``Vat.Status``, ``IGem[]``), so they are non-canonical and must not reach
+    the keccak. Recurse so nested shapes (``Foo[]``, ``Foo[][2]``, structs of
+    interfaces) canonicalize fully.
+    """
     if type_obj is None:
         return "unknown"
-    type_name = type(type_obj).__name__
-    if type_name == "UserDefinedType":
+    # Imported lazily to keep this module importable without Slither side
+    # effects, mirroring the rest of the static pipeline's type handling.
+    from slither.core.declarations.contract import Contract
+    from slither.core.declarations.enum import Enum
+    from slither.core.declarations.structure import Structure
+    from slither.core.solidity_types.array_type import ArrayType
+    from slither.core.solidity_types.type_alias import TypeAlias
+    from slither.core.solidity_types.user_defined_type import UserDefinedType
+
+    if isinstance(type_obj, ArrayType):
+        inner = _abi_type(getattr(type_obj, "type", None))
+        length = getattr(type_obj, "length_value", None)
+        if length is not None:
+            return f"{inner}[{length}]"
+        return f"{inner}[]"
+    if isinstance(type_obj, TypeAlias):
+        # ``type Foo is uint256`` — collapse to the underlying elementary type.
+        return _abi_type(getattr(type_obj, "underlying_type", None))
+    if isinstance(type_obj, UserDefinedType):
         underlying = getattr(type_obj, "type", None)
-        if type(underlying).__name__ == "Contract":
+        if isinstance(underlying, Contract):
             return "address"
-        if type(underlying).__name__ == "Enum":
+        if isinstance(underlying, Enum):
             return "uint8"
+        if isinstance(underlying, Structure):
+            members = ",".join(
+                _abi_type(getattr(elem, "type", None)) for elem in getattr(underlying, "elems_ordered", []) or []
+            )
+            return f"({members})"
     return str(type_obj)
 
 
@@ -180,9 +214,17 @@ def _event_metadata(event: Any) -> _EventMetadata | None:
     name = getattr(event, "name", "") or ""
     elems = list(getattr(event, "elems", []) or [])
     arg_types = [_abi_type(getattr(elem, "type", None)) for elem in elems]
-    signature = getattr(event, "full_name", "") or ""
-    if not signature and name:
+    # Build the canonical signature from ``arg_types`` (Contract->address,
+    # Enum->uint8, recursive arrays/structs/UDVT). ``Event.full_name`` carries
+    # the *declared* type names (``IGem``, ``Vat.Status``, ``IGem[]``), so its
+    # keccak never matches the on-chain topic0 whenever a parameter is a
+    # non-elementary type. Derive from ``elems`` whenever the event has
+    # parameters; only fall back to ``full_name`` when ``elems`` is unavailable
+    # (no params, or a producer that could not introspect them).
+    if name and elems:
         signature = f"{name}({','.join(arg_types)})"
+    else:
+        signature = (getattr(event, "full_name", "") or "") or (f"{name}()" if name else "")
     if not signature:
         return None
     return {
