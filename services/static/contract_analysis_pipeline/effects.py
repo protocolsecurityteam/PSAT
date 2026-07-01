@@ -73,6 +73,12 @@ class EffectInfo(TypedDict):
     # state-changing entry point that produced no sink (e.g. an inline-assembly
     # writer) as an honest unsupported row.
     state_changing: bool
+    # True when at least one sink on this function originated from inline
+    # assembly (sstore/delegatecall lowered to a SolidityCall IR). The gate
+    # guarding such a write may itself be inline assembly and therefore
+    # invisible to the predicate pipeline, so the policy stage keeps these
+    # fail-closed (unsupported) rather than projecting public.
+    assembly_state_access: bool
 
 
 class EffectsArtifact(TypedDict):
@@ -207,8 +213,21 @@ def _classify_node_irs(node: Any) -> list[tuple[str, str, str | None]]:
                 out.append(("external_call", f"{target}.{function_name or 'call'}", None))
         elif op == "SolidityCall":
             function_name = getattr(getattr(ir, "function", None), "name", "") or ""
+            arguments = list(getattr(ir, "arguments", []) or [])
             if function_name.startswith("selfdestruct("):
                 out.append(("selfdestruct", "selfdestruct", None))
+            elif function_name.startswith("sstore("):
+                # Inline-assembly storage write. Slither does not populate
+                # node.state_variables_written for assembly, so this is the
+                # only place the write is visible. Key the sink by the slot
+                # literal/expr; slot->named-var resolution is a separate concern.
+                slot = str(arguments[0]) if arguments else "unknown"
+                out.append(("state_write", f"assembly_storage:{slot}", None))
+            elif function_name.startswith("delegatecall("):
+                # Inline-assembly delegatecall, e.g. an EIP-1967 proxy fallback.
+                # Signature: delegatecall(gas, addr, inOff, inLen, outOff, outLen).
+                target = str(arguments[1]) if len(arguments) > 1 else "assembly_delegatecall"
+                out.append(("delegatecall", f"assembly_delegatecall:{target}", None))
     return out
 
 
@@ -374,6 +393,11 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "action_summary": summary,
         "writer_selectors": _writer_selectors_for(function, sinks),
         "state_changing": _is_state_changing_entry_point(function),
+        "assembly_state_access": any(
+            s["kind"] in ("state_write", "delegatecall")
+            and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
+            for s in sinks
+        ),
     }
 
 
