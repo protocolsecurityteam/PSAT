@@ -1013,6 +1013,14 @@ def build_governance_view(
                 fp_in_contract_by_cid[primary_cid] = set(fp_in_contract_by_cid.get(primary_cid) or set()) | set(
                     extra_addrs
                 )
+            # The second-pass CGN principal gate (:_build_flows_and_principals)
+            # admits a Safe/EOA/timelock only if it holds FP authority on the
+            # PRIMARY impl's cid. A governor that gates only the secondary impl's
+            # functions lives in fp_all_addrs under the secondary cid, so fold it
+            # up too — the sibling projections above already do.
+            extra_all = fp_all_addrs_by_cid.get(sc.id)
+            if extra_all:
+                fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
 
     principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
 

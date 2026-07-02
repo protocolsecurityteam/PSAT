@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from db.models import EffectiveFunction, FunctionPrincipal  # noqa: E402
+from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal  # noqa: E402
 from services.aggregations.company_overview import (  # noqa: E402
     build_company_overview,
     build_functions_for_protocol,
@@ -134,6 +134,91 @@ def test_secondary_impl_absorbed_into_proxy(db_session):
     proxy_fns = {f["function"] for f in funcs.get(proxy_addr, [])}
     assert {"deposit()", "setPauser()"} <= proxy_fns
     assert admin_addr not in funcs
+
+
+def test_secondary_impl_fp_all_addrs_folds_into_primary_gate(db_session):
+    """A governor that gates only the SECONDARY impl's functions, carried on a
+    FunctionPrincipal row with resolved_type NULL, must still surface as a
+    principal of the proxy.
+
+    resolved_type=NULL is deliberate and load-bearing: a ``safe`` FP row would
+    surface vacuously through the third-pass ``fp_governance`` backstop (which
+    filters resolved_type at query time), masking the gate. With NULL, the only
+    path to the surface is the second-pass CGN gate at
+    ``_build_flows_and_principals`` (``node_addr in fp_all_addrs_by_cid[primary]``)
+    — which admits the address only once the secondary impl's ``fp_all_addrs`` is
+    folded into the primary-impl bucket. The safe-typed identity comes from a
+    ControlGraphNode on the PRIMARY impl (cgn_by_cid is not folded). Reverting
+    the fold drops the principal, so this pins the fold, not the backstop."""
+    s = db_session
+    p = _add_protocol(s, f"fpfold-{uuid.uuid4().hex[:8]}")
+    proxy_addr = _addr("px")
+    core_addr = _addr("core")
+    admin_addr = _addr("admin")
+    safe = _addr("safe")  # external Safe: gates only the admin impl's fn
+
+    proxy_job = _add_job(s, address=proxy_addr, protocol_id=p.id, name="UUPSProxy")
+    proxy_c = _add_contract(
+        s,
+        address=proxy_addr,
+        job=proxy_job,
+        protocol_id=p.id,
+        is_proxy=True,
+        implementation=core_addr,
+        contract_name="UUPSProxy",
+    )
+    proxy_c.proxy_type = "eip1967"
+    proxy_c.secondary_implementations = [admin_addr.lower()]
+    s.commit()
+
+    core_job = _add_job(
+        s,
+        address=core_addr,
+        protocol_id=p.id,
+        name="Core",
+        request={"address": core_addr, "proxy_address": proxy_addr},
+    )
+    core_c = _add_contract(s, address=core_addr, job=core_job, protocol_id=p.id, contract_name="Core")
+
+    admin_job = _add_job(s, address=admin_addr, protocol_id=p.id, name="Admin")
+    admin_c = _add_contract(s, address=admin_addr, job=admin_job, protocol_id=p.id, contract_name="Admin")
+
+    _ef(s, core_c, "deposit", effect_labels=["asset_pull"])
+    # The FP row lives on the SECONDARY impl with resolved_type NULL (so the
+    # fp_governance third pass excludes it) — it enters fp_all_addrs only.
+    set_pauser = _ef(s, admin_c, "setPauser", effect_labels=["pause_toggle"])
+    s.add(
+        FunctionPrincipal(
+            function_id=set_pauser.id,
+            address=safe,
+            resolved_type=None,
+            origin="acl",
+            principal_type="authority_role",
+            details={"owners": [_addr("o1")], "threshold": 1},
+        )
+    )
+    # The safe-typed identity is a ControlGraphNode on the PRIMARY impl.
+    s.add(
+        ControlGraphNode(
+            contract_id=core_c.id,
+            address=safe.lower(),
+            node_type="contract",
+            resolved_type="safe",
+            label="GovSafe",
+            details={"owners": [_addr("o1")], "threshold": 1},
+        )
+    )
+    s.commit()
+
+    overview = build_company_overview(s, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in overview["principals"]}
+    assert safe.lower() in principals, (
+        "governor gating only the secondary impl (FP resolved_type NULL) must surface "
+        "via the folded fp_all_addrs primary-impl gate"
+    )
+    assert proxy_addr.lower() in [a.lower() for a in principals[safe.lower()].get("controls", [])]
+    # controls_detail must be non-empty (structural: a gate-admitted addr carries FP rows).
+    assert principals[safe.lower()].get("controls_detail"), "surfaced principal must carry controls_detail"
 
 
 def test_resolve_implementation_contracts_deterministic_pick(db_session):
