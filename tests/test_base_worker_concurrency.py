@@ -403,6 +403,7 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "2")
 
     started = threading.Event()
+    finished = threading.Event()
     queue = [uuid.uuid4()]
     queue_lock = threading.Lock()
 
@@ -417,7 +418,8 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
     # process() blocks longer than the 0s drain window.
     def _slow_process(session, job):  # noqa: ARG001
         started.set()
-        time.sleep(0.5)
+        time.sleep(2.0)
+        finished.set()
 
     w = _ConcurrentWorker()
     w.process = _slow_process
@@ -433,8 +435,10 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
     try:
         w.run_loop()
         elapsed = time.monotonic() - t0
-        # Returned promptly (didn't wait the full 0.5s sleep)
-        assert elapsed < 0.4, f"run_loop should have abandoned promptly, took {elapsed:.2f}s"
+        # Abandonment means returning while the job is still in flight; the
+        # wall-clock bound is deliberately loose for loaded CI runners.
+        assert not finished.is_set(), "run_loop drained the in-flight job instead of abandoning it"
+        assert elapsed < 1.0, f"run_loop should have abandoned promptly, took {elapsed:.2f}s"
     finally:
         # Drain the abandoned worker thread before yielding to the next test.
         if w._job_pool:
