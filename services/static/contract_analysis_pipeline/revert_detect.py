@@ -56,6 +56,13 @@ except Exception:  # pragma: no cover
 
 DEFAULT_INTERNAL_CALL_DEPTH = 4
 
+# How far the branch walk chases a helper-calls-helper chain when deciding
+# whether a CALLEE always reverts. A direct always-reverting helper (Solady
+# ``_revertEnumerableRolesUnauthorized``) and one further hop resolve; deeper
+# chains fall back to the conservative False (miss the gate rather than
+# fabricate one). Kept small: real revert helpers are 1-2 hops deep.
+CALLEE_REVERT_MAX_DEPTH = 3
+
 
 RevertKind = Literal[
     "require",
@@ -191,6 +198,16 @@ class RevertDetector:
         # Per-container cache of every variable name read by any IR in its
         # body, for the discarded-result test in ``_scan_node``.
         self._container_reads: dict[int, set[str]] = {}
+        # Memo for ``_callee_always_reverts``, keyed by (id(callee), depth).
+        # Depth is part of the key because the ``CALLEE_REVERT_MAX_DEPTH`` cutoff
+        # makes the answer depth-relative — a helper resolved at one depth may be
+        # cut off (conservative False) at a deeper one. ``id()`` keys are scoped
+        # to this per-function detector, so they never outlive the Slither parse.
+        self._callee_revert_cache: dict[tuple[int, int], bool] = {}
+        # Callee ids currently on the always-reverts recursion stack, so a helper
+        # that (in)directly calls itself reports escape on the back-edge rather
+        # than spinning.
+        self._callee_revert_inprogress: set[int] = set()
         # Per-detector memo for ``str(node.expression)``, keyed by
         # ``id(expression)``. Scoped to this (per-function) detector so it's
         # GC'd with the instance — the id() keys never outlive the Slither
@@ -465,6 +482,19 @@ class RevertDetector:
         branch always reverts, else ``(False, None)``. Cycle-safe via a seen-set
         (loops/back-edges); a worklist that drains with no revert seen — e.g. a
         ``while(true)`` with no revert/return — escapes (not a guard)."""
+        return self._walk_all_paths_revert(start, 0)
+
+    def _walk_all_paths_revert(self, start: Any, depth: int) -> tuple[bool, Any]:
+        """Core every-path-reverts CFG walk shared by branch-guard detection and
+        callee analysis. A path's revert SINK is either a direct Solidity/Yul
+        ``revert`` (``_ir_is_solidity_revert``) OR a call to a helper whose own
+        body always reverts (``_callee_always_reverts``) — the Solady
+        EnumerableRoles shape, where ``if (!isOwner()) _revertUnauthorized();``
+        routes the revert through an always-reverting assembly helper.
+
+        ``depth`` bounds the helper-calls-helper chase (see
+        ``CALLEE_REVERT_MAX_DEPTH``). Returns ``(True, first_sink_ir)`` when every
+        explored path reverts, else ``(False, None)``."""
         return_type = getattr(NodeType, "RETURN", -997)
         seen: set[int] = set()
         work = [start]
@@ -475,24 +505,75 @@ class RevertDetector:
             if nid in seen:
                 continue
             seen.add(nid)
-            for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
-                if _ir_is_solidity_revert(ir):
-                    if first_rev is None:
-                        first_rev = ir
-                    break
-            else:
-                sons = getattr(node, "sons", []) or []
-                if not sons or getattr(node, "type", None) == return_type:
-                    # reached function exit / a return without reverting -> escapes
-                    return (False, None)
-                work.extend(sons)
+            sink_ir = self._node_revert_sink(node, depth)
+            if sink_ir is not None:
+                if first_rev is None:
+                    first_rev = sink_ir
+                # this node reverts: it is a sink, don't follow its successors
                 continue
-            # this node reverts: it is a sink, don't follow its successors
+            sons = getattr(node, "sons", []) or []
+            if not sons or getattr(node, "type", None) == return_type:
+                # reached function exit / a return without reverting -> escapes
+                return (False, None)
+            work.extend(sons)
         # Worklist drained. If a revert was seen on every explored path the branch
         # always reverts; if it drained with NO revert seen, the only way out was
         # an unbounded cycle (``while(true)`` with no revert/return) — that is not
         # a guard, so report escape rather than fabricating an if_revert gate.
         return (first_rev is not None, first_rev)
+
+    def _node_revert_sink(self, node: Any, depth: int) -> Any:
+        """The first IR in ``node`` that terminates the current path in a revert:
+        a direct Solidity/Yul ``revert`` SolidityCall, or a call to a callee whose
+        every path reverts. ``require``/``assert`` are deliberately NOT sinks —
+        they revert only conditionally, so a helper that merely ``require``s has a
+        non-reverting exit and must never manufacture a gate. Returns the IR (a
+        truthy sentinel for the caller) or ``None``."""
+        for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
+            if _ir_is_solidity_revert(ir):
+                return ir
+            if isinstance(ir, (InternalCall, LibraryCall)) and self._callee_always_reverts(
+                getattr(ir, "function", None), depth + 1
+            ):
+                return ir
+        return None
+
+    def _callee_always_reverts(self, callee: Any, depth: int) -> bool:
+        """True iff EVERY path through ``callee``'s own body reverts before it
+        returns — an unconditionally-reverting helper such as Solady's
+        ``_revertEnumerableRolesUnauthorized`` (assembly ``revert``). A callee
+        with ANY non-reverting exit (a ``require`` that can pass, a normal
+        ``return``) is NOT counted: that conservative condition is what stops a
+        conditionally-reverting helper from fabricating a gate.
+
+        Memoized per ``(id(callee), depth)``; cycle-safe via
+        ``_callee_revert_inprogress``; the chase is bounded to
+        ``CALLEE_REVERT_MAX_DEPTH`` hops, beyond which we conservatively return
+        False (miss the gate rather than invent one)."""
+        if callee is None or depth >= CALLEE_REVERT_MAX_DEPTH:
+            return False
+        key = (id(callee), depth)
+        cached = self._callee_revert_cache.get(key)
+        if cached is not None:
+            return cached
+        cid = id(callee)
+        if cid in self._callee_revert_inprogress:
+            # recursion back-edge: conservative escape, and don't cache (the
+            # answer here is an artifact of the in-flight walk, not intrinsic).
+            return False
+        entry = getattr(callee, "entry_point", None)
+        if entry is None:
+            nodes = getattr(callee, "nodes", None) or []
+            entry = nodes[0] if nodes else None
+        if entry is None:
+            return False
+        self._callee_revert_inprogress.add(cid)
+        try:
+            result, _ = self._walk_all_paths_revert(entry, depth)
+        finally:
+            self._callee_revert_inprogress.discard(cid)
+        self._callee_revert_cache[key] = result
+        return result
 
     def _extract_condition_ir(self, node: Any) -> Any | None:
         """If `node` is an IF node, return its Condition IR (the value

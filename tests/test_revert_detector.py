@@ -20,10 +20,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
+from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+    build_predicate_tree,
+)
+from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+    apply_reentrancy_pause_pass,
+)
 from services.static.contract_analysis_pipeline.revert_detect import (  # noqa: E402
     RevertDetector,
     RevertGate,
 )
+from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+    apply_writer_gate_pass,
+)
+
+
+def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
+    """Drive the static→evaluator pipeline (same shape as test_earned_public's
+    ``_build_pipeline``/``_cap_for``) and return the CapabilityExpr for one
+    function, so a recovered revert gate can be pinned by its final verdict."""
+    contract = next(c for c in sl.contracts if c.name == cname)
+    trees = {}
+    for fn in contract.functions:
+        if fn.is_constructor:
+            continue
+        trees[fn.full_name] = build_predicate_tree(fn)
+    apply_writer_gate_pass(contract, trees)
+    apply_reentrancy_pause_pass(contract, trees)
+    return evaluate_tree(trees[full_name])
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
@@ -834,3 +859,131 @@ def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
     rev_ir = SolidityCall()
     r = SimpleNamespace(irs=[rev_ir], irs_ssa=None, type=None, sons=[])
     assert detector._branch_always_reverts(r) == (True, rev_ir)
+
+
+# ---------------------------------------------------------------------------
+# Calls to an ALWAYS-reverting callee as a branch sink. Solady EnumerableRoles
+# writes its authorization as ``if (!isOwner()) _revertUnauthorized();`` where
+# ``_revertUnauthorized`` is a helper that unconditionally reverts in assembly.
+# Before the fix the branch walk only accepted a literal revert IR as a sink,
+# so the guard branch "escaped" (the helper call looked like ordinary code),
+# no gate was lifted, and RoleRegistry setRole/grantRole/revokeRole defaulted
+# public. Treating an always-reverting CALLEE as a sink recovers the caller
+# gate, which the earned-public rail then fails CLOSED to external_check_only.
+# The conservative twin pins the load-bearing condition: a helper that reverts
+# only *conditionally* (a require that can pass) must NOT manufacture a gate.
+# ---------------------------------------------------------------------------
+
+
+def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
+    """``if (!_isOwner()) _revertUnauthorized();`` with an assembly-``revert``
+    helper and a ``caller()``-reading check → the guard is recovered as one
+    if_revert gate and the function resolves external_check_only (fail-closed),
+    not public. Pre-fix this yielded zero gates → conditional_universal."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function _isOwner() private view returns (bool result) {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x8da5cb5b)
+                    result := eq(caller(), mload(0x00))
+                }
+            }
+            function _revertUnauthorized() private pure {
+                /// @solidity memory-safe-assembly
+                assembly { revert(0x00, 0x00) }
+            }
+            function admin() external {
+                if (!_isOwner()) _revertUnauthorized();
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "admin")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert len(if_gates) == 1, f"expected the recovered guard, got: {_gate_kinds(gates)}"
+    assert if_gates[0].polarity == "allowed_when_false"
+    cap = _cap_for(sl, "admin()")
+    assert cap.kind == "external_check_only", f"recovered caller gate must fail closed, got {cap.kind}"
+
+
+def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
+    """Conservative twin (load-bearing): the same ``if (!check()) helper();``
+    shape where ``helper`` reverts only *conditionally* (a require that can
+    pass, then a normal return) must NOT be treated as an always-reverting sink
+    — no if_revert/custom_revert gate is fabricated and the function stays
+    public (conditional_universal), never external_check_only. Over-closing
+    here is the failure mode that manufactured false positives in the inverse
+    direction."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public x;
+            function _condFn() private view returns (bool) { return x > 0; }
+            function _maybeRevert() private { require(x > 0, "no"); x = x; }
+            function admin() external {
+                if (!_condFn()) _maybeRevert();
+                x = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "admin")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert if_gates == [], f"conditionally-reverting helper must not fabricate a guard, got {_gate_kinds(gates)}"
+    cap = _cap_for(sl, "admin()")
+    assert cap.kind != "external_check_only", f"business-only require must not fail closed, got {cap.kind}"
+    assert cap.kind == "conditional_universal", cap.kind
+
+
+def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
+    """Revert-proof pinning the RoleRegistry shape verbatim: Solady
+    EnumerableRoles' ``_enumerableRolesSenderIsContractOwner`` (assembly
+    reading ``caller()`` and ``staticcall``-ing ``owner()``) guarding
+    ``setRole`` through ``_authorizeSetRole``'s
+    ``if (!isOwner()) _revertEnumerableRolesUnauthorized();``. The public
+    entrypoint routes through two internal hops and an always-reverting
+    assembly helper; the recovered gate must resolve external_check_only."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function _enumerableRolesSenderIsContractOwner() private view returns (bool result) {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x8da5cb5b)
+                    result := and(
+                        and(eq(caller(), mload(0x00)), gt(returndatasize(), 0x1f)),
+                        staticcall(gas(), address(), 0x1c, 0x04, 0x00, 0x20)
+                    )
+                }
+            }
+            function _revertEnumerableRolesUnauthorized() private pure {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x99152cca)
+                    revert(0x1c, 0x04)
+                }
+            }
+            function _authorizeSetRole(address holder, uint256 role, bool active) internal virtual {
+                if (!_enumerableRolesSenderIsContractOwner()) _revertEnumerableRolesUnauthorized();
+            }
+            function setRole(address holder, uint256 role, bool active) public virtual {
+                _authorizeSetRole(holder, role, active);
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "setRole")
+    gates = RevertDetector(fn).run()
+    assert any(g.kind in ("if_revert", "custom_revert") for g in gates), _gate_kinds(gates)
+    cap = _cap_for(sl, "setRole(address,uint256,bool)")
+    assert cap.kind == "external_check_only", f"Solady owner-gated setRole must fail closed, got {cap.kind}"
