@@ -31,6 +31,7 @@ from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
+from services.static.claims import Claim, resolve_claim_precedence
 from utils.concurrency import parallel_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -594,11 +595,11 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Cross-contract effect enrichment: propagate labels across contract boundaries
+        # Cross-contract enrichment: mint policy-derived claims from sibling facts.
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
             enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
             if enriched and ep_data is not None:
-                self._apply_effect_label_updates(ep_data, enriched)
+                self._apply_cross_contract_claims(ep_data, enriched)
                 store_artifact(session, job.id, "effective_permissions", data=ep_data)
 
         self.update_detail(
@@ -717,33 +718,38 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_effect_label_updates(self, payload: dict, enriched: dict[str, list[str]]) -> None:
+    def _apply_cross_contract_claims(self, payload: dict, enriched: dict[str, list[Claim]]) -> None:
         for fn in payload.get("functions", []):
             fn_sig = fn.get("function") or fn.get("abi_signature")
-            if not fn_sig:
+            additions = enriched.get(fn_sig) if fn_sig else None
+            if not additions:
                 continue
-            new_labels = enriched.get(fn_sig)
-            if not new_labels:
-                continue
-            existing = set(fn.get("effect_labels") or [])
-            fn["effect_labels"] = sorted(existing | set(new_labels))
+            existing = list(fn.get("claims") or [])
+            fn["claims"] = resolve_claim_precedence([*existing, *additions])
 
     def _enrich_cross_contract(
         self, session, job: Job, contract_analysis: dict, control_snapshot: dict
-    ) -> dict[str, list[str]]:
-        """Propagate effect labels across contract boundaries.
+    ) -> dict[str, list[Claim]]:
+        """Mint policy-derived claims from sibling facts.
 
-        For each external call this contract makes, look up the callee's analysis
-        and propagate its effect labels to the calling function.
+        Replaces propagate-every-label with the four typed derivations in
+        ``services.static.cross_contract``: value-flow propagation, transfer-policy
+        configuration, beacon upgrade, and proxy-verified upgrade provenance. The
+        returned claims merge onto each function's existing claim list.
         """
-        from services.static.cross_contract import build_callee_effect_map, enrich_cross_contract_effects
+        del contract_analysis
+        from services.static.cross_contract import (
+            build_callee_claim_map,
+            derive_cross_contract_claims,
+            proxy_provenance_from_classifications,
+            sibling_transfer_hook_links,
+        )
 
         # Find sibling jobs (same company / same parent)
         request = job.request if isinstance(job.request, dict) else {}
         parent_job_id = request.get("parent_job_id")
         company = job.company
 
-        # Collect analyses of all completed sibling contracts
         completed_jobs = (
             session.execute(select(Job).where(Job.status == JobStatus.completed, Job.address.isnot(None)))
             .scalars()
@@ -769,22 +775,22 @@ class PolicyWorker(BaseWorker):
         if not sibling_targets:
             return {}
 
-        def _fetch_sibling_analysis(
+        def _fetch_sibling_artifacts(
             target: tuple[Any, str],
         ) -> tuple[str, dict | None, dict | None]:
             sj_id, addr = target
             with SessionLocal() as s:
-                payload = get_artifact(s, sj_id, "contract_analysis")
                 effects_payload = get_artifact(s, sj_id, "effects")
+                snapshot_payload = get_artifact(s, sj_id, "control_snapshot")
             return (
                 addr,
-                payload if isinstance(payload, dict) else None,
                 effects_payload if isinstance(effects_payload, dict) else None,
+                snapshot_payload if isinstance(snapshot_payload, dict) else None,
             )
 
-        sibling_analyses: dict[str, dict] = {}
         sibling_effects: dict[str, dict] = {}
-        for (_sj_id, addr), outcome in parallel_map(_fetch_sibling_analysis, sibling_targets, max_workers=8):
+        sibling_snapshots: dict[str, dict] = {}
+        for (_sj_id, addr), outcome in parallel_map(_fetch_sibling_artifacts, sibling_targets, max_workers=8):
             if isinstance(outcome, BaseException):
                 record_degraded(
                     phase="cross_contract_enrichment",
@@ -793,37 +799,45 @@ class PolicyWorker(BaseWorker):
                 )
                 logger.warning("sibling artifact fetch failed for %s: %s", addr, outcome)
                 continue
-            _addr, payload, effects_payload = outcome
-            if payload is not None:
-                sibling_analyses[_addr] = payload
+            _addr, effects_payload, snapshot_payload = outcome
             if effects_payload is not None:
                 sibling_effects[_addr] = effects_payload
+            if snapshot_payload is not None:
+                sibling_snapshots[_addr] = snapshot_payload
 
-        if not sibling_analyses:
+        if not sibling_effects:
             return {}
 
-        callee_map = build_callee_effect_map(sibling_analyses, effects_by_address=sibling_effects)
+        callee_claim_map = build_callee_claim_map(sibling_effects)
         controller_values = control_snapshot.get("controller_values", {})
         target_effects = get_artifact(session, job.id, "effects")
+        target_effects = target_effects if isinstance(target_effects, dict) else None
+        target_address = (job.address or "").lower()
 
-        enriched = enrich_cross_contract_effects(
-            contract_analysis,
+        hook_links = sibling_transfer_hook_links(target_address, sibling_effects, sibling_snapshots)
+        deployment_address = request.get("proxy_address") or job.address or ""
+        proxy_provenance = proxy_provenance_from_classifications(
+            deployment_address, get_artifact(session, job.id, "classifications")
+        )
+
+        enriched = derive_cross_contract_claims(
+            target_effects,
             controller_values,
-            callee_map,
-            target_effects=target_effects if isinstance(target_effects, dict) else None,
+            callee_claim_map,
+            sibling_transfer_hooks=hook_links,
+            proxy_provenance=proxy_provenance,
         )
         if enriched:
             logger.info(
-                "Job %s: cross-contract enrichment added labels: %s",
+                "Job %s: cross-contract enrichment added policy claims: %s",
                 job.id,
-                enriched,
+                {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
             )
-            # Update the effective_functions table with new labels
             contract_row = session.execute(
                 select(Contract).where(Contract.job_id == job.id).limit(1)
             ).scalar_one_or_none()
             if contract_row:
-                for fn_sig, new_labels in enriched.items():
+                for fn_sig, new_claims in enriched.items():
                     ef = session.execute(
                         select(EffectiveFunction).where(
                             EffectiveFunction.contract_id == contract_row.id,
@@ -831,8 +845,7 @@ class PolicyWorker(BaseWorker):
                         )
                     ).scalar_one_or_none()
                     if ef:
-                        existing = set(ef.effect_labels or [])
-                        ef.effect_labels = sorted(existing | set(new_labels))
+                        ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
                 session.commit()
         return enriched
 

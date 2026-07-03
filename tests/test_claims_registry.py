@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+# Importing the policy-site module registers its policy-tier claim
+# (``transfer_policy.configure``) so the registry invariants below see it
+# deterministically regardless of test order.
+import services.static.cross_contract  # noqa: E402,F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
     Claim,
@@ -294,6 +298,11 @@ CORPUS_EXEMPT_CLAIM_IDS = {
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,
+    "transfer_policy.configure": (
+        "policy-tier claim: minted only downstream from sibling facts, so the "
+        "single-contract static corpus never produces it; covered by "
+        "test_cross_contract_effects and test_cross_contract_policy_claims."
+    ),
 }
 
 

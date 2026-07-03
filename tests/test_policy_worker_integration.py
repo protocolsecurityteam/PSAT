@@ -337,7 +337,8 @@ class TestGraphRefreshAfterEffectivePermissions:
 
 
 class TestCrossContractEnrichmentArtifactSync:
-    """Cross-contract enrichment rewrites the effective_permissions artifact."""
+    """Cross-contract enrichment merges policy-derived claims into the
+    effective_permissions artifact and leaves legacy effect_labels untouched."""
 
     def test_enrichment_rewrites_effective_permissions_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
@@ -385,6 +386,7 @@ class TestCrossContractEnrichmentArtifactSync:
                     {
                         "function": "mintRewards()",
                         "effect_labels": ["role_management"],
+                        "claims": [],
                         "controllers": [],
                         "authority_roles": [],
                         "direct_owner": None,
@@ -400,17 +402,22 @@ class TestCrossContractEnrichmentArtifactSync:
             "workers.policy_worker.build_principal_labels",
             lambda *a, **kw: {"principals": []},
         )
+        policy_claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"callee": AUTH_ADDRESS}}
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot: {"mintRewards()": ["mint"]},
+            lambda self, session, job, contract_analysis, control_snapshot: {"mintRewards()": [policy_claim]},
         )
 
         worker.process(session, cast(Any, job))
 
         effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
         assert len(effective_payloads) == 2
-        assert effective_payloads[-1]["functions"][0]["effect_labels"] == ["mint", "role_management"]
+        fn = effective_payloads[-1]["functions"][0]
+        # The policy-derived claim merged into the claims plane; legacy labels are
+        # left exactly as the static stage produced them.
+        assert [c["claim_id"] for c in fn["claims"]] == ["flow.out"]
+        assert fn["effect_labels"] == ["role_management"]
 
 
 # ---------------------------------------------------------------------------
