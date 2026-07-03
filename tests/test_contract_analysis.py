@@ -113,7 +113,7 @@ def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp
     # set `error` instead.
     assert "trees" in predicate_trees or "error" in predicate_trees
     assert effects is not None
-    assert effects.get("schema_version") == "semantic"
+    assert effects.get("schema_version") == "semantic-2"
     assert "functions" in effects or "error" in effects
 
 
@@ -291,16 +291,19 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
 
     manage = _semantic_function(analysis, "manage(PingTarget,uint256)")
     assert manage["effect_labels"] == ["external_contract_call"]
-    # Semantic effects include both body and modifier-level external_call
-    # sinks. ``target.ping`` is the body sink; ``auth.canCall`` comes from
-    # the modifier ``isAuthorized`` body.
+    # ``target.ping`` is the body sink and the sole driver of the label. The
+    # modifier ``requiresAuth``'s ``auth.canCall`` is now a guard-origin sink,
+    # excluded from effect_targets so it can't dilute the effect (it stays in
+    # the raw ``sinks`` list as an ``origin=guard`` fact).
     assert "target.ping" in manage["effect_targets"]
+    assert not any("canCall" in target for target in manage["effect_targets"])
     assert manage["action_summary"] == "Calls an external contract from the contract context."
 
     set_hook = _semantic_function(analysis, "setHook(address)")
     assert set_hook["effect_labels"] == ["hook_update"]
-    # See manage() — modifier sinks now appear alongside body sinks.
-    assert "hook" in set_hook["effect_targets"]
+    # setHook's only body sink is the ``hook`` write; the guard-origin
+    # ``auth.canCall`` from ``requiresAuth`` does not appear as a target.
+    assert set_hook["effect_targets"] == ["hook"]
     assert set_hook["action_summary"] == "Updates hook configuration that can affect later contract behavior."
 
     transfer_ownership = _semantic_function(analysis, "transferOwnership(address)")
