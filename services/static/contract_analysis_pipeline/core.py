@@ -17,6 +17,7 @@ from slither.slither import Slither
 from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
 from utils.logging import record_degraded, record_stage_metric
 
+from ..claims import attach_claims_to_effects, build_claims
 from .effects import EffectsArtifact, apply_authority_effect_labels, build_effects
 from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
@@ -246,6 +247,20 @@ def collect_contract_analysis_with_artifacts(
                 extra={"exc_type": type(exc).__name__, "phase": "authority_effect_labels"},
             )
             record_degraded(phase="authority_effect_labels", exc=exc, context={"project_dir": str(project_dir)})
+
+    # Plane 1: mint typed claims from the Plane-0 facts. Rides through the
+    # effects artifact so the policy stage carries them with no new plumbing.
+    with _phase("claims", durations_ms):
+        try:
+            claims_artifact = build_claims(subject_contract, effects_artifact, predicate_trees_artifact)
+            attach_claims_to_effects(effects_artifact, claims_artifact)
+        except Exception as exc:
+            logger.warning(
+                "claims emit failed for %s",
+                project_dir,
+                extra={"exc_type": type(exc).__name__, "phase": "claims"},
+            )
+            record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)

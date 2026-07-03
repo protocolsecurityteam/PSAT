@@ -1,0 +1,115 @@
+"""Tolerant read-only view over the Plane-0 facts a matcher reasons about.
+
+Wraps the sibling-owned ``effects`` facts artifact, the ``predicate_trees``
+artifact, and the Slither subject contract behind stable accessors, so matcher
+modules never reach into ``effects.py`` internals. Every accessor fails soft: a
+degraded (errored) or absent artifact reads as empty rather than raising, which
+keeps the claims pass a no-op when its inputs are missing.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+
+def _functions_map(effects: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(effects, dict):
+        return {}
+    functions = effects.get("functions")
+    if not isinstance(functions, dict):
+        return {}
+    return {sig: rec for sig, rec in functions.items() if isinstance(rec, dict)}
+
+
+def _trees_map(predicate_trees: Any) -> dict[str, Any]:
+    if not isinstance(predicate_trees, dict):
+        return {}
+    trees = predicate_trees.get("trees")
+    return trees if isinstance(trees, dict) else {}
+
+
+def _canonical_map(predicate_trees: Any) -> dict[str, str]:
+    if not isinstance(predicate_trees, dict):
+        return {}
+    canonical = predicate_trees.get("canonical_signatures")
+    return canonical if isinstance(canonical, dict) else {}
+
+
+class ClaimContext:
+    """Facts a matcher may consult. Construct once per contract; accessors are
+    keyed by function full-name (the ``effects`` artifact's key)."""
+
+    def __init__(self, contract: Any, effects: Any, predicate_trees: Any) -> None:
+        self.contract = contract
+        self._functions = _functions_map(effects)
+        self._trees = _trees_map(predicate_trees)
+        self._canonical = _canonical_map(predicate_trees)
+        name = None
+        if isinstance(effects, dict):
+            name = effects.get("contract_name")
+        if not name:
+            name = getattr(contract, "name", None)
+        self.contract_name: str | None = name
+
+    # -- function enumeration -------------------------------------------------
+
+    def function_signatures(self) -> list[str]:
+        """Full-name signatures of every externally-observable function, sorted
+        for deterministic claim ordering."""
+        return sorted(self._functions)
+
+    def effect_record(self, function: str) -> Mapping[str, Any]:
+        return self._functions.get(function) or {}
+
+    def function_names(self) -> set[str]:
+        """Bare function names (before ``(``) — the coarse set standard gates
+        check for sibling selectors."""
+        return {sig.split("(", 1)[0] for sig in self._functions}
+
+    def has_functions(self, *names: str) -> bool:
+        present = self.function_names()
+        return all(name in present for name in names)
+
+    def has_signature(self, signature: str) -> bool:
+        return signature in self._functions
+
+    # -- sinks ----------------------------------------------------------------
+
+    def sinks(self, function: str) -> list[dict[str, Any]]:
+        record = self._functions.get(function) or {}
+        sinks = record.get("sinks")
+        if not isinstance(sinks, list):
+            return []
+        return [s for s in sinks if isinstance(s, dict)]
+
+    def sink_ids(self, function: str, kind: str) -> list[str]:
+        """Ids of every ``kind`` sink on ``function`` (stable cross-references
+        for a witness)."""
+        return [str(s.get("id")) for s in self.sinks(function) if s.get("kind") == kind and s.get("id")]
+
+    def has_sink(self, function: str, kind: str) -> bool:
+        return any(s.get("kind") == kind for s in self.sinks(function))
+
+    # -- labels / predicate trees --------------------------------------------
+
+    def effect_labels(self, function: str) -> list[str]:
+        record = self._functions.get(function) or {}
+        labels = record.get("effect_labels")
+        return list(labels) if isinstance(labels, list) else []
+
+    def predicate_tree(self, function: str) -> Any | None:
+        return self._trees.get(function)
+
+    def selector(self, function: str) -> str:
+        """4-byte selector the facts artifact recorded for ``function`` (empty
+        for fallback/receive, which have none)."""
+        record = self._functions.get(function) or {}
+        selector = record.get("selector")
+        return selector if isinstance(selector, str) else ""
+
+    def canonical_signature(self, function: str) -> str | None:
+        """Production canonical ``name(types)`` signature when the predicate
+        pipeline resolved one (enum/struct params normalized), else ``None``."""
+        canonical = self._canonical.get(function)
+        return canonical if isinstance(canonical, str) else None
