@@ -13,7 +13,7 @@ through a code registry. Public surface:
 
 from __future__ import annotations
 
-from .builder import attach_claims_to_effects, build_claims
+from .builder import attach_claims_to_effects, build_claims, project_effect_labels
 from .consumers import CONSUMER_REFERENCED_CLAIM_IDS
 from .context import ClaimContext
 from .decorator import claim_matcher
@@ -57,6 +57,7 @@ __all__ = [
     "build_claims",
     "claim_matcher",
     "discover",
+    "project_effect_labels",
     "emit_claim",
     "entry_for",
     "is_registered",

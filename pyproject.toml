@@ -57,6 +57,9 @@ markers = [
 [tool.ruff]
 target-version = "py310"
 line-length = 120
+# Prototype/evidence scripts for the effect-labels redesign — not shipped code
+# and not held to the production lint/format bar.
+extend-exclude = ["labels_redesign"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -80,3 +83,7 @@ skip_empty = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+# Prototype/evidence scripts for the effect-labels redesign are not shipped code
+# and aren't held to the type-check bar (mirrors the ruff extend-exclude above).
+# Defaults are restated because pyright's ``exclude`` replaces rather than extends.
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "labels_redesign", "issue-fixes-111-122"]

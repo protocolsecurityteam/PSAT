@@ -24,12 +24,10 @@ from ._gates import CHANGE_ADMIN, is_admin_change_gate
 def proxy_admin_change(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ctx.selector(function) != CHANGE_ADMIN:
         return None
-    explained = ctx.sink_ids(function, "delegatecall")
     return ClaimEvidence(
         tier="standard_exact",
         witness={
             "kind": "selector+gate",
             "selector": CHANGE_ADMIN,
-            "explained_delegatecall_sink_ids": explained,
         },
     )
