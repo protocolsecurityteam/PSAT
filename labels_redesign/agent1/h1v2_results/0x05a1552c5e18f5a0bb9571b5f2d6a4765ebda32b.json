@@ -1,0 +1,214 @@
+{
+ "contract": "AccountantWithRateProviders",
+ "owner_vars_v2": [
+  "owner",
+  "vault"
+ ],
+ "pause_v2": [
+  "pause()",
+  "unpause()"
+ ],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "pause()",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call",
+    "pause_toggle"
+   ]
+  ],
+  [
+   "unpause()",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call",
+    "pause_toggle"
+   ]
+  ],
+  [
+   "updateDelay(uint24)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "updateLower(uint16)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "updateManagementFee(uint16)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "updatePayoutAddress(address)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "updatePerformanceFee(uint16)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "updateUpper(uint16)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ]
+ ],
+ "current": {
+  "pause()": [
+   "hook_update"
+  ],
+  "unpause()": [
+   "hook_update"
+  ],
+  "getRate()": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "updateDelay(uint24)": [
+   "hook_update"
+  ],
+  "updateUpper(uint16)": [
+   "hook_update"
+  ],
+  "updateLower(uint16)": [
+   "hook_update"
+  ],
+  "updateManagementFee(uint16)": [
+   "hook_update"
+  ],
+  "updatePerformanceFee(uint16)": [
+   "hook_update"
+  ],
+  "updatePayoutAddress(address)": [
+   "hook_update"
+  ],
+  "setRateProviderData(ERC20,bool,address)": [
+   "external_contract_call"
+  ],
+  "resetHighwaterMark()": [
+   "external_contract_call"
+  ],
+  "updateExchangeRate(uint96)": [
+   "external_contract_call"
+  ],
+  "claimFees(ERC20)": [
+   "external_contract_call"
+  ],
+  "getRateSafe()": [],
+  "getRateInQuote(ERC20)": [
+   "external_contract_call"
+  ],
+  "getRateInQuoteSafe(ERC20)": [
+   "external_contract_call"
+  ]
+ },
+ "h1": {
+  "pause()": [
+   "external_contract_call",
+   "pause_toggle"
+  ],
+  "unpause()": [
+   "external_contract_call",
+   "pause_toggle"
+  ],
+  "getRate()": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "updateDelay(uint24)": [
+   "external_contract_call"
+  ],
+  "updateUpper(uint16)": [
+   "external_contract_call"
+  ],
+  "updateLower(uint16)": [
+   "external_contract_call"
+  ],
+  "updateManagementFee(uint16)": [
+   "external_contract_call"
+  ],
+  "updatePerformanceFee(uint16)": [
+   "external_contract_call"
+  ],
+  "updatePayoutAddress(address)": [
+   "external_contract_call"
+  ],
+  "setRateProviderData(ERC20,bool,address)": [
+   "external_contract_call"
+  ],
+  "resetHighwaterMark()": [
+   "external_contract_call"
+  ],
+  "updateExchangeRate(uint96)": [
+   "external_contract_call"
+  ],
+  "claimFees(ERC20)": [
+   "external_contract_call"
+  ],
+  "getRateSafe()": [],
+  "getRateInQuote(ERC20)": [
+   "external_contract_call"
+  ],
+  "getRateInQuoteSafe(ERC20)": [
+   "external_contract_call"
+  ]
+ },
+ "state_changing": {
+  "pause()": true,
+  "unpause()": true,
+  "getRate()": false,
+  "setAuthority(Authority)": true,
+  "transferOwnership(address)": true,
+  "updateDelay(uint24)": true,
+  "updateUpper(uint16)": true,
+  "updateLower(uint16)": true,
+  "updateManagementFee(uint16)": true,
+  "updatePerformanceFee(uint16)": true,
+  "updatePayoutAddress(address)": true,
+  "setRateProviderData(ERC20,bool,address)": true,
+  "resetHighwaterMark()": true,
+  "updateExchangeRate(uint96)": true,
+  "claimFees(ERC20)": true,
+  "getRateSafe()": false,
+  "getRateInQuote(ERC20)": false,
+  "getRateInQuoteSafe(ERC20)": false
+ }
+}

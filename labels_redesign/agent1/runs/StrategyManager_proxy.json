@@ -1,0 +1,238 @@
+{
+ "address": "0x858646372cc42e1a627fce94aa7a7033e7cf075a",
+ "label": "StrategyManager_proxy",
+ "contract_name": "TransparentUpgradeableProxy",
+ "compiler": "v0.8.12+commit.f00d7308",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "fallback()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "receive()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "admin()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  },
+  "implementation()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  },
+  "changeAdmin(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "fallback()": [],
+  "receive()": [],
+  "admin()": [],
+  "implementation()": [],
+  "changeAdmin(address)": [],
+  "upgradeTo(address)": [],
+  "upgradeToAndCall(address,bytes)": []
+ },
+ "guard_extraction_uncertain": []
+}

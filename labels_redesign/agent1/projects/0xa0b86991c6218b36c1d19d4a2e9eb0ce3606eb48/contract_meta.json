@@ -1,0 +1,13 @@
+{
+  "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "contract_name": "FiatTokenProxy",
+  "compiler_version": "v0.4.24+commit.e67f0147",
+  "language": "solidity",
+  "optimization_used": "0",
+  "runs": "200",
+  "evm_version": "Default",
+  "license": "",
+  "source_format": "flat",
+  "source_file_count": 1,
+  "remappings": []
+}

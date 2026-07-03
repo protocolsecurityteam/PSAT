@@ -1,0 +1,29 @@
+{
+  "address": "0xcb3d917a965a70214f430a135154cd5adda2ad84",
+  "contract_name": "EETH",
+  "compiler_version": "v0.8.27+commit.40a35a09",
+  "language": "solidity",
+  "optimization_used": "1",
+  "runs": "1500",
+  "evm_version": "cancun",
+  "license": "",
+  "source_format": "standard_json",
+  "source_file_count": 29,
+  "remappings": [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "@openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/",
+    "@uniswap/=lib/",
+    "@eigenlayer/=lib/eigenlayer-contracts/src/",
+    "@layerzerolabs/lz-evm-oapp-v2/contracts/=lib/Etherfi-SyncPools/node_modules/@layerzerolabs/lz-evm-oapp-v2/contracts/",
+    "@layerzerolabs/lz-evm-protocol-v2/contracts/=lib/Etherfi-SyncPools/node_modules/@layerzerolabs/lz-evm-protocol-v2/contracts/",
+    "@layerzerolabs/lz-evm-messagelib-v2/contracts/=lib/Etherfi-SyncPools/node_modules/@layerzerolabs/lz-evm-messagelib-v2/contracts/",
+    "@layerzerolabs/lz-evm-oapp-v2/contracts-upgradeable/=lib/Etherfi-SyncPools/node_modules/layerzero-v2/oapp/contracts/",
+    "ds-test/=lib/openzeppelin-contracts/lib/forge-std/lib/ds-test/src/",
+    "openzeppelin-contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+    "solady/=lib/solady/src/",
+    "v3-core/=lib/v3-core/",
+    "v3-periphery/=lib/v3-periphery/contracts/"
+  ]
+}

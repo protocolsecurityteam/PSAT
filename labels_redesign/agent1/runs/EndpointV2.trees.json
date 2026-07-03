@@ -1,0 +1,4219 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "EndpointV2",
+ "trees": {
+  "sendCompose(address,bytes32,uint16,bytes)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "_to"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_guid"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 2,
+      "parameter_name": "_index"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     0,
+     1,
+     2
+    ],
+    "expression": "composeQueue[msg.sender][_to][_guid][_index] != NO_MESSAGE_HASH",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "msg_sender"
+      },
+      {
+       "source": "parameter",
+       "parameter_index": 0,
+       "parameter_name": "_to"
+      },
+      {
+       "source": "parameter",
+       "parameter_index": 1,
+       "parameter_name": "_guid"
+      },
+      {
+       "source": "parameter",
+       "parameter_index": 2,
+       "parameter_name": "_index"
+      }
+     ],
+     "truthy_value": "bytes32(0)",
+     "value_predicate": {
+      "op": "eq",
+      "rhs_values": [
+       "bytes32(0)"
+      ],
+      "value_type": "bytes32"
+     },
+     "storage_var": "composeQueue",
+     "enumeration_hint": [
+      {
+       "topic0": "0x3d52ff888d033fd3dd1d8057da59e850c91d91a72c41dfa445b247dfedeb6dc1",
+       "topics_to_keys": {},
+       "data_to_keys": {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 3
+       },
+       "direction": "set",
+       "event_signature": "ComposeSent(address,address,bytes32,uint16,bytes)",
+       "event_name": "ComposeSent",
+       "mapping_name": "composeQueue",
+       "key_position": 3,
+       "indexed_positions": [],
+       "value_position": null,
+       "writer_function": "sendCompose(address,bytes32,uint16,bytes)"
+      },
+      {
+       "topic0": "0x0036c98efcf9e6641dfbc9051f66f405253e8e0c2ab4a24dccda15595b7378c8",
+       "topics_to_keys": {},
+       "data_to_keys": {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 3
+       },
+       "direction": "set",
+       "event_signature": "ComposeDelivered(address,address,bytes32,uint16)",
+       "event_name": "ComposeDelivered",
+       "mapping_name": "composeQueue",
+       "key_position": 3,
+       "indexed_positions": [],
+       "value_position": null,
+       "writer_function": "lzCompose(address,address,bytes32,uint16,bytes,bytes)"
+      }
+     ]
+    },
+    "confidence": "high"
+   }
+  },
+  "lzCompose(address,address,bytes32,uint16,bytes,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_from"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "keccak256(bytes)"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "expectedHash != actualHash",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_from"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_guid"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 4,
+        "parameter_name": "_message"
+       },
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 5,
+        "parameter_name": "_extraData"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       0,
+       2,
+       4,
+       5
+      ],
+      "expression": "lzCompose(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "lzCompose(address,bytes32,bytes,address,bytes)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "getSendLibrary(address,uint32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_dstEid"
+     },
+     {
+      "source": "constant",
+      "constant_value": "0",
+      "value_type": "uint256"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "lib == address(0x0)",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "low"
+   }
+  },
+  "getReceiveLibrary(address,uint32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_srcEid"
+     },
+     {
+      "source": "constant",
+      "constant_value": "0",
+      "value_type": "uint256"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "lib == address(0x0)",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "low"
+   }
+  },
+  "registerLibrary(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "431572701",
+        "value_type": "bytes4"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "supportsInterface(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "supportsInterface(bytes4)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_lib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_lib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "setDefaultSendLibrary(uint32,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "defaultSendLibrary[_eid] == _newLib",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_newLib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Receive"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Receive",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setDefaultReceiveLibrary(uint32,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "oldLib == _newLib",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_newLib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Send"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Send",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setDefaultReceiveLibraryTimeout(uint32,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gt",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_expiry"
+       },
+       {
+        "source": "block_context",
+        "block_context_kind": "number"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "_expiry <= block.number",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_lib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_lib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Send"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Send",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "setSendLibrary(address,uint32,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       2
+      ],
+      "expression": "sendLibrary[_oapp][_eid] == _newLib",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "membership",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "_newLib"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "! isRegisteredLibrary[_lib] && _lib != DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "set_descriptor": {
+         "kind": "mapping_membership",
+         "key_sources": [
+          {
+           "source": "parameter",
+           "parameter_index": 2,
+           "parameter_name": "_newLib"
+          }
+         ],
+         "storage_var": "isRegisteredLibrary"
+        },
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "_newLib"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "DEFAULT_LIB"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "! isRegisteredLibrary[_lib] && _lib != DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Receive"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Receive",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setReceiveLibrary(address,uint32,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_newLib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       2
+      ],
+      "expression": "oldLib == _newLib",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "DEFAULT_LIB"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "oldLib == DEFAULT_LIB || _newLib == DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "_newLib"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "DEFAULT_LIB"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "oldLib == DEFAULT_LIB || _newLib == DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "membership",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "_newLib"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "! isRegisteredLibrary[_lib] && _lib != DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "set_descriptor": {
+         "kind": "mapping_membership",
+         "key_sources": [
+          {
+           "source": "parameter",
+           "parameter_index": 2,
+           "parameter_name": "_newLib"
+          }
+         ],
+         "storage_var": "isRegisteredLibrary"
+        },
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "_newLib"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "DEFAULT_LIB"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "! isRegisteredLibrary[_lib] && _lib != DEFAULT_LIB",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Send"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Send",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setReceiveLibraryTimeout(address,uint32,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "getReceiveLibrary(address,uint32)",
+        "callee_signature": "getReceiveLibrary(address,uint32)",
+        "callee_selector": "0x402f8468"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "isDefault",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gt",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "_expiry"
+       },
+       {
+        "source": "block_context",
+        "block_context_kind": "number"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "_expiry <= block.number",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_lib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "! isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 2,
+         "parameter_name": "_lib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "messageLibType",
+        "callee_signature": "messageLibType()",
+        "callee_selector": "0x1881d94d"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.Send"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IMessageLib(_lib).messageLibType() == MessageLibType.Send",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_eid"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "isSupportedEid(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "isSupportedEid(uint32)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setConfig(address,address,SetConfigParam[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_params"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       2
+      ],
+      "expression": "setConfig(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "setConfig(address,SetConfigParam[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_lib"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! isRegisteredLibrary[_lib]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_lib"
+        }
+       ],
+       "storage_var": "isRegisteredLibrary"
+      },
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "getConfig(address,address,uint32,uint32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_lib"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "! isRegisteredLibrary[_lib]",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "parameter",
+       "parameter_index": 1,
+       "parameter_name": "_lib"
+      }
+     ],
+     "storage_var": "isRegisteredLibrary"
+    },
+    "confidence": "low"
+   }
+  },
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_217)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(newOwner != address(0),Ownable: new owner is the zero address)",
+      "basis": [
+       "require(TMP_223)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "skip(address,uint32,bytes32,uint64)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "_nonce"
+       },
+       {
+        "source": "view_call",
+        "callee": "inboundNonce(address,uint32,bytes32)",
+        "callee_signature": "inboundNonce(address,uint32,bytes32)",
+        "callee_selector": "0xa0dd43fc"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "_nonce != inboundNonce(_oapp,_srcEid,_sender) + 1",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "nilify(address,uint32,bytes32,uint64,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 4,
+        "parameter_name": "_payloadHash"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       4
+      ],
+      "expression": "curPayloadHash != _payloadHash",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "gt",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 3,
+          "parameter_name": "_nonce"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         3,
+         0
+        ],
+        "expression": "_nonce <= lazyInboundNonce[_oapp][_srcEid][_sender] && curPayloadHash == EMPTY_PAYLOAD_HASH",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "EMPTY_PAYLOAD_HASH"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "_nonce <= lazyInboundNonce[_oapp][_srcEid][_sender] && curPayloadHash == EMPTY_PAYLOAD_HASH",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "burn(address,uint32,bytes32,uint64,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 4,
+        "parameter_name": "_payloadHash"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       4
+      ],
+      "expression": "curPayloadHash != _payloadHash",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         },
+         {
+          "source": "state_variable",
+          "state_variable_name": "EMPTY_PAYLOAD_HASH"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "curPayloadHash == EMPTY_PAYLOAD_HASH || _nonce > lazyInboundNonce[_oapp][_srcEid][_sender]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "lte",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 3,
+          "parameter_name": "_nonce"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         3,
+         0
+        ],
+        "expression": "curPayloadHash == EMPTY_PAYLOAD_HASH || _nonce > lazyInboundNonce[_oapp][_srcEid][_sender]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "quote(MessagingParams,address)": {
+   "op": "OR",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_params"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "_params.payInLzToken && lzToken == address(0x0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "lzToken"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "_params.payInLzToken && lzToken == address(0x0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "send(MessagingParams,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "falsy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_params"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "_params.payInLzToken && lzToken == address(0x0)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "lzToken"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "_params.payInLzToken && lzToken == address(0x0)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "lte",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "top"
+         },
+         {
+          "source": "view_call",
+          "callee": "_suppliedNative()",
+          "callee_signature": "_suppliedNative()",
+          "callee_selector": "0xf315b533"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "_required.nativeFee > _suppliedNativeFee || _required.lzTokenFee > _suppliedLzTokenFee",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "lte",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "top"
+         },
+         {
+          "source": "view_call",
+          "callee": "_suppliedLzToken(bool)",
+          "callee_signature": "_suppliedLzToken(bool)",
+          "callee_selector": "0xdf9da971"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "_required.nativeFee > _suppliedNativeFee || _required.lzTokenFee > _suppliedLzTokenFee",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "_token_1",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_receiver_1",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_required_1",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "token(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "token(address,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "top"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "TMP_627",
+        "value_type": "IERC20"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_to_1",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_value_1",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "external_call",
+          "callee": "functionCall",
+          "callee_signature": "functionCall(address,bytes,string)",
+          "callee_selector": "0x241b5886"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)(returndata.length == 0 || abi.decode(returndata,(bool)),SafeERC20: ERC20 operation did not succeed)",
+        "basis": [
+         "require(TMP_56)"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "unsupported",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [],
+        "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate",
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "TMP_55(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+        "basis": [
+         "solidity_call_abi.decode()_unsupported_as_gate"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "_token_1",
+        "value_type": "address"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_refundAddress"
+       },
+       {
+        "source": "constant",
+        "constant_value": "TMP_323",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "token(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "token(address,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_refundAddress"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "TMP_627",
+        "value_type": "IERC20"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_to_1",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_value_1",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "external_call",
+          "callee": "functionCall",
+          "callee_signature": "functionCall(address,bytes,string)",
+          "callee_selector": "0x241b5886"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)(returndata.length == 0 || abi.decode(returndata,(bool)),SafeERC20: ERC20 operation did not succeed)",
+        "basis": [
+         "require(TMP_56)"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "unsupported",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [],
+        "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate",
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "TMP_55(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+        "basis": [
+         "solidity_call_abi.decode()_unsupported_as_gate"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "_receiver_1",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_required_1",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "native(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "native(address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "top"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "top"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "! success",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "nonview",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_refundAddress"
+       },
+       {
+        "source": "constant",
+        "constant_value": "TMP_328",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "native(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "native(address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_refundAddress"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_refundAddress"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! success",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "nonview",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_sendContext"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "NOT_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "_sendContext != NOT_ENTERED",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "reentrancy guard: _sendContext"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "verify(Origin,address,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "view_call",
+          "callee": "getReceiveLibrary(address,uint32)",
+          "callee_signature": "getReceiveLibrary(address,uint32)",
+          "callee_selector": "0x402f8468"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [],
+        "expression": "return TMP_128",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "caller_authority",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 0,
+            "parameter_name": "_origin"
+           },
+           {
+            "source": "msg_sender"
+           }
+          ],
+          "references_msg_sender": true,
+          "parameter_indices": [
+           0
+          ],
+          "expression": "return TMP_131",
+          "basis": [
+           "if-revert via always-reverting branch"
+          ],
+          "confidence": "high"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "comparison",
+          "operator": "gt",
+          "authority_role": "time",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 0,
+            "parameter_name": "_origin"
+           },
+           {
+            "source": "block_context",
+            "block_context_kind": "number"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           0
+          ],
+          "expression": "return TMP_131",
+          "basis": [
+           "if-revert via always-reverting branch"
+          ],
+          "confidence": "high"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "gt",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "! _initializable(_origin,_receiver,lazyNonce)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "external_bool",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "allowInitializePath(...)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "callee_state_mutability": "view",
+        "gate_kind": "custom_revert",
+        "callee_signature": "allowInitializePath(Origin)",
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "gt",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0,
+         0
+        ],
+        "expression": "! _verifiable(_origin,_receiver,lazyNonce)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "membership",
+        "operator": "falsy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 1,
+          "parameter_name": "_receiver"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_origin"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         1,
+         0,
+         0,
+         0
+        ],
+        "expression": "! _verifiable(_origin,_receiver,lazyNonce)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "set_descriptor": {
+         "kind": "mapping_membership",
+         "key_sources": [
+          {
+           "source": "parameter",
+           "parameter_index": 1,
+           "parameter_name": "_receiver"
+          },
+          {
+           "source": "parameter",
+           "parameter_index": 0,
+           "parameter_name": "_origin"
+          },
+          {
+           "source": "parameter",
+           "parameter_index": 0,
+           "parameter_name": "_origin"
+          },
+          {
+           "source": "parameter",
+           "parameter_index": 0,
+           "parameter_name": "_origin"
+          }
+         ],
+         "truthy_value": "bytes32(0)",
+         "value_predicate": {
+          "op": "ne",
+          "rhs_values": [
+           "bytes32(0)"
+          ],
+          "value_type": "bytes32"
+         },
+         "storage_var": "inboundPayloadHash"
+        },
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_payloadHash"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "EMPTY_PAYLOAD_HASH"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "_payloadHash == EMPTY_PAYLOAD_HASH",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "lzReceive(Origin,address,bytes32,bytes,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_receiver"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       0,
+       0,
+       0
+      ],
+      "expression": "! _hasPayloadHash(_receiver,_srcEid,_sender,i)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_receiver"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        }
+       ],
+       "truthy_value": "bytes32(0)",
+       "value_predicate": {
+        "op": "ne",
+        "rhs_values": [
+         "bytes32(0)"
+        ],
+        "value_type": "bytes32"
+       },
+       "storage_var": "inboundPayloadHash"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "keccak256(bytes)"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "expectedHash != actualHash",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_guid"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "_message"
+       },
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 4,
+        "parameter_name": "_extraData"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       0,
+       2,
+       3,
+       4
+      ],
+      "expression": "lzReceive(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "lzReceive(Origin,bytes32,bytes,address,bytes)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "clear(address,Origin,bytes32,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_oapp",
+          "mapping_name": "delegates",
+          "mapping_writer_specs": [
+           {
+            "mapping_name": "delegates",
+            "event_signature": "DelegateSet(address,address)",
+            "event_name": "DelegateSet",
+            "key_position": 0,
+            "indexed_positions": [],
+            "direction": "set",
+            "writer_function": "setDelegate(address)",
+            "value_position": 1
+           }
+          ]
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "msg.sender != _oapp && msg.sender != delegates[_oapp]",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1,
+       1,
+       0
+      ],
+      "expression": "! _hasPayloadHash(_receiver,_srcEid,_sender,i)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_oapp"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_oapp"
+        }
+       ],
+       "truthy_value": "bytes32(0)",
+       "value_predicate": {
+        "op": "ne",
+        "rhs_values": [
+         "bytes32(0)"
+        ],
+        "value_type": "bytes32"
+       },
+       "storage_var": "inboundPayloadHash"
+      },
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_oapp"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "keccak256(bytes)"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "expectedHash != actualHash",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setLzToken(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_217)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "recoverToken(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_token"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_to"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_amount"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1,
+       2
+      ],
+      "expression": "nativeOrToken(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "nativeOrToken(address,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_to"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_to"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! success",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "nonview",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_to"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ADDRESS_ZERO"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "_to == ADDRESS_ZERO",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "TMP_627",
+        "value_type": "IERC20"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_to"
+       },
+       {
+        "source": "constant",
+        "constant_value": "_value_1",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "external_call",
+          "callee": "functionCall",
+          "callee_signature": "functionCall(address,bytes,string)",
+          "callee_selector": "0x241b5886"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)(returndata.length == 0 || abi.decode(returndata,(bool)),SafeERC20: ERC20 operation did not succeed)",
+        "basis": [
+         "require(TMP_56)"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "unsupported",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [],
+        "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate",
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "TMP_55(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+        "basis": [
+         "solidity_call_abi.decode()_unsupported_as_gate"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_217)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  }
+ },
+ "canonical_signatures": {
+  "setConfig(address,address,SetConfigParam[])": "setConfig(address,address,(uint32,uint32,bytes)[])",
+  "quote(MessagingParams,address)": "quote((uint32,bytes32,bytes,bytes,bool),address)",
+  "send(MessagingParams,address)": "send((uint32,bytes32,bytes,bytes,bool),address)",
+  "verify(Origin,address,bytes32)": "verify((uint32,bytes32,uint64),address,bytes32)",
+  "lzReceive(Origin,address,bytes32,bytes,bytes)": "lzReceive((uint32,bytes32,uint64),address,bytes32,bytes,bytes)",
+  "lzReceiveAlert(Origin,address,bytes32,uint256,uint256,bytes,bytes,bytes)": "lzReceiveAlert((uint32,bytes32,uint64),address,bytes32,uint256,uint256,bytes,bytes,bytes)",
+  "clear(address,Origin,bytes32,bytes)": "clear(address,(uint32,bytes32,uint64),bytes32,bytes)",
+  "initializable(Origin,address)": "initializable((uint32,bytes32,uint64),address)",
+  "verifiable(Origin,address)": "verifiable((uint32,bytes32,uint64),address)"
+ },
+ "check_trees": {
+  "isSendingMessage()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "reentrancy",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_sendContext"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "NOT_ENTERED"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "return TMP_97",
+    "basis": [
+     "bool-return predicate",
+     "reentrancy guard: _sendContext"
+    ],
+    "confidence": "high"
+   }
+  },
+  "isDefaultSendLibrary(address,uint32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_dstEid"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0,
+     1
+    ],
+    "expression": "return TMP_123",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "parameter",
+       "parameter_index": 0,
+       "parameter_name": "_sender"
+      },
+      {
+       "source": "parameter",
+       "parameter_index": 1,
+       "parameter_name": "_dstEid"
+      }
+     ],
+     "truthy_value": "address(0)",
+     "value_predicate": {
+      "op": "eq",
+      "rhs_values": [
+       "address(0)"
+      ],
+      "value_type": "address"
+     },
+     "storage_var": "sendLibrary"
+    },
+    "confidence": "low"
+   }
+  },
+  "getReceiveLibrary(address,uint32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_srcEid"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "return lib_3",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  },
+  "isValidReceiveLibrary(address,uint32,address)": {
+   "op": "OR",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "view_call",
+        "callee": "getReceiveLibrary(address,uint32)",
+        "callee_signature": "getReceiveLibrary(address,uint32)",
+        "callee_selector": "0x402f8468"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "return TMP_128",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "caller_authority",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_receiver"
+         },
+         {
+          "source": "msg_sender"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "return TMP_131",
+        "basis": [
+         "bool-return predicate"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "gt",
+        "authority_role": "time",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "_receiver"
+         },
+         {
+          "source": "block_context",
+          "block_context_kind": "number"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "return TMP_131",
+        "basis": [
+         "bool-return predicate"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "isSupportedEid(uint32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "return TMP_173",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_eid"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "return TMP_173",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "initializable(Origin,address)": {
+   "op": "OR",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gt",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "return TMP_352",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "allowInitializePath(...)",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "assert",
+      "callee_signature": "allowInitializePath(Origin)",
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "verifiable(Origin,address)": {
+   "op": "OR",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gt",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       0
+      ],
+      "expression": "return TMP_353",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "falsy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_receiver"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_origin"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       0,
+       0,
+       0
+      ],
+      "expression": "return TMP_353",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "_receiver"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "_origin"
+        }
+       ],
+       "truthy_value": "bytes32(0)",
+       "value_predicate": {
+        "op": "ne",
+        "rhs_values": [
+         "bytes32(0)"
+        ],
+        "value_type": "bytes32"
+       },
+       "storage_var": "inboundPayloadHash"
+      },
+      "confidence": "low"
+     }
+    }
+   ]
+  }
+ }
+}

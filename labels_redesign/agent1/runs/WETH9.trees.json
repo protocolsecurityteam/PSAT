@@ -1,0 +1,226 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "WETH9",
+ "trees": {
+  "withdraw(uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "wad"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     0
+    ],
+    "expression": "require(bool)(balanceOf[msg.sender] >= wad)",
+    "basis": [
+     "require(TMP_2)"
+    ],
+    "confidence": "low"
+   }
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool)(balanceOf[src] >= wad)",
+      "basis": [
+       "require(TMP_8)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool)(allowance[src][msg.sender] >= wad)",
+      "basis": [
+       "require(TMP_15)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  }
+ },
+ "check_trees": {
+  "approve(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "transfer(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool)(balanceOf[src] >= wad)",
+      "basis": [
+       "require(TMP_8)",
+       "inlined_internal_gate:transferFrom(address,address,uint256)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool)(allowance[src][msg.sender] >= wad)",
+      "basis": [
+       "require(TMP_15)",
+       "inlined_internal_gate:transferFrom(address,address,uint256)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "return TMP_8",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 2,
+      "parameter_name": "wad"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     2
+    ],
+    "expression": "return TMP_8",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

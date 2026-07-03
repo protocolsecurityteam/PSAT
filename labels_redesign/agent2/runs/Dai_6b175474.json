@@ -1,0 +1,273 @@
+{
+ "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+ "contract": "Dai",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [
+  "ERC20"
+ ],
+ "var_roles": {
+  "wards": {
+   "type": "mapping(address => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 3,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "DOMAIN_SEPARATOR": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "allowance": {
+   "type": "mapping(address => mapping(address => uint256))",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "balanceOf": {
+   "type": "mapping(address => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "totalSupply": {
+   "type": "uint256",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "nonces": {
+   "type": "mapping(address => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "decimals": {
+   "type": "uint8",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "symbol": {
+   "type": "string",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "version": {
+   "type": "string",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "name": {
+   "type": "string",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "PERMIT_TYPEHASH": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "approve(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance"
+   ]
+  },
+  "burn(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf, totalSupply.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf",
+    "totalSupply"
+   ]
+  },
+  "deny(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "wards"
+   ]
+  },
+  "mint(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: balanceOf, totalSupply.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "balanceOf",
+    "totalSupply"
+   ]
+  },
+  "move(address,address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)": {
+   "labels": [],
+   "summary": "Writes or calls into: nonces, allowance.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "nonces"
+   ]
+  },
+  "pull(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "push(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "rely(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "wards"
+   ]
+  },
+  "transfer(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  }
+ }
+}

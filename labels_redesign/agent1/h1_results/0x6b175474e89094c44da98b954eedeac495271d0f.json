@@ -1,0 +1,62 @@
+{
+ "contract": "Dai",
+ "pause_info_fns": [],
+ "struct_pause": [],
+ "uups_marker": false,
+ "owner_vars_tight": [],
+ "diffs": [
+  [
+   "approve(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "deny(address)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "rely(address)",
+   [
+    "hook_update"
+   ],
+   []
+  ]
+ ],
+ "current": {
+  "rely(address)": [
+   "hook_update"
+  ],
+  "deny(address)": [
+   "hook_update"
+  ],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "mint(address,uint256)": [],
+  "burn(address,uint256)": [],
+  "approve(address,uint256)": [
+   "hook_update"
+  ],
+  "push(address,uint256)": [],
+  "pull(address,uint256)": [],
+  "move(address,address,uint256)": [],
+  "permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)": []
+ },
+ "h1": {
+  "rely(address)": [],
+  "deny(address)": [],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "mint(address,uint256)": [],
+  "burn(address,uint256)": [],
+  "approve(address,uint256)": [],
+  "push(address,uint256)": [],
+  "pull(address,uint256)": [],
+  "move(address,address,uint256)": [],
+  "permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)": []
+ }
+}

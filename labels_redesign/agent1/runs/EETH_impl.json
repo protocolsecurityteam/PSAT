@@ -1,0 +1,1118 @@
+{
+ "address": "0xcb3d917a965a70214f430a135154cd5adda2ad84",
+ "label": "EETH_impl",
+ "contract_name": "EETH",
+ "compiler": "v0.8.27+commit.40a35a09",
+ "owner_vars_from_trees": [
+  "_owner",
+  "liquidityPool"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "name()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "symbol()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "decimals()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalShares()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "shares(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "balanceOf(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "initialize(address)": {
+   "labels": [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_initialized",
+    "_initializing",
+    "_owner",
+    "liquidityPool"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "self_address"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    }
+   ]
+  },
+  "mintShares(address,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "shares",
+    "totalShares"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:liquidityPool"
+     ]
+    }
+   ]
+  },
+  "burnShares(address,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "shares",
+    "totalShares"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:liquidityPool"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "allowances",
+    "shares"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": true,
+     "refs": [
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "transfer(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "shares"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": true,
+     "refs": [
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "approve(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "allowances"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "increaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "allowances"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "decreaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "allowances"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "allowances"
+   ],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "block_context",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "nonces(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "DOMAIN_SEPARATOR()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "proxiableUUID()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "sv:_IMPLEMENTATION_SLOT"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "sv:_IMPLEMENTATION_SLOT"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "totalSupply()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "allowance(address,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "recoverETH(address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "assembly_storage:s"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:EETH_OPERATING_ADMIN_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed",
+      "self_address"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    }
+   ]
+  },
+  "recoverERC20(address,address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "assembly_storage:s"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:EETH_OPERATING_ADMIN_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed",
+      "self_address"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    }
+   ]
+  },
+  "recoverERC721(address,address,uint256)": {
+   "labels": [
+    "asset_pull"
+   ],
+   "summary": "Pulls assets into the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "assembly_storage:s"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:EETH_OPERATING_ADMIN_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "self_address"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "computed",
+      "self_address"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    }
+   ]
+  },
+  "getImplementation()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  }
+ },
+ "written_by_fn": {
+  "name()": [],
+  "symbol()": [],
+  "decimals()": [],
+  "totalShares()": [],
+  "shares(address)": [],
+  "balanceOf(address)": [],
+  "initialize(address)": [
+   "_initialized",
+   "_initializing",
+   "_owner",
+   "liquidityPool"
+  ],
+  "mintShares(address,uint256)": [
+   "shares",
+   "totalShares"
+  ],
+  "burnShares(address,uint256)": [
+   "shares",
+   "totalShares"
+  ],
+  "transferFrom(address,address,uint256)": [
+   "allowances",
+   "shares"
+  ],
+  "transfer(address,uint256)": [
+   "shares"
+  ],
+  "approve(address,uint256)": [
+   "allowances"
+  ],
+  "increaseAllowance(address,uint256)": [
+   "allowances"
+  ],
+  "decreaseAllowance(address,uint256)": [
+   "allowances"
+  ],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [
+   "allowances"
+  ],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "_owner"
+  ],
+  "transferOwnership(address)": [
+   "_owner"
+  ],
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [],
+  "upgradeToAndCall(address,bytes)": [],
+  "totalSupply()": [],
+  "allowance(address,address)": [],
+  "recoverETH(address,uint256)": [],
+  "recoverERC20(address,address,uint256)": [],
+  "recoverERC721(address,address,uint256)": [],
+  "getImplementation()": []
+ },
+ "guard_extraction_uncertain": []
+}

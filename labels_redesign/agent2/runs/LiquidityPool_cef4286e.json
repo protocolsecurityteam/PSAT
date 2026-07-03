@@ -1,0 +1,633 @@
+{
+ "address": "0xcef4286e4274433f167320db9ae81073accfc474",
+ "contract": "LiquidityPool",
+ "owner_vars_from_trees": [
+  "_owner",
+  "admin",
+  "membershipManager"
+ ],
+ "pause_info": {
+  "pause_state_vars": [
+   "eEthliquidStakingOpened"
+  ],
+  "pause_toggle_functions": [
+   "closeEEthLiquidStaking()",
+   "initialize(address)",
+   "openEEthLiquidStaking()"
+  ]
+ },
+ "slither_ercs": [],
+ "var_roles": {
+  "_initialized": {
+   "type": "uint8",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 1,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_owner": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 10,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "totalValueOutOfLp": {
+   "type": "uint128",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "totalValueInLp": {
+   "type": "uint128",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "regulationsManager": {
+   "type": "IRegulationsManager",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_initializing": {
+   "type": "bool",
+   "is_mapping": false,
+   "is_bool": true,
+   "is_address": false,
+   "gate_for_n_fns": 1,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "eEthliquidStakingOpened": {
+   "type": "bool",
+   "is_mapping": false,
+   "is_bool": true,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "numPendingDeposits": {
+   "type": "uint32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "eETH": {
+   "type": "IeETH",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "stakingManager": {
+   "type": "IStakingManager",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "nodesManager": {
+   "type": "IEtherFiNodesManager",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "membershipManager": {
+   "type": "IMembershipManager",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "tNft": {
+   "type": "ITNFT",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "admin": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 6,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "bNftTreasury": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_IMPLEMENTATION_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_ADMIN_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_BEACON_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "amountForShare(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "batchCancelDeposit(uint256[])": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "numPendingDeposits",
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ]
+  },
+  "batchDepositWithBidIds(uint256,uint256[],bytes32[])": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "numPendingDeposits",
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ]
+  },
+  "batchRegisterValidators(bytes32,uint256[],IStakingManager.DepositData[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "numPendingDeposits"
+   ]
+  },
+  "closeEEthLiquidStaking()": {
+   "labels": [],
+   "summary": "Writes or calls into: eEthliquidStakingOpened.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "eEthliquidStakingOpened"
+   ]
+  },
+  "deposit(address,address,bytes32[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp"
+   ]
+  },
+  "deposit(address,bytes32[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp"
+   ]
+  },
+  "getImplementation()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "getTotalEtherClaimOf(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "getTotalPooledEther()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "initialize(address)": {
+   "labels": [
+    "pause_toggle",
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "_initialized",
+    "_initializing",
+    "_owner",
+    "eEthliquidStakingOpened",
+    "regulationsManager"
+   ]
+  },
+  "openEEthLiquidStaking()": {
+   "labels": [],
+   "summary": "Writes or calls into: eEthliquidStakingOpened.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "eEthliquidStakingOpened"
+   ]
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "proxiableUUID()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "rebase(uint256,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: totalValueOutOfLp, totalValueInLp.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ]
+  },
+  "receive()": {
+   "labels": [],
+   "summary": "Writes or calls into: totalValueOutOfLp, totalValueInLp.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ]
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "sendExitRequests(uint256[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "setEtherFiNodesManager(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "nodesManager"
+   ]
+  },
+  "setMembershipManager(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "membershipManager"
+   ]
+  },
+  "setStakingManager(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "stakingManager"
+   ]
+  },
+  "setTnft(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "tNft"
+   ]
+  },
+  "setTokenAddress(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "eETH"
+   ]
+  },
+  "sharesForAmount(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "sharesForWithdrawalAmount(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "swapTNftForEth(uint256[])": {
+   "labels": [
+    "asset_pull",
+    "asset_send"
+   ],
+   "summary": "Pulls assets into the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "updateAdmin(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "admin"
+   ]
+  },
+  "updateBNftTreasury(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "bNftTreasury"
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "withdraw(address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "totalValueInLp"
+   ]
+  }
+ }
+}

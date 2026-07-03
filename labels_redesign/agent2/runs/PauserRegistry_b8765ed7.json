@@ -1,0 +1,80 @@
+{
+ "address": "0xb8765ed72235d279c3fb53936e4606db0ef12806",
+ "contract": "PauserRegistry",
+ "owner_vars_from_trees": [
+  "unpauser"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [],
+ "var_roles": {
+  "isPauser": {
+   "type": "mapping(address => bool)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "unpauser": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  }
+ },
+ "functions": {
+  "isPauser(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "setIsPauser(address,bool)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "isPauser"
+   ]
+  },
+  "setUnpauser(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "unpauser"
+   ]
+  },
+  "unpauser()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  }
+ }
+}

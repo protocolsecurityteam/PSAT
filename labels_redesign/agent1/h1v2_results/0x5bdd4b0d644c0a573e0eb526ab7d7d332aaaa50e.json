@@ -1,0 +1,79 @@
+{
+ "contract": "TopUp",
+ "owner_vars_v2": [],
+ "pause_v2": [],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "initialize(address)",
+   [
+    "ownership_transfer"
+   ],
+   []
+  ],
+  [
+   "renounceOwnership()",
+   [],
+   [
+    "ownership_transfer"
+   ]
+  ],
+  [
+   "transferOwnership(address)",
+   [],
+   [
+    "ownership_transfer"
+   ]
+  ]
+ ],
+ "current": {
+  "transferOwnership(address)": [],
+  "renounceOwnership()": [],
+  "requestOwnershipHandover()": [],
+  "cancelOwnershipHandover()": [],
+  "completeOwnershipHandover(address)": [],
+  "owner()": [],
+  "ownershipHandoverExpiresAt(address)": [],
+  "initialize(address)": [
+   "ownership_transfer"
+  ],
+  "processTopUp(address[])": [
+   "asset_send"
+  ],
+  "receive()": [
+   "asset_send"
+  ]
+ },
+ "h1": {
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "requestOwnershipHandover()": [],
+  "cancelOwnershipHandover()": [],
+  "completeOwnershipHandover(address)": [],
+  "owner()": [],
+  "ownershipHandoverExpiresAt(address)": [],
+  "initialize(address)": [],
+  "processTopUp(address[])": [
+   "asset_send"
+  ],
+  "receive()": [
+   "asset_send"
+  ]
+ },
+ "state_changing": {
+  "transferOwnership(address)": true,
+  "renounceOwnership()": true,
+  "requestOwnershipHandover()": true,
+  "cancelOwnershipHandover()": true,
+  "completeOwnershipHandover(address)": true,
+  "owner()": false,
+  "ownershipHandoverExpiresAt(address)": false,
+  "initialize(address)": true,
+  "processTopUp(address[])": true,
+  "receive()": false
+ }
+}

@@ -1,0 +1,328 @@
+{
+ "contract": "FiatTokenV2_2",
+ "owner_vars_v2": [
+  "_owner",
+  "_rescuer",
+  "blacklister",
+  "masterMinter",
+  "pauser"
+ ],
+ "pause_v2": [
+  "pause()",
+  "unpause()"
+ ],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "approve(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "blacklist(address)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "cancelAuthorization(address,bytes32,bytes)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "decreaseAllowance(address,uint256)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "increaseAllowance(address,uint256)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "transfer(address,uint256)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ],
+  [
+   "unBlacklist(address)",
+   [
+    "hook_update"
+   ],
+   []
+  ]
+ ],
+ "current": {
+  "initializeV2_1(address)": [
+   "external_contract_call"
+  ],
+  "version()": [],
+  "initializeV2(string)": [
+   "external_contract_call"
+  ],
+  "increaseAllowance(address,uint256)": [
+   "hook_update"
+  ],
+  "decreaseAllowance(address,uint256)": [
+   "hook_update"
+  ],
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)": [
+   "hook_update"
+  ],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [
+   "external_contract_call"
+  ],
+  "totalSupply()": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [
+   "hook_update"
+  ],
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [
+   "hook_update"
+  ],
+  "transferFrom(address,address,uint256)": [
+   "external_contract_call"
+  ],
+  "authorizationState(address,bytes32)": [],
+  "rescuer()": [],
+  "rescueERC20(IERC20,address,uint256)": [
+   "asset_send"
+  ],
+  "updateRescuer(address)": [
+   "ownership_transfer"
+  ],
+  "owner()": [],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "initialize(string,string,string,uint8,address,address,address,address)": [
+   "ownership_transfer"
+  ],
+  "mint(address,uint256)": [
+   "external_contract_call"
+  ],
+  "minterAllowance(address)": [],
+  "isMinter(address)": [],
+  "configureMinter(address,uint256)": [],
+  "removeMinter(address)": [],
+  "burn(uint256)": [
+   "external_contract_call"
+  ],
+  "updateMasterMinter(address)": [
+   "ownership_transfer"
+  ],
+  "isBlacklisted(address)": [],
+  "blacklist(address)": [
+   "hook_update"
+  ],
+  "unBlacklist(address)": [
+   "hook_update"
+  ],
+  "updateBlacklister(address)": [
+   "ownership_transfer"
+  ],
+  "pause()": [
+   "pause_toggle"
+  ],
+  "unpause()": [
+   "pause_toggle"
+  ],
+  "updatePauser(address)": [
+   "ownership_transfer"
+  ],
+  "initializeV2_2(address[],string)": [],
+  "permit(address,address,uint256,uint256,bytes)": [
+   "external_contract_call"
+  ],
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": [
+   "external_contract_call"
+  ],
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": [
+   "external_contract_call"
+  ],
+  "cancelAuthorization(address,bytes32,bytes)": [
+   "hook_update"
+  ]
+ },
+ "h1": {
+  "initializeV2_1(address)": [
+   "external_contract_call"
+  ],
+  "version()": [],
+  "initializeV2(string)": [
+   "external_contract_call"
+  ],
+  "increaseAllowance(address,uint256)": [
+   "external_contract_call"
+  ],
+  "decreaseAllowance(address,uint256)": [
+   "external_contract_call"
+  ],
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [
+   "external_contract_call"
+  ],
+  "totalSupply()": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [
+   "external_contract_call"
+  ],
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [
+   "external_contract_call"
+  ],
+  "authorizationState(address,bytes32)": [],
+  "rescuer()": [],
+  "rescueERC20(IERC20,address,uint256)": [
+   "asset_send"
+  ],
+  "updateRescuer(address)": [
+   "ownership_transfer"
+  ],
+  "owner()": [],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "initialize(string,string,string,uint8,address,address,address,address)": [
+   "ownership_transfer"
+  ],
+  "mint(address,uint256)": [
+   "external_contract_call"
+  ],
+  "minterAllowance(address)": [],
+  "isMinter(address)": [],
+  "configureMinter(address,uint256)": [],
+  "removeMinter(address)": [],
+  "burn(uint256)": [
+   "external_contract_call"
+  ],
+  "updateMasterMinter(address)": [
+   "ownership_transfer"
+  ],
+  "isBlacklisted(address)": [],
+  "blacklist(address)": [],
+  "unBlacklist(address)": [],
+  "updateBlacklister(address)": [
+   "ownership_transfer"
+  ],
+  "pause()": [
+   "pause_toggle"
+  ],
+  "unpause()": [
+   "pause_toggle"
+  ],
+  "updatePauser(address)": [
+   "ownership_transfer"
+  ],
+  "initializeV2_2(address[],string)": [],
+  "permit(address,address,uint256,uint256,bytes)": [
+   "external_contract_call"
+  ],
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": [
+   "external_contract_call"
+  ],
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": [
+   "external_contract_call"
+  ],
+  "cancelAuthorization(address,bytes32,bytes)": [
+   "external_contract_call"
+  ]
+ },
+ "state_changing": {
+  "initializeV2_1(address)": true,
+  "version()": false,
+  "initializeV2(string)": true,
+  "increaseAllowance(address,uint256)": true,
+  "decreaseAllowance(address,uint256)": true,
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": true,
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)": true,
+  "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)": true,
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": true,
+  "nonces(address)": false,
+  "DOMAIN_SEPARATOR()": false,
+  "totalSupply()": false,
+  "balanceOf(address)": false,
+  "transfer(address,uint256)": true,
+  "allowance(address,address)": false,
+  "approve(address,uint256)": true,
+  "transferFrom(address,address,uint256)": true,
+  "authorizationState(address,bytes32)": false,
+  "rescuer()": false,
+  "rescueERC20(IERC20,address,uint256)": true,
+  "updateRescuer(address)": true,
+  "owner()": false,
+  "transferOwnership(address)": true,
+  "initialize(string,string,string,uint8,address,address,address,address)": true,
+  "mint(address,uint256)": true,
+  "minterAllowance(address)": false,
+  "isMinter(address)": false,
+  "configureMinter(address,uint256)": true,
+  "removeMinter(address)": true,
+  "burn(uint256)": true,
+  "updateMasterMinter(address)": true,
+  "isBlacklisted(address)": false,
+  "blacklist(address)": true,
+  "unBlacklist(address)": true,
+  "updateBlacklister(address)": true,
+  "pause()": true,
+  "unpause()": true,
+  "updatePauser(address)": true,
+  "initializeV2_2(address[],string)": true,
+  "permit(address,address,uint256,uint256,bytes)": true,
+  "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": true,
+  "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)": true,
+  "cancelAuthorization(address,bytes32,bytes)": true
+ }
+}

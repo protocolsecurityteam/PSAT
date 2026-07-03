@@ -1,0 +1,961 @@
+{
+ "address": "0x88582996b70fdd7c4f16e3fde7b53858fce0d394",
+ "label": "StrategyManager_impl",
+ "contract_name": "StrategyManager",
+ "compiler": "v0.8.30+commit.73712a01",
+ "owner_vars_from_trees": [
+  "_owner",
+  "delegation",
+  "strategyWhitelister"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [
+   "_status"
+  ],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "domainSeparator()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "version()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "initialize(address,address,uint256)": {
+   "labels": [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_initialized",
+    "_initializing",
+    "_owner",
+    "_paused",
+    "strategyWhitelister"
+   ],
+   "leaves": [
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "self_address"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    }
+   ]
+  },
+  "depositIntoStrategy(IStrategy,IERC20,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "stakerDepositShares",
+    "stakerStrategyList"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:PAUSED_DEPOSITS",
+      "sv:PAUSED_DEPOSITS"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "depositIntoStrategyWithSignature(IStrategy,IERC20,uint256,address,uint256,bytes)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "nonces",
+    "stakerDepositShares",
+    "stakerStrategyList"
+   ],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "block_context"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:PAUSED_DEPOSITS",
+      "sv:PAUSED_DEPOSITS"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "burnShares(IStrategy)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status"
+   ],
+   "leaves": [
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "clearBurnOrRedistributableShares(OperatorSet,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status"
+   ],
+   "leaves": [
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "clearBurnOrRedistributableSharesByStrategy(OperatorSet,uint256,IStrategy)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status"
+   ],
+   "leaves": [
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "getBurnOrRedistributableShares(OperatorSet,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getBurnOrRedistributableShares(OperatorSet,uint256,IStrategy)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getBurnOrRedistributableCount(OperatorSet,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setStrategyWhitelister(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "strategyWhitelister"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "addStrategiesToDepositWhitelist(IStrategy[])": {
+   "labels": [],
+   "summary": "Writes or calls into: strategyIsWhitelistedForDeposit, _status.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "strategyIsWhitelistedForDeposit"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:strategyWhitelister"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "removeStrategiesFromDepositWhitelist(IStrategy[])": {
+   "labels": [],
+   "summary": "Writes or calls into: strategyIsWhitelistedForDeposit, _status.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "strategyIsWhitelistedForDeposit"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:strategyWhitelister"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "strategyIsWhitelistedForDeposit(IStrategy)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getDeposits(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getStakerStrategyList(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "stakerStrategyListLength(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "stakerDepositShares(address,IStrategy)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "delegation()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "strategyWhitelister()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getBurnableShares(IStrategy)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getStrategiesWithBurnableShares()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "calculateStrategyDepositDigestHash(address,IStrategy,IERC20,uint256,uint256,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getPendingOperatorSets()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getPendingSlashIds(OperatorSet)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "removeDepositShares(address,IStrategy,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "stakerDepositShares",
+    "stakerStrategyList"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:delegation"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "addShares(address,IStrategy,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "stakerDepositShares",
+    "stakerStrategyList"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:delegation"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "withdrawSharesAsTokens(address,IStrategy,IERC20,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:delegation"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "increaseBurnOrRedistributableShares(OperatorSet,uint256,IStrategy,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:delegation"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:_ENTERED"
+     ]
+    }
+   ]
+  },
+  "pause(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:_paused"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "pauseAll()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    }
+   ]
+  },
+  "unpause(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:_paused"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "paused()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "paused(uint8)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "pauserRegistry()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "domainSeparator()": [],
+  "version()": [],
+  "initialize(address,address,uint256)": [
+   "_initialized",
+   "_initializing",
+   "_owner",
+   "_paused",
+   "strategyWhitelister"
+  ],
+  "depositIntoStrategy(IStrategy,IERC20,uint256)": [
+   "_status",
+   "stakerDepositShares",
+   "stakerStrategyList"
+  ],
+  "depositIntoStrategyWithSignature(IStrategy,IERC20,uint256,address,uint256,bytes)": [
+   "_status",
+   "nonces",
+   "stakerDepositShares",
+   "stakerStrategyList"
+  ],
+  "burnShares(IStrategy)": [
+   "_status"
+  ],
+  "clearBurnOrRedistributableShares(OperatorSet,uint256)": [
+   "_status"
+  ],
+  "clearBurnOrRedistributableSharesByStrategy(OperatorSet,uint256,IStrategy)": [
+   "_status"
+  ],
+  "getBurnOrRedistributableShares(OperatorSet,uint256)": [],
+  "getBurnOrRedistributableShares(OperatorSet,uint256,IStrategy)": [],
+  "getBurnOrRedistributableCount(OperatorSet,uint256)": [],
+  "setStrategyWhitelister(address)": [
+   "_status",
+   "strategyWhitelister"
+  ],
+  "addStrategiesToDepositWhitelist(IStrategy[])": [
+   "_status",
+   "strategyIsWhitelistedForDeposit"
+  ],
+  "removeStrategiesFromDepositWhitelist(IStrategy[])": [
+   "_status",
+   "strategyIsWhitelistedForDeposit"
+  ],
+  "strategyIsWhitelistedForDeposit(IStrategy)": [],
+  "getDeposits(address)": [],
+  "getStakerStrategyList(address)": [],
+  "stakerStrategyListLength(address)": [],
+  "stakerDepositShares(address,IStrategy)": [],
+  "delegation()": [],
+  "strategyWhitelister()": [],
+  "getBurnableShares(IStrategy)": [],
+  "getStrategiesWithBurnableShares()": [],
+  "calculateStrategyDepositDigestHash(address,IStrategy,IERC20,uint256,uint256,uint256)": [],
+  "getPendingOperatorSets()": [],
+  "getPendingSlashIds(OperatorSet)": [],
+  "removeDepositShares(address,IStrategy,uint256)": [
+   "_status",
+   "stakerDepositShares",
+   "stakerStrategyList"
+  ],
+  "addShares(address,IStrategy,uint256)": [
+   "_status",
+   "stakerDepositShares",
+   "stakerStrategyList"
+  ],
+  "withdrawSharesAsTokens(address,IStrategy,IERC20,uint256)": [
+   "_status"
+  ],
+  "increaseBurnOrRedistributableShares(OperatorSet,uint256,IStrategy,uint256)": [
+   "_status"
+  ],
+  "pause(uint256)": [],
+  "pauseAll()": [],
+  "unpause(uint256)": [],
+  "paused()": [],
+  "paused(uint8)": [],
+  "pauserRegistry()": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "_owner"
+  ],
+  "transferOwnership(address)": [
+   "_owner"
+  ]
+ },
+ "guard_extraction_uncertain": []
+}

@@ -1,0 +1,205 @@
+{
+ "contract": "BackingEigen",
+ "owner_vars_v2": [
+  "_owner"
+ ],
+ "pause_v2": [],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "decreaseAllowance(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "increaseAllowance(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "initialize(address)",
+   [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   [
+    "ownership_transfer"
+   ]
+  ],
+  [
+   "setAllowedFrom(address,bool)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "setAllowedTo(address,bool)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "setIsMinter(address,bool)",
+   [
+    "hook_update"
+   ],
+   []
+  ]
+ ],
+ "current": {
+  "clock()": [
+   "external_contract_call"
+  ],
+  "CLOCK_MODE()": [],
+  "checkpoints(address,uint32)": [],
+  "numCheckpoints(address)": [
+   "external_contract_call"
+  ],
+  "delegates(address)": [],
+  "getVotes(address)": [],
+  "getPastVotes(address,uint256)": [],
+  "getPastTotalSupply(uint256)": [],
+  "delegate(address)": [],
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "eip712Domain()": [],
+  "name()": [],
+  "symbol()": [],
+  "decimals()": [],
+  "totalSupply()": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [],
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "increaseAllowance(address,uint256)": [
+   "hook_update"
+  ],
+  "decreaseAllowance(address,uint256)": [
+   "hook_update"
+  ],
+  "owner()": [],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "setIsMinter(address,bool)": [
+   "hook_update"
+  ],
+  "mint(address,uint256)": [
+   "external_contract_call"
+  ],
+  "burn(uint256)": [
+   "external_contract_call"
+  ],
+  "initialize(address)": [
+   "ownership_transfer",
+   "pause_toggle"
+  ],
+  "setAllowedFrom(address,bool)": [
+   "hook_update"
+  ],
+  "setAllowedTo(address,bool)": [
+   "hook_update"
+  ],
+  "disableTransferRestrictions()": []
+ },
+ "h1": {
+  "clock()": [
+   "external_contract_call"
+  ],
+  "CLOCK_MODE()": [],
+  "checkpoints(address,uint32)": [],
+  "numCheckpoints(address)": [
+   "external_contract_call"
+  ],
+  "delegates(address)": [],
+  "getVotes(address)": [],
+  "getPastVotes(address,uint256)": [],
+  "getPastTotalSupply(uint256)": [],
+  "delegate(address)": [],
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "eip712Domain()": [],
+  "name()": [],
+  "symbol()": [],
+  "decimals()": [],
+  "totalSupply()": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [],
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "increaseAllowance(address,uint256)": [],
+  "decreaseAllowance(address,uint256)": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "setIsMinter(address,bool)": [],
+  "mint(address,uint256)": [
+   "external_contract_call"
+  ],
+  "burn(uint256)": [
+   "external_contract_call"
+  ],
+  "initialize(address)": [
+   "ownership_transfer"
+  ],
+  "setAllowedFrom(address,bool)": [],
+  "setAllowedTo(address,bool)": [],
+  "disableTransferRestrictions()": []
+ },
+ "state_changing": {
+  "clock()": false,
+  "CLOCK_MODE()": false,
+  "checkpoints(address,uint32)": false,
+  "numCheckpoints(address)": false,
+  "delegates(address)": false,
+  "getVotes(address)": false,
+  "getPastVotes(address,uint256)": false,
+  "getPastTotalSupply(uint256)": false,
+  "delegate(address)": true,
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": true,
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": true,
+  "nonces(address)": false,
+  "DOMAIN_SEPARATOR()": false,
+  "eip712Domain()": false,
+  "name()": false,
+  "symbol()": false,
+  "decimals()": false,
+  "totalSupply()": false,
+  "balanceOf(address)": false,
+  "transfer(address,uint256)": true,
+  "allowance(address,address)": false,
+  "approve(address,uint256)": true,
+  "transferFrom(address,address,uint256)": true,
+  "increaseAllowance(address,uint256)": true,
+  "decreaseAllowance(address,uint256)": true,
+  "owner()": false,
+  "renounceOwnership()": true,
+  "transferOwnership(address)": true,
+  "setIsMinter(address,bool)": true,
+  "mint(address,uint256)": true,
+  "burn(uint256)": true,
+  "initialize(address)": true,
+  "setAllowedFrom(address,bool)": true,
+  "setAllowedTo(address,bool)": true,
+  "disableTransferRestrictions()": true
+ }
+}

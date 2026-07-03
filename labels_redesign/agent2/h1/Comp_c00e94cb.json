@@ -1,0 +1,16 @@
+{
+ "contract": "Comp",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "delegate(address)": [],
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "getCurrentVotes(address)": [],
+  "getPriorVotes(address,uint256)": []
+ }
+}

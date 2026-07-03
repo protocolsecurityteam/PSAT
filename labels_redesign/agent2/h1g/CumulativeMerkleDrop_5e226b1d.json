@@ -1,0 +1,100 @@
+{
+ "contract": "CumulativeMerkleDrop",
+ "pause_toggle_functions": [
+  "setUserChainSwitchingEnabled(bool)"
+ ],
+ "pause_state_vars": [
+  "isUserChainSwitchingEnabled"
+ ],
+ "functions": {
+  "oAppVersion()": [],
+  "composeMsgSender()": [],
+  "allowInitializePath(Origin)": [],
+  "nextNonce(uint32,bytes32)": [],
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": [],
+  "peers(uint32)": [],
+  "setPeer(uint32,bytes32)": [],
+  "setDelegate(address)": [],
+  "owner()": [],
+  "renounceOwnership()": [],
+  "transferOwnership(address)": [],
+  "endpoint()": [],
+  "paused()": [],
+  "supportsInterface(bytes4)": [],
+  "grantRole(bytes32,address)": [
+   "role_management"
+  ],
+  "revokeRole(bytes32,address)": [
+   "role_management"
+  ],
+  "renounceRole(bytes32,address)": [],
+  "defaultAdmin()": [],
+  "pendingDefaultAdmin()": [],
+  "defaultAdminDelay()": [],
+  "pendingDefaultAdminDelay()": [],
+  "defaultAdminDelayIncreaseWait()": [],
+  "beginDefaultAdminTransfer(address)": [],
+  "cancelDefaultAdminTransfer()": [],
+  "acceptDefaultAdminTransfer()": [],
+  "changeDefaultAdminDelay(uint48)": [],
+  "rollbackDefaultAdminDelay()": [],
+  "hasRole(bytes32,address)": [],
+  "getRoleAdmin(bytes32)": [],
+  "proxiableUUID()": [],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "token()": [],
+  "merkleRoot()": [],
+  "setMerkleRoot(bytes32)": [],
+  "claim(address,uint256,bytes32,bytes32[])": [
+   "asset_send"
+  ],
+  "initialize(uint48,address,address)": [],
+  "initializeLayerZero(uint128)": [
+   "external_contract_call"
+  ],
+  "verify(address,uint256,bytes32,bytes32[])": [],
+  "pause()": [],
+  "unpause()": [],
+  "addChain(uint32,uint128,bytes32)": [
+   "external_contract_call"
+  ],
+  "removeChain(uint32)": [
+   "external_contract_call"
+  ],
+  "quoteSetClaimEid(uint32)": [
+   "external_contract_call"
+  ],
+  "quoteBroadcastMerkleRoot(uint32)": [
+   "external_contract_call"
+  ],
+  "quoteBatchSetClaimEid(uint32,uint256)": [
+   "external_contract_call"
+  ],
+  "updateClaimEid(uint32,MessagingFee)": [
+   "asset_send"
+  ],
+  "batchUpdateClaimEid(address[],uint32)": [
+   "external_contract_call"
+  ],
+  "setAndBroadcastMerkleRoot(bytes32)": [
+   "external_contract_call"
+  ],
+  "topUpPeer(uint32,uint256)": [
+   "external_contract_call"
+  ],
+  "getClaimEid(address)": [],
+  "setUserChainSwitchingEnabled(bool)": [
+   "pause_toggle"
+  ],
+  "setBatchMessageGasLimit(uint128)": [],
+  "getExecutorReceiveOptions(uint32)": [
+   "external_contract_call"
+  ],
+  "sweepETH(address,uint256)": [
+   "asset_send"
+  ],
+  "receive()": []
+ }
+}

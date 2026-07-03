@@ -1,0 +1,2298 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "EETH",
+ "trees": {
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_803)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(newOwner != address(0),Ownable: new owner is the zero address)",
+      "basis": [
+       "require(TMP_809)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_803)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "proxiableUUID()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "self_address"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "__self"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(address(this) == __self,UUPSUpgradeable: must not be called through delegatecall)",
+    "basis": [
+     "require(TMP_1054)"
+    ],
+    "confidence": "low"
+   }
+  },
+  "upgradeTo(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "onlyProtocolUpgrader(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "onlyProtocolUpgrader(address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "onlyProtocolUpgrader",
+       "callee_signature": "onlyProtocolUpgrader(address)",
+       "callee_selector": "0x5006bb7b"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_840)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "opaque_try_catch",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "slot = IERC1822ProxiableUpgradeable(newImplementation).proxiableUUID()",
+      "basis": [
+       "opaque_try_catch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "proxiableUUID",
+        "callee_signature": "proxiableUUID()",
+        "callee_selector": "0x52d1902d"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_IMPLEMENTATION_SLOT",
+        "constant_value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(slot == _IMPLEMENTATION_SLOT,ERC1967Upgrade: unsupported proxiableUUID)",
+      "basis": [
+       "require(TMP_853)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_840)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_880)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "self_address"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(address(this) != __self,Function must be called through delegatecall)",
+      "basis": [
+       "require(TMP_1048)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "_getImplementation()",
+        "callee_signature": "_getImplementation()",
+        "callee_selector": "0x42404e07"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_getImplementation() == __self,Function must be called through active proxy)",
+      "basis": [
+       "require(TMP_1051)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "onlyProtocolUpgrader(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "onlyProtocolUpgrader(address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "onlyProtocolUpgrader",
+       "callee_signature": "onlyProtocolUpgrader(address)",
+       "callee_selector": "0x5006bb7b"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_840)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "opaque_try_catch",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "slot = IERC1822ProxiableUpgradeable(newImplementation).proxiableUUID()",
+      "basis": [
+       "opaque_try_catch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "proxiableUUID",
+        "callee_signature": "proxiableUUID()",
+        "callee_selector": "0x52d1902d"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_IMPLEMENTATION_SLOT",
+        "constant_value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(slot == _IMPLEMENTATION_SLOT,ERC1967Upgrade: unsupported proxiableUUID)",
+      "basis": [
+       "require(TMP_853)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_840)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_880)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "self_address"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(address(this) != __self,Function must be called through delegatecall)",
+      "basis": [
+       "require(TMP_1048)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "_getImplementation()",
+        "callee_signature": "_getImplementation()",
+        "callee_selector": "0x42404e07"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_getImplementation() == __self,Function must be called through active proxy)",
+      "basis": [
+       "require(TMP_1051)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "initialize(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_liquidityPool"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(_liquidityPool != address(0),No zero addresses)",
+      "basis": [
+       "require(TMP_894)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "truthy",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initializing"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1038)",
+           "one-shot initializer latch: _initializing (initializer-family modifier)"
+          ],
+          "confidence": "high"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "comparison",
+          "operator": "lt",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initialized"
+           },
+           {
+            "source": "constant",
+            "constant_value": "1",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1038)",
+           "one-shot initializer latch: _initialized (initializer-family modifier)"
+          ],
+          "confidence": "high",
+          "one_shot_latch": {
+           "kind": "storage",
+           "role": "version",
+           "variable": "_initialized",
+           "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+           "byte_offset": 0,
+           "size_bytes": 1,
+           "value_type": "uint8",
+           "expected_version": 1,
+           "standard": "storage_layout"
+          }
+         }
+        }
+       ]
+      },
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "external_bool",
+          "operator": "falsy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "self_address"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "isContract(...)",
+          "basis": [
+           "require(TMP_1038)"
+          ],
+          "callee_state_mutability": "view",
+          "gate_kind": "require",
+          "callee_signature": "isContract(address)",
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initialized"
+           },
+           {
+            "source": "constant",
+            "constant_value": "1",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1038)",
+           "one-shot initializer latch: _initialized (initializer-family modifier)"
+          ],
+          "confidence": "high",
+          "one_shot_latch": {
+           "kind": "storage",
+           "role": "version",
+           "variable": "_initialized",
+           "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+           "byte_offset": 0,
+           "size_bytes": 1,
+           "value_type": "uint8",
+           "expected_version": 1,
+           "standard": "storage_layout"
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "mintShares(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "liquidityPool"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(msg.sender == address(liquidityPool),Only pool contract function)",
+    "basis": [
+     "require(TMP_1057)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "burnShares(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "liquidityPool"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(msg.sender == address(liquidityPool),Incorrect Caller)",
+      "basis": [
+       "require(TMP_907)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_user"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_share"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "require(bool,string)(shares[_user] >= _share,BURN_AMOUNT_EXCEEDS_BALANCE)",
+      "basis": [
+       "require(TMP_909)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transfer(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_sender != address(0),TRANSFER_FROM_THE_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_964)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_recipient"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(_recipient != address(0),TRANSFER_TO_THE_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_967)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "sharesForAmount",
+        "callee_signature": "sharesForAmount(uint256)",
+        "callee_selector": "0x3a53acb0"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_sharesAmount <= shares[_sender],TRANSFER_AMOUNT_EXCEEDS_BALANCE)",
+      "basis": [
+       "require(TMP_969)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "approve(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_owner != address(0),APPROVE_FROM_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_957)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_spender != address(0),APPROVE_TO_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_960)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "increaseAllowance(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_owner != address(0),APPROVE_FROM_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_957)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_spender != address(0),APPROVE_TO_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_960)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "decreaseAllowance(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_decreaseAmount"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(currentAllowance >= _decreaseAmount,ERC20: decreased allowance below zero)",
+      "basis": [
+       "require(TMP_922)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_owner != address(0),APPROVE_FROM_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_957)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_spender != address(0),APPROVE_TO_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_960)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "_amount"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(currentAllowance >= _amount,TRANSFER_AMOUNT_EXCEEDS_ALLOWANCE)",
+      "basis": [
+       "require(TMP_926)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_owner != address(0),APPROVE_FROM_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_957)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_spender != address(0),APPROVE_TO_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_960)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_sender != address(0),TRANSFER_FROM_THE_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_964)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "_recipient"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(_recipient != address(0),TRANSFER_TO_THE_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_967)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "sharesForAmount",
+        "callee_signature": "sharesForAmount(uint256)",
+        "callee_selector": "0x3a53acb0"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_sharesAmount <= shares[_sender],TRANSFER_AMOUNT_EXCEEDS_BALANCE)",
+      "basis": [
+       "require(TMP_969)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "block_context",
+        "block_context_kind": "timestamp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "deadline"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "require(bool,string)(block.timestamp <= deadline,ERC20Permit: expired deadline)",
+      "basis": [
+       "require(TMP_931)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "recover",
+        "callee_signature": "recover(bytes32,uint8,bytes32,bytes32)",
+        "callee_selector": "0xc2bf17b0"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "owner"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(signer == owner,ERC20Permit: invalid signature)",
+      "basis": [
+       "require(TMP_938)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_owner != address(0),APPROVE_FROM_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_957)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_spender != address(0),APPROVE_TO_ZERO_ADDRESS)",
+      "basis": [
+       "require(TMP_960)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "recoverETH(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+        "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+         "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "to"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "to == address(0) || amount == 0",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 1,
+          "parameter_name": "amount"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         1
+        ],
+        "expression": "to == address(0) || amount == 0",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "amount"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "balance(address)"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "amount > address(this).balance",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "to"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "! success",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "nonview",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_994(uint256) = SOLIDITY_CALL tload(uint256)(s_1)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "computed",
+        "computed_kind": "sload(uint256)"
+       },
+       {
+        "source": "self_address"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "sload(uint256)(s) == address()()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_1006(uint256) = SOLIDITY_CALL tload(uint256)(_REENTRANCY_GUARD_SLOT_2)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "recoverERC20(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+        "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+         "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "ne",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 0,
+            "parameter_name": "token"
+           },
+           {
+            "source": "constant",
+            "constant_value": "0",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           0
+          ],
+          "expression": "token == address(0) || to == address(0) || amount == 0",
+          "basis": [
+           "if-revert via always-reverting branch"
+          ],
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "ne",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 1,
+            "parameter_name": "to"
+           },
+           {
+            "source": "constant",
+            "constant_value": "0",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           1
+          ],
+          "expression": "token == address(0) || to == address(0) || amount == 0",
+          "basis": [
+           "if-revert via always-reverting branch"
+          ],
+          "confidence": "low"
+         }
+        }
+       ]
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 2,
+          "parameter_name": "amount"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         2
+        ],
+        "expression": "token == address(0) || to == address(0) || amount == 0",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "amount"
+       },
+       {
+        "source": "external_call",
+        "callee": "balanceOf",
+        "callee_signature": "balanceOf(address)",
+        "callee_selector": "0x70a08231"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "amount > IERC20(token).balanceOf(address(this))",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "TMP_776",
+        "value_type": "IERC20"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "to"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "amount"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_33(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+      "basis": [
+       "solidity_call_abi.decode()_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_994(uint256) = SOLIDITY_CALL tload(uint256)(s_1)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "computed",
+        "computed_kind": "sload(uint256)"
+       },
+       {
+        "source": "self_address"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "sload(uint256)(s) == address()()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_1006(uint256) = SOLIDITY_CALL tload(uint256)(_REENTRANCY_GUARD_SLOT_2)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "recoverERC721(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+        "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "EETH_OPERATING_ADMIN_ROLE",
+         "constant_value": "0x06b452e947f709c0549c7a2e857f0d57f53a00c27bb826a3340a48774a76512f"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "token"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "token == address(0) || to == address(0)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "ne",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 1,
+          "parameter_name": "to"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         1
+        ],
+        "expression": "token == address(0) || to == address(0)",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "ownerOf",
+        "callee_signature": "ownerOf(uint256)",
+        "callee_selector": "0x6352211e"
+       },
+       {
+        "source": "self_address"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "IERC721(token).ownerOf(tokenId) != address(this)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "TMP_792",
+        "value_type": "address"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "to"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "tokenId"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "expression": "safeTransferFrom(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransferFrom(address,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_994(uint256) = SOLIDITY_CALL tload(uint256)(s_1)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "computed",
+        "computed_kind": "sload(uint256)"
+       },
+       {
+        "source": "self_address"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "sload(uint256)(s) == address()()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "solidity_call_tload(uint256)_unsupported_as_gate",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "TMP_1006(uint256) = SOLIDITY_CALL tload(uint256)(_REENTRANCY_GUARD_SLOT_2)",
+      "basis": [
+       "solidity_call_tload(uint256)_unsupported_as_gate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  }
+ },
+ "check_trees": {
+  "transfer(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "approve(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "increaseAllowance(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "decreaseAllowance(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "_decreaseAmount"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "return TMP_922",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 2,
+      "parameter_name": "_amount"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     2
+    ],
+    "expression": "return TMP_926",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

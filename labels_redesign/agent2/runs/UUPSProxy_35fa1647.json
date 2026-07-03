@@ -1,0 +1,70 @@
+{
+ "address": "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+ "contract": "UUPSProxy",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [],
+ "var_roles": {
+  "_IMPLEMENTATION_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_ADMIN_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_BEACON_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "fallback()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": false,
+   "assembly": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "receive()": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": false,
+   "assembly": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  }
+ }
+}

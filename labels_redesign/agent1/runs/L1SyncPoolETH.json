@@ -1,0 +1,741 @@
+{
+ "address": "0x39272ee125ebd9214404f735baae50acb9d334c0",
+ "label": "L1SyncPoolETH",
+ "contract_name": "L1SyncPoolETH",
+ "compiler": "v0.8.24+commit.e11b9ed9",
+ "owner_vars_from_trees": [
+  "OwnableStorageLocation",
+  "endpoint"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [
+   "REF"
+  ],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "getTokenOut()": {
+   "labels": [],
+   "summary": "Writes or calls into: L1BaseSyncPoolStorageLocation.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation"
+   ],
+   "leaves": []
+  },
+  "getLockBox()": {
+   "labels": [],
+   "summary": "Writes or calls into: L1BaseSyncPoolStorageLocation.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation"
+   ],
+   "leaves": []
+  },
+  "getReceiver(uint32)": {
+   "labels": [],
+   "summary": "Writes or calls into: L1BaseSyncPoolStorageLocation.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation"
+   ],
+   "leaves": []
+  },
+  "getTotalUnbackedTokens()": {
+   "labels": [],
+   "summary": "Writes or calls into: L1BaseSyncPoolStorageLocation.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation"
+   ],
+   "leaves": []
+  },
+  "onMessageReceived(uint32,bytes32,address,uint256,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:ReentrancyGuardStorageLocation",
+      "sv:ENTERED"
+     ]
+    }
+   ]
+  },
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:endpoint"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:ReentrancyGuardStorageLocation",
+      "sv:ENTERED"
+     ]
+    }
+   ]
+  },
+  "setTokenOut(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation",
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "setLockBox(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation",
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "setReceiver(uint32,address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "L1BaseSyncPoolStorageLocation",
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "sweep(address,address,uint256)": {
+   "labels": [
+    "asset_send",
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "oAppVersion()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "endpoint()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "peers(uint32)": {
+   "labels": [],
+   "summary": "Writes or calls into: OAppCoreStorageLocation.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OAppCoreStorageLocation"
+   ],
+   "leaves": []
+  },
+  "setPeer(uint32,bytes32)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OAppCoreStorageLocation",
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "setDelegate(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "composeMsgSender()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "allowInitializePath(Origin)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "nextNonce(uint32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "owner()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation"
+   ],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "initialize(address,address,address,address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "INITIALIZABLE_STORAGE",
+    "L1BaseSyncPoolStorageLocation",
+    "OwnableStorageLocation",
+    "_vault"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:INITIALIZABLE_STORAGE"
+     ]
+    }
+   ]
+  },
+  "getVault()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getDummyToken(uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setVault(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation",
+    "_vault"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  },
+  "setDummyToken(uint32,address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "OwnableStorageLocation",
+    "_dummyTokens"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:OwnableStorageLocation"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "getTokenOut()": [
+   "L1BaseSyncPoolStorageLocation"
+  ],
+  "getLockBox()": [
+   "L1BaseSyncPoolStorageLocation"
+  ],
+  "getReceiver(uint32)": [
+   "L1BaseSyncPoolStorageLocation"
+  ],
+  "getTotalUnbackedTokens()": [
+   "L1BaseSyncPoolStorageLocation"
+  ],
+  "onMessageReceived(uint32,bytes32,address,uint256,uint256)": [],
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": [],
+  "setTokenOut(address)": [
+   "L1BaseSyncPoolStorageLocation",
+   "OwnableStorageLocation"
+  ],
+  "setLockBox(address)": [
+   "L1BaseSyncPoolStorageLocation",
+   "OwnableStorageLocation"
+  ],
+  "setReceiver(uint32,address)": [
+   "L1BaseSyncPoolStorageLocation",
+   "OwnableStorageLocation"
+  ],
+  "sweep(address,address,uint256)": [
+   "OwnableStorageLocation"
+  ],
+  "oAppVersion()": [],
+  "endpoint()": [],
+  "peers(uint32)": [
+   "OAppCoreStorageLocation"
+  ],
+  "setPeer(uint32,bytes32)": [
+   "OAppCoreStorageLocation",
+   "OwnableStorageLocation"
+  ],
+  "setDelegate(address)": [
+   "OwnableStorageLocation"
+  ],
+  "composeMsgSender()": [],
+  "allowInitializePath(Origin)": [],
+  "nextNonce(uint32,bytes32)": [],
+  "owner()": [
+   "OwnableStorageLocation"
+  ],
+  "renounceOwnership()": [
+   "OwnableStorageLocation"
+  ],
+  "transferOwnership(address)": [
+   "OwnableStorageLocation"
+  ],
+  "initialize(address,address,address,address)": [
+   "INITIALIZABLE_STORAGE",
+   "L1BaseSyncPoolStorageLocation",
+   "OwnableStorageLocation",
+   "_vault"
+  ],
+  "getVault()": [],
+  "getDummyToken(uint32)": [],
+  "setVault(address)": [
+   "OwnableStorageLocation",
+   "_vault"
+  ],
+  "setDummyToken(uint32,address)": [
+   "OwnableStorageLocation",
+   "_dummyTokens"
+  ]
+ },
+ "guard_extraction_uncertain": []
+}

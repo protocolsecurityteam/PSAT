@@ -1,0 +1,102 @@
+{
+ "contract": "MembershipManager",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "wrapEthForEap(uint256,uint256,uint32,uint256,uint256,bytes32[])": [
+   "mint"
+  ],
+  "wrapEth(uint256,uint256)": [
+   "mint"
+  ],
+  "wrapEth(uint256,uint256,address)": [
+   "mint"
+  ],
+  "topUpDepositWithEth(uint256,uint128,uint128)": [
+   "external_contract_call"
+  ],
+  "requestWithdraw(uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "requestWithdrawAndBurn(uint256)": [
+   "external_contract_call"
+  ],
+  "claim(uint256)": [
+   "external_contract_call"
+  ],
+  "migrateFromV0ToV1(uint256)": [
+   "external_contract_call"
+  ],
+  "tokenDeposits(uint256)": [],
+  "tokenData(uint256)": [],
+  "tierDeposits(uint256)": [],
+  "tierData(uint256)": [],
+  "rewardsGlobalIndex(uint8)": [],
+  "allTimeHighDepositAmount(uint256)": [],
+  "tierForPoints(uint40)": [],
+  "canTopUp(uint256,uint256,uint128,uint128)": [],
+  "pointsBoostFactor()": [],
+  "pointsGrowthRate()": [],
+  "maxDepositTopUpPercent()": [],
+  "numberOfTiers()": [],
+  "getImplementation()": [
+   "external_contract_call"
+  ],
+  "minimumAmountForMint()": [],
+  "eEthShareForVaultShare(uint8,uint256)": [],
+  "vaultShareForEEthShare(uint8,uint256)": [],
+  "ethAmountForVaultShare(uint8,uint256)": [
+   "external_contract_call"
+  ],
+  "vaultShareForEthAmount(uint8,uint256)": [
+   "external_contract_call"
+  ],
+  "initializeOnUpgrade(address,uint256,uint16)": [
+   "ownership_transfer"
+  ],
+  "setWithdrawalLockBlocks(uint32)": [],
+  "updatePointsParams(uint16,uint16)": [],
+  "rebase(int128)": [
+   "external_contract_call"
+  ],
+  "addNewTier(uint40,uint24)": [],
+  "updateTier(uint8,uint40,uint24)": [],
+  "setPoints(uint256,uint40,uint40)": [
+   "external_contract_call"
+  ],
+  "setDepositAmountParams(uint56,uint8)": [],
+  "setTopUpCooltimePeriod(uint32)": [],
+  "updateAdmin(address,bool)": [],
+  "pauseContract()": [],
+  "unPauseContract()": [],
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "paused()": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "receive()": [],
+  "unwrapForEEthAndBurn(uint256)": [
+   "asset_send"
+  ],
+  "claimBatch(uint256[])": [
+   "external_contract_call"
+  ],
+  "setFeeAmounts(uint256,uint256,uint256,uint16)": [],
+  "setFanBoostThresholdEthAmount(uint256)": [],
+  "fanBoostThresholdEthAmount()": [],
+  "hasMetBurnFeeWaiverPeriod(uint256)": [
+   "external_contract_call"
+  ],
+  "getFees()": []
+ }
+}

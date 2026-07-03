@@ -1,0 +1,58 @@
+{
+ "contract": "L1SyncPoolETH",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "getTokenOut()": [],
+  "getLockBox()": [],
+  "getReceiver(uint32)": [],
+  "getTotalUnbackedTokens()": [],
+  "onMessageReceived(uint32,bytes32,address,uint256,uint256)": [],
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": [],
+  "setTokenOut(address)": [
+   "ownership_transfer"
+  ],
+  "setLockBox(address)": [
+   "ownership_transfer"
+  ],
+  "setReceiver(uint32,address)": [
+   "ownership_transfer"
+  ],
+  "sweep(address,address,uint256)": [
+   "asset_send",
+   "ownership_transfer"
+  ],
+  "oAppVersion()": [],
+  "endpoint()": [],
+  "peers(uint32)": [],
+  "setPeer(uint32,bytes32)": [
+   "ownership_transfer"
+  ],
+  "setDelegate(address)": [
+   "ownership_transfer"
+  ],
+  "composeMsgSender()": [],
+  "allowInitializePath(Origin)": [],
+  "nextNonce(uint32,bytes32)": [],
+  "owner()": [
+   "ownership_transfer"
+  ],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "initialize(address,address,address,address)": [
+   "ownership_transfer"
+  ],
+  "getVault()": [],
+  "getDummyToken(uint32)": [],
+  "setVault(address)": [
+   "ownership_transfer"
+  ],
+  "setDummyToken(uint32,address)": [
+   "ownership_transfer"
+  ]
+ }
+}

@@ -1,0 +1,9 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.27"
+evm_version = "prague"
+optimizer = true
+optimizer_runs = 1500
+auto_detect_solc = false

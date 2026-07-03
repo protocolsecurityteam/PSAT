@@ -1,0 +1,26 @@
+{
+  "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+  "contract_name": "BoringVault",
+  "compiler_version": "v0.8.21+commit.d9974bed",
+  "language": "solidity",
+  "optimization_used": "1",
+  "runs": "200",
+  "evm_version": "shanghai",
+  "license": "",
+  "source_format": "standard_json",
+  "source_file_count": 13,
+  "remappings": [
+    "@solmate/=lib/solmate/src/",
+    "@forge-std/=lib/forge-std/src/",
+    "@ds-test/=lib/forge-std/lib/ds-test/src/",
+    "ds-test/=lib/forge-std/lib/ds-test/src/",
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "@ccip/=lib/ccip/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "ccip/=lib/ccip/contracts/",
+    "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+    "forge-std/=lib/forge-std/src/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+    "solmate/=lib/solmate/src/"
+  ]
+}

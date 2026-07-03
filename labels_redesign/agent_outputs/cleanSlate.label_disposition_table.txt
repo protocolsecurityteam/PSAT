@@ -1,0 +1,154 @@
+[
+  {
+    "label": "hook_update",
+    "disposition": "retire",
+    "claim_it_makes": "today: 'Updates hook configuration that can affect later contract behavior' / chip 'changes hook' / lane control / score 0.78 / _admin tag",
+    "evidence_required": "n/a \u2014 replaced by claim callee_pointer.rotate (evidence: written var is invoked by another externally-reachable entry fn \u2014 the measured-clean _writes_hook_reference signal, 1/1 in-sample) and by safe.set_guard etc. where a standard names the hook; ACL-map edits become facts ('edits gate mapping X') or registry ACL claims (wards, fiattoken.blacklist)",
+    "provenance_tier": "idiom_structural (callee-pointer), standard_exact (safe.set_guard)",
+    "hard_cases_passed": "current: 1/69 correct (measured); replacement: BoringVault.setBeforeTransferHook PASS, SafeL2.setGuard PASS via standard, approve/transfer/rely/deny/blacklist/allowFrom no longer lie"
+  },
+  {
+    "label": "ownership_transfer",
+    "disposition": "redefine",
+    "claim_it_makes": "new claim ownership.transfer/renounce/accept: 'changes the contract-ownership principal per standard X'",
+    "evidence_required": "standard gate (Ownable/2Step: owner-var write identity or owner() sibling; Solady: handover selector family; DefaultAdminRules: defaultAdmin gate) + canonical selector. The predicate-equality post-pass may CORROBORATE but never solely emit (measured: OZ v5 ghost writes make writes\u2229owner_vars unsound both unguarded and guarded)",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "OZ v4 PASS, OZ v5 PASS (ghost-immune \u2014 current code labels owner() views), Solady PASS (currently silent), FiatToken updateMasterMinter correctly NOT ownership (becomes fiattoken.rotate_masterMinter)"
+  },
+  {
+    "label": "pause_toggle",
+    "disposition": "redefine",
+    "claim_it_makes": "new claim pause.set/unset: 'toggles a gate that blocks other state-changing entry points'",
+    "evidence_required": "either standard (OZ Pausable selector+_paused var identity; isPaused-var idiom) or structural fact-chain: written bool is referenced by pause-role predicate leaves (authority_role='pause') of >=1 OTHER state-changing fn, with one_shot/initializer writes excluded via the one_shot leaf role. NEITHER existing detector alone (measured: disjoint FP/TP sets \u2014 init-latch FPs vs ownerCount/threshold/_minDelay FPs, 8 real fns missed by pause_info)",
+    "provenance_tier": "standard_exact or idiom_structural",
+    "hard_cases_passed": "modifier-based PASS, inline-require PASS (Teller), OZ v5 PASS via selector, EigenLayer PauserRegistry family = honest residue until its registry entry lands; init-latch excluded"
+  },
+  {
+    "label": "implementation_update",
+    "disposition": "redefine",
+    "claim_it_makes": "new claims upgrade.implementation (UUPS/1967/zos/beacon) and proxy.admin_change",
+    "evidence_required": "uups gate: proxiableUUID()+upgradeTo(AndCall) selectors; proxy-shell gate: fallback-with-delegatecall + upgrade/changeAdmin selectors; beacon: policy-stage cross-contract join (callee UpgradeableBeacon.upgradeTo). Existing same-contract dataflow detectors retired (corpus-dead: 0 prod rows, 0 in 27-contract sample)",
+    "provenance_tier": "standard_exact (+policy_derived for beacon)",
+    "hard_cases_passed": "UUPS 14/14 in-sample, zos wBETH 3/3 incl. changeAdmin, beacon via existing cross_contract.py machinery"
+  },
+  {
+    "label": "role_management",
+    "disposition": "keep",
+    "claim_it_makes": "'grants/revokes role-based permissions per standard X'",
+    "evidence_required": "exactly today's canonical selectors (summaries.py:288) + contract gates (hasRole/getRoleAdmin siblings; Solmate write-target identity); extended by wards idiom (rely/deny) and DefaultAdminRules staged-transfer claims",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "9/9 measured; composeQueue counterexample preserved as mandatory non-emission fixture"
+  },
+  {
+    "label": "authority_update",
+    "disposition": "keep",
+    "claim_it_makes": "'replaces the Auth authority contract'",
+    "evidence_required": "canonical setAuthority selector + authority write-target gate (Solmate/DSAuth). The _writes_authority_reference structural tier retired (source-verified category error: StakingManagerV2 verifyDepositState freshness check)",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "5/5 canonical in-sample; the 1 structural FP eliminated"
+  },
+  {
+    "label": "asset_send",
+    "disposition": "keep",
+    "claim_it_makes": "'can move value out (low-level value call / token transfer out)'",
+    "evidence_required": "value-flow facts: LOW_LEVEL_CALL+value, PLUS .transfer()/.send() Transfer IR (measured miss: WETH9.withdraw), PLUS callee ERC-20 transfer selectors (existing)",
+    "provenance_tier": "fact (flow)",
+    "hard_cases_passed": "26/29 C + 3 U measured; WETH9.withdraw recovered via weth idiom + Transfer-IR fact"
+  },
+  {
+    "label": "asset_pull",
+    "disposition": "keep",
+    "claim_it_makes": "'pulls tokens in via transferFrom-class call'",
+    "evidence_required": "callee selector fact (existing) \u2014 unchanged",
+    "provenance_tier": "fact (flow)",
+    "hard_cases_passed": "1/1 measured"
+  },
+  {
+    "label": "mint",
+    "disposition": "redefine",
+    "claim_it_makes": "'increases token supply' (claim when standard-anchored; flow fact when callee-selector)",
+    "evidence_required": "own-selector within ERC-20/FiatToken gate (recovers Dai.mint, WrapToken.mint \u2014 silent today), callee-selector (existing), supply-change str(ir) heuristic RETIRED (unfalsifiable)",
+    "provenance_tier": "standard_exact or fact (flow)",
+    "hard_cases_passed": "wrapEth 3/3 source-verified; Dai.mint recovered"
+  },
+  {
+    "label": "burn",
+    "disposition": "redefine",
+    "claim_it_makes": "same as mint, burn direction",
+    "evidence_required": "same as mint (0 corpus emissions today)",
+    "provenance_tier": "standard_exact or fact (flow)",
+    "hard_cases_passed": "Dai.burn/BoringVault.exit recovered via gates"
+  },
+  {
+    "label": "contract_deployment",
+    "disposition": "keep",
+    "claim_it_makes": "'deploys a contract' (sink fact)",
+    "evidence_required": "contract_creation sink (existing, sound)",
+    "provenance_tier": "fact (sink)",
+    "hard_cases_passed": "1/1 measured"
+  },
+  {
+    "label": "delegatecall_execution",
+    "disposition": "keep",
+    "claim_it_makes": "'a delegatecall is reachable from this entry' (sink fact) \u2014 renderer must stop implying intent ('delegatecall path' on changeAdmin is fact-true but reads as purpose)",
+    "evidence_required": "delegatecall sink (existing); annotate source=body|modifier-fallthrough so proxies render honestly",
+    "provenance_tier": "fact (sink)",
+    "hard_cases_passed": "25/26 measured (1 U)"
+  },
+  {
+    "label": "selfdestruct_capability",
+    "disposition": "keep",
+    "claim_it_makes": "'can self-destruct' (sink fact)",
+    "evidence_required": "selfdestruct sink (existing; 0 corpus emissions)",
+    "provenance_tier": "fact (sink)",
+    "hard_cases_passed": "no corpus instance"
+  },
+  {
+    "label": "external_contract_call",
+    "disposition": "redefine",
+    "claim_it_makes": "demote from label to sink fact; exclude auth-check-only calls (modifier-origin) from the headline fact",
+    "evidence_required": "external_call sink with origin annotation (body vs modifier) \u2014 measured: Teller.pause's only 'effect' is its requiresAuth check",
+    "provenance_tier": "fact (sink)",
+    "hard_cases_passed": "19/26 informative, 7 misleading-as-sole-signal; both downstream governance consumers already ignore it (primary_controller.py:161, company_overview.py:940)"
+  },
+  {
+    "label": "timelock_operation",
+    "disposition": "redefine",
+    "claim_it_makes": "new claims timelock.schedule/execute/cancel/set_delay (dead label today: 0 producers, 4 consumers)",
+    "evidence_required": "oz_timelock gate (getMinDelay+schedule+execute) + per-selector; measured 6/6 on 0x70a64840",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "TimelockController battery PASS (schedule no longer silent; execute no longer 'moves value out' outflow-lane)"
+  },
+  {
+    "label": "arbitrary_external_call",
+    "disposition": "redefine",
+    "claim_it_makes": "new claim exec.arbitrary ('executes caller-supplied calldata') \u2014 dead today (0 producers) while _manager tag and 0.95 severity wait on it",
+    "evidence_required": "standard gates: safe.execTransaction/module-exec, timelock.execute, manage(address,bytes,uint256)-idiom (bytes-calldata param flowing to call sink)",
+    "provenance_tier": "standard_exact or idiom_structural",
+    "hard_cases_passed": "BoringVault.manage, SafeL2.execTransaction, TimelockController.execute all currently generic \u2014 all matched by gates in-sample"
+  },
+  {
+    "label": "safe.signer_mgmt / safe.module_mgmt / safe.set_guard",
+    "disposition": "new",
+    "claim_it_makes": "'changes signer set / threshold', 'grants/revokes module execution rights', 'sets transaction guard hook'",
+    "evidence_required": "Safe gate (getThreshold+getOwners+execTransaction) + canonical selectors",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "12/12 on real base SafeL2 0x29fcb43b (today: hook_update or silent)"
+  },
+  {
+    "label": "gov.delegate",
+    "disposition": "new",
+    "claim_it_makes": "'delegates voting power (user operation)'",
+    "evidence_required": "Comp-style gate (delegates+checkpoints write identity) + delegate/delegateBySig selectors",
+    "provenance_tier": "standard_exact",
+    "hard_cases_passed": "Comp 2/2 (today silent)"
+  },
+  {
+    "label": "FACTS (write/role/flow/sink records)",
+    "disposition": "new",
+    "claim_it_makes": "per-fn verifiable facts: writes {var,type,granularity,hygiene_class}; var roles sourced from predicate-leaf taxonomy (caller_authority/pause/reentrancy/business/one_shot) + callee-pointer + fallback-read; flows; sinks with origin",
+    "evidence_required": "direct IR checkability; hygiene exclusions (constants, storage-location pseudo-vars, reentrancy-role vars) enforced in builder \u2014 each exclusion measured necessary (OwnableStorageLocation gate_for=10, _status gates redeemEEth)",
+    "provenance_tier": "fact",
+    "hard_cases_passed": "Dai.wards, WrapToken.pauser/paused/blacklisted correct; composeQueue silent; ghost/reentrancy pathologies excluded by construction"
+  }
+]

@@ -1,0 +1,911 @@
+{
+ "address": "0x325ea059f11d6860e50a803ae52d49ef35c85fb9",
+ "contract": "MembershipManager",
+ "owner_vars_from_trees": [
+  "_owner",
+  "etherFiAdmin"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [],
+ "var_roles": {
+  "_initialized": {
+   "type": "uint8",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_paused": {
+   "type": "bool",
+   "is_mapping": false,
+   "is_bool": true,
+   "is_address": false,
+   "gate_for_n_fns": 9,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_owner": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 4,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "fanBoostThreshold": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "admins": {
+   "type": "mapping(address => bool)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "burnFeeWaiverPeriodInDays": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "tierVaults": {
+   "type": "IMembershipManager.TierVault[]",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "etherFiAdmin": {
+   "type": "IEtherFiAdmin",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "tokenData": {
+   "type": "mapping(uint256 => IMembershipManager.TokenData)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "tokenDeposits": {
+   "type": "mapping(uint256 => IMembershipManager.TokenDeposit)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "tierDeposits": {
+   "type": "IMembershipManager.TierDeposit[]",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "allTimeHighDepositAmount": {
+   "type": "mapping(uint256 => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "tierData": {
+   "type": "IMembershipManager.TierData[]",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "pointsBoostFactor": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "pointsGrowthRate": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "withdrawalLockBlocks": {
+   "type": "uint32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "maxDepositTopUpPercent": {
+   "type": "uint8",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "minDepositGwei": {
+   "type": "uint56",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "topUpCooltimePeriod": {
+   "type": "uint32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "burnFee": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "upgradeFee": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "mintFee": {
+   "type": "uint16",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_BEACON_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_IMPLEMENTATION_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_ADMIN_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "addNewTier(uint40,uint24)": {
+   "labels": [],
+   "summary": "Writes or calls into: tierData, tierVaults.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "tierData",
+    "tierVaults"
+   ]
+  },
+  "allTimeHighDepositAmount(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "canTopUp(uint256,uint256,uint128,uint128)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "claim(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "claimBatch(uint256[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "eEthShareForVaultShare(uint8,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "ethAmountForVaultShare(uint8,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "fanBoostThresholdEthAmount()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "getFees()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "getImplementation()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "hasMetBurnFeeWaiverPeriod(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "initializeOnUpgrade(address,uint256,uint16)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "admins",
+    "burnFeeWaiverPeriodInDays",
+    "etherFiAdmin",
+    "fanBoostThreshold",
+    "tierVaults"
+   ]
+  },
+  "maxDepositTopUpPercent()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "migrateFromV0ToV1(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "minimumAmountForMint()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "numberOfTiers()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "pauseContract()": {
+   "labels": [
+    "pause_toggle"
+   ],
+   "summary": "Changes the contract pause state.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_paused"
+   ]
+  },
+  "paused()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "pointsBoostFactor()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "pointsGrowthRate()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "proxiableUUID()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "rebase(int128)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierData",
+    "tierDeposits",
+    "tierVaults"
+   ]
+  },
+  "receive()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "requestWithdraw(uint256,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "allTimeHighDepositAmount",
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "requestWithdrawAndBurn(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "rewardsGlobalIndex(uint8)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "setDepositAmountParams(uint56,uint8)": {
+   "labels": [],
+   "summary": "Writes or calls into: minDepositGwei, maxDepositTopUpPercent.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "maxDepositTopUpPercent",
+    "minDepositGwei"
+   ]
+  },
+  "setFanBoostThresholdEthAmount(uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: fanBoostThreshold.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "fanBoostThreshold"
+   ]
+  },
+  "setFeeAmounts(uint256,uint256,uint256,uint16)": {
+   "labels": [],
+   "summary": "Writes or calls into: mintFee, burnFee, upgradeFee, burnFeeWaiverPeriodInDays.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "burnFee",
+    "burnFeeWaiverPeriodInDays",
+    "mintFee",
+    "upgradeFee"
+   ]
+  },
+  "setPoints(uint256,uint40,uint40)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "setTopUpCooltimePeriod(uint32)": {
+   "labels": [],
+   "summary": "Writes or calls into: topUpCooltimePeriod.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "topUpCooltimePeriod"
+   ]
+  },
+  "setWithdrawalLockBlocks(uint32)": {
+   "labels": [],
+   "summary": "Writes or calls into: withdrawalLockBlocks.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "withdrawalLockBlocks"
+   ]
+  },
+  "tierData(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "tierDeposits(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "tierForPoints(uint40)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "tokenData(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "tokenDeposits(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "topUpDepositWithEth(uint256,uint128,uint128)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "unPauseContract()": {
+   "labels": [
+    "pause_toggle"
+   ],
+   "summary": "Changes the contract pause state.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_paused"
+   ]
+  },
+  "unwrapForEEthAndBurn(uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierDeposits",
+    "tierVaults",
+    "tokenData",
+    "tokenDeposits"
+   ]
+  },
+  "updateAdmin(address,bool)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "admins"
+   ]
+  },
+  "updatePointsParams(uint16,uint16)": {
+   "labels": [],
+   "summary": "Writes or calls into: pointsBoostFactor, pointsGrowthRate.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "pointsBoostFactor",
+    "pointsGrowthRate"
+   ]
+  },
+  "updateTier(uint8,uint40,uint24)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "tierData"
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "vaultShareForEEthShare(uint8,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "vaultShareForEthAmount(uint8,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "wrapEth(uint256,uint256)": {
+   "labels": [
+    "mint"
+   ],
+   "summary": "Mints contract balances or shares.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierVaults",
+    "tokenData"
+   ]
+  },
+  "wrapEth(uint256,uint256,address)": {
+   "labels": [
+    "mint"
+   ],
+   "summary": "Mints contract balances or shares.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierVaults",
+    "tokenData"
+   ]
+  },
+  "wrapEthForEap(uint256,uint256,uint32,uint256,uint256,bytes32[])": {
+   "labels": [
+    "mint"
+   ],
+   "summary": "Mints contract balances or shares.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "tierVaults",
+    "tokenData"
+   ]
+  }
+ }
+}

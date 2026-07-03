@@ -1,0 +1,809 @@
+{
+  "evidenceFirst": {
+    "current_system_map": "PRODUCERS (all verified on main @ 90d8774):\n[P1] services/static/contract_analysis_pipeline/summaries.py::_effect_labels (:664-730) \u2014 per-function label assembly, called from effects.py::build_effects. Detector tiers as they exist in code:\n  T-exact (selector/sink facts): _KNOWN_SELECTORS (:254, ERC-20 transfer/transferFrom/mint/burn/safeTransfer* \u2192 asset_send/asset_pull/mint/burn) applied to external-call sinks (:345) and abi.encodeWithSelector IR text (:621 _detect_encoded_selectors); _access_control_label (:317) via _ACCESS_CONTROL_SELECTORS (:288 \u2014 OZ grantRole/revokeRole, Solmate setUserRole/setRoleCapability/setPublicCapability \u2192 role_management; setAuthority 0x7a9e5e4b \u2192 authority_update); sink kinds \u2192 contract_deployment/delegatecall_execution/selfdestruct_capability (:715-720); _function_has_low_level_value_call (:358, \"LOW_LEVEL_CALL\"+\"value:\" string match \u2192 asset_send).\n  T-structural-stringly: _writes_pause_like_bool (:445 \u2014 bool var written + modifier reads it + modifier gates OTHER fns; no auth requirement, no revert check); _writes_owner_like_address (:463 \u2014 var-NAME substring inside stringified modifier IR + \"msg.sender\"); _writes_authority_reference (:498, \"dest:{name}\" substring in modifier high-level-call IR); _writes_hook_reference (:517, \"dest:{name}\" in a mapping-writing sibling's calls); _writes_delegatecall_target (:381, fallback reads written var); _writes_assembly_delegatecall_slot (:404, sstore/sload IR-arg STRING equality \u2014 fails when slot args are different local temps).\n  T-guess: _writes_unclassified_address_pointer fallback \u2192 hook_update (:727; :551 body; gated by _is_address_like_state_var :542 which matches `mapping(address=>\u2026)` and any Uppercase-type by substring/case); _detect_supply_change_pattern (:576, str(ir) parsing of totalSupply-call sandwich).\n  _action_summary (:806) maps labels \u2192 the one UI sentence.\n[P2] effects.py::build_effects (:409) walks sinks per externally-observable fn (_classify_node_irs :180; transitive walk :234). CRITICAL bugs found: (a) functions dict keyed by full_name \u2014 an inherited INTERFACE re-declaration (0 nodes) can overwrite the concrete record (:413-418): verified live on EigenLayer StrategyManager impl 0x88582996b70fdd7c4f16e3fde7b53858fce0d394 where IPausable.pause(uint256) blanks Pausable.pause's sinks/labels; (b) modifier bodies are reached through the node walk, so guard-plumbing external calls (auth.canCall, pauserRegistry.isPauser) are recorded as effect sinks \u2014 verified on Teller 0x417e1ef6.pause() sink `external_call \u2192 auth.canCall 0xb7009613`; test-pinned at tests/test_contract_analysis.py:295-298. external_contract_call is attached whenever any external_call sink exists and nothing more specific fired (:354-377).\n[P3] effects.py::apply_authority_effect_labels (:482) \u2014 the tree-grounded post-pass: harvests state vars from caller_authority EQUALITY leaves referencing msg.sender (_owner_vars_from_predicate_trees :462), tags writers ownership_transfer, superseding _COARSE_AUTHORITY_LABELS=(hook_update, external_contract_call) (:446). NO type/constant/view filtering: on OZ v5 namespaced Ownable, Slither attributes the SLOT CONSTANT (OwnableStorageLocation) as *written* by every touching function including views, so owner() [a view], setPeer, setDelegate, setDummyToken/setLockBox/setReceiver/setTokenOut/setVault, sweep all get ownership_transfer \u2014 reproduced with current code on L1SyncPoolETH 0x39272ee125ebd9214404f735baae50acb9d334c0 (matches prod rows on L1ModeReceiverETH 0xf68f84b5, EtherfiL1LineaReceiverETH 0x75535763, CumulativeMerkleDrop 0x5e226b1d, AssetRecoveryDispatcher 0x8290d774). The dossier's 'the precise layer already exists' claim is FALSE for OZ v5.\n[P4] Pipeline ordering (core.py): predicate_trees+pause_info built FIRST (:206-207), then build_effects (:226), then the post-pass (:239-248) \u2014 so ALL tree artifacts incl. PauseInfo are in scope at labeling time; no stage relocation is needed to use them. A SECOND, higher-rigor pause detector already exists and is NOT used for labels: reentrancy_pause.py::PauseAnalyzer (:222 \u2014 writer must be caller/delegated-authority-gated per trees :262-266, other fns must revert-read the var :268-300, incl. cross-fn helper reads via tree operands) feeding PauseInfo (:66) \u2192 _detect_pausability/is_pausable only. Its own defects: _lookup_state_var (:251) uses contract.state_variables which EXCLUDES inherited private vars (verified: `_paused` invisible on EtherFiNodesManager 0x789cbbe0 and EigenLayer StrategyManager; `_all_state_variables` in shared.py:65 sees them), and _is_pause_typed (:257) accepts uint256 (flags LiquidityPool.validatorSizeWei as a pause var).\n[P5] Policy-stage cross-contract enrichment: services/static/cross_contract.py::enrich_cross_contract_effects (:117; _merge_labels :29 propagates EVERY callee label) called from workers/policy_worker.py::_enrich_cross_contract (:731), merged into effective_permissions payload (:720-729) and EffectiveFunction rows (:826-836). Propagates the hook_update mislabel across contracts (prod: Teller.deposit(ERC20,uint256,uint256) rows on 0x63ede83c/0xc8c58d15/0xa55a34d3 etc. carry {external_contract_call,hook_update}; donor consistent with WETH9.deposit()'s own hook_update via nativeWrapper controller-value). Also produces per-deployment nondeterminism: AccountantWithRateProviders.updateExchangeRate(uint96) = {hook_update} on one prod deployment, {external_contract_call} on four others.\nFULL VOCABULARY actually emittable: ownership_transfer, role_management, authority_update, pause_toggle, implementation_update, hook_update, external_contract_call, asset_send, asset_pull, mint, burn, contract_deployment, delegatecall_execution, selfdestruct_capability. DEAD (consumed, produced nowhere \u2014 verified by repo-wide grep): timelock_operation AND arbitrary_external_call (dossier lists only the former).\nSTORAGE: db/models.py:708 EffectiveFunction.effect_labels ARRAY(String); rows built in services/policy/effective_permissions.py (:582-611 prefers effects-artifact labels; row admission :418-470 = union of capabilities \u222a trees \u222a sensitive-sink fns \u222a state-changing ABI fns \u2014 note sink-bearing VIEWS are admitted, so the bogus OZv5 owner() 'write' sink rows a view).\nCONSUMERS and their decisions:\n  site/src/surface/meta.js:5 CONTROL_EFFECTS (incl. dead timelock_operation :13) \u2192 lane membership; site/src/surface/lane.js:17 laneForFunction (labels\u2192lane, else name-hints), :30 toneForFunction (chip color), :42 compactActionSummary (\"changes owner\"/\"changes hook\"/\"changes logic\"/\"pause control\"), :56 lanePriority (ordering); buildMachines.js:26-51 (chip assembly + sort).\n  site/src/protocolScore.js:162 classifyAction \u2014 labels\u2192kind/severity (hook_update\u2192config 0.78 :172; ownership/role/authority\u2192admin 0.88 :171; impl/name-hint\u2192upgrade 1.0 :167-169; delegatecall/arbitrary\u2192execution 0.95 :170); severity drives authority/safes/upgrade/pause axes.\n  services/policy/principal_enrichment.py:120-133 & :156-168 \u2014 label sets grant principal tags: arbitrary_external_call\u2192`_manager`; asset labels\u2192`_operator`; {authority_update, ownership_transfer, hook_update, implementation_update, role_management(, timelock_operation)}\u2192`_admin`; tags drive display names (\"X admin Safe\") at :253-272.\n  services/governance/primary_controller.py:165 PRIVILEGED_EFFECT_LABELS (hook_update & external_contract_call deliberately excluded) \u2192 co-controller significance (:248).\n  services/aggregations/company_overview.py:943 _EFFECT_CAPABILITY \u2192 capability chips (hook_update/external_contract_call deliberately unmapped :959-963).\n  services/aggregations/analysis_detail.py:282 and services/governance/principals.py:126 \u2192 raw label pass-through to API; site/src/graph.js:322 + site/src/tabs/PermissionsTab.jsx:20 render labels as literal chip text.\n  Monitoring enrollment does NOT read labels: services/monitoring/enrollment.py:397-432 derives watch flags from contract_type/summary.is_pausable/control_model (is_pausable comes from PauseInfo, not labels).\n  Tests pinning behavior: tests/test_contract_analysis.py:301 (bare setHook fallback \u2192 hook_update, i.e. the guess tier is test-pinned), :295-298 (modifier sinks pinned); tests/test_effects.py:330-353 (post-pass positives/negatives).",
+    "corpus_accuracy": [
+      {
+        "label": "hook_update",
+        "sampled_n": 54,
+        "correct": 1,
+        "wrong": 53,
+        "unprovable": 0,
+        "worst_examples": [
+          "WETH9 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 withdraw(uint256) 0x2e1a7d4d \u2192 'changes hook' (it burns WETH and sends native ETH out; asset_send also missed because msg.sender.transfer() is not a LOW_LEVEL_CALL)",
+          "WETH9 deposit() 0xd0e30db0 and fallback() \u2192 'changes hook' (payable deposit)",
+          "AccountantWithRateProviders 0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b pause() 0x8456cb59 / unpause() 0x3f4ba83a \u2192 'changes hook' (struct-member pause write accountantState.isPaused falls to the address-pointer fallback because the struct type name is Uppercase)",
+          "Dai 0x6b175474e89094c44da98b954eedeac495271d0f rely(address) 0x65fae35e / deny(address) \u2192 'changes hook' (Maker wards admin-grant)",
+          "TellerWithMultiAssetSupport 0x417e1ef6 allowFrom/denyFrom/allowTo/denyTo/allowOperator/denyOperator \u2192 'changes hook' (transfer-denylist management; 72 prod rows across 12 Teller deployments)",
+          "approve/increaseAllowance/decreaseAllowance/transfer on EETH 0xcb3d917a, BoringVault\u00d713 (e.g. 0x7223442c), FiatTokenV2_2 0x43506849, StakedTokenV1 0x31724ca0, Comp 0xc00e94cb"
+        ],
+        "method": "Local in-process run of CURRENT main code (crytic-compile etherscan \u2192 Slither \u2192 build_effects \u2192 apply_authority_effect_labels) on 21 real contracts covering the hard-case battery + prod corpus; every labeled row graded against the emitted UI sentence by reading verified source. Prod cross-check: 340 hook_update rows; \u2265265 (78%) fall in these verified-wrong fn-name classes, 14 (4%) verified-correct (setBeforeTransferHook), rest unproven. The single local-20 correct case is BoringVault.setBeforeTransferHook (real use-based detection, survives fallback deletion)."
+      },
+      {
+        "label": "ownership_transfer",
+        "sampled_n": 44,
+        "correct": 26,
+        "wrong": 18,
+        "unprovable": 0,
+        "worst_examples": [
+          "L1SyncPoolETH 0x39272ee125ebd9214404f735baae50acb9d334c0 owner() (A VIEW) \u2192 'Transfers contract ownership' \u2014 Slither attributes the OZ v5 slot constant OwnableStorageLocation as written by every function touching namespaced storage; reproduced on current main; prod shows the same class on 7\u00d7owner(), 3\u00d7getMessenger(), 4\u00d7setPeer, 4\u00d7setDelegate, 3\u00d7onMessageReceived rows",
+          "L1SyncPoolETH setPeer(uint32,bytes32)/setDummyToken/setLockBox/setReceiver/setTokenOut/setVault/sweep \u2192 all ownership_transfer",
+          "FiatTokenV2_2 0x43506849 + StakedTokenV1 0x31724ca0 updatePauser/updateBlacklister/updateMasterMinter/updateRescuer \u2192 'Transfers contract ownership' (they rotate OTHER privileged pointers, not ownership \u2014 claim-adjacent but the emitted sentence is false)"
+        ],
+        "method": "Same local-21 ground truth (44 ownership rows). Prod scale: 284 rows = 156 canonical transferOwnership/renounceOwnership (correct) + 41 initialize (sets owner \u2014 graded correct) + ~21 OZ-v5 view/config-setter class (wrong) + ~26 privileged-pointer rotations (wrong sentence) + ~12 DefaultAdminRules borderline (unprovable without deeper reading) + ~28 misc. FN side: TopUp 0x5bdd4b0d transferOwnership/renounceOwnership carry NO label (Solady assembly owner write invisible)."
+      },
+      {
+        "label": "pause_toggle",
+        "sampled_n": 12,
+        "correct": 8,
+        "wrong": 4,
+        "unprovable": 0,
+        "worst_examples": [
+          "EETH 0xcb3d917a initialize(address) 0xc4d66de8 \u2192 'pause control' (OZ Initializable _initialized/_initializing bools match the pause detector; prod: 31/73 pause_toggle rows are initialize(...) + 1 initializeOnUpgrade \u2014 44% of the label's corpus is initializers)",
+          "OneSig 0xbe010a7e3686fdf65e93344ab664d065a0b02478 setExecutorRequired(bool) \u2192 'pause control' (config toggle)",
+          "FN side: TellerWithMultiAssetSupport 0x417e1ef6 pause()/unpause() get external_contract_call not pause_toggle (require-based pause, no modifier); AccountantWithRateProviders pause()/unpause() get hook_update (struct pause); EigenLayer StrategyManager impl 0x88582996 pause(uint256) gets NO labels at all (interface-record clobber in build_effects + bitmask pause)"
+        ],
+        "method": "Local-21 (12 pause_toggle emissions graded) + prod breakdown of all 73 rows by fn name (initialize 31, pauseContract/unPauseContract 32, pause/unpause 8, setExecutorRequired 1, initializeOnUpgrade 1). PauseAnalyzer (unused for labels) independently gets Teller RIGHT and initialize RIGHT, proving the tree-grounded detector dominates the label detector on the same corpus."
+      },
+      {
+        "label": "implementation_update",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "worst_examples": [
+          "ZERO emissions corpus-wide (prod count 0 of 2182 rows; 0 of 21 local contracts) despite 10 upgradeTo/upgradeToAndCall functions in the local set and 40+ in prod. EETH 0xcb3d917a upgradeTo(address) 0x3659cfe6 \u2192 delegatecall_execution ('Executes delegatecall-controlled logic'); FiatTokenProxy 0xa0b86991 (USDC, zos legacy assembly slots) upgradeTo \u2192 external_contract_call, upgradeToAndCall \u2192 asset_send, changeAdmin \u2192 NOTHING (the sstore/sload IR-arg string match at summaries.py:404 fails across different local temp names); EigenLayer TransparentUpgradeableProxy 0x85864637 changeAdmin \u2192 delegatecall_execution"
+        ],
+        "method": "Exhaustive: label absent from ALL prod rows (unnest count) and all local runs; upgrade-family functions enumerated on both sides. The OZ StorageSlot-library ERC-1967 write is invisible to Slither state-write attribution (verified: EETH upgradeTo writes=[] with delegatecall+external_call sinks only)."
+      },
+      {
+        "label": "role_management",
+        "sampled_n": 57,
+        "correct": 57,
+        "wrong": 0,
+        "unprovable": 0,
+        "worst_examples": [
+          "None found. Prod 57 rows = setUserRole/setRoleCapability/setPublicCapability \u00d715 each (Solmate RolesAuthority e.g. 0x3994741a5b29c60d0ab318de1024f9256fe959dc) + grantRole/revokeRole \u00d76 (OZ, e.g. EtherFiTimelock 0x9f26d4c9). Selector-canonical matching; LayerZero composeQueue counterexample correctly NOT labeled (EndpointV2 0x1a440760 sendCompose/lzCompose carry no labels)"
+        ],
+        "method": "Prod exhaustive by fn-name + local runs on RolesAuthority/EtherFiTimelock/EndpointV2."
+      },
+      {
+        "label": "authority_update",
+        "sampled_n": 55,
+        "correct": 52,
+        "wrong": 0,
+        "unprovable": 3,
+        "worst_examples": [
+          "52/55 prod rows are canonical setAuthority(address) 0x7a9e5e4b (correct by construction). 3 anomalies: initialize (EtherFiStaking), initializeOnUpgrade (WithdrawRequestNFT), registerEth2DepositContract (StakingManagerV2) \u2014 from the dest:{name} substring detector (summaries.py:498); unprovable without those exact sources"
+        ],
+        "method": "Prod exhaustive by fn-name; canonical rows verified on local RolesAuthority/BoringVault/Teller/Accountant runs."
+      },
+      {
+        "label": "asset_send / asset_pull / mint / burn",
+        "sampled_n": 18,
+        "correct": 17,
+        "wrong": 1,
+        "unprovable": 0,
+        "worst_examples": [
+          "EETH 0xcb3d917a recoverERC721(address,address,uint256) \u2192 asset_pull (WRONG DIRECTION: safeTransferFrom with from=address(this) SENDS the NFT out; the selector\u2192direction map at summaries.py:254 ignores the from argument)",
+          "FN side: WETH9.withdraw misses asset_send (native .transfer() not matched by the LOW_LEVEL_CALL string test :358); DAI.mint/burn, BoringVault.enter/exit, FiatTokenV2_2.mint/burn, BackingEigen.mint/burn ALL miss mint/burn (local supply writes; _detect_supply_change_pattern :576 only handles the external-totalSupply-sandwich shape)"
+        ],
+        "method": "Local-21: all 18 asset-family emissions graded vs source (recoverERC20/recoverETH/withdraw/execute/executeTransaction/sweep correct). Prod distribution (131 asset_send, 15 asset_pull, 6 mint, 0 burn) is name-plausible (withdraw/claim/bridge/recover)."
+      },
+      {
+        "label": "external_contract_call",
+        "sampled_n": 124,
+        "correct": 124,
+        "wrong": 0,
+        "unprovable": 0,
+        "worst_examples": [
+          "Mechanically true in every graded case but semantically diluted two ways: (1) 31/124 local rows sit on VIEWS or fallback (EETH balanceOf/totalSupply/nonces/permit/getImplementation); (2) guard-path auth reads count as effects \u2014 Teller.pause()'s only external call is auth.canCall from the requiresAuth modifier (sink verified), test-pinned at tests/test_contract_analysis.py:295. BoringVault.manage (arbitrary-call execution, params control target+calldata) is flattened to the same label as a fee-getter call"
+        ],
+        "method": "Local-21 count (124 rows); vacuity split measured (25% views); guard-origin verified by direct sink probe. Prod: 858 rows (39% of corpus)."
+      },
+      {
+        "label": "delegatecall_execution / contract_deployment / selfdestruct_capability",
+        "sampled_n": 13,
+        "correct": 13,
+        "wrong": 0,
+        "unprovable": 0,
+        "worst_examples": [
+          "Mechanically correct (sink-kind facts) but on the 10 upgradeTo/upgradeToAndCall rows delegatecall_execution is the WRONG EMPHASIS (chip 'delegatecall path' instead of 'changes logic'); prod 62 delegatecall_execution rows are dominated by this class"
+        ],
+        "method": "Local-21 grading; prod fn-name distribution."
+      },
+      {
+        "label": "timelock_operation + arbitrary_external_call (dead)",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "worst_examples": [
+          "Produced NOWHERE (repo-wide grep, prod count 0) yet consumed: lane.js:36/:62 (tone/priority), protocolScore.js:170/:177 (execution 0.95 / timelock 0.62), principal_enrichment.py:120/:156 (_manager/_admin tags), company_overview.py:955 ('arbitrary-call' chip), meta.js:13. Their poster children go unlabeled: EtherFiTimelock 0x9f26d4c9 schedule\u2192external_contract_call, execute\u2192asset_send, cancel\u2192external_contract_call, updateDelay\u2192NOTHING; BoringVault.manage\u2192external_contract_call"
+        ],
+        "method": "Grep + prod exhaustive + local runs."
+      }
+    ],
+    "hypotheses": [
+      {
+        "id": "H0-keep-as-is-plus-patches",
+        "summary": "Keep the current detector bag and vocabulary; patch bugs as found.",
+        "evidence_standard": "None \u2014 each patch is another unevidenced heuristic; the system keeps emitting sentences with no per-label claim spec.",
+        "hard_case_results": "Fails the battery structurally: fixing the mapping-substring bug (1 line) still leaves 15 other measured defect classes: initialize-as-pause, struct/require/inherited/bitmask pause FNs, UUPS+zos implementation_update total absence, OZv5 owner()-view labeling, privileged-pointer-rotation overclaim, recoverERC721 direction, native-transfer miss, local mint/burn miss, interface-record clobber, guard-path sink dilution, cross-contract propagate-all contagion, per-deployment label nondeterminism, 2 dead labels, name-collision-prone dest:{name} matching.",
+        "corpus_impact_numbers": "16 independently-measured defect classes across 2182 prod rows and 21 local contracts; hook_update 53/54 wrong, pause 4/12 wrong + \u22657 FN, ownership 18/44 wrong, implementation 0 emitted vs 10+ should-fire. Patch-by-patch convergence has already been the strategy (PR #45 shipped the fallback; the :440 comment shows one counterexample was learned) \u2014 the corpus shows the generator of wrongness is the missing evidence discipline, not any single bug.",
+        "consumer_fit": "Consumers keep working exactly as today, including on wrong data (protocolScore currently inflates config-severity 0.78 onto approve/allowFrom rows; two consumers already defensively ignore hook_update/external_contract_call \u2014 primary_controller.py:161-179, company_overview.py:940-956 \u2014 i.e. the codebase is ALREADY routing around the label system).",
+        "failure_modes": "Unbounded: nothing prevents defect #17; every new protocol family (OZ v5, Solady, EigenLayer bitmask) has added a new silent class.",
+        "verdict": "REJECT. Comparable engineering cost to H1 (every detector must be touched either way) with zero structural protection; fails the anti-heuristic-creep hard constraint."
+      },
+      {
+        "id": "H1-evidence-standard-redesign",
+        "summary": "Keep the vocabulary; give every label a written claim + required-evidence spec; derive pause/ownership/implementation from predicate trees + PauseInfo + canonical selectors; DELETE the guess tier; provenance tiers on the wire. STEELMANNED WITH A WORKING PROTOTYPE.",
+        "evidence_standard": "Per label: pause_toggle = PauseInfo derivation (writer has caller/delegated-authority leaf; another fn revert-reads the var \u2014 via tree operand incl. member_path for struct members; var bool-typed or write has constant polarity; one_shot-gated writers excluded; state-var lookup via _all_state_variables). ownership_transfer = tree tier (caller_authority equality leaf, scalar address-typed non-constant var, writer is state-changing non-view) OR selector+event tier (0xf2fde38b/0x715018a6 + OwnershipTransferred). implementation_update = structural tier (fallback-reads-written-var; assembly matcher keyed on slot VALUE) OR selector+marker tier (0x3659cfe6/0x4f1ef286 + UUPS/ERC1967 inheritance or Upgraded event). role/authority = canonical selectors (unchanged). Asset family = selector facts + direction correction on from==this + native Transfer/Send IR ops + local supply-write sign for mint/burn. Every emission carries {tier, witness}.",
+        "hard_case_results": "Prototyped end-to-end on real contracts (prototype_h1_v2): LayerZero composeQueue PASS (no role label; EndpointV2 sendCompose/lzCompose silent); BoringVault/Teller beforeTransfer PASS (setBeforeTransferHook keeps hook_update via use-link; the 6 denylist toggles lose it); Solady owner gate PASS-partial (TopUp transferOwnership/renounceOwnership recovered via selector tier; initialize stays silent \u2014 honest ceiling); EIP-1967+zos PASS-partial (UUPS recovered \u00d710 via selector+marker; FiatTokenProxy needs the slot-value assembly matcher \u2014 designed, not yet prototyped); ERC-20 approve/transfer PASS (all lose control-plane labels); WETH9 PASS (all four mislabels gone; withdraw gains asset_send under the native-transfer fix); TimelockController PASS via new selector tier producing timelock_operation (currently dead); Maker wards PASS (rely/deny lose hook_update; role-ish claim only via new authorized_caller/ACL evidence, else fact-text); pause require/modifier/struct/inherited/bitmask ALL PASS with the four PauseInfo fixes (Teller +2, Accountant +2 via member_path, ENM retained, EigenLayer +3 after clobber fix \u2014 each verified against the real trees); Comp delegation PASS (stays silent \u2014 correct); one-shot initializers PASS (31-row prod FP class eliminated via one_shot leaf exclusion).",
+        "corpus_impact_numbers": "Local-21 measured: hook_update 54\u21921 (53 mislabels removed, 1 true positive kept); pause_toggle 12\u219214 all-correct (4 FP out, 4-7 FN in); ownership 18 FPs removed, 2 FNs recovered, 26 correct kept; implementation_update 0\u219210. Prod-projected via faithful consumer simulation over all 2182 rows: 319 lane changes (276 = mislabeled rows exiting the control lane), 205 protocolScore kind changes (143 config\u2192other de-inflations of the 0.78 hook severity, 30 admin\u2192config OZv5 corrections, 25 config\u2192pause/unpause upgrades).",
+        "consumer_fit": "Demonstrated against consumer code: lane.js/meta.js unchanged (same vocabulary); protocolScore.js:167 isUpgrade already name-hint-catches upgradeTo so impl recovery is monotone, and the config-0.78 de-inflation removes measured score distortion; principal_enrichment: ZERO prod principals lose _admin (measured: no admin-tagged principal's contract lacks a real admin label \u2014 0 rows from the dependency query); primary_controller PRIVILEGED_EFFECT_LABELS gains implementation_update coverage on upgrade fns (currently reachable only via delegatecall_execution); company_overview capability chips unchanged. Tests pinning the guess tier (test_contract_analysis.py:301) flip intentionally.",
+        "failure_modes": "OZ v5/Solady non-canonical owner writers stay silent (write attribution ceiling); selector tiers are FN-by-design on renamed forks; PauseInfo derivation inherits any predicate-tree extraction failure (guard_extraction_uncertain fns get no pause label \u2014 fail-closed); needs the build_effects clobber + guard-origin sink fixes underneath or witnesses are polluted.",
+        "verdict": "WIN as the single-contract layer \u2014 with the mandatory absorption of the facts-plane fixes and the H5 registry mechanism, and H4's cross-contract element for what static provably cannot see."
+      },
+      {
+        "id": "H2-facts-only",
+        "summary": "Static emits only verifiable facts (sinks, written-state roles, value flows); every consumer derives its own view; UI vocabulary becomes presentation-layer mapping. ATTACKED WITH MEASUREMENTS.",
+        "evidence_standard": "Facts are checkable \u2014 but the CURRENT facts are not clean: guard-path auth calls recorded as effect sinks (Teller.pause \u2192 auth.canCall), interface records clobbering concrete ones (EigenLayer pause = zero sinks), UUPS slot writes invisible, OZv5 constant misattributed as written. A facts-only design inherits every one of these into N consumers.",
+        "hard_case_results": "Ran the starvation test on all 2182 prod rows with the label input removed from faithful ports of laneForFunction and classifyAction: 481 lane changes (354 control-lane exits \u2014 including TRUE control functions with no name hint: blacklist, setPeer, configureMinter); 699 action-kind changes and 866 severity DROPS \u2014 transferOwnership/renounceOwnership fall from admin 0.88 to config 0.45 (Treasury/EarlyAdopterPool rows), claim()/withdraw()/processTopUp/receive() fall from asset_out 0.78 to other 0 (severity gone entirely). All 65 prod admin-display principals lose their _admin/_manager/_operator tags (principal_enrichment.py:120-168 grants exclusively off labels). Battery: every case degrades to name-hints \u2014 the exact shape-guessing this redesign exists to kill, relocated into JS.",
+        "corpus_impact_numbers": "866/2182 (40%) severity drops; 481/2182 (22%) lane changes; 65/65 admin principal display names lost; 5 consumer sites (lane.js, protocolScore.js, principal_enrichment.py, graph.js, PermissionsTab.jsx) must each re-implement the facts\u2192meaning mapping without IR/tree access (the browser cannot re-derive 'writes the var the trees say authorizes callers').",
+        "consumer_fit": "Fails the constraint. The honest version of H2 ('ship a shared facts\u2192view mapping service') is not facts-only \u2014 it is exactly a labeling layer, produced once; i.e. H2 collapses into H1/H4 with extra migration.",
+        "failure_modes": "Heuristic creep RELOCATES rather than dies: each consumer grows its own hint lists (lane.js already has CONTROL_HINTS/INPUT_HINTS; protocolScore has CONFIG_HINTS \u2014 these become the primary signal). Cross-consumer drift becomes unauditable.",
+        "verdict": "REJECT as architecture. ABSORB its principle: the facts artifact must be hardened (sink origin body|guard, member-level writes, clobber fix) and every semantic claim must carry a witness pointing into facts."
+      },
+      {
+        "id": "H3-standard-aware-semantic-models",
+        "summary": "Match contracts/functions to known standards; emit exact per-standard semantics; non-standard gets facts only. ATTACKED WITH MEASUREMENTS.",
+        "evidence_standard": "Standard conformance is checkable at the INTERFACE level (ercs(), STANDARD_SIGNATURES already exist in summaries.py:850-897) but NOT at the behavior level statically \u2014 a pack's semantic claims are unverifiable exactly where forks deviate.",
+        "hard_case_results": "Coverage measured on the 21-contract battery/corpus set: 8/21 match NO standard at all (Teller, Accountant, L1SyncPoolETH, TopUp, EtherFiNodesManager, LiquidityPool, OneSig, EndpointV2) \u2014 including LiquidityPool, the protocol's core value contract: strict H3 leaves its pauseContract/upgradeTo/initialize UNLABELED (control-lane starvation exactly where risk is highest). Of 8 ERC20-matching contracts, 5 are behavior-modified forks (EETH share-based transfer, BackingEigen allowedFrom restrictions, FiatTokenV2_2 + StakedTokenV1 blacklist gates, BoringVault beforeTransferHook) \u2014 pack semantics assert subtly false claims unless structurally re-verified per contract, which is H1's mechanism. Control-surface standards appear as FRAGMENTS (Ownable 13/21, Solmate Auth 4, UUPS/1967 5, TimelockController 1, MakerWards 1), so useful 'standard-awareness' is per-mechanism selector/slot matching \u2014 which is precisely H1's canonical tier. FiatTokenProxy (zos, pre-1967) and OneSig match nothing.",
+        "corpus_impact_numbers": "38% of the sample gets zero labels under strict H3; 62% of ERC20 matches carry fork deviations; the labels H3 could add over H1's selector tier (per-standard body text like 'sets spending allowance') affect chip text only, no consumer decision (lane/severity/tags key on the label id, not pack text).",
+        "consumer_fit": "Starves lane/score/enrichment on the non-standard majority; provides nothing the selector tier doesn't for the standard minority.",
+        "failure_modes": "Almost-standard forks misfire (measured 5/8); whole-pack matching creates a maintenance treadmill per standard version (OZ v4 vs v5 Ownable already behave differently at the IR level \u2014 measured); long tail permanently unlabeled.",
+        "verdict": "REJECT as architecture; ABSORB as H1's canonical-selector/slot/event tier (standard-awareness at mechanism granularity, requiring per-contract structural corroboration)."
+      },
+      {
+        "id": "H4-relocate-labeling-downstream",
+        "summary": "Compute labels at policy/aggregation where trees + resolution + proxy classification + control graph coexist; static emits facts only. STEELMANNED, THEN SCOPED.",
+        "evidence_standard": "Policy-stage claims can be corroborated on-chain (proxy slot values, resolved authorities, sibling artifacts) \u2014 strongest possible provenance for cross-contract and proxy-context claims.",
+        "hard_case_results": "Steelman verified: the policy stage ALREADY holds sibling effects artifacts + controller_values (policy_worker.py:731-813) and proxy rows \u2014 the existing cross-contract enrichment is H4's mechanism with a broken rule (propagate EVERY label: cross_contract.py:29-35,168 \u2014 measured contagion: Teller.deposit inherits WETH9.deposit's hook_update mislabel; per-deployment nondeterminism on updateExchangeRate). Typed H4 derivations that static provably cannot make: (1) configures-transfer-policy-of(vault): Teller.allowFrom writes fromDenyList; BoringVault.hook controller_value == Teller address; Teller.beforeTransfer membership leaves read fromDenyList \u2014 all three artifacts exist at policy time (verified in my local artifacts + controller_values shape); (2) implementation_update provenance upgrade: classifier-confirmed 1967 slot + live proxy linkage; (3) registry-stored cross-contract pause. FULL relocation fails the battery differently: policy sees serialized artifacts, not IR \u2014 it cannot re-derive member-level writes, write polarity, modifier-origin, or interface-clobber corrections; and the ordering fact (core.py:206-241) shows trees+PauseInfo are already in scope at static labeling time, so relocation buys single-contract claims nothing.",
+        "corpus_impact_numbers": "The propagate-all rule accounts for the cross-contract share of prod's 340 hook rows (deposit(ERC20,\u2026) class \u00d710+ deployments) and the deployment-inconsistency class; a typed replacement eliminates both while ADDING the Teller\u2192vault policy claim (12 Teller deployments in prod would gain a true cross-contract claim).",
+        "consumer_fit": "Same consumers, later producer; but latency/race costs are real (memory: event-index cold races required a deferred reconciler) \u2014 single-contract labels would become dependent on policy-stage completion for no accuracy gain.",
+        "failure_modes": "Full relocation couples chip text to resolution freshness; artifact-only view loses IR fidelity; blind propagation (the current H4-shaped code) is the single worst contagion mechanism measured.",
+        "verdict": "PARTIAL WIN: adopt as the CROSS-CONTRACT + on-chain-corroboration layer (replace propagate-all with typed derivations); reject full relocation."
+      }
+    ],
+    "novel_hypotheses": [
+      {
+        "id": "H5-two-plane-claims-architecture (RECOMMENDED)",
+        "summary": "Split the system into a hardened FACTS plane and a registry-governed CLAIMS plane. Facts plane = EffectInfo upgraded: sink.origin \u2208 {body, guard} (modifier-reached auth reads stop counting as effects \u2014 fixes the Teller.pause/auth.canCall dilution), member-level state writes (var, member_path), constant/view write-attribution exclusions (kills the OZv5 owner() row), interface-clobber fix in build_effects keying (fixes EigenLayer blanking), native Transfer/Send ops as value sinks. Claims plane = the effect-label vocabulary reborn as typed claims: each emission is {label, tier, witness} where witness is machine-checkable (leaf path into predicate_trees / canonical selector+event / sink id / slot value). Claims are produced at exactly TWO sites chosen by evidence locality: static (single-contract evidence: trees, PauseInfo, selectors, sinks) and policy (cross-contract/on-chain evidence: sibling artifacts, controller_values, classifier). A claim REGISTRY (code, not docs) declares every label's claim-sentence, allowed tiers, and witness schema; emitting outside the registry is unrepresentable. Consumers read the claims plane through one shared vocabulary module.",
+        "evidence_standard": "Every emitted semantic statement carries a witness a test can replay: tree-tier claims point at the exact leaf; selector-tier claims point at the selector+corroborating marker/event; structural-tier claims point at sink ids; policy-tier claims point at (sibling artifact id, controller_value, slot read). No witness kind exists for 'looks like' \u2014 the guess tier is not schema-representable.",
+        "hard_case_results": "Identical to H1 on the single-contract battery (it IS H1's derivations under the registry) plus the H4 cross-contract cases: Teller\u2192vault transfer-policy claim, registry-pause, proxy-verified implementation provenance. The facts-plane fixes additionally repair cases NO label hypothesis touches: EigenLayer pause blanking, guard-sink dilution (858-row external_contract_call class), OZv5 view rows.",
+        "consumer_fit": "Consumers keep today's vocabulary and gain tier for display/weighting (protocolScore can discount structural vs tree-proven; PermissionsTab/graph.js chips can show provenance). Verified zero-regression paths: lane membership (same label ids), principal tags (same admin set minus hook_update \u2014 measured zero prod dependency), co-controller significance (unchanged set + implementation_update gain).",
+        "failure_modes": "Registry discipline can be bypassed by committing to the registry itself \u2014 countered by the corpus A/B gate (any label-diff on the frozen fixture corpus must be attached to the PR); witness replay costs CI time (bounded: 21-contract fixture corpus \u2248 6 min serial, parallelizable).",
+        "verdict": "ADOPT \u2014 it is H1's measured derivations + H2's facts-integrity principle + H3's mechanism-granular standards tier + H4's scoped cross-contract layer, under one structural governance mechanism."
+      },
+      {
+        "id": "H6-capability-expr-drives-UI (evaluated, rejected)",
+        "summary": "Retire effect labels; drive lanes/chips/score directly from capability_expr + sinks (the authority pipeline's highest-trust outputs).",
+        "evidence_standard": "capability_expr is resolution-verified (finite_set/conditional_universal/cofinite) \u2014 the strongest artifact in the system \u2014 but it answers WHO can call, not WHAT the function does.",
+        "hard_case_results": "Category error on the battery: BoringVault.manage and Teller.deposit can share identical capability shape (requiresAuth) while being arbitrary-execution vs user deposit; WETH9.withdraw is public (conditional_universal) and so is approve \u2014 capability cannot separate 'moves value out' from 'sets allowance'. Lane placement and severity NEED effect semantics; capability already feeds the score separately (actionProtectionScore).",
+        "consumer_fit": "Starves compactActionSummary/tone entirely; classifyAction's kind axis has no input.",
+        "failure_modes": "Conflates authorization with effect; would push effect semantics back into name hints.",
+        "verdict": "REJECT; keep capability_expr as the authorization axis it already is."
+      }
+    ],
+    "recommended_design": "THE TWO-PLANE CLAIMS ARCHITECTURE (H5 = H1-derivations + H4-scoped-cross-contract + facts hardening + registry governance).\n\nWHAT A LABEL IS: a typed claim `{label, tier, witness}` about a function's effect, where the claim sentence is fixed in a code registry and the witness is a machine-replayable pointer into the facts plane or the trees. A label without a registered evidence spec cannot be constructed (schema-level, not convention).\n\nPLANE 1 \u2014 FACTS (services/static/\u2026/effects.py, hardened): (a) SinkRecord gains origin \u2208 {body, guard}: sinks reached only through modifier bodies are guard-origin (fixes auth.canCall-as-effect; verified mechanism on Teller 0x417e1ef6); (b) build_effects keys records by (full_name, has_body) preferring concrete over 0-node interface declarations (fixes the EigenLayer StrategyManager 0x88582996 blanking); (c) state-write facts add member-level pairs (var, member_path) from IR Member+Assignment (prototyped \u2014 distinguishes accountantState.isPaused from accountantState.payoutAddress); (d) write-attribution excludes is_constant vars and view functions (kills the OZ v5 OwnableStorageLocation false writes on L1SyncPoolETH 0x39272ee1); (e) native .transfer()/.send() IR ops become value sinks; (f) selector\u2192direction corrected when from == address(this) (fixes recoverERC721).\n\nPLANE 2 \u2014 CLAIMS, produced at two sites by evidence locality:\nSTATIC-SITE CLAIMS (all available pre-effects per core.py:206-241):\n\u2022 pause_toggle \u2014 claim: \"toggles a flag that blocks/unblocks other functions of this contract\". Evidence (tree tier): PauseInfo derivation with four fixes, each verified on a real failure: _lookup_state_var \u2192 _all_state_variables (EtherFiNodesManager _paused, EigenLayer _paused); member-level extension using facts (c) + tree member_path operands with bool member type (Accountant isPaused in-struct; payoutAddress FP excluded by type); writer polarity/bool gate (excludes LiquidityPool.validatorSizeWei uint config); one_shot-leaf writers excluded (kills the 31-row initialize class + OneSig.setExecutorRequired). PauseAnalyzer's auth-gated-writer + revert-read-elsewhere requirements stay (they are what beat the old detector on Teller).\n\u2022 ownership_transfer \u2014 claim: \"rotates the scalar that authorizes callers as owner\". Tree tier: caller_authority equality leaves referencing msg.sender; harvested vars must be scalar address-typed, non-constant (via _all_state_variables); writers must be state-changing non-views. Selector+event tier: 0xf2fde38b/0x715018a6 + OwnershipTransferred emission (carries OZ v5 + Solady where write attribution fails \u2014 verified recovering TopUp 0x5bdd4b0d).\n\u2022 authorized_caller_update (NEW, split from ownership_transfer) \u2014 claim: \"rotates a non-owner scalar that authorizes callers of specific functions\" (chip: \"changes controller\"). Same tree evidence, var \u2209 canonical-owner set (owner/_owner/OZ-v5 slot alias). Covers updatePauser/updateBlacklister/updateMasterMinter/updateRescuer (USDC 0x43506849, StakedTokenV1 0x31724ca0), setL1SyncPool/setMessenger family \u2014 ends the false \"Transfers contract ownership\" sentence on 26+ prod rows while keeping their admin-severity for consumers (added to the _admin set and CONTROL_EFFECTS).\n\u2022 implementation_update \u2014 claim: \"changes which code executes behind this deployment\". Structural tier: fallback-reads-written-var (kept) + assembly matcher rewritten to compare RESOLVED SLOT VALUES not IR temp names (fixes FiatTokenProxy 0xa0b86991); selector+marker tier: 0x3659cfe6/0x4f1ef286 + (UUPS/ERC1967 inheritance \u2228 proxiableUUID() \u2228 Upgraded event) \u2014 verified recovering all 10 local UUPS rows; suppresses the redundant delegatecall_execution emphasis on the same fn. proxy_admin_update (NEW): changeAdmin 0x8f283970 + AdminChanged event.\n\u2022 role_management / authority_update \u2014 unchanged canonical selectors (already correct; composeQueue negative pinned as fixture).\n\u2022 timelock_operation \u2014 RESURRECTED via selector tier: TimelockController family (schedule/scheduleBatch/execute/executeBatch/cancel/updateDelay) gated on hashOperation+AccessControl markers (EtherFiTimelock 0x9f26d4c9 becomes fully labeled; the frontend branches at lane.js:36/:63 and protocolScore.js:177 stop being dead).\n\u2022 arbitrary_external_call \u2014 RESURRECTED via structural tier: body-origin external-call sink whose destination AND calldata are parameter-tainted (BoringVault.manage, OneSig.executeTransaction, Timelock.execute/executeBatch) \u2014 the label consumers already treat as manager-grade (0.95 severity, _manager tag) finally gets producers.\n\u2022 hook_update \u2014 NARROWED claim: \"changes a code pointer that a value-moving function of this contract calls at runtime\". Use-link evidence only (writes X; sibling body-origin-calls X and has value/mapping-write sinks), matching on IR destination identity instead of dest:{name} strings. The unclassified-pointer fallback is DELETED (measured: 53/54 of its emissions wrong); un-evidenced setters fall to fact-text (\"Writes or calls into: X\" \u2014 _action_summary :845 already renders this).\n\u2022 asset_send/asset_pull/mint/burn \u2014 selector facts + facts-plane fixes (e)/(f) + local supply-write tier (is_erc20 \u2227 writes totalSupply \u2227 IR sign) recovering DAI/BoringVault/USDC/BackingEigen mint/burn.\n\u2022 external_contract_call \u2014 DEMOTED to fact-tier: emitted only for body-origin external calls; never alone drives lane/severity (primary_controller.py:161 and company_overview.py:940 already treat it as non-semantic; lane.js/meta.js follow).\nPOLICY-SITE CLAIMS (replace cross_contract.py propagate-all): typed derivations only \u2014 (1) value-flow propagation: caller's sink selector \u2208 asset/mint/burn family AND callee address resolved via controller_values AND callee's own claim is selector-tier (no control-plane label ever propagates \u2014 ends the Teller.deposit hook_update contagion and the updateExchangeRate deployment nondeterminism); (2) configures_transfer_policy_of(target) (NEW): this contract's written set-vars are read by its hook function AND a sibling's hook-pointer controller_value == this contract (Teller\u2192BoringVault, all artifacts verified present at policy time); (3) provenance upgrades: implementation_update selector-tier \u2192 proxy-verified tier when the classifier confirms the 1967 slot on the linked proxy.\n\nCONSUMER MIGRATION (conceptual): vocabulary is unchanged plus 3 additions (authorized_caller_update, proxy_admin_update, configures_transfer_policy_of) and 2 resurrections; effect_labels stays readable as string list (tier/witness ride alongside), so lane.js/meta.js/protocolScore.js/principal_enrichment.py work unmodified on day one; then: CONTROL_EFFECTS += the new labels; principal_enrichment admin set: hook_update out (measured zero prod dependency), authorized_caller_update + proxy_admin_update in; compactActionSummary sentences follow the registry's claim sentences; tier optionally weights severity.",
+    "label_disposition_table": [
+      {
+        "label": "ownership_transfer",
+        "disposition": "redefine",
+        "claim_it_makes": "Rotates the scalar that authorizes callers as owner of this contract",
+        "evidence_required": "Tree tier: caller_authority equality leaf w/ msg.sender + scalar address-typed non-constant var (via _all_state_variables) + writer is state-changing non-view; OR selector+event tier: 0xf2fde38b/0x715018a6 + OwnershipTransferred",
+        "provenance_tier": "tree-proven | selector+event",
+        "hard_cases_passed": "OZv4 Ownable \u2713 (kept); OZ v5 L1SyncPoolETH owner()/setPeer/sweep FPs removed \u2713, transferOwnership kept via selector \u2713; Solady TopUp recovered via selector \u2713; FiatToken updateRescuer et al. correctly re-homed to authorized_caller_update \u2713; initialize keeps it only where owner write is attributable (EETH \u2713, OZ v5 initialize honest-silent)"
+      },
+      {
+        "label": "authorized_caller_update",
+        "disposition": "new",
+        "claim_it_makes": "Rotates a non-owner scalar that authorizes callers of specific gated functions",
+        "evidence_required": "Same tree harvest as ownership, var not in canonical-owner alias set",
+        "provenance_tier": "tree-proven",
+        "hard_cases_passed": "updatePauser/updateBlacklister/updateMasterMinter/updateRescuer (USDC/StakedTokenV1) \u2713; setL1SyncPool/setMessenger/setLockBox family \u2713 (were 'Transfers contract ownership')"
+      },
+      {
+        "label": "role_management",
+        "disposition": "keep",
+        "claim_it_makes": "Grants/revokes membership in a role-based access scheme",
+        "evidence_required": "Canonical ABI selector of OZ AccessControl / Solmate RolesAuthority setters (existing _ACCESS_CONTROL_SELECTORS)",
+        "provenance_tier": "selector",
+        "hard_cases_passed": "LayerZero composeQueue negative \u2713 (sendCompose/lzCompose unlabeled on real EndpointV2); Solmate RolesAuthority 0x3994741a \u2713; OZ Timelock grantRole \u2713; Maker wards NOT covered (documented FN-by-design; rely/deny fall to fact-text, no longer 'changes hook')"
+      },
+      {
+        "label": "authority_update",
+        "disposition": "keep",
+        "claim_it_makes": "Replaces the external authority contract consulted for permission checks",
+        "evidence_required": "Canonical selector setAuthority 0x7a9e5e4b (Solmate/DSAuth); dest:{name} substring detector (:498) deleted",
+        "provenance_tier": "selector",
+        "hard_cases_passed": "52/55 prod rows already canonical \u2713; the 3 substring-detector anomalies (initializeOnUpgrade, registerEth2DepositContract) stop being emitted"
+      },
+      {
+        "label": "pause_toggle",
+        "disposition": "redefine",
+        "claim_it_makes": "Toggles a flag that blocks/unblocks other functions of this contract",
+        "evidence_required": "PauseInfo derivation: writer caller/delegated-authority-gated + var revert-read by other fns (tree operand incl. member_path) + bool type or constant write polarity + writer not one_shot-gated + _all_state_variables lookup",
+        "provenance_tier": "tree-proven",
+        "hard_cases_passed": "modifier pause (USDC/StakedTokenV1/LiquidityPool) \u2713 kept; require pause (Teller) \u2713 recovered; struct pause (Accountant isPaused) \u2713 recovered w/ payoutAddress FP excluded; inherited private (_paused, EtherFiNodesManager) \u2713 after lookup fix; EigenLayer bitmask+PauserRegistry \u2713 after clobber fix (delegated_authority leaf verified); initialize \u00d731 prod FP class \u2713 removed; OneSig setExecutorRequired \u2713 removed; validatorSizeWei uint FP \u2713 excluded"
+      },
+      {
+        "label": "implementation_update",
+        "disposition": "redefine",
+        "claim_it_makes": "Changes which code executes behind this deployment (or its upgrade admin)",
+        "evidence_required": "Structural: fallback-reads-written-var OR slot-VALUE-matched assembly write; selector+marker: 0x3659cfe6/0x4f1ef286 + UUPS/1967 marker or Upgraded event; policy tier: classifier-verified 1967 slot on linked proxy",
+        "provenance_tier": "structural | selector+marker | proxy-verified",
+        "hard_cases_passed": "UUPS (EETH/LiquidityPool/EtherFiNodesManager/TransparentProxy) \u2713 10/10 recovered from 0; zos FiatTokenProxy \u2713 by slot-value matcher (designed; current string matcher verified failing); delegatecall_execution emphasis suppressed on the same fn \u2713"
+      },
+      {
+        "label": "proxy_admin_update",
+        "disposition": "new",
+        "claim_it_makes": "Changes the proxy admin who can upgrade this deployment",
+        "evidence_required": "changeAdmin 0x8f283970 + AdminChanged event (ERC-1967)",
+        "provenance_tier": "selector+event",
+        "hard_cases_passed": "FiatTokenProxy.changeAdmin (currently NOTHING) \u2713; TransparentUpgradeableProxy.changeAdmin (currently 'delegatecall path') \u2713"
+      },
+      {
+        "label": "hook_update",
+        "disposition": "redefine",
+        "claim_it_makes": "Changes a code pointer that a value-moving function of this contract calls at runtime",
+        "evidence_required": "Use-link: writes var X (address/contract-typed, IR identity not name-string); sibling fn has body-origin call to X and value/mapping-write sinks. Fallback tier DELETED",
+        "provenance_tier": "structural(use-link)",
+        "hard_cases_passed": "BoringVault.setBeforeTransferHook \u2713 kept (survives fallback deletion \u2014 verified fired by use-link); 53/54 measured mislabels (approve/transfer/deposit/withdraw/rely/deny/allowFrom\u00d76/pause-struct/updateX\u00d78/setDelegate\u2026) \u2713 removed; prod 340-row class collapses to the ~14 setBeforeTransferHook rows + fact-text"
+      },
+      {
+        "label": "external_contract_call",
+        "disposition": "redefine",
+        "claim_it_makes": "FACT ONLY: the function body makes an external call (no semantic weight)",
+        "evidence_required": "Body-origin external_call sink (guard-origin excluded)",
+        "provenance_tier": "fact",
+        "hard_cases_passed": "Teller.pause auth.canCall dilution \u2713 excluded by origin; views keep it as fact but carry no lane/severity weight (consumers already ignore it: primary_controller.py:161, company_overview.py:940)"
+      },
+      {
+        "label": "timelock_operation",
+        "disposition": "redefine",
+        "claim_it_makes": "Schedules/executes/cancels a timelocked operation or changes its delay",
+        "evidence_required": "TimelockController-family canonical selectors + hashOperation/AccessControl markers (was: produced nowhere)",
+        "provenance_tier": "selector+marker",
+        "hard_cases_passed": "EtherFiTimelock schedule/execute/cancel/updateDelay \u2713 (currently external_contract_call / asset_send / nothing); dead consumer branches at lane.js:36, protocolScore.js:177, meta.js:13 become live"
+      },
+      {
+        "label": "arbitrary_external_call",
+        "disposition": "redefine",
+        "claim_it_makes": "Forwards caller-supplied target and calldata (arbitrary execution)",
+        "evidence_required": "Body-origin external-call sink with parameter-tainted destination AND data (was: produced nowhere)",
+        "provenance_tier": "structural(taint)",
+        "hard_cases_passed": "BoringVault.manage \u2713 (currently plain external_contract_call at severity 0.45-hint vs deserved 0.95); OneSig.executeTransaction \u2713; Timelock.execute \u2713 (consumers already wired: protocolScore.js:170 execution 0.95, principal_enrichment.py:120 _manager)"
+      },
+      {
+        "label": "asset_send",
+        "disposition": "keep",
+        "claim_it_makes": "Sends value out of the contract",
+        "evidence_required": "Known-selector external call w/ direction corrected for from==this; low-level value call; native .transfer()/.send() IR ops (new)",
+        "provenance_tier": "selector | structural",
+        "hard_cases_passed": "WETH9.withdraw \u2713 recovered (currently 'changes hook'); recover*/sweep/execute \u2713 kept"
+      },
+      {
+        "label": "asset_pull",
+        "disposition": "keep",
+        "claim_it_makes": "Pulls value into the contract",
+        "evidence_required": "transferFrom-family selectors with from \u2260 address(this) (direction fix)",
+        "provenance_tier": "selector",
+        "hard_cases_passed": "EETH.recoverERC721 direction FP \u2713 becomes asset_send"
+      },
+      {
+        "label": "mint",
+        "disposition": "keep",
+        "claim_it_makes": "Increases token supply / contract share balances",
+        "evidence_required": "Known selector on external call; OR local tier: is_erc20 \u2227 writes totalSupply \u2227 IR '+' sign (new); totalSupply-sandwich detector rewritten off str(ir)",
+        "provenance_tier": "selector | structural",
+        "hard_cases_passed": "DAI.mint, BoringVault.enter, USDC.mint, BackingEigen.mint \u2713 recovered (currently invisible/external_contract_call)"
+      },
+      {
+        "label": "burn",
+        "disposition": "keep",
+        "claim_it_makes": "Decreases token supply / contract share balances",
+        "evidence_required": "Mirror of mint with '-' sign",
+        "provenance_tier": "selector | structural",
+        "hard_cases_passed": "DAI.burn, BoringVault.exit, WETH9.withdraw(+asset_send) \u2713"
+      },
+      {
+        "label": "contract_deployment",
+        "disposition": "keep",
+        "claim_it_makes": "Deploys a new contract",
+        "evidence_required": "contract_creation sink (NewContract IR)",
+        "provenance_tier": "fact",
+        "hard_cases_passed": "unchanged (6 prod rows, factory detection verified path)"
+      },
+      {
+        "label": "delegatecall_execution",
+        "disposition": "keep",
+        "claim_it_makes": "Executes delegatecall-controlled logic",
+        "evidence_required": "delegatecall sink, body-origin; suppressed when implementation_update selector tier explains the same sink",
+        "provenance_tier": "fact",
+        "hard_cases_passed": "proxies' fallback \u2713; upgradeTo emphasis corrected \u2713"
+      },
+      {
+        "label": "selfdestruct_capability",
+        "disposition": "keep",
+        "claim_it_makes": "Can destroy the contract",
+        "evidence_required": "selfdestruct sink",
+        "provenance_tier": "fact",
+        "hard_cases_passed": "no corpus instances; unchanged"
+      },
+      {
+        "label": "configures_transfer_policy_of(target)",
+        "disposition": "new",
+        "claim_it_makes": "Changes another contract's transfer gating (hook-side policy)",
+        "evidence_required": "POLICY tier: this contract's written set-var read by its hook fn + sibling's hook controller_value == this contract",
+        "provenance_tier": "policy(cross-artifact)",
+        "hard_cases_passed": "Teller.allowFrom/denyFrom \u2192 BoringVault \u2713 (replaces both the hook_update mislabel and the propagate-all contagion)"
+      }
+    ],
+    "irreducible_ceilings": [
+      "OZ v5 namespaced storage + Solady assembly owner writes: Slither cannot attribute which slot a $.member write hits (verified: L1SyncPoolETH writes 'OwnableStorageLocation' from every touching fn; TopUp writes nothing). Design response: canonical selector+event tier carries the standard functions (transferOwnership/renounceOwnership/upgradeTo\u2026); NON-canonical writers on such contracts stay SILENT (fact-text), never guessed. OZ v5 initialize's owner-set is knowingly unlabeled.",
+      "Caller-keyed data map vs ACL membership (LayerZero composeQueue vs wards): structurally identical leaves (documented at effects.py:436-443, confirmed on real EndpointV2). Design response: role/ACL-membership claims stay selector-canonical; membership-map writers get NO role claim (Maker rely/deny = fact-text; a Maker-wards selector pack is possible future selector-tier work, not a guess).",
+      "Whole-contract behavioral semantics (H3 packs): 'this approve behaves exactly like OZ ERC20.approve' is statically unverifiable on forks (5/8 measured ERC20 matches deviate). Design response: never emit pack-level claims; only mechanism-level claims with witnesses.",
+      "Whether an upgrade function controls a LIVE proxy: static sees the impl only. Design response: static emits selector+marker tier; the policy tier upgrades provenance when the classifier confirms the linked proxy slot \u2014 the claim text never exceeds its tier.",
+      "Intent/severity semantics (is this pause benign ops or rug vector; is a config uint economically critical): not derivable from code. Design response: silence \u2014 severity stays a consumer-side policy over claims + capability + principals.",
+      "Business-effect of arbitrary bytes paths (manage/execute payloads): only the arbitrariness is provable (taint), never the payload's meaning. Marked as arbitrary_external_call, nothing more.",
+      "Guard-extraction-uncertain functions (predicate pipeline fails closed): no tree \u21d2 no tree-tier claims possible; such functions can carry only selector/fact tiers (consistent with the existing unsupported/fail-closed policy rows)."
+    ],
+    "anti_heuristic_guardrails": [
+      "Registry-as-schema: labels are constructible only via emit_claim(claim_id, tier, witness) where the registry (a typed Python module, imported by both producer sites) defines each claim's sentence, allowed tiers, and witness schema; EffectiveFunction.effect_labels' successor column stores {label, tier, witness} and the schema has NO tier value for 'heuristic/guess' \u2014 an unevidenced label is unrepresentable, not just discouraged. (The current system's guess tier lives at exactly one line, summaries.py:727 \u2014 the redesign makes that line untypeable.)",
+      "Frozen-corpus A/B diff gate in CI: the 21 real contracts from this investigation (WETH9, EETH, BoringVault, Teller, Accountant, RolesAuthority, L1SyncPoolETH, EndpointV2, FiatTokenProxy, FiatTokenV2_2, DAI, Comp, EtherFiTimelock, OneSig, TopUp, EtherFiNodesManager, StakedTokenV1, BackingEigen, LiquidityPool, StrategyManager proxy+impl) become checked-in compilation fixtures; CI recomputes all (contract, selector, label, tier) tuples and fails unless the PR includes the reviewed golden diff \u2014 every label-behavior change is visible and attributable, no silent drift.",
+      "New-label admission rule enforced by the same gate: adding a registry entry requires \u22653 fixture cases \u2014 one positive, one negative, one adversarial near-miss (e.g. pause: Teller require-pause positive, initialize negative, OneSig config-toggle near-miss) \u2014 the pattern that would have caught every one of the 16 defect classes measured here.",
+      "Witness replay tests: for each tier a generic test re-verifies emissions on the fixture corpus (tree-tier: the referenced leaf exists and has the required role/kind/operand types; selector-tier: selector matches and the corroborating event/marker is present; taint-tier: the sink's destination/data trace to parameters) \u2014 a detector that drifts from its evidence spec fails without anyone writing a new test.",
+      "Single vocabulary module per side: consumers import label\u2192{lane, tone, sentence, severity-kind, tag-set} from one shared map (extending company_overview._EFFECT_CAPABILITY / meta.js), eliminating the measured N-place drift (5 consumer sites today) and the dead-label class (a consumer referencing an unregistered label fails lint)."
+    ],
+    "migration_sketch": "Non-binding, explicitly not a decision criterion. Phase 0: land facts-plane fixes behind the existing artifact schema (sink.origin, member writes, clobber fix, constant/view exclusion) \u2014 pure accuracy, no consumer change; add the fixture corpus + A/B gate pinned to CURRENT behavior. Phase 1: introduce the claim registry and re-home existing detectors under it (tree/selector/structural tiers), dual-writing legacy effect_labels strings for consumers; golden diff reviewed against this investigation's expected corrections (hook 340\u2192~14+facts, pause \u221232FP/+7FN-recovered, impl 0\u219240+, ownership \u221247FP). Phase 2: consumers switch to tiered reads; principal_enrichment admin-set swap (hook_update\u2192authorized_caller_update/proxy_admin_update); resurrect timelock_operation/arbitrary_external_call consumer branches (already wired). Phase 3: replace cross_contract.py propagate-all with the typed policy-site derivations; delete the fallback tier and legacy columns. Tests pinning the guess tier (test_contract_analysis.py:301) are rewritten to pin the registry behavior instead.",
+    "confidence": "HIGH on the empirical core: every number comes from either exhaustive prod queries (2182 rows, label distributions, per-fn-name breakdowns) or local in-process runs of CURRENT main code on 21 real verified contracts (reproducing prod symptoms exactly where comparable: EETH/WETH9/StakedTokenV1 approve, L1 family ownership, initialize pause), and the H1 derivations were actually prototyped and re-run (v1\u2192v2) with their own FPs found and fixed (payoutAddress, validatorSizeWei) \u2014 the design gates cited are the ones that survived measurement, not aspirations. HIGH on the consumer map (every decision site read in code). MEDIUM on prod-scale extrapolation of exact H1 deltas (local-21 is battery-enriched; the prod hook_update wrong-rate is bounded at \u226578% by fn-name classes rather than the local 98%). Things that could change the recommendation: (1) if the orchestrator's other investigator demonstrates a consumer need for whole-standard semantic text that mechanism-level claims cannot serve (I found none in code \u2014 pack text touches no decision); (2) if policy-stage claim production proves operationally fragile (races/staleness) beyond what the existing deferred-reconciler pattern handles \u2014 this would shrink the H4 element to provenance-upgrades-only without affecting the static core; (3) if Slither-version behavior differs materially in prod workers vs my local .venv (same lockfile, low risk). Explicit disagreements with the handoff dossier, all evidence-backed: (a) the 'precise layer' (apply_authority_effect_labels) is itself a top-3 FP source on OZ v5 \u2014 reproduced on current code; (b) TWO labels are dead, not one (arbitrary_external_call also produced nowhere); (c) monitor watch flags do NOT consume effect labels (enrollment.py derives from contract_type/is_pausable/control_model); (d) beyond the dossier's known defects I found and verified: interface-record clobbering (EigenLayer pause blanked), guard-origin sink dilution (test-pinned), cross-contract propagate-all contagion + per-deployment nondeterminism, initialize-as-pause (44% of the pause corpus), recoverERC721 direction, WETH9.withdraw miss, PauseAnalyzer inherited-private-var and uint-type gaps."
+  },
+  "cleanSlate": {
+    "anti_heuristic_guardrails": [
+      "1. CLOSED CLAIM SCHEMA: EffectInfo carries no free-string label field. Claims are objects {claim_id, evidence{...}} where claim_id is a schema-enforced Literal drawn from the registry module; artifact validation rejects unknown ids at build time. Adding a label without registering it is a type error, not a review comment. This mechanically kills the current class of dead-but-consumed labels (timelock_operation consumed at site/src/surface/meta.js:13 + protocolScore.js:177 with zero producers; arbitrary_external_call consumed at principal_enrichment.py:120/156 with zero producers \u2014 both verified by grep + prod count 0).",
+      "2. REGISTRY ENTRY CONTRACT: every matcher requires (a) written claim text, (b) machine-checkable evidence spec expressed as predicates over Layer-0 facts (gate + per-function trigger), (c) >=1 real-contract positive fixture asserting emission, (d) >=1 real-contract COUNTEREXAMPLE fixture asserting non-emission (institutionalizing the composeQueue pattern that today lives only in a comment at effects.py:436-443), (e) an approved corpus label-diff. CI runs the pinned 27-contract battery (this investigation's runs/, kept as fixtures) and fails any PR whose emitted-claims diff is not explicitly approved \u2014 a per-claim A/B gate, so a matcher edit that silently relabels WETH9.deposit cannot merge.",
+      "3. CONSUMER-COVERAGE INVARIANT (CI): consumer-referenced claim ids \u2286 registry ids \u2286 fixture-produced ids. Any of today's rot modes (frontend consuming a never-produced label; producer emitting a label no consumer maps) becomes a CI failure. Checkable today: the invariant is violated twice on main (timelock_operation, arbitrary_external_call).",
+      "4. FACT HYGIENE ENFORCED IN THE BUILDER, NOT IN CONSUMERS: is_constant vars, *StorageLocation/*_SLOT/_STORAGE bytes32 pseudo-vars, and reentrancy-role vars (predicate leaf authority_role='reentrancy') are structurally excluded from role-facts by the fact builder with pinned tests (they remain visible as raw writes tagged hygiene_class). Measured necessity: OwnableStorageLocation presents as gate_for_n_fns=10 + caller_eq=True on L1SyncPoolETH and _status gates redeemEEth \u2014 without builder-level hygiene every consumer re-implements (or forgets) the filter.",
+      "5. NO GUESS TIER IN THE TYPE SYSTEM: claim provenance is Literal['standard_exact','idiom_structural']. There is no 'heuristic'/'fallback' variant to reach for; a PR adding one must change the schema, the registry contract, and the CI gate simultaneously \u2014 three loud diffs instead of one quiet `labels.add(...)` like summaries.py:728."
+    ],
+    "confidence": "HIGH on the measurements (every number regenerable from scripts in /tmp/claude-1000/-home-riley-PSAT/9df2a451-0f58-4b21-a72f-6b665c843f80/scratchpad/agent2/: harness.py\u2192runs/, h1sim.py\u2192h1/+h1g/, h3sim.py, derive_sim.py, score_labels.py with per-function auditable verdicts; prod queries read-only). MEDIUM-HIGH on the recommendation. Three things could change it: (1) if the orchestrator weighs COVERAGE over precision \u2014 H5's claims layer proves only 37% of state-changing fns in-sample and the residue gets fact-text chips, so a consumer-experience judgment that 'changes hook, sometimes wrong' beats 'writes fromDenyList, always true' would favor keeping fuzzier labels (I judged the mission's zero-unfalsifiable-claims constraint decides this against fuzz); (2) if field-sensitive struct write analysis is cheap in Slither (storage-pointer member resolution), the Accountant/OZ-v5 ceiling shrinks and a tree-derived pause/ownership layer becomes viable, strengthening H1's mechanics inside my Layer 1; (3) the 27-contract sample is EtherFi/Veda/EigenLayer/token-classics weighted (drawn from the actual prod corpus + battery); a corpus with heavy ERC-4626/GovernorBravo/Diamond usage would need those matchers before the coverage number generalizes \u2014 the registry design anticipates this, but the measured 37% does not. One measurement I could not complete: EndpointV2.sendCompose writes=[] (Slither reported no sinks; also LZTeller pause()); I verified the label outcome (silent) but not the IR-level cause \u2014 flagged as engine variance rather than swept under a hypothesis.",
+    "corpus_accuracy": [
+      {
+        "label": "hook_update",
+        "sampled_n": 69,
+        "correct": 1,
+        "wrong": 68,
+        "unprovable": 0,
+        "method": "CURRENT CODE (main@90d8774), in-process build_effects+apply_authority_effect_labels on 27 Etherscan-fetched verified contracts drawn from the prod corpus + hard-case battery; every labeled fn judged against the rendered claim ('Updates hook configuration...' / chip 'changes hook' / control lane / _admin tag); verdicts per-function in score_labels.py. PROD cross-check (deployed symptom, 2182 effective_functions rows): 340 hook_update rows bucket to ~16 genuine hook-pointer setters (4.7%): tokenops=73, AccountantWithRateProviders struct-writes=89, ACL edits=111, other=51.",
+        "worst_examples": [
+          "WETH9 0xc02aaa39...56cc2 deposit() 0xd0e30db0 and withdraw(uint256) 0x2e1a7d4d -> 'changes hook', control lane (withdraw ALSO misses asset_send: msg.sender.transfer() is not LOW_LEVEL_CALL, summaries.py:358)",
+          "AccountantWithRateProviders 0x04b81368...9bd8 pause() 0x8456cb59 -> hook_update: writes AccountantState STRUCT; _is_address_like_state_var (summaries.py:542) treats ANY uppercase user type (struct/enum/interface) as address-like \u2014 a second FP mechanism beyond the dossier's mapping-substring; 89 prod rows on this one contract family",
+          "Dai 0x6b175474...1d0f rely(address) 0x65fae35e / deny(address) -> 'changes hook': Maker root-authorization grant/revoke rendered as config, severity 0.78",
+          "SafeL2 0x29fcb43b...c762(base) swapOwner 0xe318b52b, enableModule 0x610b5925 -> 'changes hook': Safe signer rotation and module install (arbitrary-exec grant) as generic config",
+          "Lido submit()/mintShares()/transferShares() (prod addr 0x6ca84080...) -> hook_update on the main staking entry",
+          "The ONLY true positive in-sample: BoringVault 0x657e8c86...c642 setBeforeTransferHook(address) via _writes_hook_reference (summaries.py:517)"
+        ]
+      },
+      {
+        "label": "ownership_transfer",
+        "sampled_n": 85,
+        "correct": 40,
+        "wrong": 45,
+        "unprovable": 0,
+        "method": "Same current-code harness; claim judged = 'Transfers contract ownership.' PROD: 284 rows = 205 canonical transferOwnership/renounce/accept/initialize + ~6 defensible others, ~73 wrong (10 VIEW functions, 10 DefaultAdmin-delay family, 6 role grants, ~47 non-owner setters) \u2248 74% defensible.",
+        "worst_examples": [
+          "L1SyncPoolETH 0x39272ee1...4c0 owner() VIEW + setPeer(uint32,bytes32) 0x3400288b + setDelegate/setDummyToken/setLockBox/setReceiver/setTokenOut/setVault/sweep ALL -> 'Transfers contract ownership.' Mechanism source-verified: OZ v5 _checkOwner -> _getOwnableStorage() assembly $.slot := OwnableStorageLocation makes Slither report the CONSTANT as written by every onlyOwner fn; post-pass (effects.py:482, the dossier's 'precise layer') matches written\u2229owner_vars -> fires. 12/26 fns on this contract",
+          "CumulativeMerkleDrop 0x5e226b1d...511 grantRole 0x2f2ff15d -> role_management+ownership_transfer, action_summary picks 'Transfers contract ownership.' (summaries.py:806 ordering); owner()/defaultAdmin()/defaultAdminDelay() views labeled",
+          "WrapTokenV3ETH 0x9e021c96...0bb updateMasterMinter/updatePauser/updateRescuer/updateBlacklister -> four different role rotations all claiming contract-ownership transfer (owner_vars from predicate equality = {_owner,_rescuer,blacklister,masterMinter,pauser}: the tree is precise, the label collapses it)",
+          "TopUpV2 0x80b1931d...a28 (Solady): REAL transferOwnership/renounceOwnership SILENT (assembly slot writes invisible) while initialize() gets the label via ghost _OWNER_SLOT constant write",
+          "PauserRegistry 0xb8765ed7...806 setUnpauser -> 'Transfers contract ownership.'"
+        ]
+      },
+      {
+        "label": "pause_toggle",
+        "sampled_n": 16,
+        "correct": 10,
+        "wrong": 6,
+        "unprovable": 0,
+        "method": "Current-code harness, claim 'Changes the contract pause state.' PROD: 73 rows, ~30 are initialize/initializeOnUpgrade (same latch mechanism, verified live on current code), 1 OneSig.setExecutorRequired; ~42 genuine.",
+        "worst_examples": [
+          "EETH/StrategyManager/LiquidityPool/EtherFiRedemptionManager/AuctionManager initialize() -> pause_toggle: writes _initialized/_initializing bools read by the initializer modifier which gates other fns \u2014 the OZ init latch satisfies _writes_pause_like_bool (summaries.py:445) verbatim",
+          "OneSig 0xbe010a7e...478 setExecutorRequired(bool) -> 'pause control'",
+          "MISSES the other direction: TellerWithMultiAssetSupport 0x417e1ef6...d35 pause()/unpause() get external_contract_call only (inline `if (isPaused) revert`, no modifier) \u2014 while the SAME pipeline's pause pass (build_predicate_artifacts_with_pause_info) correctly reports pause_state_vars=['isPaused']; OZ v5 Pausable pause() on TopUpSource/CumulativeMerkleDrop silent (PausableStorageLocation ghost)"
+        ]
+      },
+      {
+        "label": "authority_update",
+        "sampled_n": 6,
+        "correct": 5,
+        "wrong": 1,
+        "unprovable": 0,
+        "method": "Current-code harness (canonical setAuthority selector tier + structural tier). PROD: 55 rows = 51 canonical setAuthority (correct) + 3 structural FPs + 1 initialize.",
+        "worst_examples": [
+          "StakingManagerV2 0x733015e8...119 registerEth2DepositContract(address) -> 'Updates the authority contract used for permission checks.' SOURCE-VERIFIED category error: the verifyDepositState modifier calls depositContractEth2.get_deposit_root() as a DATA-FRESHNESS check; _writes_authority_reference (summaries.py:498) equates 'a modifier calls it' with 'it is the auth authority' \u2014 same class of error as the composeQueue counterexample"
+        ]
+      },
+      {
+        "label": "role_management",
+        "sampled_n": 9,
+        "correct": 9,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Current-code harness. PROD 57 rows all canonical selectors (grantRole/revokeRole/setUserRole/setRoleCapability/setPublicCapability). The selector-canonical tier is the only tier measuring 100%.",
+        "worst_examples": [
+          "No wrong emissions; but note prod CumulativeMerkleDrop/TopUpSource grantRole rows carry action_summary 'Transfers contract ownership.' because the co-labeled ownership_transfer wins the summary"
+        ]
+      },
+      {
+        "label": "implementation_update",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "PROD: 0 rows in 2182 (label distribution query). CURRENT CODE: 0 emissions across 27 contracts INCLUDING the real wBETH zos AdminUpgradeabilityProxy 0xa2e33566...2e1 (its upgradeTo gets only delegatecall_execution: the fallback's sload lives in _implementation(), not the fallback body, defeating summaries.py:404) and 9 UUPS impls (writer on impl, fallback on proxy, defeating summaries.py:381). The label driving 'changes logic' chips and severity-1.0 upgrades is CORPUS-DEAD; protocolScore.js:167 silently compensates with a NAME heuristic (name.includes('upgrade')).",
+        "worst_examples": [
+          "EETH 0x5e9035f3...242 upgradeToAndCall(address,bytes) 0x4f1ef286 -> delegatecall_execution only",
+          "wBETH proxy 0xa2e33566...2e1 upgradeTo/changeAdmin -> delegatecall_execution only (changeAdmin doesn't even delegatecall on the admin path \u2014 the sink is the non-admin fallthrough)"
+        ]
+      },
+      {
+        "label": "asset_send",
+        "sampled_n": 29,
+        "correct": 26,
+        "wrong": 0,
+        "unprovable": 3,
+        "method": "Current-code harness; claim 'Sends assets out'. PROD 131 rows, list reads plausible (withdraw/claim/redeem/execute/sweep). Known FN class: .transfer()/.send() ETH sends missed (WETH9.withdraw).",
+        "worst_examples": [
+          "Unprovable: StrategyManager.depositIntoStrategy (user deposit via transferFrom \u2014 'moves value out' direction debatable), TopUpV2.receive()"
+        ]
+      },
+      {
+        "label": "asset_pull",
+        "sampled_n": 1,
+        "correct": 1,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Current-code harness (LiquidityPool.swapTNftForEth). PROD 15 rows.",
+        "worst_examples": []
+      },
+      {
+        "label": "mint",
+        "sampled_n": 3,
+        "correct": 3,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Current-code harness; MembershipManager.wrapEth x2 + wrapEthForEap source-verified as minting paths. PROD 6 rows (same fns). Massive FN side: Dai.mint, EETH.mintShares, BoringVault.enter, WrapTokenV3ETH.mint all silent \u2014 _KNOWN_SELECTORS (summaries.py:254) only matches CALLEES, never the function itself.",
+        "worst_examples": []
+      },
+      {
+        "label": "burn",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "PROD 0 rows; 0 in-sample emissions. Dai.burn/EETH.burnShares/BoringVault.exit silent \u2014 producer exists but never fires in this corpus.",
+        "worst_examples": []
+      },
+      {
+        "label": "delegatecall_execution",
+        "sampled_n": 26,
+        "correct": 25,
+        "wrong": 0,
+        "unprovable": 1,
+        "method": "Current-code harness; graded as the sink FACT it is. PROD 62 rows. Fact-true but semantically deceptive on proxies: wBETH changeAdmin carries it only because the NON-admin path falls through to the delegating fallback (modifier expansion pulls the sink in).",
+        "worst_examples": [
+          "Unprovable: TopUpSource.bridge (adapter delegatecall unverified)"
+        ]
+      },
+      {
+        "label": "contract_deployment",
+        "sampled_n": 1,
+        "correct": 1,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Current-code harness (StakingManagerV2.registerEtherFiNodeImplementationContract creates UpgradeableBeacon \u2014 correct fact, though the beacon-upgrade semantic is missed). PROD 6 rows, 2 unverified (wstETH_Burner.triggerBurn/Batch).",
+        "worst_examples": []
+      },
+      {
+        "label": "selfdestruct_capability",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "PROD 0 rows, 0 in-sample. Producer exists (sink-fact tier), corpus never triggers it.",
+        "worst_examples": []
+      },
+      {
+        "label": "external_contract_call",
+        "sampled_n": 26,
+        "correct": 19,
+        "wrong": 7,
+        "unprovable": 0,
+        "method": "Current-code harness; judged 26 of 141 in-sample emissions (the rest are uncontested fact-tier). PROD 858 rows (39% of all rows). 'Wrong' = cases where the only external call is the modifier's AUTH CHECK or where it is the sole signal on a semantically critical fn. Both downstream consumers already refuse to use it (primary_controller.py:161-164, company_overview.py:940-942).",
+        "worst_examples": [
+          "TellerWithMultiAssetSupport.pause/unpause: the 'external call' is requiresAuth's auth.canCall \u2014 an auth-check artifact presented as an effect",
+          "SafeL2.setGuard 0xe19a9dd9: THE canonical hook setter in the Safe ecosystem, generic-labeled",
+          "BoringVault.manage(address,bytes,uint256): root arbitrary-call power of the Veda stack, generic-labeled (arbitrary_external_call has no producer)",
+          "OneSig.setSigner/setExecutor/setThreshold: multisig signer management invisible (EnumerableSet library writes produce no state_write sink)"
+        ]
+      },
+      {
+        "label": "timelock_operation",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Grep + prod query: ZERO producers anywhere in services/ (only consumed: meta.js:13, lane.js:36/62, protocolScore.js:177, principal_enrichment.py:165, summaries.py:829). TimelockController 0x70a64840...3d0 schedule/cancel silent; execute/executeBatch labeled asset_send ('moves value out', OUTFLOW lane).",
+        "worst_examples": []
+      },
+      {
+        "label": "arbitrary_external_call",
+        "sampled_n": 0,
+        "correct": 0,
+        "wrong": 0,
+        "unprovable": 0,
+        "method": "Second dead-but-consumed label (dossier lists only timelock_operation): zero producers by grep; consumed at principal_enrichment.py:120/156 (_manager tag \u2014 thus never granted), protocolScore.js:170 (0.95 severity \u2014 never fires), company_overview.py:955.",
+        "worst_examples": []
+      }
+    ],
+    "current_system_map": "PRODUCER (all verified on main@90d8774): services/static/contract_analysis_pipeline/summaries.py::_effect_labels(:664) called from effects.py::_effect_info_for_function(:351) per externally-observable fn (external/public/fallback/receive incl. VIEWS \u2014 views get labels too, e.g. EETH.balanceOf -> external_contract_call). Detector tiers: [T1 sink-facts] sink_kinds\u2192contract_deployment/delegatecall_execution/selfdestruct_capability(:715-720); external_contract_call appended in effects.py:354-377 when an external_call sink exists and nothing specific matched \u2014 note modifier bodies are walked too (Slither modifier expansion), so an auth-check call (requiresAuth\u2192auth.canCall) yields the label. [T2 canonical selectors] _KNOWN_SELECTORS(:254, callee-side ERC-20 transfer/transferFrom/mint/burn\u2192asset_send/asset_pull/mint/burn via _labels_from_external_call_sinks(:345)+_detect_encoded_selectors(:621)); _ACCESS_CONTROL_SELECTORS(:288, own-selector grantRole/revokeRole/setUserRole/setRoleCapability/setPublicCapability\u2192role_management, setAuthority\u2192authority_update) via _access_control_label(:317). [T3 structural-use] _writes_pause_like_bool(:445 bool+modifier-read+gates-others), _writes_owner_like_address(:463 substring of var name in stringified modifier IR containing 'msg.sender'), _writes_delegatecall_target(:381), _writes_assembly_delegatecall_slot(:404 string-parsed sstore/sload slot args, fallback-body only), _writes_authority_reference(:498 'dest:{name}' substring in modifier high-level calls), _writes_hook_reference(:517 mapping-writing sibling calls written var). [T4 guess] _writes_unclassified_address_pointer(:551)\u2192hook_update fallback(:727-728); _is_address_like_state_var(:542) matches 'address' substring (mappings) AND any uppercase-initial type (structs/enums/interfaces \u2014 the second, undocumented FP mechanism). [T5 heuristic] _detect_supply_change_pattern(:576, str(ir) parsing)\u2192mint/burn. [POST-PASS] effects.py::apply_authority_effect_labels(:482): predicate-tree caller_authority EQUALITY leaves\u2192owner_vars (_owner_vars_from_predicate_trees:462); any fn whose fn.all_state_variables_written() (:502 \u2014 INCLUDING constants and OZ-v5 storage-location pseudo-vars, no is_constant guard) intersects owner_vars gets ownership_transfer, superseding _COARSE_AUTHORITY_LABELS(:446); wired in core.py:238-248 before semantic_control. [CROSS-CONTRACT] services/static/cross_contract.py::build_callee_effect_map(:38)/enrich_cross_contract_effects(:117), invoked from workers/policy_worker.py:739-830, propagates callee labels via resolved controller_values+sink selectors and persists onto EffectiveFunction. [TEXT] _action_summary(:806) priority-ordered label\u2192sentence (ownership_transfer outranks role_management, so grantRole+both renders 'Transfers contract ownership.'). EMITTABLE VOCABULARY (14): pause_toggle, ownership_transfer, implementation_update, asset_send, asset_pull, mint, burn, authority_update, hook_update, role_management, contract_deployment, delegatecall_execution, selfdestruct_capability, external_contract_call. CONSUMED-BUT-NEVER-PRODUCED (2, verified by grep+prod): timelock_operation, arbitrary_external_call. STORAGE: EffectiveFunction.effect_labels ARRAY (db/models.py:708), written by services/policy/effective_permissions.py:580-611 (effects artifact is source of truth) via effective_permissions_writer.py:213. CONSUMERS AND WHAT EACH DECIDES: (1) site/src/surface/meta.js:5 CONTROL_EFFECTS (10 labels incl. dead timelock_operation)\u2192lane membership; lane.js:17 laneForFunction (labels\u2192top/left/right, then name-hint fallback), lane.js:30 toneForFunction (chip color), :42 compactActionSummary ('changes owner/authority/hook', 'pause control', 'changes logic', 'moves value in/out'), :56 lanePriority (ordering 0-9); buildMachines.js:37-53 sorts lanes by it. (2) site/src/protocolScore.js:162-179 classifyAction: severity 1.0 upgrade (label OR name-substring \u2014 the name arm is the only live upgrade path since implementation_update is corpus-dead), 0.95 arbitrary/delegatecall, 0.88 ownership/role/authority, 0.78 hook_update (=the approve/pause mislabels inflate scores), 0.78 asset_out, 0.62 timelock (dead), 0.5 asset_in. (3) services/policy/principal_enrichment.py:118-170: _admin tag from {authority_update, ownership_transfer, hook_update, implementation_update, role_management(+timelock_operation in controllers arm)}, _operator from value labels, _manager from arbitrary_external_call (dead\u2192never granted). (4) services/governance/primary_controller.py:165 PRIVILEGED_EFFECT_LABELS (11 labels; hook_update/external_contract_call deliberately excluded :161-164) gates co-controller assignment arm 1. (5) services/aggregations/company_overview.py:943 _EFFECT_CAPABILITY\u2192contract capability chips + per-controller 'Can Call' chips (:1084-1100, :1366, :1405); hook_update/external_contract_call intentionally unmapped (:940-942). (6) site/src/graph.js:322 + site/src/tabs/PermissionsTab.jsx:20 render raw label list. (7) MONITORING DOES NOT READ LABELS: enrollment.py:397-432 uses summary.is_pausable (from the SEPARATE pause pass via _detect_pausability summaries.py:1057) and control_model; unified_watcher.py:355-395 keys watch flags off state-var NAMES. (8) Tests pinning behavior: tests/test_contract_analysis.py:301-309 (setHook\u2192hook_update pinned), tests/test_effects.py:334-345 (OZ owner post-pass + precision regression), test_effective_permissions.py:241/298. DOSSIER DISAGREEMENTS: dossier's defect list omits (a) the uppercase-struct FP mechanism, (b) the OZ v5 storage-location ghost-write FP class in the POST-PASS itself (the layer the dossier calls 'the highest-trust data'), (c) implementation_update being corpus-dead, (d) arbitrary_external_call being dead-but-consumed, (e) .transfer()/.send() asset_send miss, (f) that pause_info and _writes_pause_like_bool have disjoint TP/FP sets (no 'precise pause layer' exists anywhere yet).",
+    "hypotheses": [
+      {
+        "id": "H0-keep-as-is-plus-patches",
+        "summary": "Keep the 8-detector architecture and vocabulary; patch the known bugs individually (mapping/uppercase guard, is_constant guard, .transfer() detection, init-latch exclusion, supply-parse hardening, timelock/arbitrary producers, OZv5 pause).",
+        "evidence_standard": "None added: each patched detector remains an unfalsifiable shape-guess with a narrower miss profile. No written claim/evidence contract exists for any label.",
+        "hard_case_results": "approve/transfer: PASS after mapping-guard patch but the guard must not kill the genuine single-mapping-var setter class \u2014 measured neighbors exist. Accountant struct: patching uppercase-match makes pause() SILENT, not correct (var-granularity ceiling). OZv5 ownership: is_constant guard measured (h1g/) to erase real transferOwnership on all 3 OZ v5 contracts \u2014 patch needs the standards route anyway. Maker wards, Safe signer mgmt, Comp delegation, TimelockController, beacon upgrade: vocabulary cannot EXPRESS these; patches don't help. WETH9: patch leaves deposit/withdraw silent (fallback deleted) \u2192 name-hints. UUPS/zos implementation_update: not patchable inside per-contract static detectors (split-proxy measured on 0x5e9035f3 impl + 0xa2e33566 proxy).",
+        "corpus_impact_numbers": "Best case measured: hook_update FPs 68\u2192~0 (fallback removal, = H1's number), ownership stuck at either 45 FPs kept or ~11 OZv5 TPs lost (h1/ vs h1g/ measurement), pause 6 FPs\u21948 FNs trade, implementation_update stays 0/corpus, timelock/arbitrary stay dead unless NEW detectors (= new guesses) are written. Prod steady-state \u2248 raises hook 4.7%\u2192~90% precision by deleting most volume, ownership ~74%\u2192~85%.",
+        "consumer_fit": "Unchanged interfaces, but consumers keep consuming claims with no evidence contract; protocolScore keeps the name-substring upgrade arm as the only upgrade signal; _manager tag stays unreachable.",
+        "failure_modes": "Each patch is a new heuristic with its own counterexample neighbor (measured: constant-guard kills OZv5 TPs; uppercase-guard silences real pause; init-latch exclusion needs one_shot knowledge = predicate data anyway). Converges to per-pattern special-casing inside string-matching code \u2014 the definition of the heuristic creep the mission forbids. Vocabulary still conflates 5 role rotations with ownership transfer.",
+        "verdict": "REJECT. Costed honestly: ~8 patches buy hook precision and little else; the two structural problems (vocabulary expressiveness, no evidence standard) are untouched."
+      },
+      {
+        "id": "H1-evidence-standard-redesign",
+        "summary": "Keep vocabulary; per-label claim+evidence spec; derive ownership/pause/authority/implementation from predicate trees & structural passes; canonical selectors; delete guess tier; provenance tiers.",
+        "evidence_standard": "Written per-label spec is real progress, but the evidence CARRIERS it prescribes are measured-insufficient: predicate-tree equality leaves inherit Slither var-granularity (OZ v5 ghosts), pause artifacts are mutually inconsistent, and 'provenance tier' stamps do not make a wrong claim right \u2014 SafeL2.changeThreshold would carry pause_toggle at tier 'structural'.",
+        "hard_case_results": "Measured via h1sim.py (unguarded) + H1_CONST_GUARD=1 (guarded) on all 27 contracts: approve/transfer PASS (guess tier deleted; 68 hook FPs\u21921 TP kept: BoringVault.setBeforeTransferHook survives via :517). WETH9 PARTIAL (mislabels gone but deposit/withdraw now label-less; withdraw still lacks asset_send). Maker wards PARTIAL (rely/deny drop to silence \u2014 no lie, no semantics). composeQueue PASS by design comment (no tree-derived role labels). OZ v5 ownership FAIL BOTH WAYS \u2014 the central measured result: unguarded keeps all 45 sample FPs (setPeer/sweep/owner() = 'Transfers contract ownership'); is_constant-guarded erases the ghosts AND the real thing (CumulativeMerkleDrop/TopUpSource/L1SyncPoolETH transferOwnership, beginDefaultAdminTransfer, initialize \u2014 11 real fns lost) because in OZ v5 ALL ownership writes go through the storage-location constant. There is no var-granularity fix; the correct evidence is the STANDARD (selectors+gates). Solady FAIL (trees name _OWNER_SLOT; assembly writes invisible; transferOwnership stays silent). Pause FAIL: swapping _writes_pause_like_bool for pause_info (the 'precise layer') removes the 5 init-latch FPs and recovers Teller/LiquidityPool inline-require pauses (+6 real) but LOSES 8 real pauseContract fns (EtherFiRedemptionManager/MembershipManager/StakingManagerV2/AuctionManager \u2014 pause_info missed their _paused entirely) and ADDS SafeL2.addOwnerWithThreshold/removeOwner/changeThreshold + TimelockController.updateDelay as pause_toggle (pause pass treats ownerCount/threshold/_minDelay as pause vars). Neither artifact is precise; union inherits both FP sets, intersection halves recall. implementation_update FAIL (trees carry guards, not fallback dataflow; stays 0 \u2014 H1's own text falls back to 'slot + classifier', which is H4/H3 machinery). TimelockController FAIL (no vocabulary/producer). authority PASS when selector-only (structural tier deleted kills the verifyDepositState category error).",
+        "corpus_impact_numbers": "h1/ vs runs/ diff: 94 label changes across 27 contracts. hook_update 69\u21921 (all 68 W removed, TP kept). pause_toggle 16\u219215 but membership swaps: \u22126 FP \u22128 TP +6 TP +4-6 FP. ownership_transfer 85\u219285 (unguarded, 45 W kept) or \u219237 (guarded: 26 C + 11 W remaining role-scalar conflations, 11 real OZv5 C lost). authority_update 6\u21925 (FP removed). Net: only hook_update lands accurate; ownership/pause remain wrong-or-blind.",
+        "consumer_fit": "Lane/chip/score interfaces unchanged (good), but 'changes owner' still renders for updatePauser (guarded variant keeps those 11 W), OZ v5 protocols either keep garbage control lanes or lose ownership chips entirely; upgrade severity still rides the protocolScore name-heuristic.",
+        "failure_modes": "1) Provenance tiers become the new creep vector: 'structural' tier legitimizes shape-guesses under a trust label \u2014 measured wrong claims (changeThreshold\u2192pause) would ship stamped as evidence-backed. 2) The post-pass extension premise ('the precise layer already exists') is empirically false for pause and OZ v5/Solady ownership. 3) Keeping the 16-word vocabulary preserves the expressiveness ceiling: predicate trees KNOW pauser\u2260owner (operand var names), the label throws that away.",
+        "verdict": "REJECT AS ARCHITECTURE; salvage two components: guess-tier deletion (measured 68:1 win) and selector-canonicalization (measured 100%). Both are subsumed by the registry design."
+      },
+      {
+        "id": "H2-facts-only",
+        "summary": "Static emits only verifiable facts (state writes + role-of-written-state + sinks + value flows); consumers derive views.",
+        "evidence_standard": "Every emitted statement is machine-checkable against IR (a write exists; a modifier reads the var; a leaf carries authority_role=X; a sink exists). Strongest evidence story of all hypotheses \u2014 nothing emitted is a guess.",
+        "hard_case_results": "Prototyped: var_roles in harness.py + derive_sim.py lane derivation on all 27 contracts. Genuine wins measured: Dai.wards = {mapping, gate_for_n_fns=3} \u2192 'edits authorization mapping wards (gates 3 fns)' \u2014 correct where current says 'changes hook'; WrapToken pauser = {address, caller_eq_in_tree, gates 2} \u2192 'rotates caller-authority address pauser' \u2014 the truth that ownership_transfer overclaims; paused = {bool, gates 12} \u2192 provable pause-gate fact. BUT the naive derivation FAILS measurably without role discrimination: reentrancy _status presents as 'gate var gating 4 fns' \u2192 redeemEEth/createBid/executeTransaction jump to CONTROL lane; Teller share-lock `locked` (gates 8) drags deposit into control; AccessControlStorageLocation ghost 'gates 18 fns'; the one real hook (BoringVault.hook) is LOST (callee-pointer role wasn't in my naive schema); Accountant pause invisible (struct granularity); SafeL2 owners/modules facts are empty (no modifier reads) \u2192 signer mgmt still weak; composeQueue PASS (facts stay silent about roles).",
+        "corpus_impact_numbers": "derive_sim.py: 174/415 lane changes vs current; control lane 211\u2192184 but with wrong composition (nonReentrant bloat in, real pause out); value lanes collapse in 32\u21924, out 60\u219213 when selector semantics are dropped \u2014 consumers are STARVED without a semantics layer.",
+        "consumer_fit": "protocolScore/classifyAction and company_overview capability chips cannot rank 'writes tierData' vs 'writes wards' without re-inventing semantics per consumer \u2014 H2 alone relocates the guessing into N consumers (worse creep surface). principal_enrichment _admin from raw facts = the same reentrancy/business-gate FPs measured above.",
+        "failure_modes": "1) Facts inherit Slither granularity bugs (ghost constants look like gate vars: OwnableStorageLocation gate_for=10 caller_eq=True) \u2014 needs builder-level hygiene. 2) Role facts must come from the predicate-tree role taxonomy (authority_role \u2208 caller_authority/pause/reentrancy/business/time/one_shot), not raw modifier reads \u2014 my measured FPs all violate this. 3) Engine variance: LZTeller pause()/EndpointV2.sendCompose report writes=[] (1-2/27 contracts) \u2014 any fact consumer inherits it.",
+        "verdict": "ADOPT AS LAYER 0 (the substrate), NOT as the whole design. Facts-only starves consumers (measured); facts + role-taxonomy + standards layer does not."
+      },
+      {
+        "id": "H3-standard-aware-semantic-models",
+        "summary": "Match contracts/functions to standards (ERC-20, Ownable/2Step, AccessControl/DefaultAdminRules, Pausable, UUPS/1967, Safe, TimelockController, Solmate, Solady, wards/Comp/FiatToken idioms); emit exact per-standard semantics; facts for everything else.",
+        "evidence_standard": "Claim = 'this function is standard X's operation Y', evidence = contract-level gate (mandated sibling selectors / written-var identity / sink shape) + the function's canonical selector. Checkable and falsifiable (the gate predicates either hold or don't); by construction the semantic is the standard's documented semantic.",
+        "hard_case_results": "Measured via h3sim.py (2 iterations; gates on write-targets because public-var getters are absent from contract.functions): ERC-20 approve/transfer PASS (28 matches, user-plane, leaves control lane). WETH9 PASS (weth idiom: wraps/unwraps ETH \u2014 recovers the value semantics the labels never had). UUPS PASS \u2014 THE headline: proxiableUUID gate + upgradeTo/upgradeToAndCall = 14 implementation_update claims recovered where current+H1 emit ZERO corpus-wide; zos/1967 proxy shell PASS (fallback-delegatecall gate: wBETH upgradeTo/upgradeToAndCall/changeAdmin = 3 more, including the admin-change semantic nothing else sees). TimelockController PASS (6 matches: schedule/execute/cancel/updateDelay with correct 'arbitrary call' framing on execute). Safe PASS (12: swapOwner='changes signer set', enableModule='grants module execution rights', setGuard='sets transaction guard hook' \u2014 all silent-or-wrong today). Maker wards PASS (rely/deny='grants/revokes root authorization'). Solady PASS (5 matches incl. the transferOwnership that is silent today). OZ v5 ownership/DefaultAdminRules PASS (ghost-immune: selector+gate, not writes). Comp delegation PASS (2, user-plane). Pause: PASS for OZ/isPaused-var idioms (8 matches incl. Teller inline-require case that defeats both current detectors), FAIL for EigenLayer pause(uint256)+PauserRegistry family (residue \u2014 needs one more registry entry, honest until then). Accountant struct family FAIL (no standard; residue \u2192 facts; nothing lies). composeQueue PASS (no standard \u2192 silence). Battery items with no in-corpus instance: Solady EnumerableRoles (untested \u2014 same selector-family mechanism as Solady Ownable, marked unproven).",
+        "corpus_impact_numbers": "154/415 state-changing fns (37%) matched with exact semantics at 0 observed FPs in-sample (every match inspected; correctness is by-construction given gates, and all gates verified against real deployments). Per-standard: erc20 28, ownable 21, uups 14, safe 12, fiattoken 12, access_control 9+10 DAR, pausable 8 + oz_pausable_var 8, lz_oapp 6, oz_timelock 6, solmate 8, solady 3+2, wards 2, comp 2, weth 2, proxy_shell 3. Residue 261 fns \u2192 facts. Recovered semantics that today are 0%: implementation_update 17, timelock ops 6, Safe signer/module 12, staged admin transfer 10.",
+        "consumer_fit": "Chip texts become standard-exact ('changes signer set / threshold' instead of 'changes hook' on swapOwner); protocolScore upgrade arm gets evidence (uups/proxy_shell claims) replacing the name heuristic; _admin/_operator tags map from claim families; the 63% residue renders neutral fact text \u2014 for ops-lane config setters that is what company_overview already does deliberately (shows function names, :940-942).",
+        "failure_modes": "1) Coverage ceiling measured at 37% \u2014 bespoke protocol logic (Accountant, EndpointV2 library config, MembershipManager tiers) stays claim-less; if consumers demand semantic words there, pressure to loosen gates = creep vector unless the registry contract (fixtures + corpus diff) is enforced. 2) Selector collision risk without gates (a non-Safe 'swapOwner' would mislabel) \u2014 hence gates are mandatory, and gate quality is the real engineering surface. 3) Registry maintenance is ongoing work (new standards).",
+        "verdict": "ADOPT AS LAYER 1. The only mechanism measured that produces exact, evidence-gated semantics on the cases users actually see (upgrades, Safe ops, timelocks, ownership on modern OZ/Solady)."
+      },
+      {
+        "id": "H4-relocate-labeling-downstream",
+        "summary": "Static emits facts; labels computed at policy/aggregation where predicate trees, resolution, classifier, control graph all exist.",
+        "evidence_standard": "Same fact substrate as H2 plus cross-artifact joins (classifier proxy_type, resolved controller_values, callee analyses). Evidence for cross-contract claims is genuinely only available here.",
+        "hard_case_results": "implementation_update via 'slot + classifier': the join it needs is measured-absent \u2014 the assembly sink target stringifies as 'assembly_storage:slot' (local var name, not the 1967 constant), so policy-stage slot-identity forensics has nothing to join on; the UUPS/zos cases are instead proven statically by H3 gates (proxiableUUID / fallback-shape) with zero cross-artifact machinery. Beacon upgrade (StakingManagerV2.upgradeEtherFiNode\u2192beacon.upgradeTo) PASS \u2014 genuinely needs the policy stage (callee identity via controller_values), and the mechanism ALREADY EXISTS: enrich_cross_contract_effects (cross_contract.py:117, invoked policy_worker.py:739-830). LiquidityPool.deposit\u2192mint propagation PASS at policy stage IF the callee fn (EETH.mintShares) has a claim \u2014 which requires the static standards layer first (mintShares is silent today, so today's cross-contract pass propagates nothing; measured). composeQueue PASS (no derivation). Role semantics via resolved authorities: resolution tells WHO, not WHAT \u2014 relocating does not create what-semantics.",
+        "corpus_impact_numbers": "In-sample: +1 semantic recovered uniquely (beacon upgrade path, StakingManagerV2.upgradeEtherFiNode currently external_contract_call); cross-contract mint/burn propagation potential = the 6 LiquidityPool/DepositAdapter-class fns, contingent on static claims existing first. Everything else H4 would compute is computable statically (17 impl-update claims via H3 gates).",
+        "consumer_fit": "company_overview/enrichment already live downstream so they'd consume unchanged; but Surface /functions and analysis_detail read EffectiveFunction rows written at policy time either way \u2014 no consumer gains from the relocation itself.",
+        "failure_modes": "1) Claims become artifact-lifecycle-dependent (recompute on re-resolution; prod's stale-label rows show version-skew pain either way). 2) The 'all context exists downstream' premise conflates WHO-context (resolution) with WHAT-context (source semantics); measured crown cases need only the latter. 3) Moving ALL labeling downstream couples chip text to policy-stage availability \u2014 static-only runs (tests, previews) lose semantics.",
+        "verdict": "REJECT AS ARCHITECTURE; ADOPT ITS ONE REAL COMPONENT: keep/extend the existing policy-stage cross-contract claim augmentation (beacon upgrades, callee mint/burn propagation) on top of statically-produced claims."
+      }
+    ],
+    "irreducible_ceilings": [
+      "1. Cross-contract hook semantics: whether Teller.allowFrom's fromDenyList edit changes TRANSFER behavior is decided by BoringVault's beforeTransfer call into the Teller \u2014 invisible to single-contract static analysis. Design response: facts state 'edits mapping fromDenyList'; the policy-stage cross-contract pass (which sees both artifacts) may upgrade to a denylist claim; never claimed statically. (The merged cofinite/denylist work already models the downstream half.)",
+      "2. Struct-field write granularity: Slither reports var-level writes, so AccountantWithRateProviders.pause() writing accountantState.isPaused is indistinguishable from updatePlatformFee() writing accountantState.platformFee. Pause semantics there are unprovable at current engine granularity. Design response: silence + fact 'writes accountantState (struct)'; registry entry only if field-sensitive analysis lands. Same root cause as the OZ v5 namespaced-storage ghost writes (storage-pointer binding reported as a write of the location constant \u2014 source-verified mechanism).",
+      "3. Caller-keyed mapping purpose: a caller-keyed data map (LayerZero composeQueue) is structurally identical to a caller-keyed ACL membership map \u2014 role-management semantics are never derivable from write shape (the repo's own counterexample, effects.py:436-443, now institutionalized as a mandatory counterexample fixture class). Design response: permanent silence from shape; only selector/standard evidence may claim role management.",
+      "4. Business meaning of unmatched config writes (setMerkleRoot, updateTier, rebase, EndpointV2 library config): no checkable evidence source exists for 'what this parameter means'. Design response: fact text + function name (exactly what company_overview.py:940-942 already chose for this class).",
+      "5. Assembly-slot writes without a standard anchor (WrapTokenV3ETH.updateEthReceiver -> assembly_storage:position): sinks record the write but the slot's meaning is unprovable; the existing assembly_state_access fail-closed flag (effects.py:75-81) is the right response and is preserved.",
+      "6. Beneficiary/direction of value flows: depositIntoStrategy 'sends' tokens via transferFrom on behalf of the caller \u2014 mechanism (transferFrom, target) is provable, who ultimately benefits is not. Claims state mechanism only.",
+      "7. Analysis-engine variance: two of 27 contracts yielded empty write-sets for functions that plainly write storage (LayerZeroTeller.pause(), EndpointV2.sendCompose \u2014 measured, cause not fully diagnosed). Any design consuming Slither facts inherits this floor; mitigation is multi-source corroboration (pause pass + predicate leaves + writes), not certainty.",
+      "8. Solady/assembly-slot authority writes: transferOwnership writing _OWNER_SLOT via sstore is invisible as a var write; only the standards layer (selector family) can claim it \u2014 a contract using Solady-style assembly auth with RENAMED selectors is unlabelable statically (falls to facts + the existing unsupported/fail-closed policy row)."
+    ],
+    "label_disposition_table": [
+      {
+        "label": "hook_update",
+        "disposition": "retire",
+        "claim_it_makes": "today: 'Updates hook configuration that can affect later contract behavior' / chip 'changes hook' / lane control / score 0.78 / _admin tag",
+        "evidence_required": "n/a \u2014 replaced by claim callee_pointer.rotate (evidence: written var is invoked by another externally-reachable entry fn \u2014 the measured-clean _writes_hook_reference signal, 1/1 in-sample) and by safe.set_guard etc. where a standard names the hook; ACL-map edits become facts ('edits gate mapping X') or registry ACL claims (wards, fiattoken.blacklist)",
+        "provenance_tier": "idiom_structural (callee-pointer), standard_exact (safe.set_guard)",
+        "hard_cases_passed": "current: 1/69 correct (measured); replacement: BoringVault.setBeforeTransferHook PASS, SafeL2.setGuard PASS via standard, approve/transfer/rely/deny/blacklist/allowFrom no longer lie"
+      },
+      {
+        "label": "ownership_transfer",
+        "disposition": "redefine",
+        "claim_it_makes": "new claim ownership.transfer/renounce/accept: 'changes the contract-ownership principal per standard X'",
+        "evidence_required": "standard gate (Ownable/2Step: owner-var write identity or owner() sibling; Solady: handover selector family; DefaultAdminRules: defaultAdmin gate) + canonical selector. The predicate-equality post-pass may CORROBORATE but never solely emit (measured: OZ v5 ghost writes make writes\u2229owner_vars unsound both unguarded and guarded)",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "OZ v4 PASS, OZ v5 PASS (ghost-immune \u2014 current code labels owner() views), Solady PASS (currently silent), FiatToken updateMasterMinter correctly NOT ownership (becomes fiattoken.rotate_masterMinter)"
+      },
+      {
+        "label": "pause_toggle",
+        "disposition": "redefine",
+        "claim_it_makes": "new claim pause.set/unset: 'toggles a gate that blocks other state-changing entry points'",
+        "evidence_required": "either standard (OZ Pausable selector+_paused var identity; isPaused-var idiom) or structural fact-chain: written bool is referenced by pause-role predicate leaves (authority_role='pause') of >=1 OTHER state-changing fn, with one_shot/initializer writes excluded via the one_shot leaf role. NEITHER existing detector alone (measured: disjoint FP/TP sets \u2014 init-latch FPs vs ownerCount/threshold/_minDelay FPs, 8 real fns missed by pause_info)",
+        "provenance_tier": "standard_exact or idiom_structural",
+        "hard_cases_passed": "modifier-based PASS, inline-require PASS (Teller), OZ v5 PASS via selector, EigenLayer PauserRegistry family = honest residue until its registry entry lands; init-latch excluded"
+      },
+      {
+        "label": "implementation_update",
+        "disposition": "redefine",
+        "claim_it_makes": "new claims upgrade.implementation (UUPS/1967/zos/beacon) and proxy.admin_change",
+        "evidence_required": "uups gate: proxiableUUID()+upgradeTo(AndCall) selectors; proxy-shell gate: fallback-with-delegatecall + upgrade/changeAdmin selectors; beacon: policy-stage cross-contract join (callee UpgradeableBeacon.upgradeTo). Existing same-contract dataflow detectors retired (corpus-dead: 0 prod rows, 0 in 27-contract sample)",
+        "provenance_tier": "standard_exact (+policy_derived for beacon)",
+        "hard_cases_passed": "UUPS 14/14 in-sample, zos wBETH 3/3 incl. changeAdmin, beacon via existing cross_contract.py machinery"
+      },
+      {
+        "label": "role_management",
+        "disposition": "keep",
+        "claim_it_makes": "'grants/revokes role-based permissions per standard X'",
+        "evidence_required": "exactly today's canonical selectors (summaries.py:288) + contract gates (hasRole/getRoleAdmin siblings; Solmate write-target identity); extended by wards idiom (rely/deny) and DefaultAdminRules staged-transfer claims",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "9/9 measured; composeQueue counterexample preserved as mandatory non-emission fixture"
+      },
+      {
+        "label": "authority_update",
+        "disposition": "keep",
+        "claim_it_makes": "'replaces the Auth authority contract'",
+        "evidence_required": "canonical setAuthority selector + authority write-target gate (Solmate/DSAuth). The _writes_authority_reference structural tier retired (source-verified category error: StakingManagerV2 verifyDepositState freshness check)",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "5/5 canonical in-sample; the 1 structural FP eliminated"
+      },
+      {
+        "label": "asset_send",
+        "disposition": "keep",
+        "claim_it_makes": "'can move value out (low-level value call / token transfer out)'",
+        "evidence_required": "value-flow facts: LOW_LEVEL_CALL+value, PLUS .transfer()/.send() Transfer IR (measured miss: WETH9.withdraw), PLUS callee ERC-20 transfer selectors (existing)",
+        "provenance_tier": "fact (flow)",
+        "hard_cases_passed": "26/29 C + 3 U measured; WETH9.withdraw recovered via weth idiom + Transfer-IR fact"
+      },
+      {
+        "label": "asset_pull",
+        "disposition": "keep",
+        "claim_it_makes": "'pulls tokens in via transferFrom-class call'",
+        "evidence_required": "callee selector fact (existing) \u2014 unchanged",
+        "provenance_tier": "fact (flow)",
+        "hard_cases_passed": "1/1 measured"
+      },
+      {
+        "label": "mint",
+        "disposition": "redefine",
+        "claim_it_makes": "'increases token supply' (claim when standard-anchored; flow fact when callee-selector)",
+        "evidence_required": "own-selector within ERC-20/FiatToken gate (recovers Dai.mint, WrapToken.mint \u2014 silent today), callee-selector (existing), supply-change str(ir) heuristic RETIRED (unfalsifiable)",
+        "provenance_tier": "standard_exact or fact (flow)",
+        "hard_cases_passed": "wrapEth 3/3 source-verified; Dai.mint recovered"
+      },
+      {
+        "label": "burn",
+        "disposition": "redefine",
+        "claim_it_makes": "same as mint, burn direction",
+        "evidence_required": "same as mint (0 corpus emissions today)",
+        "provenance_tier": "standard_exact or fact (flow)",
+        "hard_cases_passed": "Dai.burn/BoringVault.exit recovered via gates"
+      },
+      {
+        "label": "contract_deployment",
+        "disposition": "keep",
+        "claim_it_makes": "'deploys a contract' (sink fact)",
+        "evidence_required": "contract_creation sink (existing, sound)",
+        "provenance_tier": "fact (sink)",
+        "hard_cases_passed": "1/1 measured"
+      },
+      {
+        "label": "delegatecall_execution",
+        "disposition": "keep",
+        "claim_it_makes": "'a delegatecall is reachable from this entry' (sink fact) \u2014 renderer must stop implying intent ('delegatecall path' on changeAdmin is fact-true but reads as purpose)",
+        "evidence_required": "delegatecall sink (existing); annotate source=body|modifier-fallthrough so proxies render honestly",
+        "provenance_tier": "fact (sink)",
+        "hard_cases_passed": "25/26 measured (1 U)"
+      },
+      {
+        "label": "selfdestruct_capability",
+        "disposition": "keep",
+        "claim_it_makes": "'can self-destruct' (sink fact)",
+        "evidence_required": "selfdestruct sink (existing; 0 corpus emissions)",
+        "provenance_tier": "fact (sink)",
+        "hard_cases_passed": "no corpus instance"
+      },
+      {
+        "label": "external_contract_call",
+        "disposition": "redefine",
+        "claim_it_makes": "demote from label to sink fact; exclude auth-check-only calls (modifier-origin) from the headline fact",
+        "evidence_required": "external_call sink with origin annotation (body vs modifier) \u2014 measured: Teller.pause's only 'effect' is its requiresAuth check",
+        "provenance_tier": "fact (sink)",
+        "hard_cases_passed": "19/26 informative, 7 misleading-as-sole-signal; both downstream governance consumers already ignore it (primary_controller.py:161, company_overview.py:940)"
+      },
+      {
+        "label": "timelock_operation",
+        "disposition": "redefine",
+        "claim_it_makes": "new claims timelock.schedule/execute/cancel/set_delay (dead label today: 0 producers, 4 consumers)",
+        "evidence_required": "oz_timelock gate (getMinDelay+schedule+execute) + per-selector; measured 6/6 on 0x70a64840",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "TimelockController battery PASS (schedule no longer silent; execute no longer 'moves value out' outflow-lane)"
+      },
+      {
+        "label": "arbitrary_external_call",
+        "disposition": "redefine",
+        "claim_it_makes": "new claim exec.arbitrary ('executes caller-supplied calldata') \u2014 dead today (0 producers) while _manager tag and 0.95 severity wait on it",
+        "evidence_required": "standard gates: safe.execTransaction/module-exec, timelock.execute, manage(address,bytes,uint256)-idiom (bytes-calldata param flowing to call sink)",
+        "provenance_tier": "standard_exact or idiom_structural",
+        "hard_cases_passed": "BoringVault.manage, SafeL2.execTransaction, TimelockController.execute all currently generic \u2014 all matched by gates in-sample"
+      },
+      {
+        "label": "safe.signer_mgmt / safe.module_mgmt / safe.set_guard",
+        "disposition": "new",
+        "claim_it_makes": "'changes signer set / threshold', 'grants/revokes module execution rights', 'sets transaction guard hook'",
+        "evidence_required": "Safe gate (getThreshold+getOwners+execTransaction) + canonical selectors",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "12/12 on real base SafeL2 0x29fcb43b (today: hook_update or silent)"
+      },
+      {
+        "label": "gov.delegate",
+        "disposition": "new",
+        "claim_it_makes": "'delegates voting power (user operation)'",
+        "evidence_required": "Comp-style gate (delegates+checkpoints write identity) + delegate/delegateBySig selectors",
+        "provenance_tier": "standard_exact",
+        "hard_cases_passed": "Comp 2/2 (today silent)"
+      },
+      {
+        "label": "FACTS (write/role/flow/sink records)",
+        "disposition": "new",
+        "claim_it_makes": "per-fn verifiable facts: writes {var,type,granularity,hygiene_class}; var roles sourced from predicate-leaf taxonomy (caller_authority/pause/reentrancy/business/one_shot) + callee-pointer + fallback-read; flows; sinks with origin",
+        "evidence_required": "direct IR checkability; hygiene exclusions (constants, storage-location pseudo-vars, reentrancy-role vars) enforced in builder \u2014 each exclusion measured necessary (OwnableStorageLocation gate_for=10, _status gates redeemEEth)",
+        "provenance_tier": "fact",
+        "hard_cases_passed": "Dai.wards, WrapToken.pauser/paused/blacklisted correct; composeQueue silent; ghost/reentrancy pathologies excluded by construction"
+      }
+    ],
+    "migration_sketch": "Non-binding, explicitly not a decision criterion. Phase 1: extend effects.py facts (var-role records sourced from predicate-leaf roles, callee-pointer role, flow facts incl. Transfer IR, sink origin annotation, hygiene classifier) \u2014 additive, current labels untouched; ship the registry module with the 18 matchers measured here + fixtures from this investigation's 27-contract corpus (scratchpad runs/ become tests/fixtures). Phase 2: emit claims in a parallel EffectiveFunction column (claims JSONB) via the same writer path (effective_permissions.py:580-611 analog); keep the policy-stage cross-contract pass propagating CLAIMS instead of labels (cross_contract.py needs only the map source swapped). Phase 3: cut consumers over one at a time behind flags \u2014 lane.js/meta.js first (claims->lane map + fact chips; visual-baseline Playwright per CLAUDE.md), then protocolScore (claim-family severities; delete the name-substring upgrade arm once uups/proxy_shell claims flow), principal_enrichment (_admin/_operator/_manager from claim families \u2014 _manager becomes reachable for the first time), primary_controller PRIVILEGED set, company_overview capability map. Phase 4: delete _effect_labels T3/T4/T5 tiers and the effect_labels column; retarget pinned tests (test_contract_analysis.py:301 setHook asserts callee_pointer.rotate; test_effects.py:334 asserts ownership claims). Stored prod rows are stale either way (already true today); recompute on next protocol run. Rollback boundary is per-consumer flags; producers are additive until Phase 4.",
+    "novel_hypotheses": [
+      {
+        "id": "H5-claims-registry-two-layer (RECOMMENDED)",
+        "summary": "Layer 0: verifiable facts artifact (H2's substrate, hardened by measured hygiene rules + predicate-role sourcing). Layer 1: a closed registry of standard/idiom matchers emitting claims-objects {claim_id, evidence, tier \u2208 {standard_exact, idiom_structural}} \u2014 H3's mechanics under a schema-enforced registry contract. No fallback tier exists in the type system. Consumers read claims first, facts second; UI words become a renderer-side map keyed by claim_id.",
+        "evidence_standard": "Every semantic statement is either a fact (directly checkable against IR) or a claim whose registry entry carries a written claim text + machine-checkable gate predicates + positive AND counterexample fixtures on real contracts + an approved corpus label-diff. Nothing emittable is unfalsifiable; the 'guess' provenance does not exist as a type.",
+        "hard_case_results": "Union of measured H2+H3 results: composeQueue PASS (silence by construction + mandatory counterexample fixture); ERC-20/WETH9 PASS; UUPS/zos PASS (17 impl-update claims vs 0 today); Timelock PASS (6); Safe PASS (12); Maker wards PASS; Solady ownership PASS; OZ v5 ownership PASS ghost-immune; Comp delegation PASS; pause PASS for OZ/isPaused idioms + honest residue for EigenLayer-registry family; Accountant struct family = honest facts (nothing lies; semantics unprovable at var granularity \u2014 named ceiling); beforeTransfer denylist = facts statically + policy-stage cross-contract upgrade path.",
+        "consumer_fit": "Demonstrated against consumer code: lane.js gets claims.control_plane->top, flow facts->left/right (derive_sim.py pathologies fixed by hygiene+role sourcing); protocolScore gets evidence-backed upgrade/admin/exec families replacing its name-substring arm (protocolScore.js:167) and its dead-label arms (:170,:177); principal_enrichment maps claim families to _admin/_operator/_manager (the _manager tag becomes producible); primary_controller PRIVILEGED set maps 1:1 to claim families; company_overview capability chips key off claim_id (its deliberate hook/external exclusion is preserved \u2014 facts-only fns show names, as it already chose); monitoring enrollment upgrades is_pausable recall via pause claims (Teller case measured).",
+        "failure_modes": "Coverage honesty: 37% exact-semantic coverage measured in-sample; consumers see neutral fact text for the rest \u2014 if product later demands semantic words everywhere, pressure lands on the registry gate (the design's whole point is that this pressure becomes visible PRs with fixtures instead of silent regex edits). Registry maintenance cost is real and permanent.",
+        "verdict": "RECOMMEND. It is the only evaluated configuration with zero measured wrong claims on the 27-contract corpus, recovers the highest-value missing semantics (upgrades/timelock/Safe), and has a structural (schema+CI) anti-creep story."
+      },
+      {
+        "id": "H6-llm-assisted-labeling-hard-gated-on-facts",
+        "summary": "LLM proposes semantic labels for the facts residue; a fact-checker only admits labels consistent with facts.",
+        "evidence_standard": "Fails the mission constraint: the admitted statement's truth still rests on model judgment wherever facts underdetermine semantics (which is precisely the residue it would be used on \u2014 e.g. 'writes accountantState' cannot verify 'pauses the vault'). The checker can only verify what facts already prove, at which point the LLM adds nothing but nondeterminism.",
+        "hard_case_results": "Not run (would require prompt-engineering a judge; by construction it cannot beat the fact-checker's own ceiling). Accountant pause: facts cannot confirm or refute an LLM 'pause' proposal \u2014 the exact case it would be wanted for is the case it cannot be verified in.",
+        "consumer_fit": "Chips would regain words at the cost of unfalsifiable provenance; protocolScore severities would ride model output.",
+        "failure_modes": "Nondeterministic corpus diffs break the A/B gate; per-run label flapping; audit trail is a model transcript, not a checkable predicate.",
+        "verdict": "REJECT as a claim producer. Acceptable offline as a registry-authoring assistant (suggesting new idiom entries for humans to fixture and gate)."
+      },
+      {
+        "id": "H7-retire-labels-capability-expr-plus-sinks-drive-ui",
+        "summary": "Drop the semantic layer entirely; UI renders capability_expr (who) + raw sinks (what, mechanically).",
+        "evidence_standard": "Perfect (only resolver output + sink facts), but vacuous where it matters.",
+        "hard_case_results": "Measured as the naive derive_sim.py lower bound: value lanes collapse (in 32->4, out 60->13), 'writes accountantState' chips, Safe swapOwner renders as 'writes mapping owners'. capability_expr answers WHO can call \u2014 it cannot distinguish 'changes owner' from 'changes fee' for lane/severity purposes.",
+        "consumer_fit": "Starves protocolScore.classifyAction and company_overview capability chips outright; both would re-grow local heuristics (name matching) to compensate \u2014 creep relocated into N consumers, the worst outcome.",
+        "failure_modes": "The system already contains the disproof: laneForFunction's name-hint fallback (lane.js:24-26) and classifyAction's CONFIG_HINTS exist precisely because raw facts under-determine presentation.",
+        "verdict": "REJECT. Its true content (facts as substrate, capability_expr for who) is inside H5 already."
+      }
+    ],
+    "recommended_design": "WINNER: H5 \u2014 a two-layer claims-registry design (facts substrate + gated standards/idiom claims), assembled from the measured-good parts of H2 and H3, with H4's existing policy-stage cross-contract pass retained for claims that need callee identity, and H1's two proven components (guess-tier deletion, selector canonicalization) subsumed.\n\nWHAT A LABEL *IS*: there are exactly two kinds of emitted statement, and both are objects, not strings. (K1) FACT \u2014 a record checkable directly against Slither IR by a deterministic predicate: state-write {var, declared_type, granularity: var|namespaced_struct|assembly_slot, hygiene_class: normal|constant|storage_location_pseudo|reentrancy_guard}, var-role {gate-bool-for-N-state-changing-fns via predicate-leaf role='pause', caller-authority-equality via leaf role='caller_authority' (operand var named \u2014 so 'rotates caller-authority address `pauser`' renders instead of a fake 'ownership transfer'), callee-pointer-invoked-by-sibling-entry (the measured-clean _writes_hook_reference signal), fallback-delegatecall-read, one_shot latch via one_shot leaves}, value-flow {low-level value call, Transfer IR (.transfer()/.send() \u2014 fixes the WETH9.withdraw miss), callee ERC-20 selector}, sink {kind, target, selector, origin: body|modifier} (origin fixes the Teller.pause requiresAuth pollution). Facts are produced by build_effects hardened with builder-level hygiene: constants, *StorageLocation/*_SLOT pseudo-vars, and reentrancy-role vars can never appear as role facts (each exclusion measured necessary in derive_sim.py). (K2) CLAIM \u2014 {claim_id, tier \u2208 {standard_exact, idiom_structural}, evidence: {gate_facts, trigger}} minted ONLY by a registry matcher whose entry carries: written claim text; a machine-checkable evidence spec = contract-level GATE (mandated sibling selectors, write-target identity, sink shape \u2014 e.g. uups := proxiableUUID() present; safe := getThreshold+getOwners+execTransaction; pausable := pause()+unpause()+({paused,isPaused,_paused} write identity or paused view); wards := rely+deny+wards write identity) plus a per-function trigger (canonical selector or fact-pattern); \u22651 positive real-contract fixture; \u22651 counterexample fixture (composeQueue-class); an approved corpus A/B diff. Initial registry = the 18 matchers measured in h3sim.py (erc20, weth, ownable/2step, solady_ownable, access_control, access_control_dar, pausable, oz_pausable_var, uups, proxy_shell, safe, oz_timelock, solmate_auth, solmate_roles, maker_wards, comp_votes, fiattoken, lz_oapp) + callee_pointer.rotate idiom + exec.arbitrary gates. Measured yield on the 27-contract corpus: 154 exact claims / 415 state-changing fns, 0 observed false claims, recovering implementation_update (17 vs 0 today), timelock ops (6 vs 0), Safe signer/module/guard semantics (12 vs 0/wrong), Solady + OZ v5 ownership (ghost-immune), Maker wards, Comp delegation. (K3) A thin POLICY-STAGE augmentation (existing cross_contract.py path, claims instead of labels) adds cross-contract claims that need callee identity: beacon upgrade (upgradeEtherFiNode), callee mint/burn propagation \u2014 computed downstream because the evidence lives downstream, per H4's one correct insight.\n\nHOW EACH IS PRODUCED: facts in effects.py from IR + predicate-leaf roles (single source for role discrimination \u2014 the taxonomy that already exists at the leaf level: caller_authority/pause/reentrancy/business/time/one_shot); claims in a new registry module invoked after build_effects with (contract, facts, predicate_trees) \u2014 a pure function of source; policy augmentation in policy_worker as today. The deleted machinery: _writes_unclassified_address_pointer (+fallback :727), _is_address_like_state_var, _writes_owner_like_address, _writes_authority_reference, _detect_supply_change_pattern, the ownership post-pass as sole emitter (kept only as corroborating fact 'caller-authority var write'), _writes_pause_like_bool and pause_info as claim sources (both measured imprecise; they persist as fact inputs).\n\nEVIDENCE STANDARDS (written, per statement kind): facts \u2014 the predicate over IR must evaluate true (test = re-run predicate); standard_exact claims \u2014 gate + trigger predicates over facts must evaluate true AND the standard's semantics are the claim's semantics by the standard's own documentation (test = fixtures); idiom_structural claims \u2014 same shape, for de-facto idioms (wards, callee-pointer, weth), always with counterexample fixtures. UNKNOWN = silence + fact text; the design chooses SILENCE over marked-guess, because the marked-guess variant was measured to be exactly today's hook_update (1/69) and the consumers that matter already treat coarse labels as noise (primary_controller.py:161-164, company_overview.py:940-942).\n\nCONSUMER MIGRATION (conceptual): lane.js \u2014 control lane := any control_plane claim OR control-role fact (gate-var write, callee-pointer rotate, fallback-slot write, creation/selfdestruct sink); left/right := flow facts/claims; chips := renderer map claim_id\u2192existing vocabulary ('changes owner' stays as the TEXT for ownership.transfer \u2014 the UI words survive, their backing becomes checkable), fact-text otherwise; ordering := claim-family priority (same 0-9 shape). protocolScore.classifyAction := claim families (upgrade claims \u2192 1.0 \u2014 replacing the name-substring arm; exec.arbitrary \u2192 0.95 \u2014 producible for the first time; ownership/roles/authority/signer \u2192 0.88; pause claims split pause/unpause honestly). principal_enrichment := _admin from control-claim families, _operator from flow claims, _manager from exec.arbitrary. primary_controller PRIVILEGED_EFFECT_LABELS := privileged claim families (same semantics, minus the dead entries). company_overview _EFFECT_CAPABILITY := claim_id\u2192chip word. Monitoring enrollment := pause claims \u222a pause facts for watch_pause (recall gain measured on Teller)."
+  }
+}

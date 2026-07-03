@@ -1,0 +1,1969 @@
+{
+ "address": "0x83bc649fcdb2c8da146b2154a559ddedf937ef12",
+ "label": "LiquidityPool_impl",
+ "contract_name": "LiquidityPool",
+ "compiler": "v0.8.27+commit.40a35a09",
+ "owner_vars_from_trees": [
+  "_owner",
+  "etherFiAdminContract",
+  "etherFiRedemptionManager",
+  "liquifier",
+  "membershipManager",
+  "priorityWithdrawalQueue",
+  "withdrawRequestNFT"
+ ],
+ "pause_info": {
+  "pause_state_vars": [
+   "paused",
+   "validatorSizeWei"
+  ],
+  "pause_toggle_functions": [
+   "initialize(address,address,address,address,address,address,address)",
+   "pauseContract()",
+   "setValidatorSizeWei(uint256)",
+   "unPauseContract()"
+  ],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "numPendingDeposits()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalValueOutOfLp()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalValueInLp()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getTotalEtherClaimOf(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getTotalPooledEther()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "sharesForAmount(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "sharesForWithdrawalAmount(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "amountForShare(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "eETH()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "ethAmountLockedForWithdrawal()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "deposit()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": []
+  },
+  "deposit(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "deposit(address,address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:membershipManager"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "depositToRecipient(address,uint256,address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:liquifier"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiAdminContract"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "withdraw(address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "ethAmountLockedForWithdrawal",
+    "totalValueInLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:withdrawRequestNFT"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:membershipManager"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiRedemptionManager"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:priorityWithdrawalQueue"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "sv:totalValueInLp",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": [
+      "sv:priorityWithdrawalQueue"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "sv:ethAmountLockedForWithdrawal",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "sv:ethAmountLockedForWithdrawal",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "sv:totalValueInLp",
+      "parameter"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "computed",
+      "parameter"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "burnEEthSharesForNonETHWithdrawal(uint256,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiRedemptionManager"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "requestWithdraw(address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:eETH",
+      "sv:withdrawRequestNFT",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "requestMembershipNFTWithdraw(address,uint256,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:membershipManager"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:eETH",
+      "sv:withdrawRequestNFT",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "batchRegister(IStakingManager.DepositData[],uint256[],address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "batchCreateBeaconValidators(IStakingManager.DepositData[],uint256[],address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_VALIDATOR_CREATOR_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "batchApproveRegistration(uint256[],bytes[],bytes[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_VALIDATOR_APPROVER_ROLE"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "sv:validatorSizeWei"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "sv:validatorSizeWei"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "top",
+      "sv:validatorSizeWei"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "confirmAndFundBeaconValidators(IStakingManager.DepositData[],uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_VALIDATOR_APPROVER_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "DEPRECATED_sendExitRequests(uint256[])": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    }
+   ]
+  },
+  "registerValidatorSpawner(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "validatorSpawner"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "unregisterValidatorSpawner(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "validatorSpawner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    }
+   ]
+  },
+  "rebase(int128)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:membershipManager"
+     ]
+    }
+   ]
+  },
+  "payProtocolFees(uint128)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiAdminContract"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:liquifier"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiAdminContract"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "addEthAmountLockedForWithdrawal(uint128)": {
+   "labels": [],
+   "summary": "Writes or calls into: ethAmountLockedForWithdrawal.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "ethAmountLockedForWithdrawal"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiAdminContract"
+     ]
+    }
+   ]
+  },
+  "pauseContract()": {
+   "labels": [
+    "pause_toggle"
+   ],
+   "summary": "Changes the contract pause state.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "paused"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "burnEEthShares(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:etherFiRedemptionManager"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:withdrawRequestNFT"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:priorityWithdrawalQueue"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "unPauseContract()": {
+   "labels": [
+    "pause_toggle"
+   ],
+   "summary": "Changes the contract pause state.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "paused"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "pause",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:paused"
+     ]
+    }
+   ]
+  },
+  "setStakingTargetWeights(uint32,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setValidatorSizeWei(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "validatorSizeWei"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "proxiableUUID()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "sv:_IMPLEMENTATION_SLOT"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "sv:_IMPLEMENTATION_SLOT"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "self_address",
+      "sv:__self"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "sv:__self"
+     ]
+    }
+   ]
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "receive()": {
+   "labels": [],
+   "summary": "Writes or calls into: totalValueOutOfLp, totalValueInLp.",
+   "state_changing": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": []
+  },
+  "initialize(address,address,address,address,address,address,address)": {
+   "labels": [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "DEPRECATED_TNFT",
+    "DEPRECATED_isLpBnftHolder",
+    "_initialized",
+    "_initializing",
+    "_owner",
+    "eETH",
+    "ethAmountLockedForWithdrawal",
+    "etherFiAdminContract",
+    "membershipManager",
+    "nodesManager",
+    "paused",
+    "restakeBnftDeposits",
+    "stakingManager",
+    "withdrawRequestNFT"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "self_address"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    }
+   ]
+  },
+  "initializeOnUpgrade(address,address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "DEPRECATED_auctionManager",
+    "liquifier"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:DEPRECATED_auctionManager"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:liquifier"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "initializeVTwoDotFourNine(address,address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "etherFiRedemptionManager",
+    "roleRegistry",
+    "totalValueInLp",
+    "totalValueOutOfLp"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:etherFiRedemptionManager"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:roleRegistry"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:totalValueInLp",
+      "sv:totalValueInLp"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "setFeeRecipient(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "feeRecipient"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    }
+   ]
+  },
+  "setRestakeBnftDeposits(bool)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "restakeBnftDeposits"
+   ],
+   "leaves": [
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:LIQUIDITY_POOL_ADMIN_ROLE"
+     ]
+    }
+   ]
+  },
+  "getImplementation()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  }
+ },
+ "written_by_fn": {
+  "numPendingDeposits()": [],
+  "totalValueOutOfLp()": [],
+  "totalValueInLp()": [],
+  "getTotalEtherClaimOf(address)": [],
+  "getTotalPooledEther()": [],
+  "sharesForAmount(uint256)": [],
+  "sharesForWithdrawalAmount(uint256)": [],
+  "amountForShare(uint256)": [],
+  "eETH()": [],
+  "ethAmountLockedForWithdrawal()": [],
+  "deposit()": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "deposit(address)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "deposit(address,address)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "depositToRecipient(address,uint256,address)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "withdraw(address,uint256)": [
+   "ethAmountLockedForWithdrawal",
+   "totalValueInLp"
+  ],
+  "burnEEthSharesForNonETHWithdrawal(uint256,uint256)": [
+   "totalValueOutOfLp"
+  ],
+  "requestWithdraw(address,uint256)": [],
+  "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)": [],
+  "requestMembershipNFTWithdraw(address,uint256,uint256)": [],
+  "batchRegister(IStakingManager.DepositData[],uint256[],address)": [],
+  "batchCreateBeaconValidators(IStakingManager.DepositData[],uint256[],address)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "batchApproveRegistration(uint256[],bytes[],bytes[])": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "confirmAndFundBeaconValidators(IStakingManager.DepositData[],uint256)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "DEPRECATED_sendExitRequests(uint256[])": [],
+  "registerValidatorSpawner(address)": [
+   "validatorSpawner"
+  ],
+  "unregisterValidatorSpawner(address)": [
+   "validatorSpawner"
+  ],
+  "rebase(int128)": [
+   "totalValueOutOfLp"
+  ],
+  "payProtocolFees(uint128)": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "addEthAmountLockedForWithdrawal(uint128)": [
+   "ethAmountLockedForWithdrawal"
+  ],
+  "pauseContract()": [
+   "paused"
+  ],
+  "burnEEthShares(uint256)": [],
+  "unPauseContract()": [
+   "paused"
+  ],
+  "setStakingTargetWeights(uint32,uint32)": [],
+  "setValidatorSizeWei(uint256)": [
+   "validatorSizeWei"
+  ],
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [],
+  "upgradeToAndCall(address,bytes)": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "_owner"
+  ],
+  "transferOwnership(address)": [
+   "_owner"
+  ],
+  "receive()": [
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "initialize(address,address,address,address,address,address,address)": [
+   "DEPRECATED_TNFT",
+   "DEPRECATED_isLpBnftHolder",
+   "_initialized",
+   "_initializing",
+   "_owner",
+   "eETH",
+   "ethAmountLockedForWithdrawal",
+   "etherFiAdminContract",
+   "membershipManager",
+   "nodesManager",
+   "paused",
+   "restakeBnftDeposits",
+   "stakingManager",
+   "withdrawRequestNFT"
+  ],
+  "initializeOnUpgrade(address,address)": [
+   "DEPRECATED_auctionManager",
+   "liquifier"
+  ],
+  "initializeVTwoDotFourNine(address,address)": [
+   "etherFiRedemptionManager",
+   "roleRegistry",
+   "totalValueInLp",
+   "totalValueOutOfLp"
+  ],
+  "setFeeRecipient(address)": [
+   "feeRecipient"
+  ],
+  "setRestakeBnftDeposits(bool)": [
+   "restakeBnftDeposits"
+  ],
+  "getImplementation()": []
+ },
+ "guard_extraction_uncertain": []
+}

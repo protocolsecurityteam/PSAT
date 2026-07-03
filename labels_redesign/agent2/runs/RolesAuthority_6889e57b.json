@@ -1,0 +1,165 @@
+{
+ "address": "0x6889e57bca038c28520c0b047a75e567502ea5f6",
+ "contract": "RolesAuthority",
+ "owner_vars_from_trees": [
+  "owner"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [],
+ "var_roles": {
+  "authority": {
+   "type": "Authority",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 4,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "owner": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 4,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "isCapabilityPublic": {
+   "type": "mapping(address => mapping(bytes4 => bool))",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "getRolesWithCapability": {
+   "type": "mapping(address => mapping(bytes4 => bytes32))",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "getUserRoles": {
+   "type": "mapping(address => bytes32)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "canCall(address,address,bytes4)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "doesRoleHaveCapability(uint8,address,bytes4)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "doesUserHaveRole(address,uint8)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "setAuthority(Authority)": {
+   "labels": [
+    "authority_update"
+   ],
+   "summary": "Updates the authority contract used for permission checks.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "authority"
+   ]
+  },
+  "setPublicCapability(address,bytes4,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "isCapabilityPublic"
+   ]
+  },
+  "setRoleCapability(uint8,address,bytes4,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "getRolesWithCapability"
+   ]
+  },
+  "setUserRole(address,uint8,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "getUserRoles"
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "owner"
+   ]
+  }
+ }
+}

@@ -1,0 +1,32 @@
+{
+ "contract": "FiatTokenProxy",
+ "pause_info_fns": [],
+ "struct_pause": [],
+ "uups_marker": false,
+ "owner_vars_tight": [],
+ "diffs": [],
+ "current": {
+  "admin()": [],
+  "implementation()": [],
+  "changeAdmin(address)": [],
+  "upgradeTo(address)": [
+   "external_contract_call"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "asset_send"
+  ],
+  "fallback()": []
+ },
+ "h1": {
+  "admin()": [],
+  "implementation()": [],
+  "changeAdmin(address)": [],
+  "upgradeTo(address)": [
+   "external_contract_call"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "asset_send"
+  ],
+  "fallback()": []
+ }
+}

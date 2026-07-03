@@ -1,0 +1,75 @@
+{
+ "contract": "TellerWithMultiAssetSupport",
+ "pause_toggle_functions": [
+  "pause()",
+  "unpause()"
+ ],
+ "pause_state_vars": [
+  "isPaused"
+ ],
+ "functions": {
+  "pause()": [
+   "external_contract_call",
+   "pause_toggle"
+  ],
+  "unpause()": [
+   "external_contract_call",
+   "pause_toggle"
+  ],
+  "beforeTransfer(address,address,address)": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "addAsset(ERC20)": [
+   "external_contract_call"
+  ],
+  "removeAsset(ERC20)": [
+   "external_contract_call"
+  ],
+  "setShareLockPeriod(uint64)": [
+   "external_contract_call"
+  ],
+  "denyAll(address)": [
+   "external_contract_call"
+  ],
+  "allowAll(address)": [
+   "external_contract_call"
+  ],
+  "denyFrom(address)": [
+   "external_contract_call"
+  ],
+  "allowFrom(address)": [
+   "external_contract_call"
+  ],
+  "denyTo(address)": [
+   "external_contract_call"
+  ],
+  "allowTo(address)": [
+   "external_contract_call"
+  ],
+  "denyOperator(address)": [
+   "external_contract_call"
+  ],
+  "allowOperator(address)": [
+   "external_contract_call"
+  ],
+  "refundDeposit(uint256,address,address,uint256,uint256,uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "deposit(ERC20,uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "depositWithPermit(ERC20,uint256,uint256,uint256,uint8,bytes32,bytes32)": [
+   "external_contract_call"
+  ],
+  "bulkDeposit(ERC20,uint256,uint256,address)": [
+   "external_contract_call"
+  ],
+  "bulkWithdraw(ERC20,uint256,uint256,address)": [
+   "external_contract_call"
+  ]
+ }
+}

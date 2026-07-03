@@ -1,0 +1,4383 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "EtherFiNodesManager",
+ "trees": {
+  "proxiableUUID()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "self_address"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "__self"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(address(this) == __self,UUPSUpgradeable: must not be called through delegatecall)",
+    "basis": [
+     "require(TMP_1575)"
+    ],
+    "confidence": "low"
+   }
+  },
+  "upgradeTo(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "onlyProtocolUpgrader(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "onlyProtocolUpgrader(address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "onlyProtocolUpgrader",
+       "callee_signature": "onlyProtocolUpgrader(address)",
+       "callee_selector": "0x5006bb7b"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1211)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "opaque_try_catch",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "slot = IERC1822ProxiableUpgradeable(newImplementation).proxiableUUID()",
+      "basis": [
+       "opaque_try_catch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "proxiableUUID",
+        "callee_signature": "proxiableUUID()",
+        "callee_selector": "0x52d1902d"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_IMPLEMENTATION_SLOT",
+        "constant_value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(slot == _IMPLEMENTATION_SLOT,ERC1967Upgrade: unsupported proxiableUUID)",
+      "basis": [
+       "require(TMP_1224)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1211)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1251)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "self_address"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(address(this) != __self,Function must be called through delegatecall)",
+      "basis": [
+       "require(TMP_1569)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "_getImplementation()",
+        "callee_signature": "_getImplementation()",
+        "callee_selector": "0x42404e07"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_getImplementation() == __self,Function must be called through active proxy)",
+      "basis": [
+       "require(TMP_1572)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "onlyProtocolUpgrader(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "onlyProtocolUpgrader(address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "onlyProtocolUpgrader",
+       "callee_signature": "onlyProtocolUpgrader(address)",
+       "callee_selector": "0x5006bb7b"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1211)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "unsupported",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "unsupported_reason": "opaque_try_catch",
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "slot = IERC1822ProxiableUpgradeable(newImplementation).proxiableUUID()",
+      "basis": [
+       "opaque_try_catch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "proxiableUUID",
+        "callee_signature": "proxiableUUID()",
+        "callee_selector": "0x52d1902d"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_IMPLEMENTATION_SLOT",
+        "constant_value": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(slot == _IMPLEMENTATION_SLOT,ERC1967Upgrade: unsupported proxiableUUID)",
+      "basis": [
+       "require(TMP_1224)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1211)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newImplementation"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "isContract(...)",
+      "basis": [
+       "require(TMP_1251)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isContract(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "self_address"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(address(this) != __self,Function must be called through delegatecall)",
+      "basis": [
+       "require(TMP_1569)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "_getImplementation()",
+        "callee_signature": "_getImplementation()",
+        "callee_selector": "0x42404e07"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "__self"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_getImplementation() == __self,Function must be called through active proxy)",
+      "basis": [
+       "require(TMP_1572)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1292)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(newOwner != address(0),Ownable: new owner is the zero address)",
+      "basis": [
+       "require(TMP_1298)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_1292)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "pauseContract()": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "PROTOCOL_PAUSER",
+        "callee_signature": "PROTOCOL_PAUSER()",
+        "callee_selector": "0x77a9193e"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "external_call",
+         "callee": "PROTOCOL_PAUSER",
+         "callee_signature": "PROTOCOL_PAUSER()",
+         "callee_selector": "0x77a9193e"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "unPauseContract()": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "PROTOCOL_UNPAUSER",
+        "callee_signature": "PROTOCOL_UNPAUSER()",
+        "callee_selector": "0x421d0eb3"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "external_call",
+         "callee": "PROTOCOL_UNPAUSER",
+         "callee_signature": "PROTOCOL_UNPAUSER()",
+         "callee_selector": "0x421d0eb3"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1275)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "sweepFunds(uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+        "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+         "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "createEigenPod(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "getEigenPod(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "external_bool",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "node"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0
+    ],
+    "expression": "deployedEtherFiNodes(...)",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "callee_state_mutability": "view",
+    "gate_kind": "custom_revert",
+    "callee_signature": "deployedEtherFiNodes(address)",
+    "confidence": "low"
+   }
+  },
+  "startCheckpoint(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "startCheckpoint(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "startCheckpoint()",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "startCheckpoint(uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "startCheckpoint(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "startCheckpoint()",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "verifyCheckpointProofs(address,BeaconChainProofs.BalanceContainerProof,BeaconChainProofs.BalanceProof[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "balanceContainerProof"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "proofs"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "expression": "verifyCheckpointProofs(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "BalanceProof[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "verifyCheckpointProofs(uint256,BeaconChainProofs.BalanceContainerProof,BeaconChainProofs.BalanceProof[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "balanceContainerProof"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "proofs"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "expression": "verifyCheckpointProofs(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "BalanceProof[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+        "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_POD_PROVER_ROLE",
+         "constant_value": "0xf2c32172f8adc08057d18fb6422b871bd95592f20a6ab72ebf7963209047f50c"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setProofSubmitter(address,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "proofSubmitter"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "setProofSubmitter(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "setProofSubmitter(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setProofSubmitter(uint256,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "proofSubmitter"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "setProofSubmitter(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "setProofSubmitter(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "queueETHWithdrawal(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "UNRESTAKING_LIMIT_ID",
+        "constant_value": "0x720837b54cbf988e535e1d4cd78ea8b86135f54e35e9bd90ec3979114c84f124"
+       },
+       {
+        "source": "external_call",
+        "callee": "toUint64",
+        "callee_signature": "toUint64(uint256)",
+        "callee_selector": "0x2665fad0"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "consume(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "consume(bytes32,uint64)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "queueETHWithdrawal(uint256,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "completeQueuedETHWithdrawals(address,bool)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "completeQueuedETHWithdrawals(uint256,bool)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "queueWithdrawals(address,IDelegationManagerTypes.QueuedWithdrawalParams[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "UNRESTAKING_LIMIT_ID",
+        "constant_value": "0x720837b54cbf988e535e1d4cd78ea8b86135f54e35e9bd90ec3979114c84f124"
+       },
+       {
+        "source": "external_call",
+        "callee": "toUint64",
+        "callee_signature": "toUint64(uint256)",
+        "callee_selector": "0x2665fad0"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "consume(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "consume(bytes32,uint64)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "queueWithdrawals(uint256,IDelegationManagerTypes.QueuedWithdrawalParams[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "UNRESTAKING_LIMIT_ID",
+        "constant_value": "0x720837b54cbf988e535e1d4cd78ea8b86135f54e35e9bd90ec3979114c84f124"
+       },
+       {
+        "source": "constant",
+        "constant_value": "TMP_1391",
+        "value_type": "uint64"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "consume(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "consume(bytes32,uint64)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "completeQueuedWithdrawals(address,IDelegationManagerTypes.Withdrawal[],IERC20[][],bool[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "node"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "withdrawals"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "tokens"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "receiveAsTokens"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2,
+       3
+      ],
+      "expression": "completeQueuedWithdrawals(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "Withdrawal[],IERC20[][],bool[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "completeQueuedWithdrawals(uint256,IDelegationManagerTypes.Withdrawal[],IERC20[][],bool[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "etherfiNodeAddress(uint256)",
+        "callee_signature": "etherfiNodeAddress(uint256)",
+        "callee_selector": "0xb165e295"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "withdrawals"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "tokens"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "receiveAsTokens"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2,
+       3
+      ],
+      "expression": "completeQueuedWithdrawals(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "Withdrawal[],IERC20[][],bool[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+        "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EIGENLAYER_ADMIN_ROLE",
+         "constant_value": "0x59182b0a43541702fc3e73f22a962f8f868277e76091a99c516d2982b9df2f90"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "requestExecutionLayerTriggeredWithdrawal(IEigenPodTypes.WithdrawalRequest[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EL_TRIGGER_EXIT_ROLE",
+        "constant_value": "0x140ee46da08400488949dfb48bdfc7c0502610f6a6203d169743d6b9e776a0be"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EL_TRIGGER_EXIT_ROLE",
+         "constant_value": "0x140ee46da08400488949dfb48bdfc7c0502610f6a6203d169743d6b9e776a0be"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "requests.length == 0",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "EXIT_REQUEST_LIMIT_ID",
+        "constant_value": "0x7cb3a0475ce334f2e554cd4068801a846aec977f481e2a4593747d2681f19880"
+       },
+       {
+        "source": "external_call",
+        "callee": "toUint64",
+        "callee_signature": "toUint64(uint256)",
+        "callee_selector": "0x2665fad0"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "consume(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "consume(bytes32,uint64)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "computed",
+        "computed_kind": "msg.value"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "msg.value < pod.getWithdrawalRequestFee() * requests.length",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "requestExecutionLayerTriggeredWithdrawal(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "WithdrawalRequest[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1267)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "requestConsolidation(IEigenPodTypes.ConsolidationRequest[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_EL_CONSOLIDATION_ROLE",
+        "constant_value": "0x623ac534141a3de3d1e20f924b4a3b115aa68dc5b00452321cda0323932459ab"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_EL_CONSOLIDATION_ROLE",
+         "constant_value": "0x623ac534141a3de3d1e20f924b4a3b115aa68dc5b00452321cda0323932459ab"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "requests.length == 0",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "CONSOLIDATION_REQUEST_LIMIT_ID",
+        "constant_value": "0x59b1404ad25e8c17457226c70c543149f101046883c2bdefdfea50a4030afba5"
+       },
+       {
+        "source": "external_call",
+        "callee": "toUint64",
+        "callee_signature": "toUint64(uint256)",
+        "callee_selector": "0x2665fad0"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "consume(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "consume(bytes32,uint64)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "computed",
+        "computed_kind": "msg.value"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "msg.value < pod.getConsolidationRequestFee() * requests.length",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "requests"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "requestConsolidation(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "ConsolidationRequest[])",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1267)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "calculateValidatorPubkeyHash(bytes)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "pubkey"
+     },
+     {
+      "source": "constant",
+      "constant_value": "48",
+      "value_type": "uint256"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0
+    ],
+    "expression": "pubkey.length != 48",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "low"
+   }
+  },
+  "linkPubkeyToNode(bytes,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "stakingManager"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "msg.sender != address(stakingManager)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "etherFiNodeFromPubkeyHash"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "address(etherFiNodeFromPubkeyHash[pubkeyHash]) != address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "legacyId"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "legacyState.DEPRECATED_etherfiNodeAddress[legacyId] != address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "linkLegacyValidatorIds(uint256[],bytes[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "validatorIds"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "pubkeys"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "validatorIds.length != pubkeys.length",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "validatorIds"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "nodeAddress == address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "etherFiNodeFromPubkeyHash"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "address(etherFiNodeFromPubkeyHash[pubkeyHash]) != address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_LEGACY_LINKER_ROLE",
+        "constant_value": "0x8c7b9778e52066fde8fbd3e25c5180a9726e067622ca2cb96db1c1225b4c827b"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_LEGACY_LINKER_ROLE",
+         "constant_value": "0x8c7b9778e52066fde8fbd3e25c5180a9726e067622ca2cb96db1c1225b4c827b"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    }
+   ]
+  },
+  "updateAllowedForwardedExternalCalls(address,bytes4,address,bool)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "external_bool",
+    "operator": "truthy",
+    "authority_role": "delegated_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+      "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "hasRole(...)",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "callee_state_mutability": "view",
+    "gate_kind": "custom_revert",
+    "callee_signature": "hasRole(bytes32,address)",
+    "set_descriptor": {
+     "kind": "external_set",
+     "key_sources": [
+      {
+       "source": "state_variable",
+       "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+       "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+      },
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "authority_contract": {
+      "address_source": {
+       "source": "state_variable",
+       "state_variable_name": "roleRegistry"
+      }
+     },
+     "callee_function": "hasRole",
+     "callee_signature": "hasRole(bytes32,address)",
+     "callee_selector": "0x91d14854"
+    },
+    "confidence": "medium"
+   }
+  },
+  "updateAllowedForwardedEigenpodCalls(address,bytes4,bool)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "external_bool",
+    "operator": "truthy",
+    "authority_role": "delegated_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+      "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "hasRole(...)",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "callee_state_mutability": "view",
+    "gate_kind": "custom_revert",
+    "callee_signature": "hasRole(bytes32,address)",
+    "set_descriptor": {
+     "kind": "external_set",
+     "key_sources": [
+      {
+       "source": "state_variable",
+       "state_variable_name": "ETHERFI_NODES_MANAGER_ADMIN_ROLE",
+       "constant_value": "0xa2a38b453c00b96e25a6611741c0fa71b17f9f21f28c0d5e77c008a31c1949ba"
+      },
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "authority_contract": {
+      "address_source": {
+       "source": "state_variable",
+       "state_variable_name": "roleRegistry"
+      }
+     },
+     "callee_function": "hasRole",
+     "callee_signature": "hasRole(bytes32,address)",
+     "callee_selector": "0x91d14854"
+    },
+    "confidence": "medium"
+   }
+  },
+  "forwardExternalCall(address[],bytes[],address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "nodes"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "nodes.length != data.length",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "nodes"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       },
+       {
+        "source": "constant",
+        "constant_value": "4",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "data[i].length < 4",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "target"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1,
+       2
+      ],
+      "expression": "! allowedForwardedExternalCalls[msg.sender][selector][target]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "data"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 2,
+         "parameter_name": "target"
+        }
+       ],
+       "storage_var": "allowedForwardedExternalCalls",
+       "enumeration_hint": [
+        {
+         "topic0": "0x2a1547b8c4fcc5c564373b299ab7eecb2d5013083f2fe08a64698fe5198e1930",
+         "topics_to_keys": {
+          "1": 0,
+          "2": 1,
+          "3": 2
+         },
+         "data_to_keys": {},
+         "direction": "set",
+         "event_signature": "UserAllowedForwardedExternalCallsUpdated(address,bytes4,address,bool)",
+         "event_name": "UserAllowedForwardedExternalCallsUpdated",
+         "mapping_name": "allowedForwardedExternalCalls",
+         "key_position": 2,
+         "indexed_positions": [
+          0,
+          1,
+          2
+         ],
+         "value_position": 3,
+         "writer_function": "updateAllowedForwardedExternalCalls(address,bytes4,address,bool)"
+        }
+       ]
+      },
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_CALL_FORWARDER_ROLE",
+        "constant_value": "0x25f713693dd3e84995d0d9964722b195ad1b60efe6253e8fa19b8e74f9a6602a"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_CALL_FORWARDER_ROLE",
+         "constant_value": "0x25f713693dd3e84995d0d9964722b195ad1b60efe6253e8fa19b8e74f9a6602a"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "forwardEigenPodCall(address[],bytes[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "nodes"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "nodes.length != data.length",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "nodes"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "deployedEtherFiNodes(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "deployedEtherFiNodes(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       },
+       {
+        "source": "constant",
+        "constant_value": "4",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "data[i].length < 4",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "data"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! allowedForwardedEigenpodCalls[msg.sender][selector]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        },
+        {
+         "source": "parameter",
+         "parameter_index": 1,
+         "parameter_name": "data"
+        }
+       ],
+       "storage_var": "allowedForwardedEigenpodCalls",
+       "enumeration_hint": [
+        {
+         "topic0": "0x1bb6cfc6cc765f48d6e1b6b8c5e5503c0d2ee684bdd46f53e0785cc966e20fab",
+         "topics_to_keys": {
+          "1": 0,
+          "2": 1
+         },
+         "data_to_keys": {},
+         "direction": "set",
+         "event_signature": "UserAllowedForwardedEigenpodCallsUpdated(address,bytes4,bool)",
+         "event_name": "UserAllowedForwardedEigenpodCallsUpdated",
+         "mapping_name": "allowedForwardedEigenpodCalls",
+         "key_position": 1,
+         "indexed_positions": [
+          0,
+          1
+         ],
+         "value_position": 2,
+         "writer_function": "updateAllowedForwardedEigenpodCalls(address,bytes4,bool)"
+        }
+       ]
+      },
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ETHERFI_NODES_MANAGER_CALL_FORWARDER_ROLE",
+        "constant_value": "0x25f713693dd3e84995d0d9964722b195ad1b60efe6253e8fa19b8e74f9a6602a"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "hasRole(...)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "custom_revert",
+      "callee_signature": "hasRole(bytes32,address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "state_variable",
+         "state_variable_name": "ETHERFI_NODES_MANAGER_CALL_FORWARDER_ROLE",
+         "constant_value": "0x25f713693dd3e84995d0d9964722b195ad1b60efe6253e8fa19b8e74f9a6602a"
+        },
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "roleRegistry"
+        }
+       },
+       "callee_function": "hasRole",
+       "callee_signature": "hasRole(bytes32,address)",
+       "callee_selector": "0x91d14854"
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return _paused_2",
+      "basis": [
+       "require(TMP_1273)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  }
+ },
+ "canonical_signatures": {
+  "verifyCheckpointProofs(address,BeaconChainProofs.BalanceContainerProof,BeaconChainProofs.BalanceProof[])": "verifyCheckpointProofs(address,(bytes32,bytes),(bytes32,bytes32,bytes)[])",
+  "verifyCheckpointProofs(uint256,BeaconChainProofs.BalanceContainerProof,BeaconChainProofs.BalanceProof[])": "verifyCheckpointProofs(uint256,(bytes32,bytes),(bytes32,bytes32,bytes)[])",
+  "queueWithdrawals(address,IDelegationManagerTypes.QueuedWithdrawalParams[])": "queueWithdrawals(address,(address[],uint256[],address)[])",
+  "queueWithdrawals(uint256,IDelegationManagerTypes.QueuedWithdrawalParams[])": "queueWithdrawals(uint256,(address[],uint256[],address)[])",
+  "completeQueuedWithdrawals(address,IDelegationManagerTypes.Withdrawal[],IERC20[][],bool[])": "completeQueuedWithdrawals(address,(address,address,address,uint256,uint32,address[],uint256[])[],address[][],bool[])",
+  "completeQueuedWithdrawals(uint256,IDelegationManagerTypes.Withdrawal[],IERC20[][],bool[])": "completeQueuedWithdrawals(uint256,(address,address,address,uint256,uint32,address[],uint256[])[],address[][],bool[])",
+  "requestExecutionLayerTriggeredWithdrawal(IEigenPodTypes.WithdrawalRequest[])": "requestExecutionLayerTriggeredWithdrawal((bytes,uint64)[])",
+  "requestConsolidation(IEigenPodTypes.ConsolidationRequest[])": "requestConsolidation((bytes,bytes)[])"
+ },
+ "check_trees": {
+  "paused()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_paused"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "return _paused_2",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

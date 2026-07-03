@@ -1,0 +1,121 @@
+{
+ "contract": "BoringVault",
+ "owner_vars_v2": [
+  "owner"
+ ],
+ "pause_v2": [],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "approve(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "transfer(address,uint256)",
+   [
+    "hook_update"
+   ],
+   [
+    "external_contract_call"
+   ]
+  ]
+ ],
+ "current": {
+  "supportsInterface(bytes4)": [],
+  "onERC1155Received(address,address,uint256,uint256,bytes)": [],
+  "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)": [],
+  "onERC721Received(address,address,uint256,bytes)": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "approve(address,uint256)": [
+   "hook_update"
+  ],
+  "transfer(address,uint256)": [
+   "hook_update"
+  ],
+  "transferFrom(address,address,uint256)": [
+   "external_contract_call"
+  ],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "manage(address,bytes,uint256)": [
+   "external_contract_call"
+  ],
+  "manage(address[],bytes[],uint256[])": [
+   "external_contract_call"
+  ],
+  "enter(address,ERC20,uint256,address,uint256)": [
+   "external_contract_call"
+  ],
+  "exit(address,ERC20,uint256,address,uint256)": [
+   "external_contract_call"
+  ],
+  "setBeforeTransferHook(address)": [
+   "hook_update"
+  ],
+  "receive()": []
+ },
+ "h1": {
+  "supportsInterface(bytes4)": [],
+  "onERC1155Received(address,address,uint256,uint256,bytes)": [],
+  "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)": [],
+  "onERC721Received(address,address,uint256,bytes)": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "approve(address,uint256)": [],
+  "transfer(address,uint256)": [
+   "external_contract_call"
+  ],
+  "transferFrom(address,address,uint256)": [
+   "external_contract_call"
+  ],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "manage(address,bytes,uint256)": [
+   "external_contract_call"
+  ],
+  "manage(address[],bytes[],uint256[])": [
+   "external_contract_call"
+  ],
+  "enter(address,ERC20,uint256,address,uint256)": [
+   "external_contract_call"
+  ],
+  "exit(address,ERC20,uint256,address,uint256)": [
+   "external_contract_call"
+  ],
+  "setBeforeTransferHook(address)": [
+   "hook_update"
+  ],
+  "receive()": []
+ },
+ "state_changing": {
+  "supportsInterface(bytes4)": false,
+  "onERC1155Received(address,address,uint256,uint256,bytes)": true,
+  "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)": true,
+  "onERC721Received(address,address,uint256,bytes)": true,
+  "setAuthority(Authority)": true,
+  "transferOwnership(address)": true,
+  "approve(address,uint256)": true,
+  "transfer(address,uint256)": true,
+  "transferFrom(address,address,uint256)": true,
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": true,
+  "DOMAIN_SEPARATOR()": false,
+  "manage(address,bytes,uint256)": true,
+  "manage(address[],bytes[],uint256[])": true,
+  "enter(address,ERC20,uint256,address,uint256)": true,
+  "exit(address,ERC20,uint256,address,uint256)": true,
+  "setBeforeTransferHook(address)": true,
+  "receive()": false
+ }
+}

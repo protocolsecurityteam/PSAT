@@ -1,0 +1,154 @@
+[
+  {
+    "label": "ownership_transfer",
+    "disposition": "redefine",
+    "claim_it_makes": "Rotates the scalar that authorizes callers as owner of this contract",
+    "evidence_required": "Tree tier: caller_authority equality leaf w/ msg.sender + scalar address-typed non-constant var (via _all_state_variables) + writer is state-changing non-view; OR selector+event tier: 0xf2fde38b/0x715018a6 + OwnershipTransferred",
+    "provenance_tier": "tree-proven | selector+event",
+    "hard_cases_passed": "OZv4 Ownable \u2713 (kept); OZ v5 L1SyncPoolETH owner()/setPeer/sweep FPs removed \u2713, transferOwnership kept via selector \u2713; Solady TopUp recovered via selector \u2713; FiatToken updateRescuer et al. correctly re-homed to authorized_caller_update \u2713; initialize keeps it only where owner write is attributable (EETH \u2713, OZ v5 initialize honest-silent)"
+  },
+  {
+    "label": "authorized_caller_update",
+    "disposition": "new",
+    "claim_it_makes": "Rotates a non-owner scalar that authorizes callers of specific gated functions",
+    "evidence_required": "Same tree harvest as ownership, var not in canonical-owner alias set",
+    "provenance_tier": "tree-proven",
+    "hard_cases_passed": "updatePauser/updateBlacklister/updateMasterMinter/updateRescuer (USDC/StakedTokenV1) \u2713; setL1SyncPool/setMessenger/setLockBox family \u2713 (were 'Transfers contract ownership')"
+  },
+  {
+    "label": "role_management",
+    "disposition": "keep",
+    "claim_it_makes": "Grants/revokes membership in a role-based access scheme",
+    "evidence_required": "Canonical ABI selector of OZ AccessControl / Solmate RolesAuthority setters (existing _ACCESS_CONTROL_SELECTORS)",
+    "provenance_tier": "selector",
+    "hard_cases_passed": "LayerZero composeQueue negative \u2713 (sendCompose/lzCompose unlabeled on real EndpointV2); Solmate RolesAuthority 0x3994741a \u2713; OZ Timelock grantRole \u2713; Maker wards NOT covered (documented FN-by-design; rely/deny fall to fact-text, no longer 'changes hook')"
+  },
+  {
+    "label": "authority_update",
+    "disposition": "keep",
+    "claim_it_makes": "Replaces the external authority contract consulted for permission checks",
+    "evidence_required": "Canonical selector setAuthority 0x7a9e5e4b (Solmate/DSAuth); dest:{name} substring detector (:498) deleted",
+    "provenance_tier": "selector",
+    "hard_cases_passed": "52/55 prod rows already canonical \u2713; the 3 substring-detector anomalies (initializeOnUpgrade, registerEth2DepositContract) stop being emitted"
+  },
+  {
+    "label": "pause_toggle",
+    "disposition": "redefine",
+    "claim_it_makes": "Toggles a flag that blocks/unblocks other functions of this contract",
+    "evidence_required": "PauseInfo derivation: writer caller/delegated-authority-gated + var revert-read by other fns (tree operand incl. member_path) + bool type or constant write polarity + writer not one_shot-gated + _all_state_variables lookup",
+    "provenance_tier": "tree-proven",
+    "hard_cases_passed": "modifier pause (USDC/StakedTokenV1/LiquidityPool) \u2713 kept; require pause (Teller) \u2713 recovered; struct pause (Accountant isPaused) \u2713 recovered w/ payoutAddress FP excluded; inherited private (_paused, EtherFiNodesManager) \u2713 after lookup fix; EigenLayer bitmask+PauserRegistry \u2713 after clobber fix (delegated_authority leaf verified); initialize \u00d731 prod FP class \u2713 removed; OneSig setExecutorRequired \u2713 removed; validatorSizeWei uint FP \u2713 excluded"
+  },
+  {
+    "label": "implementation_update",
+    "disposition": "redefine",
+    "claim_it_makes": "Changes which code executes behind this deployment (or its upgrade admin)",
+    "evidence_required": "Structural: fallback-reads-written-var OR slot-VALUE-matched assembly write; selector+marker: 0x3659cfe6/0x4f1ef286 + UUPS/1967 marker or Upgraded event; policy tier: classifier-verified 1967 slot on linked proxy",
+    "provenance_tier": "structural | selector+marker | proxy-verified",
+    "hard_cases_passed": "UUPS (EETH/LiquidityPool/EtherFiNodesManager/TransparentProxy) \u2713 10/10 recovered from 0; zos FiatTokenProxy \u2713 by slot-value matcher (designed; current string matcher verified failing); delegatecall_execution emphasis suppressed on the same fn \u2713"
+  },
+  {
+    "label": "proxy_admin_update",
+    "disposition": "new",
+    "claim_it_makes": "Changes the proxy admin who can upgrade this deployment",
+    "evidence_required": "changeAdmin 0x8f283970 + AdminChanged event (ERC-1967)",
+    "provenance_tier": "selector+event",
+    "hard_cases_passed": "FiatTokenProxy.changeAdmin (currently NOTHING) \u2713; TransparentUpgradeableProxy.changeAdmin (currently 'delegatecall path') \u2713"
+  },
+  {
+    "label": "hook_update",
+    "disposition": "redefine",
+    "claim_it_makes": "Changes a code pointer that a value-moving function of this contract calls at runtime",
+    "evidence_required": "Use-link: writes var X (address/contract-typed, IR identity not name-string); sibling fn has body-origin call to X and value/mapping-write sinks. Fallback tier DELETED",
+    "provenance_tier": "structural(use-link)",
+    "hard_cases_passed": "BoringVault.setBeforeTransferHook \u2713 kept (survives fallback deletion \u2014 verified fired by use-link); 53/54 measured mislabels (approve/transfer/deposit/withdraw/rely/deny/allowFrom\u00d76/pause-struct/updateX\u00d78/setDelegate\u2026) \u2713 removed; prod 340-row class collapses to the ~14 setBeforeTransferHook rows + fact-text"
+  },
+  {
+    "label": "external_contract_call",
+    "disposition": "redefine",
+    "claim_it_makes": "FACT ONLY: the function body makes an external call (no semantic weight)",
+    "evidence_required": "Body-origin external_call sink (guard-origin excluded)",
+    "provenance_tier": "fact",
+    "hard_cases_passed": "Teller.pause auth.canCall dilution \u2713 excluded by origin; views keep it as fact but carry no lane/severity weight (consumers already ignore it: primary_controller.py:161, company_overview.py:940)"
+  },
+  {
+    "label": "timelock_operation",
+    "disposition": "redefine",
+    "claim_it_makes": "Schedules/executes/cancels a timelocked operation or changes its delay",
+    "evidence_required": "TimelockController-family canonical selectors + hashOperation/AccessControl markers (was: produced nowhere)",
+    "provenance_tier": "selector+marker",
+    "hard_cases_passed": "EtherFiTimelock schedule/execute/cancel/updateDelay \u2713 (currently external_contract_call / asset_send / nothing); dead consumer branches at lane.js:36, protocolScore.js:177, meta.js:13 become live"
+  },
+  {
+    "label": "arbitrary_external_call",
+    "disposition": "redefine",
+    "claim_it_makes": "Forwards caller-supplied target and calldata (arbitrary execution)",
+    "evidence_required": "Body-origin external-call sink with parameter-tainted destination AND data (was: produced nowhere)",
+    "provenance_tier": "structural(taint)",
+    "hard_cases_passed": "BoringVault.manage \u2713 (currently plain external_contract_call at severity 0.45-hint vs deserved 0.95); OneSig.executeTransaction \u2713; Timelock.execute \u2713 (consumers already wired: protocolScore.js:170 execution 0.95, principal_enrichment.py:120 _manager)"
+  },
+  {
+    "label": "asset_send",
+    "disposition": "keep",
+    "claim_it_makes": "Sends value out of the contract",
+    "evidence_required": "Known-selector external call w/ direction corrected for from==this; low-level value call; native .transfer()/.send() IR ops (new)",
+    "provenance_tier": "selector | structural",
+    "hard_cases_passed": "WETH9.withdraw \u2713 recovered (currently 'changes hook'); recover*/sweep/execute \u2713 kept"
+  },
+  {
+    "label": "asset_pull",
+    "disposition": "keep",
+    "claim_it_makes": "Pulls value into the contract",
+    "evidence_required": "transferFrom-family selectors with from \u2260 address(this) (direction fix)",
+    "provenance_tier": "selector",
+    "hard_cases_passed": "EETH.recoverERC721 direction FP \u2713 becomes asset_send"
+  },
+  {
+    "label": "mint",
+    "disposition": "keep",
+    "claim_it_makes": "Increases token supply / contract share balances",
+    "evidence_required": "Known selector on external call; OR local tier: is_erc20 \u2227 writes totalSupply \u2227 IR '+' sign (new); totalSupply-sandwich detector rewritten off str(ir)",
+    "provenance_tier": "selector | structural",
+    "hard_cases_passed": "DAI.mint, BoringVault.enter, USDC.mint, BackingEigen.mint \u2713 recovered (currently invisible/external_contract_call)"
+  },
+  {
+    "label": "burn",
+    "disposition": "keep",
+    "claim_it_makes": "Decreases token supply / contract share balances",
+    "evidence_required": "Mirror of mint with '-' sign",
+    "provenance_tier": "selector | structural",
+    "hard_cases_passed": "DAI.burn, BoringVault.exit, WETH9.withdraw(+asset_send) \u2713"
+  },
+  {
+    "label": "contract_deployment",
+    "disposition": "keep",
+    "claim_it_makes": "Deploys a new contract",
+    "evidence_required": "contract_creation sink (NewContract IR)",
+    "provenance_tier": "fact",
+    "hard_cases_passed": "unchanged (6 prod rows, factory detection verified path)"
+  },
+  {
+    "label": "delegatecall_execution",
+    "disposition": "keep",
+    "claim_it_makes": "Executes delegatecall-controlled logic",
+    "evidence_required": "delegatecall sink, body-origin; suppressed when implementation_update selector tier explains the same sink",
+    "provenance_tier": "fact",
+    "hard_cases_passed": "proxies' fallback \u2713; upgradeTo emphasis corrected \u2713"
+  },
+  {
+    "label": "selfdestruct_capability",
+    "disposition": "keep",
+    "claim_it_makes": "Can destroy the contract",
+    "evidence_required": "selfdestruct sink",
+    "provenance_tier": "fact",
+    "hard_cases_passed": "no corpus instances; unchanged"
+  },
+  {
+    "label": "configures_transfer_policy_of(target)",
+    "disposition": "new",
+    "claim_it_makes": "Changes another contract's transfer gating (hook-side policy)",
+    "evidence_required": "POLICY tier: this contract's written set-var read by its hook fn + sibling's hook controller_value == this contract",
+    "provenance_tier": "policy(cross-artifact)",
+    "hard_cases_passed": "Teller.allowFrom/denyFrom \u2192 BoringVault \u2713 (replaces both the hook_update mislabel and the propagate-all contagion)"
+  }
+]

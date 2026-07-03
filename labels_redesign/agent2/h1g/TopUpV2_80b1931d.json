@@ -1,0 +1,24 @@
+{
+ "contract": "TopUpV2",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "initialize(address)": [],
+  "processTopUp(address[])": [
+   "asset_send"
+  ],
+  "receive()": [
+   "asset_send"
+  ],
+  "transferOwnership(address)": [],
+  "renounceOwnership()": [],
+  "requestOwnershipHandover()": [],
+  "cancelOwnershipHandover()": [],
+  "completeOwnershipHandover(address)": [],
+  "owner()": [],
+  "ownershipHandoverExpiresAt(address)": [],
+  "executeRecovery(address,address)": [
+   "external_contract_call"
+  ]
+ }
+}

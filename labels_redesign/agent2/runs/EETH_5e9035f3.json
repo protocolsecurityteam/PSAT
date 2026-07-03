@@ -1,0 +1,391 @@
+{
+ "address": "0x5e9035f3f4b5ce6bccb45010b4aecceb639e5242",
+ "contract": "EETH",
+ "owner_vars_from_trees": [
+  "_owner",
+  "liquidityPool"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [
+  "ERC20"
+ ],
+ "var_roles": {
+  "_owner": {
+   "type": "address",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": true,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "_initialized": {
+   "type": "uint8",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 1,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "liquidityPool": {
+   "type": "ILiquidityPool",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": true
+  },
+  "_initializing": {
+   "type": "bool",
+   "is_mapping": false,
+   "is_bool": true,
+   "is_address": false,
+   "gate_for_n_fns": 1,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "totalShares": {
+   "type": "uint256",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "shares": {
+   "type": "mapping(address => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "allowances": {
+   "type": "mapping(address => mapping(address => uint256))",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_IMPLEMENTATION_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 2,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_ADMIN_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_BEACON_SLOT": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "allowance(address,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "approve(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowances"
+   ]
+  },
+  "balanceOf(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "burnShares(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: shares, totalShares.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "shares",
+    "totalShares"
+   ]
+  },
+  "decimals()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "decreaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowances"
+   ]
+  },
+  "getImplementation()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "increaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowances"
+   ]
+  },
+  "initialize(address)": {
+   "labels": [
+    "pause_toggle",
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "_initialized",
+    "_initializing",
+    "_owner",
+    "liquidityPool"
+   ]
+  },
+  "mintShares(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: shares, totalShares.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "shares",
+    "totalShares"
+   ]
+  },
+  "name()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "proxiableUUID()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "shares(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "symbol()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "totalShares()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "totalSupply()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "writes": []
+  },
+  "transfer(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "shares"
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "allowances",
+    "shares"
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_owner"
+   ]
+  },
+  "upgradeTo(address)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  },
+  "upgradeToAndCall(address,bytes)": {
+   "labels": [
+    "delegatecall_execution"
+   ],
+   "summary": "Executes delegatecall-controlled logic.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "delegatecall",
+    "external_call"
+   ],
+   "writes": []
+  }
+ }
+}

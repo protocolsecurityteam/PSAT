@@ -1,0 +1,817 @@
+{
+ "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+ "label": "Accountant",
+ "contract_name": "AccountantWithRateProviders",
+ "compiler": "v0.8.21+commit.d9974bed",
+ "owner_vars_from_trees": [
+  "owner",
+  "vault"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "pause()": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "unpause()": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "getRate()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setAuthority(Authority)": {
+   "labels": [
+    "authority_update"
+   ],
+   "summary": "Updates the authority contract used for permission checks.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "authority"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updateDelay(uint24)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updateUpper(uint16)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updateLower(uint16)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updateManagementFee(uint16)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updatePerformanceFee(uint16)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updatePayoutAddress(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "setRateProviderData(ERC20,bool,address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "rateProviderData"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "resetHighwaterMark()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState",
+      "sv:accountantState"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "updateExchangeRate(uint96)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "claimFees(ERC20)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "accountantState"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:vault"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter",
+      "sv:accountantState",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "computed"
+     ]
+    }
+   ]
+  },
+  "getRateSafe()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState"
+     ]
+    }
+   ]
+  },
+  "getRateInQuote(ERC20)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getRateInQuoteSafe(ERC20)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:accountantState"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "pause()": [
+   "accountantState"
+  ],
+  "unpause()": [
+   "accountantState"
+  ],
+  "getRate()": [],
+  "setAuthority(Authority)": [
+   "authority"
+  ],
+  "transferOwnership(address)": [
+   "owner"
+  ],
+  "updateDelay(uint24)": [
+   "accountantState"
+  ],
+  "updateUpper(uint16)": [
+   "accountantState"
+  ],
+  "updateLower(uint16)": [
+   "accountantState"
+  ],
+  "updateManagementFee(uint16)": [
+   "accountantState"
+  ],
+  "updatePerformanceFee(uint16)": [
+   "accountantState"
+  ],
+  "updatePayoutAddress(address)": [
+   "accountantState"
+  ],
+  "setRateProviderData(ERC20,bool,address)": [
+   "rateProviderData"
+  ],
+  "resetHighwaterMark()": [
+   "accountantState"
+  ],
+  "updateExchangeRate(uint96)": [
+   "accountantState"
+  ],
+  "claimFees(ERC20)": [
+   "accountantState"
+  ],
+  "getRateSafe()": [],
+  "getRateInQuote(ERC20)": [],
+  "getRateInQuoteSafe(ERC20)": []
+ },
+ "guard_extraction_uncertain": []
+}

@@ -1,0 +1,71 @@
+{
+ "contract": "WETH9",
+ "owner_vars_v2": [],
+ "pause_v2": [],
+ "impl_fns": [],
+ "diffs": [
+  [
+   "approve(address,uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "deposit()",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "fallback()",
+   [
+    "hook_update"
+   ],
+   []
+  ],
+  [
+   "withdraw(uint256)",
+   [
+    "hook_update"
+   ],
+   []
+  ]
+ ],
+ "current": {
+  "fallback()": [
+   "hook_update"
+  ],
+  "deposit()": [
+   "hook_update"
+  ],
+  "withdraw(uint256)": [
+   "hook_update"
+  ],
+  "totalSupply()": [],
+  "approve(address,uint256)": [
+   "hook_update"
+  ],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": []
+ },
+ "h1": {
+  "fallback()": [],
+  "deposit()": [],
+  "withdraw(uint256)": [],
+  "totalSupply()": [],
+  "approve(address,uint256)": [],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": []
+ },
+ "state_changing": {
+  "fallback()": false,
+  "deposit()": true,
+  "withdraw(uint256)": true,
+  "totalSupply()": false,
+  "approve(address,uint256)": true,
+  "transfer(address,uint256)": true,
+  "transferFrom(address,address,uint256)": true
+ }
+}

@@ -1,0 +1,334 @@
+{
+ "address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+ "contract": "TimelockController",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [
+   "_minDelay"
+  ],
+  "pause_toggle_functions": [
+   "updateDelay(uint256)"
+  ]
+ },
+ "slither_ercs": [
+  "ERC165"
+ ],
+ "var_roles": {
+  "_roles": {
+   "type": "mapping(bytes32 => AccessControl.RoleData)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 7,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_minDelay": {
+   "type": "uint256",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_timestamps": {
+   "type": "mapping(bytes32 => uint256)",
+   "is_mapping": true,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "CANCELLER_ROLE": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "DEFAULT_ADMIN_ROLE": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "_DONE_TIMESTAMP": {
+   "type": "uint256",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "PROPOSER_ROLE": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  },
+  "EXECUTOR_ROLE": {
+   "type": "bytes32",
+   "is_mapping": false,
+   "is_bool": false,
+   "is_address": false,
+   "gate_for_n_fns": 0,
+   "modifier_calls_it": false,
+   "fallback_delegatecall_reads_it": false,
+   "caller_eq_in_predicate_tree": false
+  }
+ },
+ "functions": {
+  "cancel(bytes32)": {
+   "labels": [],
+   "summary": "Writes or calls into: _timestamps.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_timestamps"
+   ]
+  },
+  "execute(address,uint256,bytes,bytes32,bytes32)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "_timestamps"
+   ]
+  },
+  "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "writes": [
+    "_timestamps"
+   ]
+  },
+  "getMinDelay()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "getOperationState(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "getRoleAdmin(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "getTimestamp(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "grantRole(bytes32,address)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "hasRole(bytes32,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "hashOperation(address,uint256,bytes,bytes32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "hashOperationBatch(address[],uint256[],bytes[],bytes32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "isOperation(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "isOperationDone(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "isOperationPending(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "isOperationReady(bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "onERC1155Received(address,address,uint256,uint256,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "onERC721Received(address,address,uint256,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "receive()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "renounceRole(bytes32,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "revokeRole(bytes32,address)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "schedule(address,uint256,bytes,bytes32,bytes32,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: _timestamps.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_timestamps"
+   ]
+  },
+  "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: _timestamps.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_timestamps"
+   ]
+  },
+  "supportsInterface(bytes4)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "updateDelay(uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: _minDelay.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "_minDelay"
+   ]
+  }
+ }
+}

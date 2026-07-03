@@ -40,3 +40,11 @@ phase-b-results.md
 coverage.xml
 diff-cover.html
 diff-cover.md
+
+# Effect-labels fixture corpus (referenced by tests/label_corpus/manifest.json).
+# The generic `contracts/` rule above is meant for the CLI's output dir, but it
+# also matches the scaffolded corpus sources — both their top-level `contracts/`
+# dirs and the vendored `lib/*/contracts/` deps. Un-ignore those so the frozen
+# corpus is committable; the regenerated `out/`/`cache/` build dirs stay ignored.
+!labels_redesign/agent1/projects/**/contracts/
+!labels_redesign/agent1/projects/**/contracts/**

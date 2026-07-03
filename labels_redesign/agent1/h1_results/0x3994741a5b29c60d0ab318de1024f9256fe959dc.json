@@ -1,0 +1,50 @@
+{
+ "contract": "RolesAuthority",
+ "pause_info_fns": [],
+ "struct_pause": [],
+ "uups_marker": false,
+ "owner_vars_tight": [
+  "owner"
+ ],
+ "diffs": [],
+ "current": {
+  "canCall(address,address,bytes4)": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "doesUserHaveRole(address,uint8)": [],
+  "doesRoleHaveCapability(uint8,address,bytes4)": [],
+  "setPublicCapability(address,bytes4,bool)": [
+   "role_management"
+  ],
+  "setRoleCapability(uint8,address,bytes4,bool)": [
+   "role_management"
+  ],
+  "setUserRole(address,uint8,bool)": [
+   "role_management"
+  ]
+ },
+ "h1": {
+  "canCall(address,address,bytes4)": [],
+  "setAuthority(Authority)": [
+   "authority_update"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "doesUserHaveRole(address,uint8)": [],
+  "doesRoleHaveCapability(uint8,address,bytes4)": [],
+  "setPublicCapability(address,bytes4,bool)": [
+   "role_management"
+  ],
+  "setRoleCapability(uint8,address,bytes4,bool)": [
+   "role_management"
+  ],
+  "setUserRole(address,uint8,bool)": [
+   "role_management"
+  ]
+ }
+}

@@ -1,0 +1,12 @@
+{
+ "StrategyManager_impl": {
+  "ok": true,
+  "n_fns": 39,
+  "owner_vars": [
+   "_owner",
+   "delegation",
+   "strategyWhitelister"
+  ],
+  "pause_vars": []
+ }
+}

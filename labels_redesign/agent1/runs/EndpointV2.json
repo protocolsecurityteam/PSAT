@@ -1,0 +1,1672 @@
+{
+ "address": "0x1a44076050125825900e736c501f859c50fe728c",
+ "label": "EndpointV2",
+ "contract_name": "EndpointV2",
+ "compiler": "v0.8.22+commit.4fc1097e",
+ "owner_vars_from_trees": [
+  "_owner"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [
+   "_sendContext"
+  ],
+  "reentrancy_guarded_functions": [
+   "send(MessagingParams,address)"
+  ]
+ },
+ "functions": {
+  "isSendingMessage()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getSendContext()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "sendCompose(address,bytes32,uint16,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "set:composeQueue"
+     ]
+    }
+   ]
+  },
+  "lzCompose(address,address,bytes32,uint16,bytes,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "lzComposeAlert(address,address,bytes32,uint16,uint256,uint256,bytes,bytes,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "composeQueue(address,address,bytes32,uint16)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getRegisteredLibraries()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getSendLibrary(address,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "isDefaultSendLibrary(address,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getReceiveLibrary(address,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "isValidReceiveLibrary(address,uint32,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "registerLibrary(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "setDefaultSendLibrary(uint32,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "setDefaultReceiveLibrary(uint32,address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "setDefaultReceiveLibraryTimeout(uint32,address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "block_context"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "isSupportedEid(uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setSendLibrary(address,uint32,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:DEFAULT_LIB"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "setReceiveLibrary(address,uint32,address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:DEFAULT_LIB"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:DEFAULT_LIB"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:DEFAULT_LIB"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "setReceiveLibraryTimeout(address,uint32,address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "block_context"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "setConfig(address,address,SetConfigParam[])": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    }
+   ]
+  },
+  "getConfig(address,address,uint32,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:isRegisteredLibrary"
+     ]
+    }
+   ]
+  },
+  "isRegisteredLibrary(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "defaultSendLibrary(uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "defaultReceiveLibrary(uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "defaultReceiveLibraryTimeout(uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "receiveLibraryTimeout(address,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "inboundNonce(address,uint32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "skip(address,uint32,bytes32,uint64)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "view_call"
+     ]
+    }
+   ]
+  },
+  "nilify(address,uint32,bytes32,uint64,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:EMPTY_PAYLOAD_HASH"
+     ]
+    }
+   ]
+  },
+  "burn(address,uint32,bytes32,uint64,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:EMPTY_PAYLOAD_HASH"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "nextGuid(address,uint32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "eid()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "outboundNonce(address,uint32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "inboundPayloadHash(address,uint32,bytes32,uint64)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "lazyInboundNonce(address,uint32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "quote(MessagingParams,address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:lzToken"
+     ]
+    }
+   ]
+  },
+  "send(MessagingParams,address)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_sendContext",
+    "outboundNonce"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:lzToken"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "top",
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "top",
+      "view_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "top",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "top",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "top"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_sendContext",
+      "sv:NOT_ENTERED"
+     ]
+    }
+   ]
+  },
+  "verify(Origin,address,bytes32)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "inboundPayloadHash"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "view_call"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "block_context"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "parameter",
+      "set:inboundPayloadHash"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:EMPTY_PAYLOAD_HASH"
+     ]
+    }
+   ]
+  },
+  "verifiable(Origin,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "initializable(Origin,address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "lzReceive(Origin,address,bytes32,bytes,bytes)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "inboundPayloadHash",
+    "lazyInboundNonce"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "parameter",
+      "set:inboundPayloadHash"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "clear(address,Origin,bytes32,bytes)": {
+   "labels": [],
+   "summary": "Writes or calls into: lazyInboundNonce, inboundPayloadHash.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "inboundPayloadHash",
+    "lazyInboundNonce"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter",
+      "parameter",
+      "set:inboundPayloadHash"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "computed"
+     ]
+    }
+   ]
+  },
+  "setLzToken(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "lzToken"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "lzToken()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "nativeToken()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setDelegate(address)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "delegates"
+   ],
+   "leaves": []
+  },
+  "lzReceiveAlert(Origin,address,bytes32,uint256,uint256,bytes,bytes,bytes)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "recoverToken(address,address,uint256)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:ADDRESS_ZERO"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "unsupported",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": []
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "isSendingMessage()": [],
+  "getSendContext()": [],
+  "sendCompose(address,bytes32,uint16,bytes)": [],
+  "lzCompose(address,address,bytes32,uint16,bytes,bytes)": [],
+  "lzComposeAlert(address,address,bytes32,uint16,uint256,uint256,bytes,bytes,bytes)": [],
+  "composeQueue(address,address,bytes32,uint16)": [],
+  "getRegisteredLibraries()": [],
+  "getSendLibrary(address,uint32)": [],
+  "isDefaultSendLibrary(address,uint32)": [],
+  "getReceiveLibrary(address,uint32)": [],
+  "isValidReceiveLibrary(address,uint32,address)": [],
+  "registerLibrary(address)": [],
+  "setDefaultSendLibrary(uint32,address)": [],
+  "setDefaultReceiveLibrary(uint32,address,uint256)": [],
+  "setDefaultReceiveLibraryTimeout(uint32,address,uint256)": [],
+  "isSupportedEid(uint32)": [],
+  "setSendLibrary(address,uint32,address)": [],
+  "setReceiveLibrary(address,uint32,address,uint256)": [],
+  "setReceiveLibraryTimeout(address,uint32,address,uint256)": [],
+  "setConfig(address,address,SetConfigParam[])": [],
+  "getConfig(address,address,uint32,uint32)": [],
+  "isRegisteredLibrary(address)": [],
+  "defaultSendLibrary(uint32)": [],
+  "defaultReceiveLibrary(uint32)": [],
+  "defaultReceiveLibraryTimeout(uint32)": [],
+  "receiveLibraryTimeout(address,uint32)": [],
+  "owner()": [],
+  "renounceOwnership()": [
+   "_owner"
+  ],
+  "transferOwnership(address)": [
+   "_owner"
+  ],
+  "inboundNonce(address,uint32,bytes32)": [],
+  "skip(address,uint32,bytes32,uint64)": [],
+  "nilify(address,uint32,bytes32,uint64,bytes32)": [],
+  "burn(address,uint32,bytes32,uint64,bytes32)": [],
+  "nextGuid(address,uint32,bytes32)": [],
+  "eid()": [],
+  "outboundNonce(address,uint32,bytes32)": [],
+  "inboundPayloadHash(address,uint32,bytes32,uint64)": [],
+  "lazyInboundNonce(address,uint32,bytes32)": [],
+  "quote(MessagingParams,address)": [],
+  "send(MessagingParams,address)": [
+   "_sendContext",
+   "outboundNonce"
+  ],
+  "verify(Origin,address,bytes32)": [
+   "inboundPayloadHash"
+  ],
+  "verifiable(Origin,address)": [],
+  "initializable(Origin,address)": [],
+  "lzReceive(Origin,address,bytes32,bytes,bytes)": [
+   "inboundPayloadHash",
+   "lazyInboundNonce"
+  ],
+  "clear(address,Origin,bytes32,bytes)": [
+   "inboundPayloadHash",
+   "lazyInboundNonce"
+  ],
+  "setLzToken(address)": [
+   "lzToken"
+  ],
+  "lzToken()": [],
+  "nativeToken()": [],
+  "setDelegate(address)": [
+   "delegates"
+  ],
+  "lzReceiveAlert(Origin,address,bytes32,uint256,uint256,bytes,bytes,bytes)": [],
+  "recoverToken(address,address,uint256)": []
+ },
+ "guard_extraction_uncertain": []
+}

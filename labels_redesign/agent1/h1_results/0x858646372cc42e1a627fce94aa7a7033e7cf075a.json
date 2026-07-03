@@ -1,0 +1,73 @@
+{
+ "contract": "TransparentUpgradeableProxy",
+ "pause_info_fns": [],
+ "struct_pause": [],
+ "uups_marker": true,
+ "owner_vars_tight": [],
+ "diffs": [
+  [
+   "upgradeTo(address)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ],
+  [
+   "upgradeToAndCall(address,bytes)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ]
+ ],
+ "current": {
+  "fallback()": [
+   "delegatecall_execution"
+  ],
+  "receive()": [
+   "delegatecall_execution"
+  ],
+  "admin()": [
+   "delegatecall_execution"
+  ],
+  "implementation()": [
+   "delegatecall_execution"
+  ],
+  "changeAdmin(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeTo(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ]
+ },
+ "h1": {
+  "fallback()": [
+   "delegatecall_execution"
+  ],
+  "receive()": [
+   "delegatecall_execution"
+  ],
+  "admin()": [
+   "delegatecall_execution"
+  ],
+  "implementation()": [
+   "delegatecall_execution"
+  ],
+  "changeAdmin(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeTo(address)": [
+   "implementation_update"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "implementation_update"
+  ]
+ }
+}

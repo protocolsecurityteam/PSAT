@@ -1,0 +1,8 @@
+[
+  {"address": "0xC02aaa39b223FE8D0A0e5C4F27eAD9083C756Cc2", "label": "WETH9"},
+  {"address": "0xcb3d917a965a70214f430a135154cd5adda2ad84", "label": "EETH_impl"},
+  {"address": "0x7223442cad8e9ca474fc40109ab981608f8c4273", "label": "BoringVault"},
+  {"address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35", "label": "Teller"},
+  {"address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b", "label": "Accountant"},
+  {"address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc", "label": "RolesAuthority"}
+]

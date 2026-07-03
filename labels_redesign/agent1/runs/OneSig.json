@@ -1,0 +1,695 @@
+{
+ "address": "0xbe010a7e3686fdf65e93344ab664d065a0b02478",
+ "label": "OneSig",
+ "contract_name": "OneSig",
+ "compiler": "v0.8.22+commit.4fc1097e",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [
+   "_status"
+  ],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "setExecutorRequired(bool)": {
+   "labels": [
+    "pause_toggle"
+   ],
+   "summary": "Changes the contract pause state.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "executorRequired"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "self_address"
+     ]
+    }
+   ]
+  },
+  "setExecutor(address,bool)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:executorSet",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:executorSet",
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "self_address"
+     ]
+    }
+   ]
+  },
+  "getExecutors()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "isExecutor(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalExecutors()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setThreshold(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "threshold"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "self_address"
+     ]
+    }
+   ]
+  },
+  "setSigner(address,bool)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "view_call",
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "self_address"
+     ]
+    }
+   ]
+  },
+  "verifySignatures(bytes32,bytes)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "verifyNSignatures(bytes32,bytes,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "getSigners()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "isSigner(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalSigners()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setSeed(bytes32)": {
+   "labels": [],
+   "summary": "Writes or calls into: seed.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "seed"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "self_address"
+     ]
+    }
+   ]
+  },
+  "executeTransaction(OneSig.Transaction,bytes32,uint256,bytes)": {
+   "labels": [
+    "asset_send"
+   ],
+   "summary": "Sends assets out of the contract.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_status",
+    "nonce"
+   ],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "block_context",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "reentrancy",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:_status",
+      "sv:ENTERED"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "sv:executorRequired"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:executorSet"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "sv:signerSet"
+     ]
+    }
+   ]
+  },
+  "verifyMerkleRoot(bytes32,uint256,bytes)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "block_context",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "sv:threshold"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gt",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "external_call"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:signerSet",
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "verifyTransactionProof(bytes32,OneSig.Transaction)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "external_call"
+     ]
+    }
+   ]
+  },
+  "encodeLeaf(uint64,OneSig.Call[])": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "canExecuteTransaction(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "receive()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  }
+ },
+ "written_by_fn": {
+  "setExecutorRequired(bool)": [
+   "executorRequired"
+  ],
+  "setExecutor(address,bool)": [],
+  "getExecutors()": [],
+  "isExecutor(address)": [],
+  "totalExecutors()": [],
+  "setThreshold(uint256)": [
+   "threshold"
+  ],
+  "setSigner(address,bool)": [],
+  "verifySignatures(bytes32,bytes)": [],
+  "verifyNSignatures(bytes32,bytes,uint256)": [],
+  "getSigners()": [],
+  "isSigner(address)": [],
+  "totalSigners()": [],
+  "setSeed(bytes32)": [
+   "seed"
+  ],
+  "executeTransaction(OneSig.Transaction,bytes32,uint256,bytes)": [
+   "_status",
+   "nonce"
+  ],
+  "verifyMerkleRoot(bytes32,uint256,bytes)": [],
+  "verifyTransactionProof(bytes32,OneSig.Transaction)": [],
+  "encodeLeaf(uint64,OneSig.Call[])": [],
+  "canExecuteTransaction(address)": [],
+  "receive()": []
+ },
+ "guard_extraction_uncertain": []
+}

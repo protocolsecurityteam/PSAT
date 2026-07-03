@@ -1,0 +1,67 @@
+{
+ "contract": "SafeL2",
+ "pause_toggle_functions": [
+  "addOwnerWithThreshold(address,uint256)",
+  "changeThreshold(uint256)",
+  "removeOwner(address,address,uint256)",
+  "setupOwners(address[],uint256)"
+ ],
+ "pause_state_vars": [
+  "ownerCount",
+  "threshold"
+ ],
+ "functions": {
+  "setup(address[],uint256,address,bytes,address,address,uint256,address)": [
+   "asset_send",
+   "delegatecall_execution"
+  ],
+  "execTransaction(address,uint256,bytes,Enum.Operation,uint256,uint256,uint256,address,address,bytes)": [
+   "asset_send",
+   "delegatecall_execution"
+  ],
+  "checkSignatures(bytes32,bytes,bytes)": [
+   "external_contract_call"
+  ],
+  "checkNSignatures(bytes32,bytes,bytes,uint256)": [
+   "external_contract_call"
+  ],
+  "approveHash(bytes32)": [],
+  "getChainId()": [],
+  "domainSeparator()": [],
+  "encodeTransactionData(address,uint256,bytes,Enum.Operation,uint256,uint256,uint256,address,address,uint256)": [],
+  "getTransactionHash(address,uint256,bytes,Enum.Operation,uint256,uint256,uint256,address,address,uint256)": [],
+  "setGuard(address)": [
+   "external_contract_call"
+  ],
+  "getStorageAt(uint256,uint256)": [],
+  "simulateAndRevert(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "setFallbackHandler(address)": [],
+  "fallback()": [],
+  "addOwnerWithThreshold(address,uint256)": [
+   "pause_toggle"
+  ],
+  "removeOwner(address,address,uint256)": [
+   "pause_toggle"
+  ],
+  "swapOwner(address,address,address)": [],
+  "changeThreshold(uint256)": [
+   "pause_toggle"
+  ],
+  "getThreshold()": [],
+  "isOwner(address)": [],
+  "getOwners()": [],
+  "enableModule(address)": [],
+  "disableModule(address,address)": [],
+  "execTransactionFromModule(address,uint256,bytes,Enum.Operation)": [
+   "delegatecall_execution"
+  ],
+  "execTransactionFromModuleReturnData(address,uint256,bytes,Enum.Operation)": [
+   "delegatecall_execution"
+  ],
+  "isModuleEnabled(address)": [],
+  "getModulesPaginated(address,uint256)": [],
+  "receive()": []
+ }
+}

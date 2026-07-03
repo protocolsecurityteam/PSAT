@@ -1,0 +1,962 @@
+{
+ "address": "0xf2b225815f70c9b327dc9db758a36c92a4279b17",
+ "label": "BackingEigen",
+ "contract_name": "BackingEigen",
+ "compiler": "v0.8.12+commit.f00d7308",
+ "owner_vars_from_trees": [
+  "_owner"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "clock()": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "CLOCK_MODE()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "checkpoints(address,uint32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "numCheckpoints(address)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": false,
+   "sink_kinds": [
+    "external_call"
+   ],
+   "state_writes": [],
+   "leaves": []
+  },
+  "delegates(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getVotes(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "getPastVotes(address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "view_call"
+     ]
+    }
+   ]
+  },
+  "getPastTotalSupply(uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "view_call"
+     ]
+    }
+   ]
+  },
+  "delegate(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "block_context",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "view_call"
+     ]
+    }
+   ]
+  },
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "time",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "block_context",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "external_call",
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "nonces(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "DOMAIN_SEPARATOR()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "eip712Domain()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_hashedName"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_hashedVersion"
+     ]
+    }
+   ]
+  },
+  "name()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "symbol()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "decimals()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "totalSupply()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "balanceOf(address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "transfer(address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "set:allowedFrom"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:allowedTo"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "allowance(address,address)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "approve(address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": true,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:allowedFrom"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "set:allowedTo"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": false,
+     "refs": [
+      "parameter",
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "increaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_allowances"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "decreaseAllowance(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_allowances"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "gte",
+     "msg_sender": true,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": true,
+     "refs": []
+    },
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    }
+   ]
+  },
+  "owner()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "renounceOwnership()": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "_owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "parameter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "setIsMinter(address,bool)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "isMinter"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "mint(address,uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_balances",
+    "_totalSupply",
+    "_totalSupplyCheckpoints"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "membership",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "set:isMinter"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "sv:_totalSupply",
+      "view_call"
+     ]
+    }
+   ]
+  },
+  "burn(uint256)": {
+   "labels": [
+    "external_contract_call"
+   ],
+   "summary": "Calls an external contract from the contract context.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_balances",
+    "_totalSupply",
+    "_totalSupplyCheckpoints"
+   ],
+   "leaves": []
+  },
+  "initialize(address)": {
+   "labels": [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "_balances",
+    "_hashedName",
+    "_hashedVersion",
+    "_initialized",
+    "_initializing",
+    "_name",
+    "_owner",
+    "_symbol",
+    "_totalSupply",
+    "_totalSupplyCheckpoints",
+    "_version",
+    "allowedFrom",
+    "allowedTo",
+    "transferRestrictionsDisabledAfter"
+   ],
+   "leaves": [
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "comparison",
+     "op": "lte",
+     "msg_sender": false,
+     "refs": [
+      "sv:_totalSupply",
+      "view_call"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "truthy",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initializing"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "comparison",
+     "op": "lt",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    },
+    {
+     "role": "business",
+     "kind": "external_bool",
+     "op": "falsy",
+     "msg_sender": false,
+     "refs": [
+      "self_address"
+     ]
+    },
+    {
+     "role": "one_shot",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:_initialized"
+     ]
+    }
+   ]
+  },
+  "setAllowedFrom(address,bool)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "allowedFrom"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "setAllowedTo(address,bool)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "allowedTo"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  },
+  "disableTransferRestrictions()": {
+   "labels": [],
+   "summary": "Writes or calls into: transferRestrictionsDisabledAfter.",
+   "state_changing": true,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "state_writes": [
+    "transferRestrictionsDisabledAfter"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": false,
+     "refs": [
+      "sv:transferRestrictionsDisabledAfter"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:_owner"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "clock()": [],
+  "CLOCK_MODE()": [],
+  "checkpoints(address,uint32)": [],
+  "numCheckpoints(address)": [],
+  "delegates(address)": [],
+  "getVotes(address)": [],
+  "getPastVotes(address,uint256)": [],
+  "getPastTotalSupply(uint256)": [],
+  "delegate(address)": [],
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": [],
+  "nonces(address)": [],
+  "DOMAIN_SEPARATOR()": [],
+  "eip712Domain()": [],
+  "name()": [],
+  "symbol()": [],
+  "decimals()": [],
+  "totalSupply()": [],
+  "balanceOf(address)": [],
+  "transfer(address,uint256)": [],
+  "allowance(address,address)": [],
+  "approve(address,uint256)": [],
+  "transferFrom(address,address,uint256)": [],
+  "increaseAllowance(address,uint256)": [
+   "_allowances"
+  ],
+  "decreaseAllowance(address,uint256)": [
+   "_allowances"
+  ],
+  "owner()": [],
+  "renounceOwnership()": [
+   "_owner"
+  ],
+  "transferOwnership(address)": [
+   "_owner"
+  ],
+  "setIsMinter(address,bool)": [
+   "isMinter"
+  ],
+  "mint(address,uint256)": [
+   "_balances",
+   "_totalSupply",
+   "_totalSupplyCheckpoints"
+  ],
+  "burn(uint256)": [
+   "_balances",
+   "_totalSupply",
+   "_totalSupplyCheckpoints"
+  ],
+  "initialize(address)": [
+   "_balances",
+   "_hashedName",
+   "_hashedVersion",
+   "_initialized",
+   "_initializing",
+   "_name",
+   "_owner",
+   "_symbol",
+   "_totalSupply",
+   "_totalSupplyCheckpoints",
+   "_version",
+   "allowedFrom",
+   "allowedTo",
+   "transferRestrictionsDisabledAfter"
+  ],
+  "setAllowedFrom(address,bool)": [
+   "allowedFrom"
+  ],
+  "setAllowedTo(address,bool)": [
+   "allowedTo"
+  ],
+  "disableTransferRestrictions()": [
+   "transferRestrictionsDisabledAfter"
+  ]
+ },
+ "guard_extraction_uncertain": []
+}

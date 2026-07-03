@@ -1,0 +1,477 @@
+authority_update|RolesAuthority|setAuthority|15|0x02904af5c3be78481528e0f01780439f024109a6|{"Updates the authority contract used for permission checks."}
+authority_update|BoringVault|setAuthority|13|0x08c6f91e2b681faf5e17227f2a44c307b3c1364c|{"Updates the authority contract used for permission checks."}
+authority_update|AccountantWithRateProviders|setAuthority|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates the authority contract used for permission checks."}
+authority_update|TellerWithMultiAssetSupport|setAuthority|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates the authority contract used for permission checks."}
+authority_update|LayerZeroTellerWithRateLimiting|setAuthority|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates the authority contract used for permission checks."}
+authority_update|BoringGovernance|setAuthority|1|0x86b5780b606940eb59a062aa85a07959518c0161|{"Updates the authority contract used for permission checks."}
+authority_update|EtherFiStaking|initialize|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Updates the authority contract used for permission checks."}
+authority_update|PaymentSplitter|setAuthority|1|0x25e8162d09239fb5be50e5df18adc1ed35533e61|{"Updates the authority contract used for permission checks."}
+authority_update|StakingManagerV2|registerEth2DepositContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Updates the authority contract used for permission checks."}
+authority_update|WithdrawRequestNFT|initializeOnUpgrade|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Updates the authority contract used for permission checks."}
+contract_deployment|AvsOperatorManager|initialize|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Transfers contract ownership."}
+contract_deployment|AvsOperatorManager|instantiateEtherFiAvsOperator|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Deploys a new contract instance."}
+contract_deployment|StakingManager|instantiateEtherFiNode|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Deploys a new contract instance."}
+contract_deployment|StakingManagerV2|registerEtherFiNodeImplementationContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Deploys a new contract instance."}
+contract_deployment|wstETH_Burner|triggerBurn|1|0xa7581ebe7870a220360d216c3404ff7cb79b2a0f|{"Deploys a new contract instance."}
+contract_deployment|wstETH_Burner|triggerBurnBatch|1|0xa7581ebe7870a220360d216c3404ff7cb79b2a0f|{"Deploys a new contract instance."}
+hook_update|BoringVault|transfer|13|0x08c6f91e2b681faf5e17227f2a44c307b3c1364c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BoringVault|approve|13|0x08c6f91e2b681faf5e17227f2a44c307b3c1364c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BoringVault|setBeforeTransferHook|13|0x08c6f91e2b681faf5e17227f2a44c307b3c1364c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|pause|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|unpause|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updateUpper|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updatePayoutAddress|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updateLower|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updateDelay|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updatePerformanceFee|9|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|deposit|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Calls an external contract from the contract context."}
+hook_update|TellerWithMultiAssetSupport|allowTo|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|denyFrom|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|denyOperator|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|denyTo|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|allowFrom|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|TellerWithMultiAssetSupport|allowOperator|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updateExchangeRate|5|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updateManagementFee|5|0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|previewUpdateExchangeRate|5|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AccountantWithRateProviders|updatePlatformFee|5|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|allowTo|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|denyFrom|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|deposit|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Calls an external contract from the contract context."}
+hook_update|LayerZeroTellerWithRateLimiting|denyTo|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|allowFrom|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|allowOperator|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|denyOperator|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipManager|updateTier|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipManager|updateAdmin|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AVSDirectory|cancelSalt|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AVSDirectory|deregisterOperatorFromAVS|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AddressProvider|updateContractImplementation|1|0x20ee00f43ef299dba82ba6fef537756dabe38cc7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AddressProvider|reactivateContract|1|0x20ee00f43ef299dba82ba6fef537756dabe38cc7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AddressProvider|deactivateContract|1|0x20ee00f43ef299dba82ba6fef537756dabe38cc7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AllocationManager|updateAVSMetadataURI|1|0xda2a68d318a571dd550f2ecbcb09bf50497e97c4|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AuctionManager|updateNodeOperatorManager|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AuctionManager|initializeOnUpgrade|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AuctionManager|updateAdmin|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AvsOperator|updateAvsNodeRunner|1|0xf4718766a7fc8c81f788669b0985fac03d064d29|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AvsOperator|updateEcdsaSigner|1|0xf4718766a7fc8c81f788669b0985fac03d064d29|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AvsOperatorManager|initializeAvsDirectory|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AvsOperatorManager|updateAllowedOperatorCalls|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|AvsOperatorManager|updateAdmin|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BackingEigen|setAllowedTo|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BackingEigen|setAllowedFrom|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BackingEigen|decreaseAllowance|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BackingEigen|increaseAllowance|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BackingEigen|setIsMinter|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BoringGovernance|setBeforeTransferHook|1|0x86b5780b606940eb59a062aa85a07959518c0161|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BoringGovernance|setShareLocker|1|0x86b5780b606940eb59a062aa85a07959518c0161|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|BoringVaultPriceProvider|setPriceProvider|1|0x130e22952dd3de2c80ebdfc2b256e344ff3a0729|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EETH|decreaseAllowance|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EETH|approve|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EETH|increaseAllowance|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EETH|transfer|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EarlyAdopterPool|depositEther|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EarlyAdopterPool|setClaimReceiverContract|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Eigen|increaseAllowance|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Eigen|setAllowedFrom|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Eigen|decreaseAllowance|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Eigen|setAllowedTo|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EndpointV2|setDelegate|1|0x1a44076050125825900e736c501f859c50fe728c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EndpointV2|verify|1|0x1a44076050125825900e736c501f859c50fe728c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EndpointV2|setLzToken|1|0x1a44076050125825900e736c501f859c50fe728c|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiAdmin|initializeRoleRegistry|1|0xd50f28485a75a1fde432ba7d012d0e2543d2f20d|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiNodesManager|updateAllowedForwardedExternalCalls|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiNodesManager|updateAllowedForwardedEigenpodCalls|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiOracle|setEtherFiAdmin|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiOracle|updateAdmin|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRateLimiter|updateConsumers|1|0x1dd43c32f03f8a74b8160926d559d34358880a89|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRedemptionManager|setExitFeeBasisPoints|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRedemptionManager|setLowWatermarkInBpsOfTvl|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRedemptionManager|setExitFeeSplitToTreasuryInBps|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRestaker|updateAdmin|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|EtherFiRestaker|updatePauser|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setDepositors|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setRateLimitTimePeriod|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setPercentageRateLimit|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setPauser|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setFee|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|updateTokenPositionWeightLimit|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|updatePriceProvider|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setSwapper|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|setTreasuryAddress|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LRTSquaredAdmin|updateWhitelist|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|denyPermissionedOperator|1|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|allowPermissionedOperator|1|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|denyAll|1|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|LayerZeroTellerWithRateLimiting|allowAll|1|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|transferShares|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|burnShares|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|fallback|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|mintExternalShares|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|mintShares|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Lido|submit|1|0x6ca84080381e43938476814be61b779a8bb6a600|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|updateDepositCap|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|updateDiscountInBasisPoints|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|updatePauser|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|updateWhitelistedToken|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|initializeOnUpgrade|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|Liquifier|updateAdmin|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipNFT|safeBatchTransferFrom|1|0x290d981b41b713437265cd7846806d7500307106|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipNFT|safeTransferFrom|1|0x290d981b41b713437265cd7846806d7500307106|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipNFT|setApprovalForAll|1|0x290d981b41b713437265cd7846806d7500307106|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipNFT|updateAdmin|1|0x290d981b41b713437265cd7846806d7500307106|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MembershipNFT|burn|1|0x290d981b41b713437265cd7846806d7500307106|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MockEtherFiAdmin|updateAdmin|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|MockEtherFiAdmin|updatePauser|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|NodeOperatorManager|batchUpdateOperatorsApprovedTags|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|NodeOperatorManager|fetchNextKeyIndex|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|NodeOperatorManager|removeFromWhitelist|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|NodeOperatorManager|addToWhitelist|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|NodeOperatorManager|updateAdmin|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|PauserRegistry|setIsPauser|1|0xb8765ed72235d279c3fb53936e4606db0ef12806|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|PaymentSplitter|adjustSplits|1|0x25e8162d09239fb5be50e5df18adc1ed35533e61|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|PriceProvider|setTokenConfig|1|0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|RewardsCoordinator|setFeeRecipient|1|0xa0673c53980665a706352412d2538ba005403c26|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|RewardsCoordinator|setRewardsForAllSubmitter|1|0xa0673c53980665a706352412d2538ba005403c26|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|RewardsCoordinator|disableRoot|1|0xa0673c53980665a706352412d2538ba005403c26|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|RewardsCoordinator|setClaimerFor|1|0xa0673c53980665a706352412d2538ba005403c26|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|RewardsCoordinator|setOptInForProtocolFee|1|0xa0673c53980665a706352412d2538ba005403c26|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|SafeL2|approveHash|1|0x29fcb43b46531bca003ddc8fcb67ffe91900c762|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|SafeL2|disableModule|1|0x29fcb43b46531bca003ddc8fcb67ffe91900c762|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|SafeL2|enableModule|1|0x29fcb43b46531bca003ddc8fcb67ffe91900c762|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|SafeL2|swapOwner|1|0x29fcb43b46531bca003ddc8fcb67ffe91900c762|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|ScoreManager|setCallerStatus|1|0xb034d69b313a943cce0885fc454ba5c711f4f502|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|unBlacklist|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|transfer|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|increaseAllowance|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|decreaseAllowance|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|cancelAuthorization|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|blacklist|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakedTokenV1|approve|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakingManager|backfillExistingEtherFiNodes|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakingManagerV2|registerBNFTContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|StakingManagerV2|registerTNFTContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|UnwrapTokenV1ETH|setEthBackAddress|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|UnwrapTokenV1ETH|unBlacklist|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|UnwrapTokenV1ETH|blacklist|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WETH9|approve|1|0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WETH9|deposit|1|0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WETH9|fallback|1|0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WETH9|withdraw|1|0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WeETH|decreaseAllowance|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WeETH|increaseAllowance|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WithdrawRequestNFT|initializeOnUpgrade|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Updates the authority contract used for permission checks."}
+hook_update|WrapTokenV3ETH|approve|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|blacklist|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|cancelAuthorization|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|decreaseAllowance|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|increaseAllowance|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|transfer|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+hook_update|WrapTokenV3ETH|unBlacklist|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Updates hook configuration that can affect later contract behavior."}
+mint|MembershipManager|wrapEth|4|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Mints contract balances or shares."}
+mint|MembershipManager|wrapEthForEap|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Mints contract balances or shares."}
+ownership_transfer|RolesAuthority|transferOwnership|15|0x02904af5c3be78481528e0f01780439f024109a6|{"Transfers contract ownership."}
+ownership_transfer|BoringVault|transferOwnership|13|0x08c6f91e2b681faf5e17227f2a44c307b3c1364c|{"Transfers contract ownership."}
+ownership_transfer|AccountantWithRateProviders|transferOwnership|10|0x04b8136820598a4e50bee21b8b6a23fe25df9bd8|{"Transfers contract ownership."}
+ownership_transfer|MerkleDistributorWithDeadline|renounceOwnership|8|0x0c1e1a20566321de81841e61a75b2b949610cb39|{"Transfers contract ownership."}
+ownership_transfer|MerkleDistributorWithDeadline|transferOwnership|8|0x0c1e1a20566321de81841e61a75b2b949610cb39|{"Transfers contract ownership."}
+ownership_transfer|TellerWithMultiAssetSupport|transferOwnership|8|0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35|{"Transfers contract ownership."}
+ownership_transfer|LayerZeroTellerWithRateLimiting|transferOwnership|4|0x35dd2463fa7a335b721400c5ad8ba40bd85c179b|{"Transfers contract ownership."}
+ownership_transfer|AddressProvider|setOwner|2|0x20ee00f43ef299dba82ba6fef537756dabe38cc7|{"Transfers contract ownership."}
+ownership_transfer|MembershipManager|initializeOnUpgrade|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Transfers contract ownership."}
+ownership_transfer|MembershipManager|renounceOwnership|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Transfers contract ownership."}
+ownership_transfer|MembershipManager|transferOwnership|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Transfers contract ownership."}
+ownership_transfer|AVSDirectory|renounceOwnership|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Transfers contract ownership."}
+ownership_transfer|AVSDirectory|initialize|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Transfers contract ownership."}
+ownership_transfer|AVSDirectory|transferOwnership|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|setDelegate|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|setPeer|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|transferOwnership|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|owner|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|initialize|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AssetRecoveryDispatcher|renounceOwnership|1|0x8290d77490fff37027a19c4fe49d60e85d0c1b21|{"Transfers contract ownership."}
+ownership_transfer|AuctionManager|renounceOwnership|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Transfers contract ownership."}
+ownership_transfer|AuctionManager|setStakingManagerContractAddress|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Transfers contract ownership."}
+ownership_transfer|AuctionManager|initialize|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Transfers contract ownership."}
+ownership_transfer|AuctionManager|transferOwnership|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Transfers contract ownership."}
+ownership_transfer|AvsOperator|initialize|1|0xf4718766a7fc8c81f788669b0985fac03d064d29|{"Transfers contract ownership."}
+ownership_transfer|AvsOperatorManager|renounceOwnership|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Transfers contract ownership."}
+ownership_transfer|AvsOperatorManager|initialize|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Transfers contract ownership."}
+ownership_transfer|AvsOperatorManager|transferOwnership|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Transfers contract ownership."}
+ownership_transfer|BNFT|initializeOnUpgrade|1|0x6a393848f5d1b8e7dab45f3a7e01f9f0dc687242|{"Transfers contract ownership."}
+ownership_transfer|BNFT|renounceOwnership|1|0x6a393848f5d1b8e7dab45f3a7e01f9f0dc687242|{"Transfers contract ownership."}
+ownership_transfer|BNFT|transferOwnership|1|0x6a393848f5d1b8e7dab45f3a7e01f9f0dc687242|{"Transfers contract ownership."}
+ownership_transfer|BNFT|initialize|1|0x6a393848f5d1b8e7dab45f3a7e01f9f0dc687242|{"Transfers contract ownership."}
+ownership_transfer|BackingEigen|initialize|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Transfers contract ownership."}
+ownership_transfer|BackingEigen|renounceOwnership|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Transfers contract ownership."}
+ownership_transfer|BackingEigen|transferOwnership|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Transfers contract ownership."}
+ownership_transfer|BoringGovernance|transferOwnership|1|0x86b5780b606940eb59a062aa85a07959518c0161|{"Transfers contract ownership."}
+ownership_transfer|BoringVaultPriceProvider|renounceOwnership|1|0x130e22952dd3de2c80ebdfc2b256e344ff3a0729|{"Transfers contract ownership."}
+ownership_transfer|BoringVaultPriceProvider|transferOwnership|1|0x130e22952dd3de2c80ebdfc2b256e344ff3a0729|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|initializeLayerZero|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|removeChain|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|renounceOwnership|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|renounceRole|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|revokeRole|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|rollbackDefaultAdminDelay|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|setDelegate|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|setPeer|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|transferOwnership|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|addChain|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|beginDefaultAdminTransfer|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|cancelDefaultAdminTransfer|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|changeDefaultAdminDelay|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|grantRole|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|initialize|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|acceptDefaultAdminTransfer|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|CumulativeMerkleDrop|owner|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+ownership_transfer|DepositAdapter|initialize|1|0xe87797a1afb329216811dfa22c87380128ca17d8|{"Transfers contract ownership."}
+ownership_transfer|DepositAdapter|renounceOwnership|1|0xe87797a1afb329216811dfa22c87380128ca17d8|{"Transfers contract ownership."}
+ownership_transfer|DepositAdapter|transferOwnership|1|0xe87797a1afb329216811dfa22c87380128ca17d8|{"Transfers contract ownership."}
+ownership_transfer|EETH|initialize|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Transfers contract ownership."}
+ownership_transfer|EETH|transferOwnership|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Transfers contract ownership."}
+ownership_transfer|EETH|renounceOwnership|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Transfers contract ownership."}
+ownership_transfer|EarlyAdopterPool|renounceOwnership|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Transfers contract ownership."}
+ownership_transfer|EarlyAdopterPool|transferOwnership|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Transfers contract ownership."}
+ownership_transfer|Eigen|initialize|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Transfers contract ownership."}
+ownership_transfer|Eigen|renounceOwnership|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Transfers contract ownership."}
+ownership_transfer|Eigen|transferOwnership|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Transfers contract ownership."}
+ownership_transfer|EigenPodManager|initialize|1|0xd22dd829779adbf3869fb224f703452f7f95e9db|{"Transfers contract ownership."}
+ownership_transfer|EigenPodManager|transferOwnership|1|0xd22dd829779adbf3869fb224f703452f7f95e9db|{"Transfers contract ownership."}
+ownership_transfer|EigenPodManager|setProofTimestampSetter|1|0xd22dd829779adbf3869fb224f703452f7f95e9db|{"Transfers contract ownership."}
+ownership_transfer|EigenPodManager|renounceOwnership|1|0xd22dd829779adbf3869fb224f703452f7f95e9db|{"Transfers contract ownership."}
+ownership_transfer|EndpointV2|transferOwnership|1|0x1a44076050125825900e736c501f859c50fe728c|{"Transfers contract ownership."}
+ownership_transfer|EndpointV2|renounceOwnership|1|0x1a44076050125825900e736c501f859c50fe728c|{"Transfers contract ownership."}
+ownership_transfer|EtherFiAdmin|renounceOwnership|1|0xd50f28485a75a1fde432ba7d012d0e2543d2f20d|{"Transfers contract ownership."}
+ownership_transfer|EtherFiAdmin|initialize|1|0xd50f28485a75a1fde432ba7d012d0e2543d2f20d|{"Transfers contract ownership."}
+ownership_transfer|EtherFiAdmin|transferOwnership|1|0xd50f28485a75a1fde432ba7d012d0e2543d2f20d|{"Transfers contract ownership."}
+ownership_transfer|EtherFiNodesManager|transferOwnership|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Transfers contract ownership."}
+ownership_transfer|EtherFiNodesManager|renounceOwnership|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Transfers contract ownership."}
+ownership_transfer|EtherFiOracle|transferOwnership|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Transfers contract ownership."}
+ownership_transfer|EtherFiOracle|initialize|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Transfers contract ownership."}
+ownership_transfer|EtherFiOracle|renounceOwnership|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRestaker|initialize|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRestaker|renounceOwnership|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRestaker|transferOwnership|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRewardsRouter|transferOwnership|1|0x408de8d339f40086c5643ee4778e0f872ab5e423|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRewardsRouter|initialize|1|0x408de8d339f40086c5643ee4778e0f872ab5e423|{"Transfers contract ownership."}
+ownership_transfer|EtherFiRewardsRouter|renounceOwnership|1|0x408de8d339f40086c5643ee4778e0f872ab5e423|{"Transfers contract ownership."}
+ownership_transfer|EtherFiStaking|transferOwnership|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Transfers contract ownership."}
+ownership_transfer|EtherFiStaking|renounceOwnership|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Transfers contract ownership."}
+ownership_transfer|EtherFiStaking|initialize|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Updates the authority contract used for permission checks."}
+ownership_transfer|EtherfiL1LineaReceiverETH|transferOwnership|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|initialize|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|getMessenger|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|setL1SyncPool|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|renounceOwnership|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|owner|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|onMessageReceived|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1LineaReceiverETH|setMessenger|1|0x75535763b4e4e3209d9a64e54fc63f124448f7c0|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setPeer|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setReceiver|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setTokenOut|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|initialize|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|transferOwnership|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|sweep|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|owner|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|renounceOwnership|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setDelegate|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setDummyToken|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setEEth|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setLiquifier|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|EtherfiL1SyncPoolETH|setLockBox|1|0x2c28aed76d1fa85e1afe42ed476593d6cef50155|{"Transfers contract ownership."}
+ownership_transfer|IncentiveDistributor|transferOwnership|1|0xf0164d48b308c42ae028e3379b2fb620e70f8780|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|transferOwnership|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|getMessenger|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|initialize|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|onMessageReceived|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|owner|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|renounceOwnership|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|setL1SyncPool|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1LineaReceiverETH|setMessenger|1|0x33275453144a4d6ef266ef1164f3e6fcb6ef27f1|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|onMessageReceived|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|initialize|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|getMessenger|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|transferOwnership|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|setMessenger|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|setL1SyncPool|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|renounceOwnership|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1ModeReceiverETH|owner|1|0xf68f84b5c6662254cf83b7cf63c84495659d3d60|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setTokenOut|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setVault|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|sweep|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|transferOwnership|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setDelegate|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|initialize|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|renounceOwnership|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setDummyToken|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setLockBox|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|owner|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setPeer|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|L1SyncPoolETH|setReceiver|1|0x39272ee125ebd9214404f735baae50acb9d334c0|{"Transfers contract ownership."}
+ownership_transfer|LRTSquaredAdmin|setRebalancer|1|0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5|{"Transfers contract ownership."}
+ownership_transfer|LiquidityPool|renounceOwnership|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+ownership_transfer|LiquidityPool|transferOwnership|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+ownership_transfer|LiquidityPool|initialize|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+ownership_transfer|LiquidityPool|initializeOnUpgrade|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+ownership_transfer|LiquidityPool|initializeVTwoDotFourNine|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+ownership_transfer|Liquifier|initialize|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Transfers contract ownership."}
+ownership_transfer|Liquifier|transferOwnership|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Transfers contract ownership."}
+ownership_transfer|Liquifier|renounceOwnership|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Transfers contract ownership."}
+ownership_transfer|MembershipNFT|renounceOwnership|1|0x290d981b41b713437265cd7846806d7500307106|{"Transfers contract ownership."}
+ownership_transfer|MembershipNFT|initialize|1|0x290d981b41b713437265cd7846806d7500307106|{"Transfers contract ownership."}
+ownership_transfer|MembershipNFT|transferOwnership|1|0x290d981b41b713437265cd7846806d7500307106|{"Transfers contract ownership."}
+ownership_transfer|MockEtherFiAdmin|transferOwnership|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Transfers contract ownership."}
+ownership_transfer|MockEtherFiAdmin|renounceOwnership|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Transfers contract ownership."}
+ownership_transfer|MockEtherFiAdmin|initialize|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Transfers contract ownership."}
+ownership_transfer|NodeOperatorManager|setAuctionContractAddress|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Transfers contract ownership."}
+ownership_transfer|NodeOperatorManager|transferOwnership|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Transfers contract ownership."}
+ownership_transfer|NodeOperatorManager|initialize|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Transfers contract ownership."}
+ownership_transfer|NodeOperatorManager|renounceOwnership|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Transfers contract ownership."}
+ownership_transfer|PauserRegistry|setUnpauser|1|0xb8765ed72235d279c3fb53936e4606db0ef12806|{"Transfers contract ownership."}
+ownership_transfer|PaymentSplitter|transferOwnership|1|0x25e8162d09239fb5be50e5df18adc1ed35533e61|{"Transfers contract ownership."}
+ownership_transfer|RewardsCoordinator|setRewardsUpdater|1|0xa0673c53980665a706352412d2538ba005403c26|{"Transfers contract ownership."}
+ownership_transfer|RewardsCoordinator|transferOwnership|1|0xa0673c53980665a706352412d2538ba005403c26|{"Transfers contract ownership."}
+ownership_transfer|RewardsCoordinator|initialize|1|0xa0673c53980665a706352412d2538ba005403c26|{"Transfers contract ownership."}
+ownership_transfer|RewardsCoordinator|renounceOwnership|1|0xa0673c53980665a706352412d2538ba005403c26|{"Transfers contract ownership."}
+ownership_transfer|RoleRegistry|transferOwnership|1|0x3a75019f8b09c278d152279d446c97d009e064f3|{"Transfers contract ownership."}
+ownership_transfer|RoleRegistry|initialize|1|0x3a75019f8b09c278d152279d446c97d009e064f3|{"Transfers contract ownership."}
+ownership_transfer|RoleRegistry|acceptOwnership|1|0x3a75019f8b09c278d152279d446c97d009e064f3|{"Transfers contract ownership."}
+ownership_transfer|RoleRegistry|renounceOwnership|1|0x3a75019f8b09c278d152279d446c97d009e064f3|{"Transfers contract ownership."}
+ownership_transfer|ScoreManager|initialize|1|0xb034d69b313a943cce0885fc454ba5c711f4f502|{"Transfers contract ownership."}
+ownership_transfer|ScoreManager|transferOwnership|1|0xb034d69b313a943cce0885fc454ba5c711f4f502|{"Transfers contract ownership."}
+ownership_transfer|ScoreManager|renounceOwnership|1|0xb034d69b313a943cce0885fc454ba5c711f4f502|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|initialize|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|transferOwnership|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|updateBlacklister|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|updateMasterMinter|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|updatePauser|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakedTokenV1|updateRescuer|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Transfers contract ownership."}
+ownership_transfer|StakingManager|transferOwnership|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Transfers contract ownership."}
+ownership_transfer|StakingManager|renounceOwnership|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Transfers contract ownership."}
+ownership_transfer|StakingManagerV2|transferOwnership|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Transfers contract ownership."}
+ownership_transfer|StakingManagerV2|initialize|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Transfers contract ownership."}
+ownership_transfer|StakingManagerV2|renounceOwnership|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Transfers contract ownership."}
+ownership_transfer|StrategyManager|transferOwnership|1|0x88582996b70fdd7c4f16e3fde7b53858fce0d394|{"Transfers contract ownership."}
+ownership_transfer|StrategyManager|initialize|1|0x88582996b70fdd7c4f16e3fde7b53858fce0d394|{"Transfers contract ownership."}
+ownership_transfer|StrategyManager|renounceOwnership|1|0x88582996b70fdd7c4f16e3fde7b53858fce0d394|{"Transfers contract ownership."}
+ownership_transfer|StrategyManager|setStrategyWhitelister|1|0x88582996b70fdd7c4f16e3fde7b53858fce0d394|{"Transfers contract ownership."}
+ownership_transfer|TNFT|initializeOnUpgrade|1|0xafb82ce44fd8a3431a64742bcd3547eeda1afea7|{"Transfers contract ownership."}
+ownership_transfer|TNFT|renounceOwnership|1|0xafb82ce44fd8a3431a64742bcd3547eeda1afea7|{"Transfers contract ownership."}
+ownership_transfer|TNFT|transferOwnership|1|0xafb82ce44fd8a3431a64742bcd3547eeda1afea7|{"Transfers contract ownership."}
+ownership_transfer|TNFT|initialize|1|0xafb82ce44fd8a3431a64742bcd3547eeda1afea7|{"Transfers contract ownership."}
+ownership_transfer|TopUp|initialize|1|0x5bdd4b0d644c0a573e0eb526ab7d7d332aaaa50e|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|changeDefaultAdminDelay|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|acceptDefaultAdminTransfer|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|beginDefaultAdminTransfer|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|cancelDefaultAdminTransfer|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|grantRole|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|initialize|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|renounceRole|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|revokeRole|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpSource|rollbackDefaultAdminDelay|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+ownership_transfer|TopUpV2|initialize|1|0x80b1931d101a77a94b288a6ce4f55a70e942ba28|{"Transfers contract ownership."}
+ownership_transfer|Treasury|renounceOwnership|1|0x6329004e903b7f420245e7af3f355186f2432466|{"Transfers contract ownership."}
+ownership_transfer|Treasury|transferOwnership|1|0x6329004e903b7f420245e7af3f355186f2432466|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|initialize|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|setNewOperator|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|setRechargeAddress|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|transferOwnership|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|updateBlacklister|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|UnwrapTokenV1ETH|updatePauser|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Transfers contract ownership."}
+ownership_transfer|WeETH|initialize|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Transfers contract ownership."}
+ownership_transfer|WeETH|renounceOwnership|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Transfers contract ownership."}
+ownership_transfer|WeETH|transferOwnership|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Transfers contract ownership."}
+ownership_transfer|WithdrawRequestNFT|initialize|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Transfers contract ownership."}
+ownership_transfer|WithdrawRequestNFT|renounceOwnership|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Transfers contract ownership."}
+ownership_transfer|WithdrawRequestNFT|transferOwnership|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|initialize|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|transferOwnership|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|updateBlacklister|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|updateMasterMinter|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|updatePauser|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+ownership_transfer|WrapTokenV3ETH|updateRescuer|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Transfers contract ownership."}
+pause_toggle|MembershipManager|pauseContract|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Changes the contract pause state."}
+pause_toggle|MembershipManager|unPauseContract|2|0x047a7749ad683c2fd8a27c7904ca8dd128f15889|{"Changes the contract pause state."}
+pause_toggle|AVSDirectory|initialize|1|0xcd35cef328b496fa9d70a8d7c34ef3434614862b|{"Transfers contract ownership."}
+pause_toggle|AllocationManager|initialize|1|0xda2a68d318a571dd550f2ecbcb09bf50497e97c4|{"Changes the contract pause state."}
+pause_toggle|AuctionManager|initialize|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Transfers contract ownership."}
+pause_toggle|AuctionManager|pauseContract|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Changes the contract pause state."}
+pause_toggle|AuctionManager|unPauseContract|1|0x68fe80c6e97e0c8613e2fed344358c6635ba5366|{"Changes the contract pause state."}
+pause_toggle|AvsOperatorManager|initialize|1|0xdc9e0d46bd75aa2837b266715d870b497104fae7|{"Transfers contract ownership."}
+pause_toggle|BNFT|initialize|1|0x6a393848f5d1b8e7dab45f3a7e01f9f0dc687242|{"Transfers contract ownership."}
+pause_toggle|BackingEigen|initialize|1|0xf2b225815f70c9b327dc9db758a36c92a4279b17|{"Transfers contract ownership."}
+pause_toggle|DelegationManager|initialize|1|0xe7022a128acd4c6cad7aff6fa874d61f984bce75|{"Changes the contract pause state."}
+pause_toggle|DepositAdapter|initialize|1|0xe87797a1afb329216811dfa22c87380128ca17d8|{"Transfers contract ownership."}
+pause_toggle|EETH|initialize|1|0xcb3d917a965a70214f430a135154cd5adda2ad84|{"Transfers contract ownership."}
+pause_toggle|EarlyAdopterPool|unPauseContract|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Changes the contract pause state."}
+pause_toggle|EarlyAdopterPool|pauseContract|1|0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4|{"Changes the contract pause state."}
+pause_toggle|Eigen|initialize|1|0x2c4a81e257381f87f5a5c4bd525116466d972e50|{"Transfers contract ownership."}
+pause_toggle|EigenPodManager|initialize|1|0xd22dd829779adbf3869fb224f703452f7f95e9db|{"Transfers contract ownership."}
+pause_toggle|EtherFiAdmin|initialize|1|0xd50f28485a75a1fde432ba7d012d0e2543d2f20d|{"Transfers contract ownership."}
+pause_toggle|EtherFiNodesManager|pauseContract|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Changes the contract pause state."}
+pause_toggle|EtherFiNodesManager|unPauseContract|1|0x789cbbe0739f1458905c9ca6d6e74f7997622a9b|{"Changes the contract pause state."}
+pause_toggle|EtherFiOracle|unPauseContract|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Changes the contract pause state."}
+pause_toggle|EtherFiOracle|pauseContract|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Changes the contract pause state."}
+pause_toggle|EtherFiOracle|initialize|1|0x5eefe6f65a280a6f1eb1fdff36ab9e2af6f38462|{"Transfers contract ownership."}
+pause_toggle|EtherFiRateLimiter|initialize|1|0x1dd43c32f03f8a74b8160926d559d34358880a89|{"Changes the contract pause state."}
+pause_toggle|EtherFiRateLimiter|pauseContract|1|0x1dd43c32f03f8a74b8160926d559d34358880a89|{"Changes the contract pause state."}
+pause_toggle|EtherFiRateLimiter|unPauseContract|1|0x1dd43c32f03f8a74b8160926d559d34358880a89|{"Changes the contract pause state."}
+pause_toggle|EtherFiRedemptionManager|initialize|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Changes the contract pause state."}
+pause_toggle|EtherFiRedemptionManager|pauseContract|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Changes the contract pause state."}
+pause_toggle|EtherFiRedemptionManager|unPauseContract|1|0x6bd191582f40012b2f2cdf66bd3d32bde41191f7|{"Changes the contract pause state."}
+pause_toggle|EtherFiRestaker|initialize|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Transfers contract ownership."}
+pause_toggle|EtherFiRestaker|unPauseContract|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Changes the contract pause state."}
+pause_toggle|EtherFiRestaker|pauseContract|1|0x9d795b303b9da3488fd3a4ca4702c872576bd0c6|{"Changes the contract pause state."}
+pause_toggle|EtherFiRewardsRouter|initialize|1|0x408de8d339f40086c5643ee4778e0f872ab5e423|{"Transfers contract ownership."}
+pause_toggle|EtherFiStaking|initialize|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Updates the authority contract used for permission checks."}
+pause_toggle|EtherFiStaking|pause|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Changes the contract pause state."}
+pause_toggle|EtherFiStaking|unpause|1|0x1a71588f1a429cb740ae0ecb47c9749373032a38|{"Changes the contract pause state."}
+pause_toggle|LiquidityPool|unPauseContract|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Changes the contract pause state."}
+pause_toggle|LiquidityPool|pauseContract|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Changes the contract pause state."}
+pause_toggle|LiquidityPool|initialize|1|0x83bc649fcdb2c8da146b2154a559ddedf937ef12|{"Transfers contract ownership."}
+pause_toggle|Liquifier|pauseContract|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Changes the contract pause state."}
+pause_toggle|Liquifier|initialize|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Transfers contract ownership."}
+pause_toggle|Liquifier|unPauseContract|1|0x0e7489d32d34ccdc12d7092067bf53aa38bf2bf6|{"Changes the contract pause state."}
+pause_toggle|MembershipNFT|initialize|1|0x290d981b41b713437265cd7846806d7500307106|{"Transfers contract ownership."}
+pause_toggle|MockEtherFiAdmin|initialize|1|0x0c4a8aa58885402db92c2a0d3d748265ce3d63c4|{"Transfers contract ownership."}
+pause_toggle|NodeOperatorManager|initialize|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Transfers contract ownership."}
+pause_toggle|NodeOperatorManager|pauseContract|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Changes the contract pause state."}
+pause_toggle|NodeOperatorManager|unPauseContract|1|0xfcc674fc9a0602692d2a91905e7e978ae6ee2caf|{"Changes the contract pause state."}
+pause_toggle|OneSig|setExecutorRequired|1|0xbe010a7e3686fdf65e93344ab664d065a0b02478|{"Changes the contract pause state."}
+pause_toggle|PriorityWithdrawalQueue|initialize|1|0x554b2a0c78840bbd4fdb24e198cdd93f99e29456|{"Changes the contract pause state."}
+pause_toggle|PriorityWithdrawalQueue|pauseContract|1|0x554b2a0c78840bbd4fdb24e198cdd93f99e29456|{"Changes the contract pause state."}
+pause_toggle|PriorityWithdrawalQueue|unPauseContract|1|0x554b2a0c78840bbd4fdb24e198cdd93f99e29456|{"Changes the contract pause state."}
+pause_toggle|RewardsCoordinator|initialize|1|0xa0673c53980665a706352412d2538ba005403c26|{"Transfers contract ownership."}
+pause_toggle|RoleRegistry|initialize|1|0x3a75019f8b09c278d152279d446c97d009e064f3|{"Transfers contract ownership."}
+pause_toggle|ScoreManager|initialize|1|0xb034d69b313a943cce0885fc454ba5c711f4f502|{"Transfers contract ownership."}
+pause_toggle|StakedTokenV1|pause|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Changes the contract pause state."}
+pause_toggle|StakedTokenV1|unpause|1|0x31724ca0c982a31fbb5c57f4217ab585271fc9a5|{"Changes the contract pause state."}
+pause_toggle|StakingManager|pauseContract|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Changes the contract pause state."}
+pause_toggle|StakingManager|unPauseContract|1|0xd3985048bf1cb613f5e199713a86b2ad3954f82a|{"Changes the contract pause state."}
+pause_toggle|StakingManagerV2|pauseContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Changes the contract pause state."}
+pause_toggle|StakingManagerV2|unPauseContract|1|0x733015e8606f4f079828f0bf71a2fc7135f9d119|{"Changes the contract pause state."}
+pause_toggle|StrategyManager|initialize|1|0x88582996b70fdd7c4f16e3fde7b53858fce0d394|{"Transfers contract ownership."}
+pause_toggle|TNFT|initialize|1|0xafb82ce44fd8a3431a64742bcd3547eeda1afea7|{"Transfers contract ownership."}
+pause_toggle|UnwrapTokenV1ETH|pause|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Changes the contract pause state."}
+pause_toggle|UnwrapTokenV1ETH|unpause|1|0x542059d658624df6452b22b10302a15a6ab59f10|{"Changes the contract pause state."}
+pause_toggle|WeETH|initialize|1|0x2d10683e941275d502173053927ad6066e6afd6b|{"Transfers contract ownership."}
+pause_toggle|WithdrawRequestNFT|initialize|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Transfers contract ownership."}
+pause_toggle|WithdrawRequestNFT|initializeOnUpgrade|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Updates the authority contract used for permission checks."}
+pause_toggle|WithdrawRequestNFT|pauseContract|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Changes the contract pause state."}
+pause_toggle|WithdrawRequestNFT|unPauseContract|1|0x2f4a5921fcab46f1f3154e8b42fc189e08fae3ed|{"Changes the contract pause state."}
+pause_toggle|WrapTokenV3ETH|pause|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Changes the contract pause state."}
+pause_toggle|WrapTokenV3ETH|unpause|1|0x9e021c9607bd3adb7424d3b25a2d35763ff180bb|{"Changes the contract pause state."}
+role_management|RolesAuthority|setRoleCapability|15|0x02904af5c3be78481528e0f01780439f024109a6|{"Changes role-based permissions."}
+role_management|RolesAuthority|setUserRole|15|0x02904af5c3be78481528e0f01780439f024109a6|{"Changes role-based permissions."}
+role_management|RolesAuthority|setPublicCapability|15|0x02904af5c3be78481528e0f01780439f024109a6|{"Changes role-based permissions."}
+role_management|TimelockController|revokeRole|2|0x70a64840a353c58f63333570f53dba0948bece3d|{"Changes role-based permissions."}
+role_management|TimelockController|grantRole|2|0x70a64840a353c58f63333570f53dba0948bece3d|{"Changes role-based permissions."}
+role_management|CumulativeMerkleDrop|grantRole|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+role_management|CumulativeMerkleDrop|revokeRole|1|0x5e226b1de8b0f387d7c77f78cba2571d2a1be511|{"Transfers contract ownership."}
+role_management|EtherFiTimelock|revokeRole|1|0x9f26d4c958fd811a1f59b01b86be7dffc9d20761|{"Changes role-based permissions."}
+role_management|EtherFiTimelock|grantRole|1|0x9f26d4c958fd811a1f59b01b86be7dffc9d20761|{"Changes role-based permissions."}
+role_management|TopUpSource|grantRole|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+role_management|TopUpSource|revokeRole|1|0x734a50c05341bb50338f6411ce8f586ab7f78940|{"Transfers contract ownership."}
+role_management|WithdrawalQueueERC721|grantRole|1|0xe42c659dc09109566720ea8b2de186c2be7d94d9|{"Changes role-based permissions."}
+role_management|WithdrawalQueueERC721|revokeRole|1|0xe42c659dc09109566720ea8b2de186c2be7d94d9|{"Changes role-based permissions."}

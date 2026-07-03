@@ -1,0 +1,1093 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "L1SyncPoolETH",
+ "trees": {
+  "onMessageReceived(uint32,bytes32,address,uint256,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "view_call",
+        "callee": "_getL1BaseSyncPoolStorage()",
+        "callee_signature": "_getL1BaseSyncPoolStorage()",
+        "callee_selector": "0x98ea52ff",
+        "mapping_name": "receivers",
+        "mapping_writer_specs": [
+         {
+          "mapping_name": "receivers",
+          "event_signature": "ReceiverSet(uint32,address)",
+          "event_name": "ReceiverSet",
+          "key_position": 0,
+          "indexed_positions": [
+           0
+          ],
+          "direction": "set",
+          "writer_function": "_setReceiver(uint32,address)",
+          "value_position": 1
+         }
+        ]
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "msg.sender != $.receivers[originEid]",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "tokenIn"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "member.ETH_ADDRESS"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "tokenIn != Constants.ETH_ADDRESS",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "amountIn"
+       },
+       {
+        "source": "computed",
+        "computed_kind": "msg.value"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "amountIn != msg.value",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "originEid"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "address(dummyToken) == address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "swapAmount_3",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "burn(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "burn(uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ReentrancyGuardStorageLocation",
+        "member_path": [
+         "_status"
+        ]
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "$._status == ENTERED",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "endpoint"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "address(endpoint) != msg.sender",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "view_call",
+        "callee": "_getOAppCoreStorage()",
+        "callee_signature": "_getOAppCoreStorage()",
+        "callee_selector": "0x467073c0"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "origin"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "_getPeerOrRevert(_origin.srcEid) != _origin.sender",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "tokenOut_1",
+        "value_type": "IERC20"
+       },
+       {
+        "source": "constant",
+        "constant_value": "REF_85",
+        "value_type": "address"
+       },
+       {
+        "source": "constant",
+        "constant_value": "amountToSend_3",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "ReentrancyGuardStorageLocation",
+        "member_path": [
+         "_status"
+        ]
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "$._status == ENTERED",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "setTokenOut(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setLockBox(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setReceiver(uint32,address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "sweep(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "receiver"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "! success",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "callee_state_mutability": "nonview",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "token"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "receiver"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "amount"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1,
+       2
+      ],
+      "expression": "safeTransfer(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "safeTransfer(IERC20,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "external_call",
+          "callee": "functionCall",
+          "callee_signature": "functionCall(address,bytes)",
+          "callee_selector": "0xa0b5ffb0"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "returndata.length != 0 && ! abi.decode(returndata,(bool))",
+        "basis": [
+         "if-revert via always-reverting branch"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "unsupported",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [],
+        "unsupported_reason": "solidity_call_abi.decode()_unsupported_as_gate",
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "TMP_390(bool) = SOLIDITY_CALL abi.decode()(returndata_1,bool)",
+        "basis": [
+         "solidity_call_abi.decode()_unsupported_as_gate"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "OwnableStorageLocation",
+        "member_path": [
+         "_owner"
+        ]
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "owner() != _msgSender()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "setPeer(uint32,bytes32)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setDelegate(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "_delegate"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "setDelegate(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "setDelegate(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "OwnableStorageLocation",
+        "member_path": [
+         "_owner"
+        ]
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "owner() != _msgSender()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "newOwner == address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "OwnableStorageLocation",
+        "member_path": [
+         "_owner"
+        ]
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "owner() != _msgSender()",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "initialize(address,address,address,address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "owner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "_delegate == address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "constant",
+        "constant_value": "_delegate_1",
+        "value_type": "address"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "setDelegate(...)",
+      "basis": [
+       "external call must not revert"
+      ],
+      "callee_state_mutability": "nonview",
+      "gate_kind": "external_call_revert",
+      "callee_signature": "setDelegate(address)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "INITIALIZABLE_STORAGE",
+        "member_path": [
+         "_initializing"
+        ]
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return REF_95",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "INITIALIZABLE_STORAGE",
+        "member_path": [
+         "_initializing"
+        ]
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return REF_95",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "INITIALIZABLE_STORAGE",
+        "member_path": [
+         "_initializing"
+        ]
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return REF_95",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "owner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "initialOwner == address(0)",
+      "basis": [
+       "if-revert via always-reverting branch"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "INITIALIZABLE_STORAGE",
+        "member_path": [
+         "_initializing"
+        ]
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return REF_95",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "INITIALIZABLE_STORAGE",
+        "member_path": [
+         "_initializing"
+        ]
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "return REF_95",
+      "basis": [
+       "if-revert via always-reverting branch",
+       "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "truthy",
+        "authority_role": "one_shot",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "INITIALIZABLE_STORAGE",
+          "member_path": [
+           "_initialized"
+          ]
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "! initialSetup && ! construction",
+        "basis": [
+         "if-revert via always-reverting branch",
+         "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+        ],
+        "confidence": "high",
+        "one_shot_latch": {
+         "kind": "storage",
+         "role": "version",
+         "variable": "INITIALIZABLE_STORAGE",
+         "slot": "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00",
+         "byte_offset": 0,
+         "size_bytes": 8,
+         "value_type": "uint64",
+         "expected_version": 1,
+         "standard": "oz_v5_namespaced"
+        }
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "truthy",
+        "authority_role": "one_shot",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "INITIALIZABLE_STORAGE",
+          "member_path": [
+           "_initialized"
+          ]
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "! initialSetup && ! construction",
+        "basis": [
+         "if-revert via always-reverting branch",
+         "one-shot initializer latch: INITIALIZABLE_STORAGE (initializer-family modifier)"
+        ],
+        "confidence": "high",
+        "one_shot_latch": {
+         "kind": "storage",
+         "role": "version",
+         "variable": "INITIALIZABLE_STORAGE",
+         "slot": "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00",
+         "byte_offset": 0,
+         "size_bytes": 8,
+         "value_type": "uint64",
+         "expected_version": 1,
+         "standard": "oz_v5_namespaced"
+        }
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "setVault(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setDummyToken(uint32,address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "OwnableStorageLocation",
+      "member_path": [
+       "_owner"
+      ]
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "owner() != _msgSender()",
+    "basis": [
+     "if-revert via always-reverting branch"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ "canonical_signatures": {
+  "lzReceive(Origin,bytes32,bytes,address,bytes)": "lzReceive((uint32,bytes32,uint64),bytes32,bytes,address,bytes)",
+  "allowInitializePath(Origin)": "allowInitializePath((uint32,bytes32,uint64))"
+ },
+ "check_trees": {
+  "allowInitializePath(Origin)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "view_call",
+      "callee": "_getOAppCoreStorage()",
+      "callee_signature": "_getOAppCoreStorage()",
+      "callee_selector": "0x467073c0"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "origin"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0
+    ],
+    "expression": "return TMP_242",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

@@ -1,0 +1,342 @@
+{
+ "contract": "LiquidityPool",
+ "owner_vars_v2": [
+  "_owner",
+  "etherFiAdminContract",
+  "etherFiRedemptionManager",
+  "liquifier",
+  "membershipManager",
+  "priorityWithdrawalQueue",
+  "withdrawRequestNFT"
+ ],
+ "pause_v2": [
+  "pauseContract()",
+  "unPauseContract()"
+ ],
+ "impl_fns": [
+  "upgradeTo(address)",
+  "upgradeToAndCall(address,bytes)"
+ ],
+ "diffs": [
+  [
+   "initialize(address,address,address,address,address,address,address)",
+   [
+    "ownership_transfer",
+    "pause_toggle"
+   ],
+   [
+    "ownership_transfer"
+   ]
+  ],
+  [
+   "upgradeTo(address)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ],
+  [
+   "upgradeToAndCall(address,bytes)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ]
+ ],
+ "current": {
+  "numPendingDeposits()": [],
+  "totalValueOutOfLp()": [],
+  "totalValueInLp()": [],
+  "getTotalEtherClaimOf(address)": [
+   "external_contract_call"
+  ],
+  "getTotalPooledEther()": [],
+  "sharesForAmount(uint256)": [
+   "external_contract_call"
+  ],
+  "sharesForWithdrawalAmount(uint256)": [
+   "external_contract_call"
+  ],
+  "amountForShare(uint256)": [
+   "external_contract_call"
+  ],
+  "eETH()": [],
+  "ethAmountLockedForWithdrawal()": [],
+  "deposit()": [
+   "external_contract_call"
+  ],
+  "deposit(address)": [
+   "external_contract_call"
+  ],
+  "deposit(address,address)": [
+   "external_contract_call"
+  ],
+  "depositToRecipient(address,uint256,address)": [
+   "external_contract_call"
+  ],
+  "withdraw(address,uint256)": [
+   "asset_send"
+  ],
+  "burnEEthSharesForNonETHWithdrawal(uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "requestWithdraw(address,uint256)": [
+   "asset_send"
+  ],
+  "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)": [
+   "asset_send"
+  ],
+  "requestMembershipNFTWithdraw(address,uint256,uint256)": [
+   "asset_send"
+  ],
+  "batchRegister(IStakingManager.DepositData[],uint256[],address)": [
+   "external_contract_call"
+  ],
+  "batchCreateBeaconValidators(IStakingManager.DepositData[],uint256[],address)": [
+   "external_contract_call"
+  ],
+  "batchApproveRegistration(uint256[],bytes[],bytes[])": [
+   "external_contract_call"
+  ],
+  "confirmAndFundBeaconValidators(IStakingManager.DepositData[],uint256)": [
+   "external_contract_call"
+  ],
+  "DEPRECATED_sendExitRequests(uint256[])": [
+   "external_contract_call"
+  ],
+  "registerValidatorSpawner(address)": [
+   "external_contract_call"
+  ],
+  "unregisterValidatorSpawner(address)": [
+   "external_contract_call"
+  ],
+  "rebase(int128)": [
+   "external_contract_call"
+  ],
+  "payProtocolFees(uint128)": [
+   "external_contract_call"
+  ],
+  "addEthAmountLockedForWithdrawal(uint128)": [],
+  "pauseContract()": [
+   "pause_toggle"
+  ],
+  "burnEEthShares(uint256)": [
+   "external_contract_call"
+  ],
+  "unPauseContract()": [
+   "pause_toggle"
+  ],
+  "setStakingTargetWeights(uint32,uint32)": [],
+  "setValidatorSizeWei(uint256)": [
+   "external_contract_call"
+  ],
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "owner()": [],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "receive()": [],
+  "initialize(address,address,address,address,address,address,address)": [
+   "ownership_transfer",
+   "pause_toggle"
+  ],
+  "initializeOnUpgrade(address,address)": [
+   "ownership_transfer"
+  ],
+  "initializeVTwoDotFourNine(address,address)": [
+   "ownership_transfer"
+  ],
+  "setFeeRecipient(address)": [
+   "external_contract_call"
+  ],
+  "setRestakeBnftDeposits(bool)": [
+   "external_contract_call"
+  ],
+  "getImplementation()": [
+   "external_contract_call"
+  ]
+ },
+ "h1": {
+  "numPendingDeposits()": [],
+  "totalValueOutOfLp()": [],
+  "totalValueInLp()": [],
+  "getTotalEtherClaimOf(address)": [
+   "external_contract_call"
+  ],
+  "getTotalPooledEther()": [],
+  "sharesForAmount(uint256)": [
+   "external_contract_call"
+  ],
+  "sharesForWithdrawalAmount(uint256)": [
+   "external_contract_call"
+  ],
+  "amountForShare(uint256)": [
+   "external_contract_call"
+  ],
+  "eETH()": [],
+  "ethAmountLockedForWithdrawal()": [],
+  "deposit()": [
+   "external_contract_call"
+  ],
+  "deposit(address)": [
+   "external_contract_call"
+  ],
+  "deposit(address,address)": [
+   "external_contract_call"
+  ],
+  "depositToRecipient(address,uint256,address)": [
+   "external_contract_call"
+  ],
+  "withdraw(address,uint256)": [
+   "asset_send"
+  ],
+  "burnEEthSharesForNonETHWithdrawal(uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "requestWithdraw(address,uint256)": [
+   "asset_send"
+  ],
+  "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)": [
+   "asset_send"
+  ],
+  "requestMembershipNFTWithdraw(address,uint256,uint256)": [
+   "asset_send"
+  ],
+  "batchRegister(IStakingManager.DepositData[],uint256[],address)": [
+   "external_contract_call"
+  ],
+  "batchCreateBeaconValidators(IStakingManager.DepositData[],uint256[],address)": [
+   "external_contract_call"
+  ],
+  "batchApproveRegistration(uint256[],bytes[],bytes[])": [
+   "external_contract_call"
+  ],
+  "confirmAndFundBeaconValidators(IStakingManager.DepositData[],uint256)": [
+   "external_contract_call"
+  ],
+  "DEPRECATED_sendExitRequests(uint256[])": [
+   "external_contract_call"
+  ],
+  "registerValidatorSpawner(address)": [
+   "external_contract_call"
+  ],
+  "unregisterValidatorSpawner(address)": [
+   "external_contract_call"
+  ],
+  "rebase(int128)": [
+   "external_contract_call"
+  ],
+  "payProtocolFees(uint128)": [
+   "external_contract_call"
+  ],
+  "addEthAmountLockedForWithdrawal(uint128)": [],
+  "pauseContract()": [
+   "pause_toggle"
+  ],
+  "burnEEthShares(uint256)": [
+   "external_contract_call"
+  ],
+  "unPauseContract()": [
+   "pause_toggle"
+  ],
+  "setStakingTargetWeights(uint32,uint32)": [],
+  "setValidatorSizeWei(uint256)": [
+   "external_contract_call"
+  ],
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [
+   "implementation_update"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "implementation_update"
+  ],
+  "owner()": [],
+  "renounceOwnership()": [
+   "ownership_transfer"
+  ],
+  "transferOwnership(address)": [
+   "ownership_transfer"
+  ],
+  "receive()": [],
+  "initialize(address,address,address,address,address,address,address)": [
+   "ownership_transfer"
+  ],
+  "initializeOnUpgrade(address,address)": [
+   "ownership_transfer"
+  ],
+  "initializeVTwoDotFourNine(address,address)": [
+   "ownership_transfer"
+  ],
+  "setFeeRecipient(address)": [
+   "external_contract_call"
+  ],
+  "setRestakeBnftDeposits(bool)": [
+   "external_contract_call"
+  ],
+  "getImplementation()": [
+   "external_contract_call"
+  ]
+ },
+ "state_changing": {
+  "numPendingDeposits()": false,
+  "totalValueOutOfLp()": false,
+  "totalValueInLp()": false,
+  "getTotalEtherClaimOf(address)": false,
+  "getTotalPooledEther()": false,
+  "sharesForAmount(uint256)": false,
+  "sharesForWithdrawalAmount(uint256)": false,
+  "amountForShare(uint256)": false,
+  "eETH()": false,
+  "ethAmountLockedForWithdrawal()": false,
+  "deposit()": true,
+  "deposit(address)": true,
+  "deposit(address,address)": true,
+  "depositToRecipient(address,uint256,address)": true,
+  "withdraw(address,uint256)": true,
+  "burnEEthSharesForNonETHWithdrawal(uint256,uint256)": true,
+  "requestWithdraw(address,uint256)": true,
+  "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)": true,
+  "requestMembershipNFTWithdraw(address,uint256,uint256)": true,
+  "batchRegister(IStakingManager.DepositData[],uint256[],address)": true,
+  "batchCreateBeaconValidators(IStakingManager.DepositData[],uint256[],address)": true,
+  "batchApproveRegistration(uint256[],bytes[],bytes[])": true,
+  "confirmAndFundBeaconValidators(IStakingManager.DepositData[],uint256)": true,
+  "DEPRECATED_sendExitRequests(uint256[])": true,
+  "registerValidatorSpawner(address)": true,
+  "unregisterValidatorSpawner(address)": true,
+  "rebase(int128)": true,
+  "payProtocolFees(uint128)": true,
+  "addEthAmountLockedForWithdrawal(uint128)": true,
+  "pauseContract()": true,
+  "burnEEthShares(uint256)": true,
+  "unPauseContract()": true,
+  "setStakingTargetWeights(uint32,uint32)": true,
+  "setValidatorSizeWei(uint256)": true,
+  "proxiableUUID()": false,
+  "upgradeTo(address)": true,
+  "upgradeToAndCall(address,bytes)": true,
+  "owner()": false,
+  "renounceOwnership()": true,
+  "transferOwnership(address)": true,
+  "receive()": false,
+  "initialize(address,address,address,address,address,address,address)": true,
+  "initializeOnUpgrade(address,address)": true,
+  "initializeVTwoDotFourNine(address,address)": true,
+  "setFeeRecipient(address)": true,
+  "setRestakeBnftDeposits(bool)": true,
+  "getImplementation()": false
+ }
+}

@@ -1,0 +1,73 @@
+{
+ "contract": "TopUpSource",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "paused()": [],
+  "supportsInterface(bytes4)": [],
+  "owner()": [
+   "ownership_transfer"
+  ],
+  "grantRole(bytes32,address)": [
+   "ownership_transfer",
+   "role_management"
+  ],
+  "revokeRole(bytes32,address)": [
+   "ownership_transfer",
+   "role_management"
+  ],
+  "renounceRole(bytes32,address)": [
+   "ownership_transfer"
+  ],
+  "defaultAdmin()": [
+   "ownership_transfer"
+  ],
+  "pendingDefaultAdmin()": [
+   "ownership_transfer"
+  ],
+  "defaultAdminDelay()": [
+   "ownership_transfer"
+  ],
+  "pendingDefaultAdminDelay()": [
+   "ownership_transfer"
+  ],
+  "defaultAdminDelayIncreaseWait()": [],
+  "beginDefaultAdminTransfer(address)": [
+   "ownership_transfer"
+  ],
+  "cancelDefaultAdminTransfer()": [
+   "ownership_transfer"
+  ],
+  "acceptDefaultAdminTransfer()": [
+   "ownership_transfer"
+  ],
+  "changeDefaultAdminDelay(uint48)": [
+   "ownership_transfer"
+  ],
+  "rollbackDefaultAdminDelay()": [
+   "ownership_transfer"
+  ],
+  "hasRole(bytes32,address)": [],
+  "getRoleAdmin(bytes32)": [],
+  "proxiableUUID()": [],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "initialize(address,address)": [
+   "ownership_transfer"
+  ],
+  "tokenConfig(address)": [],
+  "setTokenConfig(address[],TopUpSource.TokenConfig[])": [],
+  "bridge(address)": [
+   "delegatecall_execution"
+  ],
+  "getBridgeFee(address)": [
+   "external_contract_call"
+  ],
+  "pause()": [],
+  "unpause()": [],
+  "receive()": [
+   "external_contract_call"
+  ]
+ }
+}

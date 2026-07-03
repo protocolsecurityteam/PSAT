@@ -1,0 +1,1685 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "BackingEigen",
+ "trees": {
+  "getPastVotes(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "lt",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "timepoint"
+     },
+     {
+      "source": "view_call",
+      "callee": "clock()",
+      "callee_signature": "clock()",
+      "callee_selector": "0x91ddadf4"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "require(bool,string)(timepoint < clock(),ERC20Votes: future lookup)",
+    "basis": [
+     "require(TMP_1215)"
+    ],
+    "confidence": "low"
+   }
+  },
+  "getPastTotalSupply(uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "lt",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "timepoint"
+     },
+     {
+      "source": "view_call",
+      "callee": "clock()",
+      "callee_signature": "clock()",
+      "callee_selector": "0x91ddadf4"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0
+    ],
+    "expression": "require(bool,string)(timepoint < clock(),ERC20Votes: future lookup)",
+    "basis": [
+     "require(TMP_1219)"
+    ],
+    "confidence": "low"
+   }
+  },
+  "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "block_context",
+        "block_context_kind": "timestamp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "expiry"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(block.timestamp <= expiry,ERC20Votes: signature expired)",
+      "basis": [
+       "require(TMP_1238)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "nonce"
+       },
+       {
+        "source": "view_call",
+        "callee": "_useNonce(address)",
+        "callee_signature": "_useNonce(address)",
+        "callee_selector": "0x35d11de3"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(nonce == _useNonce(signer),ERC20Votes: invalid nonce)",
+      "basis": [
+       "require(TMP_1245)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "block_context",
+        "block_context_kind": "timestamp"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "deadline"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       3
+      ],
+      "expression": "require(bool,string)(block.timestamp <= deadline,ERC20Permit: expired deadline)",
+      "basis": [
+       "require(TMP_1300)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "external_call",
+        "callee": "recover",
+        "callee_signature": "recover(bytes32,uint8,bytes32,bytes32)",
+        "callee_selector": "0xc2bf17b0"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "owner"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(signer == owner,ERC20Permit: invalid signature)",
+      "basis": [
+       "require(TMP_1307)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "owner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(owner != address(0),ERC20: approve from the zero address)",
+      "basis": [
+       "require(TMP_1413)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "spender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(spender != address(0),ERC20: approve to the zero address)",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "eip712Domain()": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_hashedName"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_hashedName == 0 && _hashedVersion == 0,EIP712: Uninitialized)",
+      "basis": [
+       "require(TMP_1327)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_hashedVersion"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_hashedName == 0 && _hashedVersion == 0,EIP712: Uninitialized)",
+      "basis": [
+       "require(TMP_1327)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transfer(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(from != address(0),ERC20: transfer from the zero address)",
+      "basis": [
+       "require(TMP_1380)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "to"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(to != address(0),ERC20: transfer to the zero address)",
+      "basis": [
+       "require(TMP_1383)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "OR",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "membership",
+          "operator": "truthy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "msg_sender"
+           }
+          ],
+          "references_msg_sender": true,
+          "parameter_indices": [],
+          "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+          "basis": [
+           "require(TMP_1486)"
+          ],
+          "set_descriptor": {
+           "kind": "mapping_membership",
+           "key_sources": [
+            {
+             "source": "msg_sender"
+            }
+           ],
+           "storage_var": "allowedFrom",
+           "enumeration_hint": [
+            {
+             "topic0": "0xcf20b1ecb604b0e8888d579c64e8a3b10e590d45c1c2dddb393bed2843622271",
+             "topics_to_keys": {
+              "1": 0
+             },
+             "data_to_keys": {},
+             "direction": "set",
+             "event_signature": "SetAllowedFrom(address,bool)",
+             "event_name": "SetAllowedFrom",
+             "mapping_name": "allowedFrom",
+             "key_position": 0,
+             "indexed_positions": [
+              0
+             ],
+             "value_position": 1,
+             "writer_function": "_setAllowedFrom(address,bool)"
+            }
+           ]
+          },
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "membership",
+          "operator": "truthy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 0,
+            "parameter_name": "to"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           0
+          ],
+          "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+          "basis": [
+           "require(TMP_1486)"
+          ],
+          "set_descriptor": {
+           "kind": "mapping_membership",
+           "key_sources": [
+            {
+             "source": "parameter",
+             "parameter_index": 0,
+             "parameter_name": "to"
+            }
+           ],
+           "storage_var": "allowedTo"
+          },
+          "confidence": "low"
+         }
+        }
+       ]
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "msg_sender"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": true,
+        "parameter_indices": [],
+        "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+        "basis": [
+         "require(TMP_1486)"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "amount"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(fromBalance >= amount,ERC20: transfer amount exceeds balance)",
+      "basis": [
+       "require(TMP_1386)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "approve(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner != address(0),ERC20: approve from the zero address)",
+      "basis": [
+       "require(TMP_1413)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "spender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(spender != address(0),ERC20: approve to the zero address)",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "amount"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(currentAllowance >= amount,ERC20: insufficient allowance)",
+      "basis": [
+       "require(TMP_1423)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "from"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(owner != address(0),ERC20: approve from the zero address)",
+      "basis": [
+       "require(TMP_1413)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(spender != address(0),ERC20: approve to the zero address)",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "from"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(from != address(0),ERC20: transfer from the zero address)",
+      "basis": [
+       "require(TMP_1380)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "to"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(to != address(0),ERC20: transfer to the zero address)",
+      "basis": [
+       "require(TMP_1383)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "OR",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "membership",
+          "operator": "truthy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 0,
+            "parameter_name": "from"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           0
+          ],
+          "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+          "basis": [
+           "require(TMP_1486)"
+          ],
+          "set_descriptor": {
+           "kind": "mapping_membership",
+           "key_sources": [
+            {
+             "source": "parameter",
+             "parameter_index": 0,
+             "parameter_name": "from"
+            }
+           ],
+           "storage_var": "allowedFrom"
+          },
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "membership",
+          "operator": "truthy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "parameter",
+            "parameter_index": 1,
+            "parameter_name": "to"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           1
+          ],
+          "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+          "basis": [
+           "require(TMP_1486)"
+          ],
+          "set_descriptor": {
+           "kind": "mapping_membership",
+           "key_sources": [
+            {
+             "source": "parameter",
+             "parameter_index": 1,
+             "parameter_name": "to"
+            }
+           ],
+           "storage_var": "allowedTo"
+          },
+          "confidence": "low"
+         }
+        }
+       ]
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 0,
+          "parameter_name": "from"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         0
+        ],
+        "expression": "require(bool,string)(allowedFrom[from] || allowedTo[to] || from == address(0),BackingEigen._beforeTokenTransfer: from or to must be whitelisted)",
+        "basis": [
+         "require(TMP_1486)"
+        ],
+        "confidence": "low"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "from"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "amount"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       2
+      ],
+      "expression": "require(bool,string)(fromBalance >= amount,ERC20: transfer amount exceeds balance)",
+      "basis": [
+       "require(TMP_1386)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "increaseAllowance(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner != address(0),ERC20: approve from the zero address)",
+      "basis": [
+       "require(TMP_1413)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "spender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(spender != address(0),ERC20: approve to the zero address)",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "decreaseAllowance(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "subtractedValue"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(currentAllowance >= subtractedValue,ERC20: decreased allowance below zero)",
+      "basis": [
+       "require(TMP_1375)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner != address(0),ERC20: approve from the zero address)",
+      "basis": [
+       "require(TMP_1413)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "spender"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(spender != address(0),ERC20: approve to the zero address)",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1436)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(newOwner != address(0),Ownable: new owner is the zero address)",
+      "basis": [
+       "require(TMP_1442)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_1436)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "setIsMinter(address,bool)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1436)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "mint(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "membership",
+      "operator": "truthy",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(isMinter[msg.sender],BackingEigen.mintTo: caller is not a minter)",
+      "basis": [
+       "require(REF_197)",
+       "writer-gate promoted: isMinter writers are authority-gated"
+      ],
+      "set_descriptor": {
+       "kind": "mapping_membership",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "storage_var": "isMinter",
+       "enumeration_hint": [
+        {
+         "topic0": "0x0124b12503bddc2616c0f3f54fd23ed283f5ef0c1483a75409e42612176b8bde",
+         "topics_to_keys": {
+          "1": 0
+         },
+         "data_to_keys": {},
+         "direction": "set",
+         "event_signature": "IsMinterModified(address,bool)",
+         "event_name": "IsMinterModified",
+         "mapping_name": "isMinter",
+         "key_position": 0,
+         "indexed_positions": [
+          0
+         ],
+         "value_position": 1,
+         "writer_function": "setIsMinter(address,bool)"
+        }
+       ]
+      },
+      "confidence": "medium"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_totalSupply"
+       },
+       {
+        "source": "view_call",
+        "callee": "_maxSupply()",
+        "callee_signature": "_maxSupply()",
+        "callee_selector": "0x22f4596f"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(totalSupply() <= _maxSupply(),ERC20Votes: total supply risks overflowing votes)",
+      "basis": [
+       "require(TMP_1253)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "initialize(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "truthy",
+      "authority_role": "one_shot",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_initializing"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_initializing,Initializable: contract is not initializing)",
+      "basis": [
+       "require(_initializing_9)",
+       "one-shot initializer latch: _initializing (initializer-family modifier)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "lte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_totalSupply"
+       },
+       {
+        "source": "view_call",
+        "callee": "_maxSupply()",
+        "callee_signature": "_maxSupply()",
+        "callee_selector": "0x22f4596f"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(totalSupply() <= _maxSupply(),ERC20Votes: total supply risks overflowing votes)",
+      "basis": [
+       "require(TMP_1253)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "truthy",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initializing"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1497)",
+           "one-shot initializer latch: _initializing (initializer-family modifier)"
+          ],
+          "confidence": "high"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "comparison",
+          "operator": "lt",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initialized"
+           },
+           {
+            "source": "constant",
+            "constant_value": "1",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1497)",
+           "one-shot initializer latch: _initialized (initializer-family modifier)"
+          ],
+          "confidence": "high",
+          "one_shot_latch": {
+           "kind": "storage",
+           "role": "version",
+           "variable": "_initialized",
+           "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+           "byte_offset": 0,
+           "size_bytes": 1,
+           "value_type": "uint8",
+           "expected_version": 1,
+           "standard": "storage_layout"
+          }
+         }
+        }
+       ]
+      },
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "external_bool",
+          "operator": "falsy",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "self_address"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "isContract(...)",
+          "basis": [
+           "require(TMP_1497)"
+          ],
+          "callee_state_mutability": "view",
+          "gate_kind": "require",
+          "callee_signature": "isContract(address)",
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "one_shot",
+          "operands": [
+           {
+            "source": "state_variable",
+            "state_variable_name": "_initialized"
+           },
+           {
+            "source": "constant",
+            "constant_value": "1",
+            "value_type": "uint256"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+          "basis": [
+           "require(TMP_1497)",
+           "one-shot initializer latch: _initialized (initializer-family modifier)"
+          ],
+          "confidence": "high",
+          "one_shot_latch": {
+           "kind": "storage",
+           "role": "version",
+           "variable": "_initialized",
+           "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+           "byte_offset": 0,
+           "size_bytes": 1,
+           "value_type": "uint8",
+           "expected_version": 1,
+           "standard": "storage_layout"
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "setAllowedFrom(address,bool)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1436)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setAllowedTo(address,bool)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1436)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "disableTransferRestrictions()": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "transferRestrictionsDisabledAfter"
+       },
+       {
+        "source": "constant",
+        "constant_value": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(transferRestrictionsDisabledAfter == type()(uint256).max,BackingEigen.disableTransferRestrictions: transfer restrictions are already disabled)",
+      "basis": [
+       "require(TMP_1475)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_1436)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  }
+ },
+ "check_trees": {
+  "transfer(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "approve(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "increaseAllowance(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  },
+  "decreaseAllowance(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 1,
+      "parameter_name": "subtractedValue"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     1
+    ],
+    "expression": "return TMP_1375",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

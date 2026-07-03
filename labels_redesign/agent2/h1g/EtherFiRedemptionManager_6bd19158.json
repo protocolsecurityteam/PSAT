@@ -1,0 +1,73 @@
+{
+ "contract": "EtherFiRedemptionManager",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "proxiableUUID()": [],
+  "upgradeTo(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ],
+  "paused()": [],
+  "receive()": [],
+  "initialize(uint16,uint16,uint16,uint256,uint256)": [
+   "external_contract_call"
+  ],
+  "initializeTokenParameters(address[],uint16[],uint16[],uint16[],uint256[],uint256[])": [
+   "external_contract_call"
+  ],
+  "redeemEEth(uint256,address,address)": [
+   "asset_send"
+  ],
+  "redeemWeEth(uint256,address,address)": [
+   "asset_send"
+  ],
+  "redeemEEthWithPermit(uint256,address,IeETH.PermitInput,address)": [
+   "asset_send"
+  ],
+  "redeemWeEthWithPermit(uint256,address,IWeETH.PermitInput,address)": [
+   "asset_send"
+  ],
+  "lowWatermarkInETH(address)": [
+   "external_contract_call"
+  ],
+  "getInstantLiquidityAmount(address)": [
+   "external_contract_call"
+  ],
+  "totalRedeemableAmount(address)": [
+   "external_contract_call"
+  ],
+  "canRedeem(uint256,address)": [
+   "external_contract_call"
+  ],
+  "setCapacity(uint256,address)": [
+   "external_contract_call"
+  ],
+  "setRefillRatePerSecond(uint256,address)": [
+   "external_contract_call"
+  ],
+  "setExitFeeBasisPoints(uint16,address)": [
+   "external_contract_call"
+  ],
+  "setLowWatermarkInBpsOfTvl(uint16,address)": [
+   "external_contract_call"
+  ],
+  "setExitFeeSplitToTreasuryInBps(uint16,address)": [
+   "external_contract_call"
+  ],
+  "pauseContract()": [
+   "external_contract_call"
+  ],
+  "unPauseContract()": [
+   "external_contract_call"
+  ],
+  "previewRedeem(uint256,address)": [
+   "external_contract_call"
+  ],
+  "getImplementation()": [
+   "external_contract_call"
+  ]
+ }
+}

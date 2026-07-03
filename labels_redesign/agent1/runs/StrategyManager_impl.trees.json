@@ -1,0 +1,1247 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "StrategyManager",
+ "trees": {
+  "pause(uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newPausedStatus"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,error)((currentPausedStatus & newPausedStatus) == currentPausedStatus,revert InvalidNewPausedStatus()())",
+      "basis": [
+       "require(TMP_1163)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "delegated_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "isPauser(...)",
+      "basis": [
+       "require(TMP_1143)"
+      ],
+      "callee_state_mutability": "view",
+      "gate_kind": "require",
+      "callee_signature": "isPauser(address)",
+      "set_descriptor": {
+       "kind": "external_set",
+       "key_sources": [
+        {
+         "source": "msg_sender"
+        }
+       ],
+       "authority_contract": {
+        "address_source": {
+         "source": "state_variable",
+         "state_variable_name": "pauserRegistry"
+        }
+       },
+       "callee_function": "isPauser",
+       "callee_signature": "isPauser(address)",
+       "callee_selector": "0x46fbf68e"
+      },
+      "confidence": "medium"
+     }
+    }
+   ]
+  },
+  "pauseAll()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "external_bool",
+    "operator": "truthy",
+    "authority_role": "delegated_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "isPauser(...)",
+    "basis": [
+     "require(TMP_1143)"
+    ],
+    "callee_state_mutability": "view",
+    "gate_kind": "require",
+    "callee_signature": "isPauser(address)",
+    "set_descriptor": {
+     "kind": "external_set",
+     "key_sources": [
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "authority_contract": {
+      "address_source": {
+       "source": "state_variable",
+       "state_variable_name": "pauserRegistry"
+      }
+     },
+     "callee_function": "isPauser",
+     "callee_signature": "isPauser(address)",
+     "callee_selector": "0x46fbf68e"
+    },
+    "confidence": "medium"
+   }
+  },
+  "unpause(uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newPausedStatus"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_paused"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,error)(((~ currentPausedStatus) & (~ newPausedStatus)) == (~ currentPausedStatus),revert InvalidNewPausedStatus()())",
+      "basis": [
+       "require(TMP_1174)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "external_call",
+        "callee": "unpauser",
+        "callee_signature": "unpauser()",
+        "callee_selector": "0xeab66d7a"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == pauserRegistry.unpauser(),revert OnlyUnpauser()())",
+      "basis": [
+       "require(TMP_1147)"
+      ],
+      "confidence": "medium"
+     }
+    }
+   ]
+  },
+  "renounceOwnership()": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_owner"
+     },
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+    "basis": [
+     "require(TMP_1206)"
+    ],
+    "confidence": "high"
+   }
+  },
+  "transferOwnership(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "newOwner"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(newOwner != address(0),Ownable: new owner is the zero address)",
+      "basis": [
+       "require(TMP_1212)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_1206)"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "initialize(address,address,uint256)": {
+   "op": "OR",
+   "children": [
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "truthy",
+        "authority_role": "one_shot",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "_initializing"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+        "basis": [
+         "require(TMP_1400)",
+         "one-shot initializer latch: _initializing (initializer-family modifier)"
+        ],
+        "confidence": "high"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "lt",
+        "authority_role": "one_shot",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "_initialized"
+         },
+         {
+          "source": "constant",
+          "constant_value": "1",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+        "basis": [
+         "require(TMP_1400)",
+         "one-shot initializer latch: _initialized (initializer-family modifier)"
+        ],
+        "confidence": "high",
+        "one_shot_latch": {
+         "kind": "storage",
+         "role": "version",
+         "variable": "_initialized",
+         "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+         "byte_offset": 0,
+         "size_bytes": 1,
+         "value_type": "uint8",
+         "expected_version": 1,
+         "standard": "storage_layout"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "op": "AND",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "external_bool",
+        "operator": "falsy",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "self_address"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "isContract(...)",
+        "basis": [
+         "require(TMP_1400)"
+        ],
+        "callee_state_mutability": "view",
+        "gate_kind": "require",
+        "callee_signature": "isContract(address)",
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "one_shot",
+        "operands": [
+         {
+          "source": "state_variable",
+          "state_variable_name": "_initialized"
+         },
+         {
+          "source": "constant",
+          "constant_value": "1",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [],
+        "expression": "require(bool,string)((isTopLevelCall && _initialized < 1) || (! AddressUpgradeable.isContract(address(this)) && _initialized == 1),Initializable: contract is already initialized)",
+        "basis": [
+         "require(TMP_1400)",
+         "one-shot initializer latch: _initialized (initializer-family modifier)"
+        ],
+        "confidence": "high",
+        "one_shot_latch": {
+         "kind": "storage",
+         "role": "version",
+         "variable": "_initialized",
+         "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+         "byte_offset": 0,
+         "size_bytes": 1,
+         "value_type": "uint8",
+         "expected_version": 1,
+         "standard": "storage_layout"
+        }
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "depositIntoStrategy(IStrategy,IERC20,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "PAUSED_DEPOSITS"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "PAUSED_DEPOSITS"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(! paused(index),revert CurrentlyPaused()())",
+      "basis": [
+       "require(TMP_1154)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "depositIntoStrategyWithSignature(IStrategy,IERC20,uint256,address,uint256,bytes)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "time",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 4,
+        "parameter_name": "expiry"
+       },
+       {
+        "source": "block_context",
+        "block_context_kind": "timestamp"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       4
+      ],
+      "expression": "require(bool,error)(expiry >= block.timestamp,revert SignatureExpired()())",
+      "basis": [
+       "require(TMP_1131)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "external_call",
+            "callee": "tryRecover",
+            "callee_signature": "tryRecover(bytes32,bytes)",
+            "callee_selector": "0xc6edd8a7"
+           },
+           {
+            "source": "computed",
+            "computed_kind": "member.NoError"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,error)(signer.isValidSignatureNow(signableDigest,signature),revert InvalidSignature()())",
+          "basis": [
+           "require(TMP_1134)"
+          ],
+          "confidence": "low"
+         }
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "external_call",
+            "callee": "tryRecover",
+            "callee_signature": "tryRecover(bytes32,bytes)",
+            "callee_selector": "0xc6edd8a7"
+           },
+           {
+            "source": "parameter",
+            "parameter_index": 3,
+            "parameter_name": "staker"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [
+           3
+          ],
+          "expression": "require(bool,error)(signer.isValidSignatureNow(signableDigest,signature),revert InvalidSignature()())",
+          "basis": [
+           "require(TMP_1134)"
+          ],
+          "confidence": "low"
+         }
+        }
+       ]
+      },
+      {
+       "op": "AND",
+       "children": [
+        {
+         "op": "AND",
+         "children": [
+          {
+           "op": "LEAF",
+           "leaf": {
+            "kind": "equality",
+            "operator": "truthy",
+            "authority_role": "business",
+            "operands": [
+             {
+              "source": "parameter",
+              "parameter_index": 3,
+              "parameter_name": "staker"
+             }
+            ],
+            "references_msg_sender": false,
+            "parameter_indices": [
+             3
+            ],
+            "expression": "require(bool,error)(signer.isValidSignatureNow(signableDigest,signature),revert InvalidSignature()())",
+            "basis": [
+             "require(TMP_1134)"
+            ],
+            "confidence": "low"
+           }
+          },
+          {
+           "op": "LEAF",
+           "leaf": {
+            "kind": "comparison",
+            "operator": "gte",
+            "authority_role": "business",
+            "operands": [
+             {
+              "source": "parameter",
+              "parameter_index": 3,
+              "parameter_name": "staker"
+             },
+             {
+              "source": "constant",
+              "constant_value": "32",
+              "value_type": "uint256"
+             }
+            ],
+            "references_msg_sender": false,
+            "parameter_indices": [
+             3
+            ],
+            "expression": "require(bool,error)(signer.isValidSignatureNow(signableDigest,signature),revert InvalidSignature()())",
+            "basis": [
+             "require(TMP_1134)"
+            ],
+            "confidence": "low"
+           }
+          }
+         ]
+        },
+        {
+         "op": "LEAF",
+         "leaf": {
+          "kind": "equality",
+          "operator": "eq",
+          "authority_role": "business",
+          "operands": [
+           {
+            "source": "computed",
+            "computed_kind": "abi.decode()"
+           },
+           {
+            "source": "constant",
+            "constant_value": "371636862",
+            "value_type": "bytes4"
+           }
+          ],
+          "references_msg_sender": false,
+          "parameter_indices": [],
+          "expression": "require(bool,error)(signer.isValidSignatureNow(signableDigest,signature),revert InvalidSignature()())",
+          "basis": [
+           "require(TMP_1134)"
+          ],
+          "confidence": "low"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "PAUSED_DEPOSITS"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "PAUSED_DEPOSITS"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(! paused(index),revert CurrentlyPaused()())",
+      "basis": [
+       "require(TMP_1154)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "removeDepositShares(address,IStrategy,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "delegation"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == address(delegation),revert OnlyDelegationManager()())",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "addShares(address,IStrategy,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "delegation"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == address(delegation),revert OnlyDelegationManager()())",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "withdrawSharesAsTokens(address,IStrategy,IERC20,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "delegation"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == address(delegation),revert OnlyDelegationManager()())",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "increaseBurnOrRedistributableShares(OperatorSet,uint256,IStrategy,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "external_bool",
+      "operator": "truthy",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "slashId"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "strategy"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 3,
+        "parameter_name": "sharesToBurn"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       1,
+       2,
+       3
+      ],
+      "expression": "set(...)",
+      "basis": [
+       "require(TMP_1246)"
+      ],
+      "callee_state_mutability": "nonview_library",
+      "gate_kind": "require",
+      "callee_signature": "AddressToUintMap,address,uint256)",
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "delegation"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == address(delegation),revert OnlyDelegationManager()())",
+      "basis": [
+       "require(TMP_1416)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "clearBurnOrRedistributableShares(OperatorSet,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "reentrancy",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_status"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "_ENTERED"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+    "basis": [
+     "require(TMP_1186)",
+     "reentrancy guard: _status"
+    ],
+    "confidence": "high"
+   }
+  },
+  "clearBurnOrRedistributableSharesByStrategy(OperatorSet,uint256,IStrategy)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "reentrancy",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_status"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "_ENTERED"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+    "basis": [
+     "require(TMP_1186)",
+     "reentrancy guard: _status"
+    ],
+    "confidence": "high"
+   }
+  },
+  "burnShares(IStrategy)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "ne",
+    "authority_role": "reentrancy",
+    "operands": [
+     {
+      "source": "state_variable",
+      "state_variable_name": "_status"
+     },
+     {
+      "source": "state_variable",
+      "state_variable_name": "_ENTERED"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+    "basis": [
+     "require(TMP_1186)",
+     "reentrancy guard: _status"
+    ],
+    "confidence": "high"
+   }
+  },
+  "setStrategyWhitelister(address)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_owner"
+       },
+       {
+        "source": "msg_sender"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(owner() == _msgSender(),Ownable: caller is not the owner)",
+      "basis": [
+       "require(TMP_1206)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "addStrategiesToDepositWhitelist(IStrategy[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "strategyWhitelister"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == strategyWhitelister,revert OnlyStrategyWhitelister()())",
+      "basis": [
+       "require(TMP_1410)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  },
+  "removeStrategiesFromDepositWhitelist(IStrategy[])": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "strategyWhitelister"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [],
+      "expression": "require(bool,error)(msg.sender == strategyWhitelister,revert OnlyStrategyWhitelister()())",
+      "basis": [
+       "require(TMP_1410)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "reentrancy",
+      "operands": [
+       {
+        "source": "state_variable",
+        "state_variable_name": "_status"
+       },
+       {
+        "source": "state_variable",
+        "state_variable_name": "_ENTERED"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [],
+      "expression": "require(bool,string)(_status != _ENTERED,ReentrancyGuard: reentrant call)",
+      "basis": [
+       "require(TMP_1186)",
+       "reentrancy guard: _status"
+      ],
+      "confidence": "high"
+     }
+    }
+   ]
+  }
+ },
+ "canonical_signatures": {
+  "strategyIsWhitelistedForDeposit(IStrategy)": "strategyIsWhitelistedForDeposit(address)",
+  "stakerDepositShares(address,IStrategy)": "stakerDepositShares(address,address)",
+  "depositIntoStrategy(IStrategy,IERC20,uint256)": "depositIntoStrategy(address,address,uint256)",
+  "depositIntoStrategyWithSignature(IStrategy,IERC20,uint256,address,uint256,bytes)": "depositIntoStrategyWithSignature(address,address,uint256,address,uint256,bytes)",
+  "removeDepositShares(address,IStrategy,uint256)": "removeDepositShares(address,address,uint256)",
+  "addShares(address,IStrategy,uint256)": "addShares(address,address,uint256)",
+  "withdrawSharesAsTokens(address,IStrategy,IERC20,uint256)": "withdrawSharesAsTokens(address,address,address,uint256)",
+  "increaseBurnOrRedistributableShares(OperatorSet,uint256,IStrategy,uint256)": "increaseBurnOrRedistributableShares((address,uint32),uint256,address,uint256)",
+  "clearBurnOrRedistributableShares(OperatorSet,uint256)": "clearBurnOrRedistributableShares((address,uint32),uint256)",
+  "clearBurnOrRedistributableSharesByStrategy(OperatorSet,uint256,IStrategy)": "clearBurnOrRedistributableSharesByStrategy((address,uint32),uint256,address)",
+  "burnShares(IStrategy)": "burnShares(address)",
+  "addStrategiesToDepositWhitelist(IStrategy[])": "addStrategiesToDepositWhitelist(address[])",
+  "removeStrategiesFromDepositWhitelist(IStrategy[])": "removeStrategiesFromDepositWhitelist(address[])",
+  "calculateStrategyDepositDigestHash(address,IStrategy,IERC20,uint256,uint256,uint256)": "calculateStrategyDepositDigestHash(address,address,address,uint256,uint256,uint256)",
+  "getBurnOrRedistributableShares(OperatorSet,uint256)": "getBurnOrRedistributableShares((address,uint32),uint256)",
+  "getBurnOrRedistributableShares(OperatorSet,uint256,IStrategy)": "getBurnOrRedistributableShares((address,uint32),uint256,address)",
+  "getBurnOrRedistributableCount(OperatorSet,uint256)": "getBurnOrRedistributableCount((address,uint32),uint256)",
+  "getBurnableShares(IStrategy)": "getBurnableShares(address)",
+  "getPendingSlashIds(OperatorSet)": "getPendingSlashIds((address,uint32))"
+ },
+ "check_trees": {
+  "paused(uint8)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "equality",
+    "operator": "eq",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "index"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 0,
+      "parameter_name": "index"
+     }
+    ],
+    "references_msg_sender": false,
+    "parameter_indices": [
+     0,
+     0
+    ],
+    "expression": "return TMP_1181",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

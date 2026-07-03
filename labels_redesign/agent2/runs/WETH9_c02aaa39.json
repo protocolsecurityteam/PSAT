@@ -1,0 +1,104 @@
+{
+ "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+ "contract": "WETH9",
+ "owner_vars_from_trees": [],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": []
+ },
+ "slither_ercs": [
+  "ERC20"
+ ],
+ "functions": {
+  "approve(address,uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance"
+   ]
+  },
+  "deposit()": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "balanceOf"
+   ]
+  },
+  "fallback()": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "balanceOf"
+   ]
+  },
+  "totalSupply()": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "assembly": false,
+   "sink_kinds": [],
+   "writes": []
+  },
+  "transfer(address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "labels": [],
+   "summary": "Writes or calls into: allowance, balanceOf.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "allowance",
+    "balanceOf"
+   ]
+  },
+  "withdraw(uint256)": {
+   "labels": [
+    "hook_update"
+   ],
+   "summary": "Updates hook configuration that can affect later contract behavior.",
+   "state_changing": true,
+   "assembly": false,
+   "sink_kinds": [
+    "state_write"
+   ],
+   "writes": [
+    "balanceOf"
+   ]
+  }
+ }
+}

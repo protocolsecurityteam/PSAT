@@ -1,0 +1,13 @@
+{
+  "address": "0x31724ca0c982a31fbb5c57f4217ab585271fc9a5",
+  "contract_name": "StakedTokenV1",
+  "compiler_version": "v0.6.12+commit.27d51765",
+  "language": "solidity",
+  "optimization_used": "1",
+  "runs": "1000000",
+  "evm_version": "Default",
+  "license": "",
+  "source_format": "standard_json",
+  "source_file_count": 20,
+  "remappings": []
+}

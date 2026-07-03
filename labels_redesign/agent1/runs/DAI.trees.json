@@ -1,0 +1,706 @@
+{
+ "schema_version": "semantic",
+ "contract_name": "Dai",
+ "trees": {
+  "rely(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(wards[msg.sender] == 1,Dai/not-authorized)",
+    "basis": [
+     "require(TMP_75)",
+     "writer-gate promoted: wards self-administered (writer reads same map)"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "truthy_value": "1",
+     "value_predicate": {
+      "op": "eq",
+      "rhs_values": [
+       "1"
+      ],
+      "value_type": "uint256"
+     },
+     "storage_var": "wards"
+    },
+    "confidence": "high"
+   }
+  },
+  "deny(address)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(wards[msg.sender] == 1,Dai/not-authorized)",
+    "basis": [
+     "require(TMP_75)",
+     "writer-gate promoted: wards self-administered (writer reads same map)"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "truthy_value": "1",
+     "value_predicate": {
+      "op": "eq",
+      "rhs_values": [
+       "1"
+      ],
+      "value_type": "uint256"
+     },
+     "storage_var": "wards"
+    },
+    "confidence": "high"
+   }
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(balanceOf[src] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_19)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(allowance[src][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_26)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "mint(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "membership",
+    "operator": "truthy",
+    "authority_role": "caller_authority",
+    "operands": [
+     {
+      "source": "msg_sender"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [],
+    "expression": "require(bool,string)(wards[msg.sender] == 1,Dai/not-authorized)",
+    "basis": [
+     "require(TMP_75)",
+     "writer-gate promoted: wards self-administered (writer reads same map)"
+    ],
+    "set_descriptor": {
+     "kind": "mapping_membership",
+     "key_sources": [
+      {
+       "source": "msg_sender"
+      }
+     ],
+     "truthy_value": "1",
+     "value_predicate": {
+      "op": "eq",
+      "rhs_values": [
+       "1"
+      ],
+      "value_type": "uint256"
+     },
+     "storage_var": "wards"
+    },
+    "confidence": "high"
+   }
+  },
+  "burn(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "usr"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0,
+       1
+      ],
+      "expression": "require(bool,string)(balanceOf[usr] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_37)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(allowance[usr][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_44)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "push(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(balanceOf[src] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_19)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(allowance[src][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_26)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "pull(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(balanceOf[src] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_19)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(allowance[src][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_26)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "move(address,address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(balanceOf[src] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_19)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       2
+      ],
+      "expression": "require(bool,string)(allowance[src][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_26)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "permit(address,address,uint256,uint256,bool,uint8,bytes32,bytes32)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "ne",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "holder"
+       },
+       {
+        "source": "constant",
+        "constant_value": "0",
+        "value_type": "uint256"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(holder != address(0),Dai/invalid-address-0)",
+      "basis": [
+       "require(TMP_60)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "signature_auth",
+      "operator": "eq",
+      "authority_role": "caller_authority",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "holder"
+       },
+       {
+        "source": "signature_recovery",
+        "callee": "ecrecover"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       0
+      ],
+      "expression": "require(bool,string)(holder == ecrecover(bytes32,uint8,bytes32,bytes32)(digest,v,r,s),Dai/invalid-permit)",
+      "basis": [
+       "require(TMP_63)"
+      ],
+      "confidence": "high"
+     }
+    },
+    {
+     "op": "OR",
+     "children": [
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [
+         {
+          "source": "parameter",
+          "parameter_index": 3,
+          "parameter_name": "expiry"
+         },
+         {
+          "source": "constant",
+          "constant_value": "0",
+          "value_type": "uint256"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         3
+        ],
+        "expression": "require(bool,string)(expiry == 0 || now <= expiry,Dai/permit-expired)",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "low"
+       }
+      },
+      {
+       "op": "LEAF",
+       "leaf": {
+        "kind": "comparison",
+        "operator": "lte",
+        "authority_role": "time",
+        "operands": [
+         {
+          "source": "block_context",
+          "block_context_kind": "now"
+         },
+         {
+          "source": "parameter",
+          "parameter_index": 3,
+          "parameter_name": "expiry"
+         }
+        ],
+        "references_msg_sender": false,
+        "parameter_indices": [
+         3
+        ],
+        "expression": "require(bool,string)(expiry == 0 || now <= expiry,Dai/permit-expired)",
+        "basis": [
+         "require(TMP_67)"
+        ],
+        "confidence": "high"
+       }
+      }
+     ]
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "equality",
+      "operator": "eq",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "parameter",
+        "parameter_index": 2,
+        "parameter_name": "nonce"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 0,
+        "parameter_name": "holder"
+       }
+      ],
+      "references_msg_sender": false,
+      "parameter_indices": [
+       2,
+       0
+      ],
+      "expression": "require(bool,string)(nonce == nonces[holder] ++,Dai/invalid-nonce)",
+      "basis": [
+       "require(TMP_70)"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  }
+ },
+ "check_trees": {
+  "transfer(address,uint256)": {
+   "op": "AND",
+   "children": [
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(balanceOf[src] >= wad,Dai/insufficient-balance)",
+      "basis": [
+       "require(TMP_19)",
+       "inlined_internal_gate:transferFrom(address,address,uint256)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "require(bool,string)(allowance[src][msg.sender] >= wad,Dai/insufficient-allowance)",
+      "basis": [
+       "require(TMP_26)",
+       "inlined_internal_gate:transferFrom(address,address,uint256)"
+      ],
+      "confidence": "low"
+     }
+    },
+    {
+     "op": "LEAF",
+     "leaf": {
+      "kind": "comparison",
+      "operator": "gte",
+      "authority_role": "business",
+      "operands": [
+       {
+        "source": "msg_sender"
+       },
+       {
+        "source": "parameter",
+        "parameter_index": 1,
+        "parameter_name": "wad"
+       }
+      ],
+      "references_msg_sender": true,
+      "parameter_indices": [
+       1
+      ],
+      "expression": "return TMP_19",
+      "basis": [
+       "bool-return predicate"
+      ],
+      "confidence": "low"
+     }
+    }
+   ]
+  },
+  "transferFrom(address,address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "comparison",
+    "operator": "gte",
+    "authority_role": "business",
+    "operands": [
+     {
+      "source": "msg_sender"
+     },
+     {
+      "source": "parameter",
+      "parameter_index": 2,
+      "parameter_name": "wad"
+     }
+    ],
+    "references_msg_sender": true,
+    "parameter_indices": [
+     2
+    ],
+    "expression": "return TMP_19",
+    "basis": [
+     "bool-return predicate"
+    ],
+    "confidence": "low"
+   }
+  },
+  "approve(address,uint256)": {
+   "op": "LEAF",
+   "leaf": {
+    "kind": "unsupported",
+    "operator": "truthy",
+    "authority_role": "business",
+    "operands": [],
+    "unsupported_reason": "unattributable_return_true",
+    "references_msg_sender": false,
+    "parameter_indices": [],
+    "expression": "literal true",
+    "basis": [
+     "unattributable_return_true"
+    ],
+    "confidence": "low"
+   }
+  }
+ }
+}

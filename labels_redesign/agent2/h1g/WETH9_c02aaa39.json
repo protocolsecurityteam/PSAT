@@ -1,0 +1,14 @@
+{
+ "contract": "WETH9",
+ "pause_toggle_functions": [],
+ "pause_state_vars": [],
+ "functions": {
+  "fallback()": [],
+  "deposit()": [],
+  "withdraw(uint256)": [],
+  "totalSupply()": [],
+  "approve(address,uint256)": [],
+  "transfer(address,uint256)": [],
+  "transferFrom(address,address,uint256)": []
+ }
+}

@@ -1,0 +1,16 @@
+[
+  {"address": "0x39272ee125ebd9214404f735baae50acb9d334c0", "label": "L1SyncPoolETH"},
+  {"address": "0x1a44076050125825900e736c501f859c50fe728c", "label": "EndpointV2"},
+  {"address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "label": "FiatTokenProxy"},
+  {"address": "0x43506849d7c04f9138d1a2050bbf3a0c054402dd", "label": "FiatTokenV2_2"},
+  {"address": "0x6b175474e89094c44da98b954eedeac495271d0f", "label": "DAI"},
+  {"address": "0xc00e94cb662c3520282e6f5717214004a7f26888", "label": "Comp"},
+  {"address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761", "label": "EtherFiTimelock"},
+  {"address": "0xbe010a7e3686fdf65e93344ab664d065a0b02478", "label": "OneSig"},
+  {"address": "0x5bdd4b0d644c0a573e0eb526ab7d7d332aaaa50e", "label": "TopUp"},
+  {"address": "0x789cbbe0739f1458905c9ca6d6e74f7997622a9b", "label": "EtherFiNodesManager"},
+  {"address": "0x31724ca0c982a31fbb5c57f4217ab585271fc9a5", "label": "StakedTokenV1"},
+  {"address": "0xf2b225815f70c9b327dc9db758a36c92a4279b17", "label": "BackingEigen"},
+  {"address": "0x83bc649fcdb2c8da146b2154a559ddedf937ef12", "label": "LiquidityPool_impl"},
+  {"address": "0x858646372cc42e1a627fce94aa7a7033e7cf075a", "label": "StrategyManager_proxy"}
+]

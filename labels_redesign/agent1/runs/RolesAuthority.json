@@ -1,0 +1,273 @@
+{
+ "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+ "label": "RolesAuthority",
+ "contract_name": "RolesAuthority",
+ "compiler": "v0.8.21+commit.d9974bed",
+ "owner_vars_from_trees": [
+  "owner"
+ ],
+ "pause_info": {
+  "pause_state_vars": [],
+  "pause_toggle_functions": [],
+  "reentrancy_state_vars": [],
+  "reentrancy_guarded_functions": []
+ },
+ "functions": {
+  "canCall(address,address,bytes4)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setAuthority(Authority)": {
+   "labels": [
+    "authority_update"
+   ],
+   "summary": "Updates the authority contract used for permission checks.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "authority"
+   ],
+   "leaves": [
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    }
+   ]
+  },
+  "transferOwnership(address)": {
+   "labels": [
+    "ownership_transfer"
+   ],
+   "summary": "Transfers contract ownership.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "owner"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "doesUserHaveRole(address,uint8)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "doesRoleHaveCapability(uint8,address,bytes4)": {
+   "labels": [],
+   "summary": "Performs a contract action.",
+   "state_changing": false,
+   "sink_kinds": [],
+   "state_writes": [],
+   "leaves": []
+  },
+  "setPublicCapability(address,bytes4,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "isCapabilityPublic"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "setRoleCapability(uint8,address,bytes4,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "getRolesWithCapability"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  },
+  "setUserRole(address,uint8,bool)": {
+   "labels": [
+    "role_management"
+   ],
+   "summary": "Changes role-based permissions.",
+   "state_changing": true,
+   "sink_kinds": [
+    "external_call",
+    "state_write"
+   ],
+   "state_writes": [
+    "getUserRoles"
+   ],
+   "leaves": [
+    {
+     "role": "business",
+     "kind": "equality",
+     "op": "ne",
+     "msg_sender": false,
+     "refs": [
+      "sv:authority"
+     ]
+    },
+    {
+     "role": "delegated_authority",
+     "kind": "external_bool",
+     "op": "truthy",
+     "msg_sender": true,
+     "refs": [
+      "self_address",
+      "computed"
+     ]
+    },
+    {
+     "role": "caller_authority",
+     "kind": "equality",
+     "op": "eq",
+     "msg_sender": true,
+     "refs": [
+      "sv:owner"
+     ]
+    }
+   ]
+  }
+ },
+ "written_by_fn": {
+  "canCall(address,address,bytes4)": [],
+  "setAuthority(Authority)": [
+   "authority"
+  ],
+  "transferOwnership(address)": [
+   "owner"
+  ],
+  "doesUserHaveRole(address,uint8)": [],
+  "doesRoleHaveCapability(uint8,address,bytes4)": [],
+  "setPublicCapability(address,bytes4,bool)": [
+   "isCapabilityPublic"
+  ],
+  "setRoleCapability(uint8,address,bytes4,bool)": [
+   "getRolesWithCapability"
+  ],
+  "setUserRole(address,uint8,bool)": [
+   "getUserRoles"
+  ]
+ },
+ "guard_extraction_uncertain": []
+}

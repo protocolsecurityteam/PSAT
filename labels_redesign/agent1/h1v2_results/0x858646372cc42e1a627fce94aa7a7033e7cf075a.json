@@ -1,0 +1,84 @@
+{
+ "contract": "TransparentUpgradeableProxy",
+ "owner_vars_v2": [],
+ "pause_v2": [],
+ "impl_fns": [
+  "upgradeTo(address)",
+  "upgradeToAndCall(address,bytes)"
+ ],
+ "diffs": [
+  [
+   "upgradeTo(address)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ],
+  [
+   "upgradeToAndCall(address,bytes)",
+   [
+    "delegatecall_execution"
+   ],
+   [
+    "implementation_update"
+   ]
+  ]
+ ],
+ "current": {
+  "fallback()": [
+   "delegatecall_execution"
+  ],
+  "receive()": [
+   "delegatecall_execution"
+  ],
+  "admin()": [
+   "delegatecall_execution"
+  ],
+  "implementation()": [
+   "delegatecall_execution"
+  ],
+  "changeAdmin(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeTo(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "delegatecall_execution"
+  ]
+ },
+ "h1": {
+  "fallback()": [
+   "delegatecall_execution"
+  ],
+  "receive()": [
+   "delegatecall_execution"
+  ],
+  "admin()": [
+   "delegatecall_execution"
+  ],
+  "implementation()": [
+   "delegatecall_execution"
+  ],
+  "changeAdmin(address)": [
+   "delegatecall_execution"
+  ],
+  "upgradeTo(address)": [
+   "implementation_update"
+  ],
+  "upgradeToAndCall(address,bytes)": [
+   "implementation_update"
+  ]
+ },
+ "state_changing": {
+  "fallback()": false,
+  "receive()": false,
+  "admin()": true,
+  "implementation()": true,
+  "changeAdmin(address)": true,
+  "upgradeTo(address)": true,
+  "upgradeToAndCall(address,bytes)": true
+ }
+}
