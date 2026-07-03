@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from slither.slither import Slither
 
+from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
 from services.static.contract_analysis_pipeline.effects import build_effects
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts,
@@ -37,9 +38,12 @@ def _scaffold_and_analyze(solidity_source: str, contract_name: str = "Target") -
         subject = _select_subject_contract(slither, contract_name)
         if subject is None:
             raise RuntimeError(f"Contract {contract_name} not found")
-        # _build_semantic_control_summary reads predicate_trees + effects.
+        # Full production label sequence: facts -> Plane-1 claims -> projection.
         predicate_trees = build_predicate_artifacts(subject)
         effects = build_effects(subject)
+        claims_artifact = build_claims(subject, effects, predicate_trees)
+        attach_claims_to_effects(effects, claims_artifact)
+        project_effect_labels(effects)
         semantic_control = _build_semantic_control_summary(subject, project_dir, predicate_trees, effects)
         return {"semantic_control": semantic_control, "effects": effects}
 
@@ -48,6 +52,13 @@ def _get_function_labels(analysis: dict, function_name: str) -> set[str]:
     for pf in analysis.get("semantic_control", {}).get("semantic_functions", []):
         if pf.get("function", "").split("(")[0] == function_name:
             return set(pf.get("effect_labels", []))
+    return set()
+
+
+def _get_function_claims(analysis: dict, function_name: str) -> set[str]:
+    for sig, info in (analysis.get("effects", {}).get("functions") or {}).items():
+        if sig.split("(")[0] == function_name:
+            return {claim["claim_id"] for claim in (info.get("claims") or [])}
     return set()
 
 
@@ -77,9 +88,12 @@ contract Target {{
 """
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, setter_name)
-    assert "implementation_update" in labels, (
-        f"Random impl slot '{slot_name}', setter '{setter_name}': expected implementation_update, got {labels}"
+    # The bespoke same-contract impl-slot detector is retired; ``upgrade.*`` is
+    # standard-gated. The delegatecall stays a fact on the fallback.
+    assert "implementation_update" not in labels, (
+        f"Random impl slot '{slot_name}', setter '{setter_name}': expected NO implementation_update, got {labels}"
     )
+    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
 # =========================================================================
@@ -149,9 +163,10 @@ contract Target {{
 """
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, setter_name)
-    assert "implementation_update" in labels, (
-        f"Assembly sstore impl setter '{setter_name}': expected implementation_update, got {labels}"
+    assert "implementation_update" not in labels, (
+        f"Assembly sstore impl setter '{setter_name}': expected NO implementation_update, got {labels}"
     )
+    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
 # =========================================================================
@@ -207,9 +222,12 @@ contract Target {{
 
 
 # =========================================================================
-# 6. Cross-contract mint with randomized interface method name
-#    The external function is NOT called "mint" — it's called something random.
-#    The label comes from the observed totalSupply delta around the call.
+# 6. Cross-contract "mint" via a randomized interface method name.
+#    The retired ``str(ir)`` totalSupply-sandwich parser used to infer mint
+#    from an observed totalSupply delta around an arbitrarily-named call. It is
+#    gone (§5): ``supply.mint`` keys on the canonical ``mint`` selector or an
+#    ERC-20 gate, so a bespoke, non-selector call is not a supply claim — the
+#    honest label is the external-call fact.
 # =========================================================================
 
 
@@ -236,7 +254,10 @@ contract Target {{
 """
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, fn_name)
-    assert "mint" in labels, f"Randomized interface mint '{mint_name}', fn '{fn_name}': expected mint, got {labels}"
+    assert "mint" not in labels, (
+        f"Randomized interface mint '{mint_name}', fn '{fn_name}': expected NO mint, got {labels}"
+    )
+    assert labels == {"external_contract_call"}
 
 
 # =========================================================================
@@ -320,6 +341,11 @@ contract Target {{
 """
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, fn_name)
-    assert "ownership_transfer" in labels, (
-        f"Random owner var '{var_name}', fn '{fn_name}': expected ownership_transfer, got {labels}"
+    claims = _get_function_claims(analysis, fn_name)
+    # No ownership standard on this contract (no owner()/transferOwnership),
+    # so the bespoke caller-authority scalar rotation is authorized_caller.rotate
+    # rather than the ghost-prone ownership_transfer.
+    assert "authorized_caller.rotate" in claims, (
+        f"Random owner var '{var_name}', fn '{fn_name}': expected authorized_caller.rotate, got {claims}"
     )
+    assert "ownership_transfer" not in labels

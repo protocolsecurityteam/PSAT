@@ -2,9 +2,9 @@
 
 Two entry points, both driving the real static pipeline (compile with Slither,
 run ``build_predicate_artifacts_with_pause_info`` -> ``build_effects`` ->
-``apply_authority_effect_labels``) and comparing flattened
-``(contract, address, function, selector, effect_labels)`` tuples against the
-checked-in golden:
+``build_claims`` -> ``project_effect_labels``) and comparing flattened
+``(contract, address, function, selector, effect_labels, claims)`` tuples against
+the checked-in golden:
 
 - ``test_label_corpus_smoke`` runs in the default offline suite over a small,
   fast subset (contracts pinned to the solc version CI already installs), so a

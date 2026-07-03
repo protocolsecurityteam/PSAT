@@ -1,8 +1,8 @@
 """Regression tests for the Plane-0 facts hardening in ``effects.py``.
 
 Each test compiles a real Solidity fixture with Slither and drives the
-production ``build_effects`` / ``apply_authority_effect_labels`` sequence — no
-fakes, only the solc compile is real. Precedent:
+production ``build_effects`` -> ``build_claims`` -> ``project_effect_labels``
+sequence — no fakes, only the solc compile is real. Precedent:
 ``tests/test_selector_canonicalization.py``.
 
 The six hardening fixes (spec §3 FACT records / §5 facts-plane prerequisites):
@@ -30,9 +30,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.static.claims import (  # noqa: E402
+    attach_claims_to_effects,
+    build_claims,
+    project_effect_labels,
+)
 from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
     SCHEMA_VERSION,
-    apply_authority_effect_labels,
     build_effects,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -45,6 +49,17 @@ def _compile(tmp_path: Path, source: str, name: str):
     f.write_text(textwrap.dedent(source).strip() + "\n")
     sl = Slither(str(f))
     return next(c for c in sl.contracts if c.name == name)
+
+
+def _effects_with_labels(contract):
+    """Facts + Plane-1 claims + the effect-label projection, exactly as core.py
+    runs them (the claim projection is what now emits ``ownership_transfer``)."""
+    predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
+    effects = build_effects(contract)
+    claims_artifact = build_claims(contract, effects, predicate_trees)
+    attach_claims_to_effects(effects, claims_artifact)
+    project_effect_labels(effects)
+    return effects
 
 
 def _info(effects, signature):
@@ -209,16 +224,18 @@ contract Vault is OwnableUpgradeable {
 
 
 def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_path):
-    """The harvest is gated on hygiene-clean scalar address vars, so the
-    bytes32 slot constant never becomes an owner var: the ``owner()`` view and
-    the setters are NOT tagged ``ownership_transfer``. The ghost writes stay
-    recorded with a hygiene class (``view_writer`` / ``storage_location_pseudo``)."""
+    """Ghost-immunity via standards, not write identity: the ``ownership.*``
+    matcher keys on the canonical ``transferOwnership`` selector + the
+    ``owner()`` getter sibling, so ``transferOwnership`` IS tagged even on OZ v5
+    namespaced storage — while the ``owner()`` view and the unrelated
+    ``setToken`` setter (which also "write" the ``OwnableStorageLocation`` slot
+    constant per Slither) are NOT. The ghost writes stay recorded with a hygiene
+    class (``view_writer`` / ``storage_location_pseudo``)."""
     contract = _compile(tmp_path, _OZ_V5_SRC, "Vault")
-    predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
-    effects = build_effects(contract)
-    apply_authority_effect_labels(contract, effects, predicate_trees)
+    effects = _effects_with_labels(contract)
 
-    for signature in ("owner()", "setToken(address)", "transferOwnership(address)"):
+    assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
+    for signature in ("owner()", "setToken(address)"):
         assert "ownership_transfer" not in _info(effects, signature)["effect_labels"], signature
 
     # A view "writing" the slot constant is a ghost.
@@ -252,9 +269,7 @@ def test_hygiene_gate_keeps_real_address_owner_ownership(tmp_path):
     ``address private _owner`` still yields ``ownership_transfer`` on its
     setter (control for the OZ v5 ghost test)."""
     contract = _compile(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
-    predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
-    effects = build_effects(contract)
-    apply_authority_effect_labels(contract, effects, predicate_trees)
+    effects = _effects_with_labels(contract)
 
     assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
     owner_fact = next(

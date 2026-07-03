@@ -48,7 +48,7 @@
           "full_name": "pause()",
           "selector": "0x8456cb59",
           "effect_labels": [
-            "hook_update"
+            "pause_toggle"
           ],
           "claims": [
             {
@@ -101,7 +101,7 @@
           "full_name": "unpause()",
           "selector": "0x3f4ba83a",
           "effect_labels": [
-            "hook_update"
+            "pause_toggle"
           ],
           "claims": [
             {
@@ -113,9 +113,7 @@
         {
           "full_name": "updateDelay(uint24)",
           "selector": "0x6a054dc9",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -129,41 +127,31 @@
         {
           "full_name": "updateLower(uint16)",
           "selector": "0x207ec0e7",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "updateManagementFee(uint16)",
           "selector": "0xc10af4c7",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "updatePayoutAddress(address)",
           "selector": "0x56200819",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "updatePerformanceFee(uint16)",
           "selector": "0x709ac1c3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "updateUpper(uint16)",
           "selector": "0x634da58f",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         }
       ]
@@ -177,9 +165,7 @@
         {
           "full_name": "burn(address,uint32,bytes32,uint64,bytes32)",
           "selector": "0x40f80683",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -310,7 +296,7 @@
           "full_name": "lzCompose(address,address,bytes32,uint16,bytes,bytes)",
           "selector": "0x91d20fa1",
           "effect_labels": [
-            "external_contract_call"
+            "arbitrary_external_call"
           ],
           "claims": [
             {
@@ -362,9 +348,7 @@
         {
           "full_name": "nilify(address,uint32,bytes32,uint64,bytes32)",
           "selector": "0x2e80fbf3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -443,9 +427,7 @@
         {
           "full_name": "sendCompose(address,bytes32,uint16,bytes)",
           "selector": "0x7cb59012",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -471,25 +453,19 @@
         {
           "full_name": "setDefaultSendLibrary(uint32,address)",
           "selector": "0xaafea312",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "setDelegate(address)",
           "selector": "0xca5eb5e1",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "setLzToken(address)",
           "selector": "0xc28e0eed",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -501,25 +477,19 @@
         {
           "full_name": "setReceiveLibraryTimeout(address,uint32,address,uint256)",
           "selector": "0x183c834f",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "setSendLibrary(address,uint32,address)",
           "selector": "0x9535ff30",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "skip(address,uint32,bytes32,uint64)",
           "selector": "0xd70b8902",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -545,7 +515,7 @@
           "full_name": "verify(Origin,address,bytes32)",
           "selector": "0xa825d747",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         }
@@ -566,9 +536,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -591,16 +559,14 @@
         {
           "full_name": "blacklist(address)",
           "selector": "0xf9f92be4",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "burn(uint256)",
           "selector": "0x42966c68",
           "effect_labels": [
-            "external_contract_call"
+            "burn"
           ],
           "claims": [
             {
@@ -613,7 +579,7 @@
           "full_name": "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)",
           "selector": "0x5a049a70",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
@@ -627,7 +593,7 @@
           "full_name": "decreaseAllowance(address,uint256)",
           "selector": "0xa457c2d7",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
@@ -641,16 +607,14 @@
           "full_name": "increaseAllowance(address,uint256)",
           "selector": "0x39509351",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
         {
           "full_name": "initialize(string,string,string,uint8,address,address,address,address)",
           "selector": "0x3357162b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -685,7 +649,7 @@
           "full_name": "mint(address,uint256)",
           "selector": "0x40c10f19",
           "effect_labels": [
-            "external_contract_call"
+            "mint"
           ],
           "claims": [
             {
@@ -782,7 +746,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": [
             {
@@ -828,9 +792,7 @@
         {
           "full_name": "unBlacklist(address)",
           "selector": "0x1a895266",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -849,9 +811,7 @@
         {
           "full_name": "updateBlacklister(address)",
           "selector": "0xad38bf22",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -868,9 +828,7 @@
         {
           "full_name": "updateMasterMinter(address)",
           "selector": "0xaa20e1e4",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -887,9 +845,7 @@
         {
           "full_name": "updatePauser(address)",
           "selector": "0x554bab3c",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -900,9 +856,7 @@
         {
           "full_name": "updateRescuer(address)",
           "selector": "0x2ab60045",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -1044,7 +998,9 @@
         {
           "full_name": "renounceOwnership()",
           "selector": "0x715018a6",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.renounce",
@@ -1122,7 +1078,9 @@
         {
           "full_name": "transferOwnership(address)",
           "selector": "0xf2fde38b",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.transfer",
@@ -1244,25 +1202,19 @@
         {
           "full_name": "allowFrom(address)",
           "selector": "0xa924bf61",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "allowOperator(address)",
           "selector": "0x1ba9a458",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "allowTo(address)",
           "selector": "0x5f45bac8",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -1296,25 +1248,19 @@
         {
           "full_name": "denyFrom(address)",
           "selector": "0x2c524c42",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "denyOperator(address)",
           "selector": "0x1b62636c",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "denyTo(address)",
           "selector": "0x3b575407",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -1336,7 +1282,9 @@
         {
           "full_name": "pause()",
           "selector": "0x8456cb59",
-          "effect_labels": [],
+          "effect_labels": [
+            "pause_toggle"
+          ],
           "claims": [
             {
               "claim_id": "pause.set",
@@ -1393,7 +1341,9 @@
         {
           "full_name": "unpause()",
           "selector": "0x3f4ba83a",
-          "effect_labels": [],
+          "effect_labels": [
+            "pause_toggle"
+          ],
           "claims": [
             {
               "claim_id": "pause.unset",
@@ -1426,9 +1376,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -1451,16 +1399,14 @@
         {
           "full_name": "blacklist(address)",
           "selector": "0xf9f92be4",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "burn(uint256)",
           "selector": "0x42966c68",
           "effect_labels": [
-            "external_contract_call"
+            "burn"
           ],
           "claims": [
             {
@@ -1473,7 +1419,7 @@
           "full_name": "cancelAuthorization(address,bytes32,bytes)",
           "selector": "0xb7b72899",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
@@ -1481,7 +1427,7 @@
           "full_name": "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)",
           "selector": "0x5a049a70",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
@@ -1495,7 +1441,7 @@
           "full_name": "decreaseAllowance(address,uint256)",
           "selector": "0xa457c2d7",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
@@ -1503,16 +1449,14 @@
           "full_name": "increaseAllowance(address,uint256)",
           "selector": "0x39509351",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": []
         },
         {
           "full_name": "initialize(string,string,string,uint8,address,address,address,address)",
           "selector": "0x3357162b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -1553,7 +1497,7 @@
           "full_name": "mint(address,uint256)",
           "selector": "0x40c10f19",
           "effect_labels": [
-            "external_contract_call"
+            "mint"
           ],
           "claims": [
             {
@@ -1660,7 +1604,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": [
             {
@@ -1714,9 +1658,7 @@
         {
           "full_name": "unBlacklist(address)",
           "selector": "0x1a895266",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -1735,9 +1677,7 @@
         {
           "full_name": "updateBlacklister(address)",
           "selector": "0xad38bf22",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -1748,9 +1688,7 @@
         {
           "full_name": "updateMasterMinter(address)",
           "selector": "0xaa20e1e4",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -1761,9 +1699,7 @@
         {
           "full_name": "updatePauser(address)",
           "selector": "0x554bab3c",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -1774,9 +1710,7 @@
         {
           "full_name": "updateRescuer(address)",
           "selector": "0x2ab60045",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -1807,7 +1741,9 @@
         {
           "full_name": "completeOwnershipHandover(address)",
           "selector": "0xf04e283e",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.transfer",
@@ -1862,7 +1798,9 @@
         {
           "full_name": "renounceOwnership()",
           "selector": "0x715018a6",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.renounce",
@@ -1873,7 +1811,9 @@
         {
           "full_name": "requestOwnershipHandover()",
           "selector": "0x25692962",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.accept",
@@ -1884,7 +1824,9 @@
         {
           "full_name": "transferOwnership(address)",
           "selector": "0xf2fde38b",
-          "effect_labels": [],
+          "effect_labels": [
+            "ownership_transfer"
+          ],
           "claims": [
             {
               "claim_id": "ownership.transfer",
@@ -1903,9 +1845,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -1916,7 +1856,9 @@
         {
           "full_name": "burn(address,uint256)",
           "selector": "0x9dc29fac",
-          "effect_labels": [],
+          "effect_labels": [
+            "burn"
+          ],
           "claims": [
             {
               "claim_id": "supply.burn",
@@ -1928,7 +1870,7 @@
           "full_name": "deny(address)",
           "selector": "0x9c52a7f1",
           "effect_labels": [
-            "hook_update"
+            "role_management"
           ],
           "claims": [
             {
@@ -1940,7 +1882,9 @@
         {
           "full_name": "mint(address,uint256)",
           "selector": "0x40c10f19",
-          "effect_labels": [],
+          "effect_labels": [
+            "mint"
+          ],
           "claims": [
             {
               "claim_id": "supply.mint",
@@ -1976,7 +1920,7 @@
           "full_name": "rely(address)",
           "selector": "0x65fae35e",
           "effect_labels": [
-            "hook_update"
+            "role_management"
           ],
           "claims": [
             {
@@ -2024,9 +1968,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -2038,7 +1980,7 @@
           "full_name": "enter(address,ERC20,uint256,address,uint256)",
           "selector": "0x39d6ba32",
           "effect_labels": [
-            "external_contract_call"
+            "mint"
           ],
           "claims": [
             {
@@ -2051,7 +1993,7 @@
           "full_name": "exit(address,ERC20,uint256,address,uint256)",
           "selector": "0x18457e61",
           "effect_labels": [
-            "external_contract_call"
+            "burn"
           ],
           "claims": [
             {
@@ -2064,7 +2006,8 @@
           "full_name": "manage(address,bytes,uint256)",
           "selector": "0xf6e715d0",
           "effect_labels": [
-            "external_contract_call"
+            "arbitrary_external_call",
+            "asset_send"
           ],
           "claims": [
             {
@@ -2081,7 +2024,7 @@
           "full_name": "manage(address[],bytes[],uint256[])",
           "selector": "0x224d8703",
           "effect_labels": [
-            "external_contract_call"
+            "asset_send"
           ],
           "claims": [
             {
@@ -2156,7 +2099,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": [
             {
@@ -2526,24 +2469,20 @@
         {
           "full_name": "updateAllowedForwardedEigenpodCalls(address,bytes4,bool)",
           "selector": "0x4fcac486",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "updateAllowedForwardedExternalCalls(address,bytes4,address,bool)",
           "selector": "0xef8fe185",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "upgradeTo(address)",
           "selector": "0x3659cfe6",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -2556,7 +2495,7 @@
           "full_name": "upgradeToAndCall(address,bytes)",
           "selector": "0x4f1ef286",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -2728,26 +2667,19 @@
         {
           "full_name": "initialize(address,address,address,address,address,address,address)",
           "selector": "0x35876476",
-          "effect_labels": [
-            "ownership_transfer",
-            "pause_toggle"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "initializeOnUpgrade(address,address)",
           "selector": "0x4c73f498",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "initializeVTwoDotFourNine(address,address)",
           "selector": "0x46d4b714",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -2959,7 +2891,7 @@
           "full_name": "upgradeTo(address)",
           "selector": "0x3659cfe6",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -2972,7 +2904,7 @@
           "full_name": "upgradeToAndCall(address,bytes)",
           "selector": "0x4f1ef286",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -3051,7 +2983,7 @@
           "full_name": "upgradeTo(address)",
           "selector": "0x3659cfe6",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -3064,7 +2996,7 @@
           "full_name": "upgradeToAndCall(address,bytes)",
           "selector": "0x4f1ef286",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -3246,10 +3178,7 @@
         {
           "full_name": "initialize(address,address,uint256)",
           "selector": "0x1794bb3c",
-          "effect_labels": [
-            "ownership_transfer",
-            "pause_toggle"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -3318,9 +3247,7 @@
         {
           "full_name": "setStrategyWhitelister(address)",
           "selector": "0xc6656702",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "authorized_caller.rotate",
@@ -3398,7 +3325,9 @@
         {
           "full_name": "cancel(bytes32)",
           "selector": "0xc4d252f5",
-          "effect_labels": [],
+          "effect_labels": [
+            "timelock_operation"
+          ],
           "claims": [
             {
               "claim_id": "timelock.cancel",
@@ -3410,7 +3339,9 @@
           "full_name": "execute(address,uint256,bytes,bytes32,bytes32)",
           "selector": "0x134008d3",
           "effect_labels": [
-            "asset_send"
+            "arbitrary_external_call",
+            "asset_send",
+            "timelock_operation"
           ],
           "claims": [
             {
@@ -3431,7 +3362,9 @@
           "full_name": "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)",
           "selector": "0xe38335e5",
           "effect_labels": [
-            "asset_send"
+            "arbitrary_external_call",
+            "asset_send",
+            "timelock_operation"
           ],
           "claims": [
             {
@@ -3567,7 +3500,9 @@
         {
           "full_name": "schedule(address,uint256,bytes,bytes32,bytes32,uint256)",
           "selector": "0x01d5062a",
-          "effect_labels": [],
+          "effect_labels": [
+            "timelock_operation"
+          ],
           "claims": [
             {
               "claim_id": "timelock.schedule",
@@ -3578,7 +3513,9 @@
         {
           "full_name": "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
           "selector": "0x8f2a0bb0",
-          "effect_labels": [],
+          "effect_labels": [
+            "timelock_operation"
+          ],
           "claims": [
             {
               "claim_id": "timelock.schedule",
@@ -3595,7 +3532,9 @@
         {
           "full_name": "updateDelay(uint256)",
           "selector": "0x64d62353",
-          "effect_labels": [],
+          "effect_labels": [
+            "timelock_operation"
+          ],
           "claims": [
             {
               "claim_id": "timelock.set_delay",
@@ -3644,7 +3583,7 @@
           "full_name": "upgradeTo(address)",
           "selector": "0x3659cfe6",
           "effect_labels": [
-            "external_contract_call"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -3657,7 +3596,8 @@
           "full_name": "upgradeToAndCall(address,bytes)",
           "selector": "0x4f1ef286",
           "effect_labels": [
-            "asset_send"
+            "asset_send",
+            "implementation_update"
           ],
           "claims": [
             {
@@ -3754,9 +3694,7 @@
         {
           "full_name": "setExecutorRequired(bool)",
           "selector": "0xcf734e8a",
-          "effect_labels": [
-            "pause_toggle"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -3846,9 +3784,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -3929,9 +3865,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -3943,7 +3877,7 @@
           "full_name": "deposit()",
           "selector": "0xd0e30db0",
           "effect_labels": [
-            "hook_update"
+            "mint"
           ],
           "claims": [
             {
@@ -3959,9 +3893,7 @@
         {
           "full_name": "fallback()",
           "selector": "0x552079dc",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -3996,7 +3928,8 @@
           "full_name": "withdraw(uint256)",
           "selector": "0x2e1a7d4d",
           "effect_labels": [
-            "asset_send"
+            "asset_send",
+            "burn"
           ],
           "claims": [
             {
@@ -4036,9 +3969,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -4071,9 +4002,7 @@
         {
           "full_name": "decreaseAllowance(address,uint256)",
           "selector": "0xa457c2d7",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -4087,18 +4016,13 @@
         {
           "full_name": "increaseAllowance(address,uint256)",
           "selector": "0x39509351",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "initialize(address)",
           "selector": "0xc4d66de8",
-          "effect_labels": [
-            "ownership_transfer",
-            "pause_toggle"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -4225,7 +4149,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [
-            "hook_update"
+            "external_contract_call"
           ],
           "claims": [
             {
@@ -4264,7 +4188,7 @@
           "full_name": "upgradeTo(address)",
           "selector": "0x3659cfe6",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -4277,7 +4201,7 @@
           "full_name": "upgradeToAndCall(address,bytes)",
           "selector": "0x4f1ef286",
           "effect_labels": [
-            "delegatecall_execution"
+            "implementation_update"
           ],
           "claims": [
             {
@@ -4317,9 +4241,7 @@
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -4337,7 +4259,7 @@
           "full_name": "burn(uint256)",
           "selector": "0x42966c68",
           "effect_labels": [
-            "external_contract_call"
+            "burn"
           ],
           "claims": [
             {
@@ -4369,9 +4291,7 @@
         {
           "full_name": "decreaseAllowance(address,uint256)",
           "selector": "0xa457c2d7",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
@@ -4433,17 +4353,14 @@
         {
           "full_name": "increaseAllowance(address,uint256)",
           "selector": "0x39509351",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "initialize(address)",
           "selector": "0xc4d66de8",
           "effect_labels": [
-            "ownership_transfer",
-            "pause_toggle"
+            "mint"
           ],
           "claims": [
             {
@@ -4456,7 +4373,7 @@
           "full_name": "mint(address,uint256)",
           "selector": "0x40c10f19",
           "effect_labels": [
-            "external_contract_call"
+            "mint"
           ],
           "claims": [
             {
@@ -4517,25 +4434,19 @@
         {
           "full_name": "setAllowedFrom(address,bool)",
           "selector": "0x1ffacdef",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "setAllowedTo(address,bool)",
           "selector": "0xb8c25594",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {
           "full_name": "setIsMinter(address,bool)",
           "selector": "0x66eb399f",
-          "effect_labels": [
-            "hook_update"
-          ],
+          "effect_labels": [],
           "claims": []
         },
         {

@@ -13,13 +13,14 @@ unless the PR carries the regenerated, reviewed golden.
   against — also the exact set CI installs via solc-select), `etherscan_compiler`,
   `source_kind`, and `source_path` (relative to the repo root).
 - `golden.json` — the expected `(contract, address, function, selector,
-  effect_labels)` tuples, sorted deterministically. Each function row carries an
-  empty `claims` list, reserved for the claims plane (a later stage attaches
-  `{claim_id, tier, witness}` records here — no schema break).
+  effect_labels, claims)` tuples, sorted deterministically. `effect_labels` is
+  now the projection of each function's Plane-1 claims (registry `legacy_projection`
+  strings) unioned with the retained fact-tier labels; each row also pins the
+  `{claim_id, tier}` of every claim.
 - `harness.py` — compiles one contract (Slither →
   `build_predicate_artifacts_with_pause_info` → `build_effects` →
-  `apply_authority_effect_labels`) and flattens the effects artifact into golden
-  rows. Compilation is pinned to the solc-select binary named by `solc_version`
+  `build_claims` → `project_effect_labels`) and flattens the effects artifact into
+  golden rows. Compilation is pinned to the solc-select binary named by `solc_version`
   via `FOUNDRY_SOLC` + `FOUNDRY_OFFLINE=true`, so the gate is deterministic and
   makes zero network calls.
 - `regenerate.py` — rewrites `golden.json` from current behavior; `--check`

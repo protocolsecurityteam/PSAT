@@ -56,10 +56,7 @@ def _claims_for(address: str) -> dict[str, list[Any]]:
     from slither import Slither
 
     from services.static.claims import build_claims
-    from services.static.contract_analysis_pipeline.effects import (
-        apply_authority_effect_labels,
-        build_effects,
-    )
+    from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
@@ -79,7 +76,6 @@ def _claims_for(address: str) -> dict[str, list[Any]]:
             subject = _select_subject_contract(slither, entry["name"])
             predicate_trees, _pause = build_predicate_artifacts_with_pause_info(subject)
             effects = build_effects(subject)
-            apply_authority_effect_labels(subject, effects, predicate_trees)
             artifact = build_claims(subject, effects, predicate_trees)
 
     functions = artifact["functions"]

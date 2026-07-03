@@ -127,8 +127,15 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
 
     analysis = collect_contract_analysis(project_dir)
 
-    assert analysis["summary"]["is_upgradeable"] is False
-    assert analysis["upgradeability"]["pattern"] == "none"
+    # Upgradeability is recovered from the UUPS *standard* (``proxiableUUID`` +
+    # ``upgradeTo`` selector), not by guessing on the ``upgradeTo`` name — the
+    # ``upgrade.implementation`` claim projects to ``implementation_update``,
+    # which ``_detect_upgradeability`` consumes. The empty ``upgradeTo`` body
+    # writes no slot, so no implementation slot is inferred.
+    assert analysis["summary"]["is_upgradeable"] is True
+    assert analysis["upgradeability"]["pattern"] == "custom"
+    # Timelock still is NOT name-guessed: bespoke ``schedule``/``execute`` carry
+    # no OZ-timelock standard gate (no getMinDelay / hashOperation), so no claim.
     assert analysis["timelock"]["has_timelock"] is False
     assert analysis["timelock"]["pattern"] == "none"
     assert analysis["contract_classification"]["is_factory"] is True
@@ -300,11 +307,14 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
     assert manage["action_summary"] == "Calls an external contract from the contract context."
 
     set_hook = _semantic_function(analysis, "setHook(address)")
-    assert set_hook["effect_labels"] == ["hook_update"]
-    # setHook's only body sink is the ``hook`` write; the guard-origin
-    # ``auth.canCall`` from ``requiresAuth`` does not appear as a target.
+    # No sibling entry point invokes ``hook`` at runtime, so ``callee_pointer.rotate``
+    # does not fire — the retired unclassified-pointer fallback used to mislabel
+    # this bare setter ``hook_update``. It now collapses to silence + fact text
+    # (the ``hook`` state write is still the only body sink; the guard-origin
+    # ``auth.canCall`` from ``requiresAuth`` is not a target).
+    assert set_hook["effect_labels"] == []
     assert set_hook["effect_targets"] == ["hook"]
-    assert set_hook["action_summary"] == "Updates hook configuration that can affect later contract behavior."
+    assert set_hook["action_summary"] == "Writes or calls into: hook."
 
     transfer_ownership = _semantic_function(analysis, "transferOwnership(address)")
     assert transfer_ownership["effect_labels"] == ["ownership_transfer"]

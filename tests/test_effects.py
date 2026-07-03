@@ -19,11 +19,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.static.claims import (  # noqa: E402
+    attach_claims_to_effects,
+    build_claims,
+    project_effect_labels,
+)
 from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
     SCHEMA_VERSION,
     EffectInfo,
     EffectsArtifact,
-    apply_authority_effect_labels,
     build_effects,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -33,6 +37,10 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
 
 def _selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _claim_ids(info: EffectInfo) -> set[str]:
+    return {claim["claim_id"] for claim in (info.get("claims") or [])}
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
@@ -166,9 +174,10 @@ def test_effect_label_recognition_pause_toggle(tmp_path):
         }
         """,
     )
-    artifact = build_effects(_contract(sl))
+    artifact = _pipeline_effects(sl)
     info = _info(artifact, "trip()")
     assert "pause_toggle" in info["effect_labels"], info["effect_labels"]
+    assert "pause.set" in _claim_ids(info)
 
 
 def test_semantic_effects_includes_unguarded_public_function(tmp_path):
@@ -282,22 +291,26 @@ def test_constructor_skipped(tmp_path):
 # ---------------------------------------------------------------------------
 # Authorization-capability labels.
 #
-# ownership_transfer / role_management come from the cross-function post-pass
-# (apply_authority_effect_labels), which reads the predicate trees'
-# caller_authority leaves — so it knows precisely which var authorizes the
-# caller and an incidental config read in an auth modifier can't masquerade
-# as ownership. The Solmate Auth family is a selector residue handled in
-# build_effects itself, since its role state is read via an external canCall.
+# ownership_transfer / role_management now come from the Plane-1 claims
+# registry (``ownership.*`` selector-gated + ghost-immune; ``roles.*``
+# canonical-selector; a bespoke non-owner caller-authority rotation is
+# ``authorized_caller.rotate``) and are folded into ``effect_labels`` by
+# ``project_effect_labels`` — the same sequence core.py runs. The incidental
+# config-read precision comes from the ownership matcher's standards gate, not
+# a per-function structural scan.
 # ---------------------------------------------------------------------------
 
 
 def _pipeline_effects(sl, contract_name=None):
-    """Run the two artifacts core.py builds + the authority post-pass, exactly
-    as the real pipeline does, and return the (mutated) effects artifact."""
+    """Run the exact static label sequence core.py runs — facts, Plane-1 claims,
+    and the effect-label projection — and return the (mutated) effects artifact
+    carrying both ``effect_labels`` and per-function ``claims``."""
     contract = _contract(sl, contract_name)
     effects = build_effects(contract)
     predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
-    apply_authority_effect_labels(contract, effects, predicate_trees)
+    claims_artifact = build_claims(contract, effects, predicate_trees)
+    attach_claims_to_effects(effects, claims_artifact)
+    project_effect_labels(effects)
     return effects
 
 
@@ -329,10 +342,10 @@ contract MyToken is Ownable {
 
 def test_oz_ownable_checkowner_indirection_is_ownership_transfer(tmp_path):
     """OZ 5.x routes the caller check through ``onlyOwner -> _checkOwner ->
-    owner() == _msgSender()``. The predicate trees resolve that getter chain
-    to a caller_authority equality on ``_owner``, so the owner setters become
-    ``ownership_transfer`` — not the ``hook_update`` fallback they land in
-    without the post-pass."""
+    owner() == _msgSender()``. The ``ownership.*`` matcher keys on the canonical
+    ``transferOwnership``/``renounceOwnership`` selectors plus the ``owner()``
+    getter sibling, so the setters project to ``ownership_transfer`` and never
+    the retired ``hook_update`` fallback."""
     artifact = _pipeline_effects(_compile(tmp_path, _OZ_OWNABLE), "MyToken")
     assert "ownership_transfer" in _info(artifact, "transferOwnership(address)")["effect_labels"]
     assert "ownership_transfer" in _info(artifact, "renounceOwnership()")["effect_labels"]
@@ -363,9 +376,11 @@ def test_addr_setter_under_unrelated_owner_gate_is_not_ownership(tmp_path):
 
 
 def test_ownership_detection_is_name_agnostic(tmp_path):
-    """No ``owner``/``Ownable`` identifiers anywhere — detection keys on the
-    caller_authority leaf (the var compared to the caller), so the obfuscated
-    reassignment is still ownership_transfer."""
+    """No ``owner``/``Ownable`` identifiers and no canonical ownership selector,
+    so ``ownership.*`` (standards-gated) does not fire. The obfuscated
+    caller-authority scalar rotation is the name-agnostic
+    ``authorized_caller.rotate`` idiom instead — same admin weight, but not the
+    ghost-prone ownership_transfer sentence."""
     sl = _compile(
         tmp_path,
         """
@@ -378,8 +393,9 @@ def test_ownership_detection_is_name_agnostic(tmp_path):
         }
         """,
     )
-    artifact = _pipeline_effects(sl, "Vault")
-    assert "ownership_transfer" in _info(artifact, "rotate(address)")["effect_labels"]
+    info = _info(_pipeline_effects(sl, "Vault"), "rotate(address)")
+    assert "authorized_caller.rotate" in _claim_ids(info)
+    assert "ownership_transfer" not in info["effect_labels"]
 
 
 def test_oz_accesscontrol_grantrole_is_role_management(tmp_path):
@@ -419,9 +435,9 @@ def test_caller_keyed_data_map_is_not_role_management(tmp_path):
     ``q[msg.sender][guid] == 0`` — which the predicate builder classifies as a
     caller_authority *membership* leaf (caller is key 0). A naive 'writes a
     caller_authority membership var → role_management' rule mislabels this
-    data writer as role management. The ownership post-pass only acts on
-    scalar-equality leaves, so ``send`` stays untagged; roles come from
-    selectors instead."""
+    data writer as role management. ``roles.*`` is standard-gated on canonical
+    selectors and ``authorized_caller.rotate`` needs a scalar-equality leaf, so
+    ``send`` stays untagged."""
     sl = _compile(
         tmp_path,
         """

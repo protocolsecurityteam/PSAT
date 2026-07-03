@@ -2,10 +2,10 @@
 
 Drives the exact production static sequence — Slither compile ->
 ``build_predicate_artifacts_with_pause_info`` -> ``build_effects`` ->
-``apply_authority_effect_labels`` -> ``build_claims`` — over Etherscan-verified
-corpus contracts, then asserts the ``(selector, claim_id, tier)`` tuples each
-registry entry mints. Nothing is faked: the matchers, registry, and
-``ClaimContext`` are the production classes; only the compile is local.
+``build_claims`` — over Etherscan-verified corpus contracts, then asserts the
+``(selector, claim_id, tier)`` tuples each registry entry mints. Nothing is
+faked: the matchers, registry, and ``ClaimContext`` are the production classes;
+only the compile is local.
 
 Every auth-family registry entry is exercised here with at least one positive, a
 counterexample, and an adversarial near-miss drawn from real sources (spec
@@ -51,10 +51,7 @@ def _build_claims_for(project: Path, name: str, solc_version: str) -> Functions:
     from slither import Slither
 
     from services.static.claims.builder import build_claims
-    from services.static.contract_analysis_pipeline.effects import (
-        apply_authority_effect_labels,
-        build_effects,
-    )
+    from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
@@ -70,7 +67,6 @@ def _build_claims_for(project: Path, name: str, solc_version: str) -> Functions:
         assert subject is not None, f"no analyzable subject contract for {name}"
         predicate_trees, _pause = build_predicate_artifacts_with_pause_info(subject)
         effects = build_effects(subject)
-        apply_authority_effect_labels(subject, effects, predicate_trees)
         artifact = build_claims(subject, effects, predicate_trees)
     return artifact["functions"]
 

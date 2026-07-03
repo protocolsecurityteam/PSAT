@@ -111,11 +111,8 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from slither import Slither
 
     from services.resolution.capability_resolver import _selector_for_signature
-    from services.static.claims import attach_claims_to_effects, build_claims
-    from services.static.contract_analysis_pipeline.effects import (
-        apply_authority_effect_labels,
-        build_effects,
-    )
+    from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
+    from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
@@ -143,9 +140,9 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
             raise RuntimeError(f"no analyzable subject contract for {entry['name']} ({entry['address']})")
         predicate_trees, _pause_info = build_predicate_artifacts_with_pause_info(subject)
         effects = build_effects(subject)
-        apply_authority_effect_labels(subject, effects, predicate_trees)
         claims_artifact = build_claims(subject, effects, predicate_trees)
         attach_claims_to_effects(effects, claims_artifact)
+        project_effect_labels(effects)
 
     canonical = predicate_trees.get("canonical_signatures") or {}
     functions: list[dict[str, Any]] = []
