@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "description": "Frozen fixture corpus for the effect-labels A/B golden gate. Each entry is an Etherscan-verified real contract scaffolded as a self-contained Foundry project (source_path, relative to repo root). The harness compiles it with Slither -- forced onto the solc-select binary named by solc_version via FOUNDRY_SOLC -- and runs the production static label sequence. This manifest is the single source of truth for corpus membership and the set of solc versions CI must install.",
+  "contracts": [
+    {
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "name": "AccountantWithRateProviders",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.21",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b"
+    },
+    {
+      "address": "0x1a44076050125825900e736c501f859c50fe728c",
+      "name": "EndpointV2",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.22",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x1a44076050125825900e736c501f859c50fe728c"
+    },
+    {
+      "address": "0x31724ca0c982a31fbb5c57f4217ab585271fc9a5",
+      "name": "StakedTokenV1",
+      "chain": "mainnet",
+      "solc_version": "0.6.12",
+      "etherscan_compiler": "0.6.12",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x31724ca0c982a31fbb5c57f4217ab585271fc9a5"
+    },
+    {
+      "address": "0x39272ee125ebd9214404f735baae50acb9d334c0",
+      "name": "L1SyncPoolETH",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.24",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x39272ee125ebd9214404f735baae50acb9d334c0"
+    },
+    {
+      "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+      "name": "RolesAuthority",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.21",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x3994741a5b29c60d0ab318de1024f9256fe959dc"
+    },
+    {
+      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "name": "TellerWithMultiAssetSupport",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.21",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35"
+    },
+    {
+      "address": "0x43506849d7c04f9138d1a2050bbf3a0c054402dd",
+      "name": "FiatTokenV2_2",
+      "chain": "mainnet",
+      "solc_version": "0.6.12",
+      "etherscan_compiler": "0.6.12",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
+    },
+    {
+      "address": "0x5bdd4b0d644c0a573e0eb526ab7d7d332aaaa50e",
+      "name": "TopUp",
+      "chain": "mainnet",
+      "solc_version": "0.8.28",
+      "etherscan_compiler": "0.8.28",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x5bdd4b0d644c0a573e0eb526ab7d7d332aaaa50e"
+    },
+    {
+      "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "name": "Dai",
+      "chain": "mainnet",
+      "solc_version": "0.5.12",
+      "etherscan_compiler": "0.5.12",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x6b175474e89094c44da98b954eedeac495271d0f"
+    },
+    {
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "name": "BoringVault",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.21",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x7223442cad8e9ca474fc40109ab981608f8c4273"
+    },
+    {
+      "address": "0x789cbbe0739f1458905c9ca6d6e74f7997622a9b",
+      "name": "EtherFiNodesManager",
+      "chain": "mainnet",
+      "solc_version": "0.8.27",
+      "etherscan_compiler": "0.8.27",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x789cbbe0739f1458905c9ca6d6e74f7997622a9b"
+    },
+    {
+      "address": "0x83bc649fcdb2c8da146b2154a559ddedf937ef12",
+      "name": "LiquidityPool",
+      "chain": "mainnet",
+      "solc_version": "0.8.27",
+      "etherscan_compiler": "0.8.27",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x83bc649fcdb2c8da146b2154a559ddedf937ef12"
+    },
+    {
+      "address": "0x858646372cc42e1a627fce94aa7a7033e7cf075a",
+      "name": "TransparentUpgradeableProxy",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.12",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x858646372cc42e1a627fce94aa7a7033e7cf075a"
+    },
+    {
+      "address": "0x88582996b70fdd7c4f16e3fde7b53858fce0d394",
+      "name": "StrategyManager",
+      "chain": "mainnet",
+      "solc_version": "0.8.27",
+      "etherscan_compiler": "0.8.30",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x88582996b70fdd7c4f16e3fde7b53858fce0d394"
+    },
+    {
+      "address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "name": "EtherFiTimelock",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.13",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
+    },
+    {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "name": "FiatTokenProxy",
+      "chain": "mainnet",
+      "solc_version": "0.4.24",
+      "etherscan_compiler": "0.4.24",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    },
+    {
+      "address": "0xbe010a7e3686fdf65e93344ab664d065a0b02478",
+      "name": "OneSig",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.22",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xbe010a7e3686fdf65e93344ab664d065a0b02478"
+    },
+    {
+      "address": "0xc00e94cb662c3520282e6f5717214004a7f26888",
+      "name": "Comp",
+      "chain": "mainnet",
+      "solc_version": "0.5.16",
+      "etherscan_compiler": "0.5.16",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xc00e94cb662c3520282e6f5717214004a7f26888"
+    },
+    {
+      "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "name": "WETH9",
+      "chain": "mainnet",
+      "solc_version": "0.4.18",
+      "etherscan_compiler": "0.4.19",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    },
+    {
+      "address": "0xcb3d917a965a70214f430a135154cd5adda2ad84",
+      "name": "EETH",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.27",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xcb3d917a965a70214f430a135154cd5adda2ad84"
+    },
+    {
+      "address": "0xf2b225815f70c9b327dc9db758a36c92a4279b17",
+      "name": "BackingEigen",
+      "chain": "mainnet",
+      "solc_version": "0.8.24",
+      "etherscan_compiler": "0.8.12",
+      "source_kind": "foundry_project",
+      "source_path": "labels_redesign/agent1/projects/0xf2b225815f70c9b327dc9db758a36c92a4279b17"
+    }
+  ]
+}

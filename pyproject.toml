@@ -51,6 +51,7 @@ testpaths = ["tests"]
 markers = [
     "live: tests that require a running API server and workers (deselected by default)",
     "smoke: read-only live tests safe to run against prod post-deploy (subset of `live`)",
+    "label_corpus: full effect-labels A/B golden gate over the frozen fixture corpus (slow; runs in its own CI job with PSAT_LABEL_CORPUS_FULL=1)",
 ]
 
 [tool.ruff]
