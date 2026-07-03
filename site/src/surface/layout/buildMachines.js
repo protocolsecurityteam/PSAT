@@ -35,6 +35,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
           tone: toneForFunction(fn, lane),
           action: compactActionSummary(fn),
           effectLabels: fn.effect_labels || [],
+          claims: fn.claims || [],
           guard: guardSummary(fn, companyData),
           // `principals` is the direct-callers list — exactly who can fire
           // msg.sender on this function right now. `indirectPrincipals` is the
@@ -48,7 +49,8 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
 
       for (const lane of Object.keys(lanes)) {
         lanes[lane].sort((left, right) => {
-          const score = lanePriority({ effect_labels: left.effectLabels }) - lanePriority({ effect_labels: right.effectLabels });
+          const score = lanePriority({ effect_labels: left.effectLabels, claims: left.claims })
+            - lanePriority({ effect_labels: right.effectLabels, claims: right.claims });
           if (score !== 0) return score;
           return left.name.localeCompare(right.name);
         });

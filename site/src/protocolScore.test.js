@@ -237,4 +237,92 @@ describe("computeProtocolScore", () => {
     expect(json).toContain("live one-shot");
     expect(json).not.toContain("No resolved controller was found");
   });
+
+  function claim(claim_id, tier = "standard_exact") {
+    return { claim_id, tier, witness: {} };
+  }
+
+  describe("classifyAction — claims drive severity, legacy is the fallback", () => {
+    it("keys the action kind on the claim, overriding a conflicting legacy label", () => {
+      const claimTip = authorityTooltip({
+        function: "poke",
+        effect_labels: ["hook_update"], // legacy → config 0.78
+        claims: [claim("ownership.transfer")], // claim → admin 0.88
+        authority_public: true,
+        controllers: [],
+      });
+      const legacyTip = authorityTooltip({
+        function: "poke",
+        effect_labels: ["hook_update"],
+        authority_public: true,
+        controllers: [],
+      });
+      expect(JSON.stringify(claimTip.negativeExamples)).toContain("admin");
+      expect(JSON.stringify(claimTip.negativeExamples)).not.toContain("config");
+      expect(JSON.stringify(legacyTip.negativeExamples)).toContain("config");
+    });
+
+    it("classifies exec.arbitrary as a high-risk execution action", () => {
+      const tip = authorityTooltip({
+        function: "run",
+        effect_labels: [],
+        claims: [claim("exec.arbitrary")],
+        authority_public: true,
+        controllers: [],
+      });
+      expect(JSON.stringify(tip.negativeExamples)).toContain("execution");
+    });
+
+    it("treats an upgrade claim as an upgrade action even when the name isn't 'upgrade'", () => {
+      const contract = {
+        address: "0xc",
+        name: "Vault",
+        source_verified: true,
+        role: "value_handler",
+        total_usd: 1e8,
+        is_proxy: true,
+        functions: [
+          {
+            function: "migrateCode(address)",
+            claims: [claim("upgrade.implementation")],
+            authority_public: true,
+            controllers: [],
+          },
+        ],
+      };
+      const upgradesTip = computeProtocolScore({ contracts: [contract] }, null)
+        .axes.find((a) => a.key === "upgrades").tooltip;
+      expect(JSON.stringify(upgradesTip.negativeExamples)).toContain("migrateCode");
+    });
+
+    it("splits unpause severity from a claim, independent of the function name", () => {
+      const contract = {
+        address: "0xc",
+        name: "Vault",
+        source_verified: true,
+        role: "value_handler",
+        total_usd: 1e8,
+        functions: [
+          { function: "liftHalt()", claims: [claim("pause.unset")], controllers: [{ principals: [EOA] }] },
+        ],
+      };
+      const pauseTip = computeProtocolScore({ contracts: [contract] }, null)
+        .axes.find((a) => a.key === "pause").tooltip;
+      expect(pauseTip.negative).toContain("unpause");
+    });
+
+    it("does not treat a user-plane transfer as a sensitive authority action", () => {
+      // Legacy asset_send would make this a high-risk asset_out; the user-plane
+      // claim keeps it out of the sensitive set entirely.
+      const tip = authorityTooltip({
+        function: "transfer(address,uint256)",
+        effect_labels: ["asset_send"],
+        claims: [claim("erc20.transfer")],
+        authority_public: true,
+        controllers: [],
+      });
+      expect(tip.positive).toBe("No sensitive function-level authority was detected.");
+      expect(tip.negativeExamples).toHaveLength(0);
+    });
+  });
 });

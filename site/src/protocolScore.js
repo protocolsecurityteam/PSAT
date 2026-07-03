@@ -1,4 +1,5 @@
 import { bytecodeVerifiedAudits, isBytecodeVerifiedAudit } from "./auditCoverage.js";
+import { hasClaims, scoreForClaims } from "./claimsVocab.js";
 import { isInertOneShot, isLiveOneShot } from "./oneShot.js";
 
 // Generic protocol-posture score built from the control surface, upgrade
@@ -160,6 +161,12 @@ function collectPrincipals(fn) {
 }
 
 function classifyAction(fn) {
+  // Claims (Plane 1) drive severity when present; the name-substring arms below
+  // stay a fallback only for claim-less (stale) rows.
+  if (hasClaims(fn)) {
+    return scoreForClaims(fn) || { kind: "other", severity: 0 };
+  }
+
   const effects = new Set(asArray(fn?.effect_labels).map(lower));
   const name = functionName(fn?.function || fn?.abi_signature);
   const isUnpause = name.includes("unpause") || name.includes("resume") || name.includes("restart");

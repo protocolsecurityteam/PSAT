@@ -1,4 +1,4 @@
-import { prettyFunctionName, shortenAddress } from "../graph.js";
+import { functionEffectLine, prettyFunctionName, shortenAddress } from "../graph.js";
 
 export default function PermissionsTab({ detail }) {
   const payload = detail?.effective_permissions;
@@ -17,7 +17,7 @@ export default function PermissionsTab({ detail }) {
           <article className="card" key={entry.selector}>
             <div className="card-header-row">
               <h3>{prettyFunctionName(entry.function)}</h3>
-              <span className="chip alt">{(entry.effect_labels || []).join(" · ") || "permissioned"}</span>
+              <span className="chip alt">{functionEffectLine(entry) || "permissioned"}</span>
             </div>
             <p className="muted">{entry.action_summary}</p>
             <div className="kv-grid compact">
