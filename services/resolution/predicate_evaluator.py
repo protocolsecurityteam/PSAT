@@ -569,11 +569,26 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         return CapabilityExpr.signature_witness(signer)
 
     if kind == "comparison":
-        # Caller-authority comparisons are exotic; legacy treats them as
-        # conditional (public). Under the caller-taint default, the only
-        # comparison shape that is an authorization is the deny-by-default
-        # time allowlist — quantity thresholds stay permissionless.
-        if earned_public_enabled() and leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
+        # A comparison leaf only reaches here with role caller_authority /
+        # delegated_authority — i.e. the writer-gate already judged the
+        # caller-keyed mapping admin-curated (the value can't be self-
+        # acquired). So this is an authority threshold, NOT a self-service
+        # quantity gate (which stays role=business and opens to public in the
+        # side-condition block above). ``is_permissionless_caller_shape`` is
+        # shape-only and role-blind — consulting it here would re-open a
+        # promoted authority to public, the caller-keyed-threshold fail-open.
+        if earned_public_enabled() and leaf_is_caller_tainted(leaf):
+            descriptor = leaf.get("set_descriptor")
+            if descriptor is not None and _has_caller_keyed_value_predicate(leaf):
+                cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
+                # Honor an authoritative enumeration — populated (restricted
+                # holders) OR an authoritative empty (provably nobody now).
+                if cap.kind == "finite_set" and (
+                    cap.members or cap.membership_quality == "exact" or cap.empty_reason == "empty_by_design"
+                ):
+                    return _tag_caller_subject(cap, ctx)
+            # No authoritative answer (cold / unsupported / non-exact empty):
+            # fail CLOSED — gated, principals unknown — never public.
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
                     target_address=None,

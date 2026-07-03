@@ -180,7 +180,7 @@ def test_overridden_functions_iterated_once_not_per_inheritance_depth(tmp_path):
 
     invocations: list[str] = []
 
-    def _counting_build_predicate_tree(fn: Any) -> Any:
+    def _counting_build_predicate_tree(fn: Any, **_kwargs: Any) -> Any:
         invocations.append(f"build:{fn.full_name}:{id(fn):#x}")
         return None
 

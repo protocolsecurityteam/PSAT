@@ -38,6 +38,21 @@ VEDA_TELLER = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
 GOVERNING_SAFE = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _CANCALL_SELECTOR = "0xb7009613"  # keccak("canCall(address,address,bytes4)")[:4]
 
+# A Solmate ``requiresAuth`` guard survives into ``capability_expr`` differently
+# depending on how it resolved. The cross-contract inlining path (RolesAuthority
+# analyzed alongside — the etherfi company case) folds the guard into a
+# ``finite_set`` of role holders and drops the ``canCall`` selector, leaving the
+# static ``isAuthorized(msg.sender,msg.sig)`` require-condition and a
+# ``solmate_roles_authority`` resolution trace; the event-fold path keeps the raw
+# selector; the pre-#104 dead-end leaves ``delegated_check_not_materialized``.
+# Match on any of these so the guard is tracked regardless of how it resolved.
+_CANCALL_MARKERS = (
+    _CANCALL_SELECTOR,
+    "isAuthorized",
+    "solmate_roles_authority",
+    "delegated_check_not_materialized",
+)
+
 
 @pytest.fixture(scope="session")
 def analyzed_veda_teller(live_client: LiveClient) -> dict:
@@ -57,8 +72,17 @@ def analyzed_veda_teller(live_client: LiveClient) -> dict:
 
 
 def _cancall_functions(ep: dict) -> list[dict]:
-    """Effective-function records whose resolved capability references canCall."""
-    return [f for f in (ep.get("functions") or []) if _CANCALL_SELECTOR in json.dumps(f.get("capability_expr") or {})]
+    """Effective-function records guarded by a Solmate ``canCall``/``requiresAuth`` check.
+
+    Detected by any ``_CANCALL_MARKERS`` marker, so a guard that fully resolved via
+    inlining — which legitimately no longer references the ``canCall`` selector —
+    still counts, not just the event-fold or unresolved representations.
+    """
+    return [
+        f
+        for f in (ep.get("functions") or [])
+        if any(marker in json.dumps(f.get("capability_expr") or {}) for marker in _CANCALL_MARKERS)
+    ]
 
 
 def _finite_set_members(node: object, out: set[str]) -> None:

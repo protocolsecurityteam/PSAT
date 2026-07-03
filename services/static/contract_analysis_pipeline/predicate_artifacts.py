@@ -253,6 +253,10 @@ def build_predicate_artifacts_with_pause_info(
     try:
         trees: dict[str, PredicateTree] = {}
         check_trees: dict[str, PredicateTree] = {}
+        # full_names of entry points whose guard is a caller-authority EQ/NEQ
+        # the builder could not lower into a tree. The policy must NOT default
+        # these to public (they are missed access guards, not unguarded fns).
+        guard_uncertain: set[str] = set()
         # full_name -> EVM-canonical ABI signature, for every entry point whose
         # canonical form differs from full_name (i.e. it has a contract/enum/
         # struct param). Lets the selector consumers key on the true ``msg.sig``
@@ -277,7 +281,7 @@ def build_predicate_artifacts_with_pause_info(
             if canonical is not None and canonical != fn.full_name:
                 canonical_signatures[fn.full_name] = canonical
             fn_started = time.monotonic()
-            tree = build_predicate_tree(fn)
+            tree = build_predicate_tree(fn, uncertain_out=guard_uncertain)
             if tree is not None:
                 trees[fn.full_name] = tree
             check_tree = build_return_predicate_tree(fn)
@@ -362,6 +366,11 @@ def build_predicate_artifacts_with_pause_info(
         artifact["canonical_signatures"] = canonical_signatures
     if check_trees:
         artifact["check_trees"] = check_trees
+    # A cross-contract pass can promote an un-modeled guard into ``trees``; only
+    # carry the marker for fns that remain tree-less (the residual missed guards).
+    residual_uncertain = sorted(guard_uncertain - set(trees))
+    if residual_uncertain:
+        artifact["guard_extraction_uncertain"] = residual_uncertain
 
     total_ms = int((time.monotonic() - started) * 1000)
     if total_ms >= _predicate_summary_threshold_ms():

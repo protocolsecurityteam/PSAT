@@ -22,6 +22,17 @@ from utils.rpc import rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
 
+
+class ClassificationIncompleteError(RuntimeError):
+    """Raised when the proxy-detection storage slots could not be read.
+
+    Distinguishes "the read failed (transient RPC)" from "the slot is empty"
+    so a would-be ``regular`` verdict built on unread slots is never reported
+    as a confident non-proxy. Registered ``transient`` in
+    ``workers/retry_policy.py`` so the fail-closed raise self-heals on retry.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Storage slot constants
 # ---------------------------------------------------------------------------
@@ -285,13 +296,18 @@ _PROXY_SLOT_BATCH = (
 )
 
 
-def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[str | None, ...]:
+def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[tuple[str | None, ...], bool]:
     """Read the five proxy-detection slots in one JSON-RPC batch.
 
-    Returns ``(impl, beacon, admin, uups, oz)`` decoded via :func:`_slot_to_address`.
-    On whole-batch failure each slot falls back to a single ``eth_getStorageAt`` —
-    matches the prior sequential behaviour where each call could individually
-    raise and we'd surface a None.
+    Returns ``((impl, beacon, admin, uups, oz), any_read_failed)``. Each slot is
+    decoded via :func:`_slot_to_address`; on whole-batch failure a slot falls
+    back to a single ``eth_getStorageAt``.
+
+    ``any_read_failed`` is True ONLY when a slot's single-call fallback *also*
+    raises — i.e. the slot was genuinely unreadable (transient RPC), as opposed
+    to a slot that read back empty (``None`` with the flag staying False). This
+    distinction lets the caller tell "confirmed non-proxy" from "couldn't
+    determine" instead of fabricating an empty verdict from an unread slot.
     """
     calls = [("eth_getStorageAt", [address, slot, "latest"]) for slot in _PROXY_SLOT_BATCH]
     try:
@@ -300,14 +316,16 @@ def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[str | None, .
         results = [(None, True)] * len(_PROXY_SLOT_BATCH)
 
     decoded: list[str | None] = []
+    any_read_failed = False
     for idx, (raw, had_error) in enumerate(results):
         if had_error or raw is None:
             try:
                 raw = get_storage_at(rpc_url, address, _PROXY_SLOT_BATCH[idx])
             except RuntimeError:
                 raw = None
+                any_read_failed = True
         decoded.append(_slot_to_address(raw) if isinstance(raw, str) else None)
-    return tuple(decoded)
+    return tuple(decoded), any_read_failed
 
 
 def classify_single(
@@ -346,7 +364,7 @@ def classify_single(
     # the first slot (rare: the contract is more often non-proxy, where we'd have read all five
     # anyway), and trades five sequential RTTs for one. Order matches the historical sequential
     # reads so downstream branch logic is unchanged.
-    slot_addrs = _read_proxy_slots_batched(rpc_url, address)
+    slot_addrs, proxy_slots_unread = _read_proxy_slots_batched(rpc_url, address)
     impl, beacon, admin, uups, oz = slot_addrs
     logger.debug("%s EIP-1967 slots: impl=%s beacon=%s admin=%s", address, impl, beacon, admin)
 
@@ -498,6 +516,20 @@ def classify_single(
             info["implementation"] = probe
         return info
 
+    # Terminal would-be-``regular`` fallthrough. If the proxy-detection slots
+    # were never read (transient RPC), we cannot honestly call this a non-proxy:
+    # an unread impl/beacon/uups/oz slot is exactly what a real proxy looks like
+    # here. Fail closed rather than fabricate a confident ``regular`` that would
+    # silently drop the implementation's access-control surface. The raise is
+    # caught by the already-landed ``record_degraded`` handlers in
+    # ``classify_contracts`` and the resolution/static consumers. Positive
+    # detections above are untouched — the gate is behind the regular fallthrough.
+    if proxy_slots_unread:
+        raise ClassificationIncompleteError(
+            f"proxy-slot read failed for {address}; classification incomplete "
+            "(cannot distinguish unread slots from a non-proxy)"
+        )
+
     logger.debug("%s → regular (no proxy pattern matched)", address)
     info["type"] = "regular"
     return info
@@ -506,6 +538,21 @@ def classify_single(
 # ---------------------------------------------------------------------------
 # Multi-contract classification (Phases 1-3)
 # ---------------------------------------------------------------------------
+
+
+def _incomplete_or_regular(addr: str, exc: BaseException) -> dict:
+    """Map a swallowed ``classify_single`` error to a placeholder classification.
+
+    A :class:`ClassificationIncompleteError` means the proxy-detection slots
+    could not be read (transient RPC), so emitting a confident ``regular`` would
+    silently drop a real implementation/beacon edge. Mark it ``unknown`` /
+    ``classification_incomplete`` so downstream treats it as unresolved rather
+    than clean. Any other classify hiccup keeps the historical ``regular``
+    default (a best-effort fall-through, unchanged).
+    """
+    if isinstance(exc, ClassificationIncompleteError):
+        return {"address": addr, "type": "unknown", "classification_incomplete": True}
+    return {"address": addr, "type": "regular"}
 
 
 def classify_contracts(
@@ -563,7 +610,7 @@ def classify_contracts(
             logger.debug("Phase 1: classify error for %s (%s) — defaulting to regular", addr, result)
             classify_fallbacks += 1
             classify_fallback_exc = result
-            classified_phase1[addr] = {"address": addr, "type": "regular"}
+            classified_phase1[addr] = _incomplete_or_regular(addr, result)
         else:
             classified_phase1[addr] = result
 
@@ -605,7 +652,7 @@ def classify_contracts(
             logger.debug("Phase 1 (discovered): classify error for %s (%s) — defaulting to regular", addr, result)
             classify_fallbacks += 1
             classify_fallback_exc = result
-            classifications[addr] = {"address": addr, "type": "regular"}
+            classifications[addr] = _incomplete_or_regular(addr, result)
         else:
             classifications[addr] = result
 

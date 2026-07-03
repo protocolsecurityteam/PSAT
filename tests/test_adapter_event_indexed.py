@@ -242,6 +242,7 @@ def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
             {"topic0": "0xbb", "direction": "remove", "topics_to_keys": {1: 0}, "data_to_keys": {}},
         ],
         key_sources=[{"source": "msg_sender"}],
+        block=100,
     )
 
     assert result.confidence == "enumerable"

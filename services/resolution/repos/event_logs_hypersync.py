@@ -196,6 +196,11 @@ class HyperSyncEventLogRepo:
                 break
             current_from = next_block
 
+        # An unpinned ``to_block`` scans to HyperSync's live archive tip, which
+        # lags the true chain head (#119, same class as the durable-cursor fold).
+        # Only a pinned ``to_block`` the scan reached completely is exact.
+        if partial_reason is None and to_block is None:
+            partial_reason = "cursor_behind_block"
         _note_partial_reason(partial_reason, event_address=event_address, repo="hypersync")
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),
@@ -313,6 +318,11 @@ class HyperSyncEventLogRepo:
                 break
             current_from = next_block
 
+        # An unpinned ``to_block`` scans to HyperSync's live archive tip, which
+        # lags the true chain head (#119, same class as the durable-cursor fold).
+        # Only a pinned ``to_block`` the scan reached completely is exact.
+        if partial_reason is None and to_block is None:
+            partial_reason = "cursor_behind_block"
         _note_partial_reason(partial_reason, event_address=event_address, repo="hypersync")
         return EnumerationResult(
             members=sorted(addr for addr, present in state.items() if present),

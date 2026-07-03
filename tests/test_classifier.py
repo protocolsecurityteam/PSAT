@@ -719,6 +719,117 @@ def test_classify_single_falls_back_when_batch_returns_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# #121 — proxy-slot read failure must fail closed, not fabricate 'regular'
+# ---------------------------------------------------------------------------
+
+
+def test_classify_single_unread_slots_raise_incomplete(monkeypatch):
+    """A transient RPC outage that fails BOTH the batched read and the per-slot
+    fallback for a would-be-'regular' contract raises ClassificationIncompleteError
+    instead of returning a confident non-proxy. Returning 'regular' here would
+    silently drop a real implementation's access-control surface."""
+    addr = ADDR(0xDEAD)
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: BIG_BYTECODE)
+    # Batch errors (autouse fixture) AND the single-call fallback also raises:
+    # the slot read genuinely failed — distinct from a slot that read empty.
+    monkeypatch.setattr(
+        cls,
+        "rpc_call",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("rpc down")),
+    )
+
+    with pytest.raises(cls.ClassificationIncompleteError):
+        cls.classify_single(addr, RPC)
+
+
+def test_classify_single_proxy_detected_despite_unread_admin_slot(monkeypatch):
+    """The fail-closed gate is BEHIND the would-be-'regular' fallthrough: a proxy
+    whose impl slot reads fine is still classified proxy even when another slot
+    (admin) was genuinely unreadable — no false raise."""
+    addr = ADDR(0xA)
+    impl = ADDR(0xB)
+
+    def fake_batch(_rpc, calls):
+        # impl(0) reads back; admin(2) errors; the rest read empty.
+        return [
+            (_slot_for(impl), False),
+            (ZERO_SLOT, False),
+            (None, True),
+            (ZERO_SLOT, False),
+            (ZERO_SLOT, False),
+        ]
+
+    monkeypatch.setattr(cls, "rpc_batch_request_with_status", fake_batch)
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: BIG_BYTECODE)
+    # The admin-slot single-call fallback raises (genuinely unread → any_read_failed
+    # True), but impl was read so the proxy verdict returns before the fallthrough.
+    monkeypatch.setattr(
+        cls,
+        "rpc_call",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("admin slot read failed")),
+    )
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "proxy"
+    assert result["proxy_type"] == "eip1967"
+    assert result["implementation"] == impl
+    assert "admin" not in result  # admin slot unread → None → omitted, never guessed
+
+
+def test_classify_single_clean_empty_slots_stay_regular(monkeypatch):
+    """Genuinely-empty slots (read succeeds, returns zero) still classify
+    'regular' — the flag is set only on a read *failure*, so a real non-proxy is
+    never spuriously raised."""
+    addr = ADDR(0xE)
+    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr: BIG_BYTECODE)
+    # All reads succeed and return the zero slot; eth_call probes revert (non-proxy).
+    monkeypatch.setattr(
+        cls,
+        "rpc_call",
+        lambda _rpc, method, params, retries=1: (
+            ZERO_SLOT if method == "eth_getStorageAt" else (_ for _ in ()).throw(RuntimeError("revert"))
+        ),
+    )
+
+    result = cls.classify_single(addr, RPC)
+    assert result["type"] == "regular"
+
+
+def test_classify_contracts_incomplete_marks_unknown_not_regular(monkeypatch):
+    """At the orchestration layer, a ClassificationIncompleteError surfaces as
+    {type:'unknown', classification_incomplete:True} — NOT a confident 'regular'
+    that would drop the proxy edge — and trips the degraded machinery."""
+    target = ADDR(1)
+    incomplete = ADDR(2)
+    ok = ADDR(3)
+
+    def fake_classify(addr, _rpc, bytecode=None, code_cache=None):
+        if addr == incomplete:
+            raise cls.ClassificationIncompleteError("slots unread")
+        return {"address": addr, "type": "regular"}
+
+    monkeypatch.setattr(cls, "classify_single", fake_classify)
+
+    degraded: dict = {}
+
+    def fake_record_degraded(*, phase, exc, context):
+        degraded["phase"] = phase
+        degraded["exc"] = exc
+
+    monkeypatch.setattr(cls, "record_degraded", fake_record_degraded)
+
+    result = cls.classify_contracts(target, [incomplete, ok], RPC)
+    c = result["classifications"]
+
+    assert c[incomplete]["type"] == "unknown"
+    assert c[incomplete]["classification_incomplete"] is True
+    assert c[incomplete]["type"] != "regular"  # the silent-downgrade is closed
+    assert c[ok]["type"] == "regular"  # other addresses unaffected
+    assert degraded["phase"] == "classify"
+    assert isinstance(degraded["exc"], cls.ClassificationIncompleteError)
+
+
+# ---------------------------------------------------------------------------
 # classify_contracts parity: parallel + sequential produce identical output
 # (modulo dict iteration order).
 # ---------------------------------------------------------------------------

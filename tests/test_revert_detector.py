@@ -20,10 +20,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
+from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+    build_predicate_tree,
+)
+from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+    apply_reentrancy_pause_pass,
+)
 from services.static.contract_analysis_pipeline.revert_detect import (  # noqa: E402
     RevertDetector,
     RevertGate,
 )
+from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+    apply_writer_gate_pass,
+)
+
+
+def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
+    """Drive the static→evaluator pipeline (same shape as test_earned_public's
+    ``_build_pipeline``/``_cap_for``) and return the CapabilityExpr for one
+    function, so a recovered revert gate can be pinned by its final verdict."""
+    contract = next(c for c in sl.contracts if c.name == cname)
+    trees = {}
+    for fn in contract.functions:
+        if fn.is_constructor:
+            continue
+        trees[fn.full_name] = build_predicate_tree(fn)
+    apply_writer_gate_pass(contract, trees)
+    apply_reentrancy_pause_pass(contract, trees)
+    return evaluate_tree(trees[full_name])
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
@@ -665,3 +690,300 @@ def test_expression_text_cache_is_instance_scoped(tmp_path):
     d2 = RevertDetector(fn)
     assert d2._expression_text_cache == {}
     assert d2._expression_text_cache is not d1._expression_text_cache
+
+
+# ---------------------------------------------------------------------------
+# #115: multi-statement guard body — the revert sits >=2 hops below the IF.
+# Slither lowers ``if(C){ emit/assign…; revert; }`` into a chain of EXPRESSION
+# nodes; the historical one-hop son scan missed the revert and returned ``[]``,
+# defaulting the function to public (fail-OPEN). The "exactly one branch always
+# reverts" CFG walk recovers exactly one gate.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_statement_emit_then_revert_is_recovered(tmp_path):
+    """``if (msg.sender != owner) { emit Denied(...); revert(); }`` — the
+    revert is two hops below the IF (after the emit). HEAD returned ``[]`` and
+    the function defaulted to public; the walk must recover one if-revert gate
+    with allowed_when_false (the guarded branch is the condition-true side)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            event Denied(address caller);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    emit Denied(msg.sender);
+                    revert();
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert len(if_gates) == 1, f"expected the recovered guard, got: {_gate_kinds(gates)}"
+    assert if_gates[0].polarity == "allowed_when_false"
+
+
+def test_multi_statement_assign_then_revert_is_recovered(tmp_path):
+    """Same shape with an assignment (not an emit) between the IF and a bare
+    ``revert()`` — still recovered as exactly one gate."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public n;
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    n = 0;
+                    revert();
+                }
+                n = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
+    """Shape A (the prior approach's live fail-open): ``if(outer){ if(flag){
+    emit;} revert(); }``. Both inner arms reconverge into the trailing revert,
+    so EVERY path leaving the outer-true branch reverts -> the OUTER guard
+    always reverts -> exactly one gate. The inner IF reverts on both arms
+    (not exactly one) -> no spurious inner gate. (BFS-to-ENDIF would have
+    dropped the outer guard = fail-open.)"""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            bool public flag;
+            event E(address a);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    if (flag) { emit E(msg.sender); }
+                    revert();
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
+    """Shape B: ``if(outer){ if(flag){ revert(); } }``. The outer-true branch
+    can ESCAPE (the inner false arm falls through without reverting), so the
+    outer IF does NOT always revert -> no outer gate. Only the inner flag-IF
+    always reverts on exactly one arm -> exactly one gate. Guards against
+    BFS over-attribution that would emit two gates (outer AND inner)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            bool public flag;
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    if (flag) { revert(); }
+                }
+                ownerVar = msg.sender;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert sum(1 for g in gates if g.kind in ("if_revert", "custom_revert")) == 1, _gate_kinds(gates)
+
+
+def test_both_branches_revert_emits_no_if_gate(tmp_path):
+    """``if(c){ revert A(); } else { revert B(); }`` — BOTH arms always revert
+    (the function reverts unconditionally), which is not a conditional access
+    fork, so no if-revert gate is fabricated (matches the real ENS both-arms
+    case the always-reverts model correctly drops)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            error A();
+            error B();
+            function f(bool c) external pure {
+                if (c) { revert A(); } else { revert B(); }
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert [g for g in gates if g.kind in ("if_revert", "custom_revert")] == [], _gate_kinds(gates)
+
+
+def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
+    """White-box hardening for ``_branch_always_reverts``: a branch whose only
+    exit is an unbounded cycle (no revert, no return — e.g. ``while(true){…}``)
+    must report ESCAPE ``(False, None)``, never a fabricated always-reverts
+    gate. Built on minimal fake CFG nodes so it pins the drain-with-no-revert
+    branch independent of Slither's loop lowering."""
+    from types import SimpleNamespace
+
+    # Two nodes forming a cycle; neither reverts nor returns.
+    a = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
+    b = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
+    a.sons = [b]
+    b.sons = [a]
+    detector = RevertDetector(SimpleNamespace(nodes=[]))
+    assert detector._branch_always_reverts(a) == (False, None)
+
+    # Positive control: a node that reverts always-reverts and returns its IR.
+    class SolidityCall:  # type-name drives _ir_is_solidity_revert
+        def __init__(self) -> None:
+            self.function = SimpleNamespace(name="revert()")
+
+    rev_ir = SolidityCall()
+    r = SimpleNamespace(irs=[rev_ir], irs_ssa=None, type=None, sons=[])
+    assert detector._branch_always_reverts(r) == (True, rev_ir)
+
+
+# ---------------------------------------------------------------------------
+# Calls to an ALWAYS-reverting callee as a branch sink. Solady EnumerableRoles
+# writes its authorization as ``if (!isOwner()) _revertUnauthorized();`` where
+# ``_revertUnauthorized`` is a helper that unconditionally reverts in assembly.
+# Before the fix the branch walk only accepted a literal revert IR as a sink,
+# so the guard branch "escaped" (the helper call looked like ordinary code),
+# no gate was lifted, and RoleRegistry setRole/grantRole/revokeRole defaulted
+# public. Treating an always-reverting CALLEE as a sink recovers the caller
+# gate, which the earned-public rail then fails CLOSED to external_check_only.
+# The conservative twin pins the load-bearing condition: a helper that reverts
+# only *conditionally* (a require that can pass) must NOT manufacture a gate.
+# ---------------------------------------------------------------------------
+
+
+def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
+    """``if (!_isOwner()) _revertUnauthorized();`` with an assembly-``revert``
+    helper and a ``caller()``-reading check → the guard is recovered as one
+    if_revert gate and the function resolves external_check_only (fail-closed),
+    not public. Pre-fix this yielded zero gates → conditional_universal."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function _isOwner() private view returns (bool result) {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x8da5cb5b)
+                    result := eq(caller(), mload(0x00))
+                }
+            }
+            function _revertUnauthorized() private pure {
+                /// @solidity memory-safe-assembly
+                assembly { revert(0x00, 0x00) }
+            }
+            function admin() external {
+                if (!_isOwner()) _revertUnauthorized();
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "admin")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert len(if_gates) == 1, f"expected the recovered guard, got: {_gate_kinds(gates)}"
+    assert if_gates[0].polarity == "allowed_when_false"
+    cap = _cap_for(sl, "admin()")
+    assert cap.kind == "external_check_only", f"recovered caller gate must fail closed, got {cap.kind}"
+
+
+def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
+    """Conservative twin (load-bearing): the same ``if (!check()) helper();``
+    shape where ``helper`` reverts only *conditionally* (a require that can
+    pass, then a normal return) must NOT be treated as an always-reverting sink
+    — no if_revert/custom_revert gate is fabricated and the function stays
+    public (conditional_universal), never external_check_only. Over-closing
+    here is the failure mode that manufactured false positives in the inverse
+    direction."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public x;
+            function _condFn() private view returns (bool) { return x > 0; }
+            function _maybeRevert() private { require(x > 0, "no"); x = x; }
+            function admin() external {
+                if (!_condFn()) _maybeRevert();
+                x = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "admin")
+    gates = RevertDetector(fn).run()
+    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
+    assert if_gates == [], f"conditionally-reverting helper must not fabricate a guard, got {_gate_kinds(gates)}"
+    cap = _cap_for(sl, "admin()")
+    assert cap.kind != "external_check_only", f"business-only require must not fail closed, got {cap.kind}"
+    assert cap.kind == "conditional_universal", cap.kind
+
+
+def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
+    """Revert-proof pinning the RoleRegistry shape verbatim: Solady
+    EnumerableRoles' ``_enumerableRolesSenderIsContractOwner`` (assembly
+    reading ``caller()`` and ``staticcall``-ing ``owner()``) guarding
+    ``setRole`` through ``_authorizeSetRole``'s
+    ``if (!isOwner()) _revertEnumerableRolesUnauthorized();``. The public
+    entrypoint routes through two internal hops and an always-reverting
+    assembly helper; the recovered gate must resolve external_check_only."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function _enumerableRolesSenderIsContractOwner() private view returns (bool result) {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x8da5cb5b)
+                    result := and(
+                        and(eq(caller(), mload(0x00)), gt(returndatasize(), 0x1f)),
+                        staticcall(gas(), address(), 0x1c, 0x04, 0x00, 0x20)
+                    )
+                }
+            }
+            function _revertEnumerableRolesUnauthorized() private pure {
+                /// @solidity memory-safe-assembly
+                assembly {
+                    mstore(0x00, 0x99152cca)
+                    revert(0x1c, 0x04)
+                }
+            }
+            function _authorizeSetRole(address holder, uint256 role, bool active) internal virtual {
+                if (!_enumerableRolesSenderIsContractOwner()) _revertEnumerableRolesUnauthorized();
+            }
+            function setRole(address holder, uint256 role, bool active) public virtual {
+                _authorizeSetRole(holder, role, active);
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "setRole")
+    gates = RevertDetector(fn).run()
+    assert any(g.kind in ("if_revert", "custom_revert") for g in gates), _gate_kinds(gates)
+    cap = _cap_for(sl, "setRole(address,uint256,bool)")
+    assert cap.kind == "external_check_only", f"Solady owner-gated setRole must fail closed, got {cap.kind}"

@@ -368,6 +368,14 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
     }
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=artifact)
 
+    # Probe at a finalized height the cursor covers (last_indexed_block=18_500_000).
+    # block=None means "at live head", which the durable cursor structurally lags
+    # (#119) -> the fold honestly demotes exact->lower_bound and a non-member reads
+    # "unknown". Pinning a covering finalized block keeps the set exact, so absence
+    # is definitive ("no"). This mirrors the head-pin contract the resolver applies
+    # in prod (max(1, head - RESOLVER_FINALITY_MARGIN)).
+    covering_block = 18_000_000
+
     # Granted member -> yes
     granted_resp = api_client.post(
         f"/api/contract/{address}/probe/membership",
@@ -375,6 +383,7 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
             "function_signature": "guardedFn()",
             "predicate_index": 0,
             "member": member,
+            "block": covering_block,
         },
     )
     assert granted_resp.status_code == 200, granted_resp.text
@@ -391,6 +400,7 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
             "function_signature": "guardedFn()",
             "predicate_index": 0,
             "member": unknown_member,
+            "block": covering_block,
         },
     )
     assert no_resp.status_code == 200, no_resp.text

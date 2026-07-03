@@ -89,6 +89,37 @@ contract MiniEnumerableRoles {
 """
 
 
+# An EIP-1967-style proxy whose state write AND fallback delegatecall are
+# entirely inline assembly, and — critically — whose mutator ``takeOver`` has
+# NO high-level caller gate at all. Slither emits a ``SolidityCall sstore``
+# IR for the write (no predicate tree, no high-level state_variables_written),
+# so this mutator routes through the assembly-sink path, NOT the predicate-tree
+# path the Solady-roles fixture above exercises.
+_TAKEOVER_PROXY_SOURCE = """
+pragma solidity ^0.8.19;
+
+contract TakeOverProxy {
+    address impl;
+
+    function takeOver(address a) public {
+        assembly { sstore(0, a) }
+    }
+
+    fallback() external payable {
+        assembly {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, 0, calldatasize())
+            let result := delegatecall(gas(), sload(0), ptr, calldatasize(), 0, 0)
+            returndatacopy(ptr, 0, returndatasize())
+            switch result
+            case 0 { revert(ptr, returndatasize()) }
+            default { return(ptr, returndatasize()) }
+        }
+    }
+}
+"""
+
+
 def _selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
 
@@ -100,6 +131,18 @@ def roles_artifacts(tmp_path_factory):
     src.write_text(textwrap.dedent(_SOLADY_ROLES_SOURCE).strip() + "\n")
     sl = Slither(str(src))
     contract = next(c for c in sl.contracts if c.name == "MiniEnumerableRoles")
+    effects = build_effects(contract)
+    predicate_trees = build_predicate_artifacts(contract)
+    return effects, predicate_trees
+
+
+@pytest.fixture(scope="module")
+def takeover_artifacts(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("takeover_proxy")
+    src = tmp / "TakeOverProxy.sol"
+    src.write_text(textwrap.dedent(_TAKEOVER_PROXY_SOURCE).strip() + "\n")
+    sl = Slither(str(src))
+    contract = next(c for c in sl.contracts if c.name == "TakeOverProxy")
     effects = build_effects(contract)
     predicate_trees = build_predicate_artifacts(contract)
     return effects, predicate_trees
@@ -206,6 +249,71 @@ def test_state_changing_flag_tracks_solidity_mutability(roles_artifacts):
 
     for reader in ("hasRole(address,uint256)", "MAX_ROLE()"):
         assert functions[reader]["state_changing"] is False
+
+
+def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifacts):
+    """Co-land guard regression: an assembly state writer whose gate is NOT
+    extractable as a predicate tree must route through the *assembly-sink*
+    guard (``assembly_only_signatures``), not the abi-only or predicate-tree
+    branches.
+
+    ``takeOver`` carries an inline-assembly ``sstore`` sink (so it is removed
+    from ``abi_only_signatures``) and produces no predicate tree (so it is not
+    caught by ``missing_semantic_capability_for_predicate_tree``). The ONLY
+    thing keeping it ``unsupported`` is the assembly-sink guard added by this
+    fix; with that guard removed it projects ``public`` (verified manually).
+    The two structural asserts below pin the routing so the test cannot pass
+    via a different unsupported branch.
+    """
+    effects, predicate_trees = takeover_artifacts
+    analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "TakeOverProxy"}}
+
+    # Structural preconditions that force the assembly-sink branch:
+    take = effects["functions"]["takeOver(address)"]
+    assert any(
+        s["kind"] == "state_write" and s["target"].startswith("assembly_storage:") for s in take.get("sinks") or []
+    ), "takeOver must carry an assembly state_write sink (else it routes via abi_only, not the guard)"
+    trees = predicate_trees.get("trees", predicate_trees)
+    assert "takeOver(address)" not in trees, "takeOver must have no predicate tree (else it routes via the tree branch)"
+
+    payload = build_effective_permissions(
+        analysis,
+        effects=effects,
+        predicate_trees=predicate_trees,
+        capability_resolver_output={},
+    )
+    by_sig = {fn["function"]: fn for fn in payload["functions"]}
+
+    fn = by_sig["takeOver(address)"]
+    assert fn.get("status") == "unsupported"
+    assert fn["authority_public"] is False
+    assert fn["controllers"] == []
+    assert fn.get("capability_expr", {}).get("unsupported_reason") == "assembly_only_authority_not_extracted"
+
+
+def test_inline_assembly_sstore_and_delegatecall_surface_as_sinks(takeover_artifacts):
+    """Effects accuracy regression: the assembly ``sstore`` write and the
+    assembly ``delegatecall`` fallback must each surface as a sink, with the
+    writer selector populated and the delegatecall-execution capability
+    recovered. Fails if the effects.py SolidityCall sstore/delegatecall
+    branches are reverted (both sinks vanish)."""
+    effects, _ = takeover_artifacts
+    functions = effects["functions"]
+
+    # Assembly sstore -> state_write sink keyed by the slot, writer monitorable
+    # by selector.
+    take = functions["takeOver(address)"]
+    write_sinks = [s for s in take.get("sinks") or [] if s["kind"] == "state_write"]
+    assert any(s["target"].startswith("assembly_storage:") for s in write_sinks), take.get("sinks")
+    assert take.get("writer_selectors"), "assembly sstore must populate writer_selectors"
+
+    # Assembly delegatecall fallback -> delegatecall sink + delegatecall_execution
+    # capability + the matching summary.
+    fb = functions["fallback()"]
+    dc_sinks = [s for s in fb.get("sinks") or [] if s["kind"] == "delegatecall"]
+    assert any(s["target"].startswith("assembly_delegatecall:") for s in dc_sinks), fb.get("sinks")
+    assert "delegatecall_execution" in (fb.get("effect_labels") or [])
+    assert fb.get("action_summary") == "Executes delegatecall-controlled logic."
 
 
 class _StubFn:

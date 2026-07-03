@@ -27,6 +27,7 @@ from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
     build_predicate_tree,
+    build_return_predicate_tree,
 )
 
 
@@ -950,3 +951,469 @@ def test_confidence_high_for_time_gate(tmp_path):
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "time"
     assert leaves[0]["confidence"] == "high"  # type: ignore[typeddict-item]
+
+
+def test_multi_statement_caller_guard_yields_caller_authority_leaf(tmp_path):
+    """#115 -> #114 end-to-end at the builder: a multi-statement caller guard
+    ``if (msg.sender != owner) { emit Denied(...); revert(); }`` (the revert is
+    two hops below the IF) recovers the same ``caller_authority`` equality leaf
+    as the single-statement ``require(msg.sender == owner)``. HEAD produced no
+    gate -> ``None`` tree -> the function defaulted to public; the fix restores
+    correct owner attribution so the policy no longer projects it public."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public n;
+            event Denied(address caller);
+            function f() external {
+                if (msg.sender != ownerVar) {
+                    emit Denied(msg.sender);
+                    revert();
+                }
+                n = 1;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    leaves = _all_leaves(build_predicate_tree(fn))
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "equality"
+    assert leaf["operator"] == "eq"  # ne flipped to eq via allowed_when_false polarity
+    assert leaf["authority_role"] == "caller_authority"
+    assert leaf["references_msg_sender"] is True
+
+
+# ---------------------------------------------------------------------------
+# #120 — bool-authority ``return true`` polarity + multi-IF deny fork
+#
+# ``build_return_predicate_tree`` lifts a bool-returning authority
+# provider's if/else chain into an OR of per-path predicates. A tail
+# ``return true`` must carry the negation of EVERY dominating deny-IF (or
+# fail closed), never an always-true leaf and never the deny set re-cast
+# as the allow set.
+# ---------------------------------------------------------------------------
+
+
+def _membership_var(leaf):
+    return (leaf.get("set_descriptor") or {}).get("storage_var")
+
+
+def test_issue120_single_early_deny_returns_complement_not_deny_set(tmp_path):
+    """``if (blocked[src]) return false; return true;`` — the tail
+    ``return true`` is the ELSE of the deny-IF, so ``allowed ⇔ src ∉
+    blocked``. The leaf must be ``falsy`` (complement / cofinite), NOT
+    ``truthy`` (which would make the deny set the allow set — fail-open)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) blocked;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (blocked[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_return_predicate_tree(_function(sl, "isAuthorized")))
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "membership"
+    assert leaf["operator"] == "falsy"  # complement of the deny set, not the deny set
+    assert _membership_var(leaf) == "blocked"
+
+
+def test_issue120_multi_deny_chain_ands_all_negations_zero_fabrication(tmp_path):
+    """THE FORK. ``if (a[src]) return false; if (b[src]) return false;
+    return true;`` — the tail ``return true`` must AND the negation of
+    BOTH deny-IFs: ``allowed ⇔ src ∉ a ∧ src ∉ b``. Attributing it to
+    only the closest deny-IF (``falsy[b]`` alone) drops ``!a`` and
+    re-admits every principal in ``a`` (a NEW fail-open). The tree must
+    be an AND of ``falsy[a]`` and ``falsy[b]`` with NO ``truthy``
+    membership anywhere (zero fabricated access)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) a;
+            mapping(address => bool) b;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (a[src]) return false;
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    # Top node is the conjunction of both deny negations.
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("a", "falsy"),
+        ("b", "falsy"),
+    }, leaves
+    # Fail-open guard: not a single ``truthy`` membership survived, so no
+    # denied principal is re-cast as allowed.
+    assert not any(le["kind"] == "membership" and le["operator"] == "truthy" for le in leaves), leaves
+
+
+def test_issue120_unconditional_true_fails_closed_to_unsupported(tmp_path):
+    """A ``return true`` with no dominating IF is unattributable; it must
+    become a fail-closed ``unsupported`` leaf, never an empty always-true
+    ``business`` leaf that makes the OR tree trivially public."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function isAuthorized(address) internal pure returns (bool) {
+                return true;
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_return_predicate_tree(_function(sl, "isAuthorized")))
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "unsupported"
+    assert leaf.get("unsupported_reason") == "unattributable_return_true"
+
+
+def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
+    """Regression bar: verbatim Maker ds-auth ``DSAuth.isAuthorized``. Its
+    ``return true`` paths are the THEN-side (``son_true``) of their IFs —
+    genuine allows — so they stay positive equality leaves, and the dropped
+    null-authority guard leaves the ``canCall`` path an external_bool. The
+    tree must remain ``OR(eq[this], eq[owner], external_bool:canCall)`` with
+    NO negation (``falsy``) and NO ``unsupported`` introduced by the fix."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface DSAuthority {
+            function canCall(address src, address dst, bytes4 sig) external view returns (bool);
+        }
+        contract C {
+            address owner;
+            DSAuthority authority;
+            function isAuthorized(address src, bytes4 sig) internal view returns (bool) {
+                if (src == address(this)) {
+                    return true;
+                } else if (src == owner) {
+                    return true;
+                } else if (authority == DSAuthority(address(0))) {
+                    return false;
+                } else {
+                    return authority.canCall(src, address(this), sig);
+                }
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "OR", tree
+    leaves = _all_leaves(tree)
+    kinds = sorted(le["kind"] for le in leaves)
+    assert kinds == ["equality", "equality", "external_bool"], leaves
+    assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "truthy"], leaves
+    # The fix must not touch this allow-chain: no manufactured negation,
+    # no fail-closed downgrade.
+    assert not any(le["operator"] == "falsy" for le in leaves), leaves
+    assert not any(le["kind"] == "unsupported" for le in leaves), leaves
+
+
+def test_issue120_mixed_allow_then_deny_then_tail(tmp_path):
+    """Combined shape exercising both branches of the fix in one function:
+    ``if (a[src]) return true;`` (an allow-IF — emitted as its own OR child
+    and SKIPPED when negating the tail) then ``if (b[src]) return false;``
+    (a deny-IF — negated on the tail). Result: ``OR(truthy[a], falsy[b])``
+    = ``a ∨ ¬b``, not the fail-open ``OR(truthy[a], truthy[b])``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) a;
+            mapping(address => bool) b;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (a[src]) return true;
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "OR", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("a", "truthy"),
+        ("b", "falsy"),
+    }, leaves
+
+
+def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
+    """#120 round-2 point 1 — a revert-IF guard is a CFG sink, not a leak.
+    ``if (!auth[src]) revert(); if (b[src]) return false; return true;`` — the
+    revert son of the first IF keeps a structural fall-through edge to the
+    ENDIF merge, so without terminator-as-sink the ``!auth`` guard leaks into
+    the post-join region and the tail collapses to a lone ``falsy[b]`` =
+    public-minus-b (a fabrication). The fix must AND the positive ``auth``
+    guard with the ``b`` negation: ``allowed ⇔ src ∈ auth ∧ src ∉ b``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) auth;
+            mapping(address => bool) b;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (!auth[src]) revert();
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("auth", "truthy"),
+        ("b", "falsy"),
+    }, leaves
+    # The revert guard's positive constraint must survive — NOT a lone
+    # ``falsy[b]`` opening.
+    assert any(le["operator"] == "truthy" and _membership_var(le) == "auth" for le in leaves), leaves
+
+
+def test_issue120_standalone_require_not_projected_public(tmp_path):
+    """#120 round-2 point 2 — a standalone ``require(cond)`` is a dominating
+    positive guard, not an ignorable non-IF statement.
+    ``require(wl[src]); if(bl[src]) return false; return true;`` — the builder
+    only inspects IF nodes, so the ``require(wl)`` guard was dropped and the
+    tail became a bare ``falsy[bl]`` = public-minus-bl. The fix conjoins the
+    dominating require: ``allowed ⇔ src ∈ wl ∧ src ∉ bl`` — never public."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) wl;
+            mapping(address => bool) bl;
+            function isAuthorized(address src) internal view returns (bool) {
+                require(wl[src]);
+                if (bl[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("wl", "truthy"),
+        ("bl", "falsy"),
+    }, leaves
+    # The whitelist gate must survive so the provider is NOT public-minus-bl.
+    assert any(le["operator"] == "truthy" and _membership_var(le) == "wl" for le in leaves), leaves
+
+
+def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
+    """#120 round-2 points 1+3c — a multi-revert guard chain must AND EVERY
+    guard. ``if(!authA[src]) revert(); if(!authB[src]) revert(); return true;``
+    — both reverts leak their fall-through son to ENDIF, so pre-fix the tail
+    dropped both guards (→ unattributable ``unsupported``, safe but lossy).
+    With terminator-as-sink each ``!authX`` else path negates to a positive
+    membership: ``allowed ⇔ src ∈ authA ∧ src ∈ authB``. Never public, and
+    no fabricated ``falsy`` opening."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) authA;
+            mapping(address => bool) authB;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (!authA[src]) revert();
+                if (!authB[src]) revert();
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("authA", "truthy"),
+        ("authB", "truthy"),
+    }, leaves
+    # Both guards required (AND), no cofinite opening → never public.
+    assert not any(le["operator"] == "falsy" for le in leaves), leaves
+    assert not any(le["kind"] == "unsupported" for le in leaves), leaves
+
+
+def test_issue120_single_revert_guard_is_positive_membership(tmp_path):
+    """#120 round-2 point 1 — the ``_branch_value_is_only_true`` sink change.
+    ``if (!auth[src]) revert(); return true;`` — without treating the revert
+    as a sink, the revert branch reaches the downstream ``return true`` and is
+    misread as an *allow* branch, so its else-guard is skipped and the tail
+    goes ``unsupported``. With the sink the revert branch is a deny, so the
+    tail negates ``!auth`` to ``truthy[auth]`` (``allowed ⇔ src ∈ auth``)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) auth;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (!auth[src]) revert();
+                return true;
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_return_predicate_tree(_function(sl, "isAuthorized")))
+    assert len(leaves) == 1, leaves
+    leaf = leaves[0]
+    assert leaf["kind"] == "membership"
+    assert leaf["operator"] == "truthy"
+    assert _membership_var(leaf) == "auth"
+
+
+def _assert_no_lone_falsy(tree):
+    """The #120 safety invariant: a cofinite ``falsy`` membership (public
+    minus a set) must never survive alone — a dropped positive guard would
+    otherwise re-admit every principal outside the set. Either a truthy
+    membership co-requires it (the guard was captured) or the whole child is
+    ``unsupported`` (fail-closed)."""
+    leaves = _all_leaves(tree)
+    has_falsy = any(le["kind"] == "membership" and le["operator"] == "falsy" for le in leaves)
+    has_truthy = any(le["kind"] == "membership" and le["operator"] == "truthy" for le in leaves)
+    is_unsupported = any(le["kind"] == "unsupported" for le in leaves)
+    assert (not has_falsy) or has_truthy or is_unsupported, leaves
+
+
+def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
+    """#120 round-3 point 1 — a deny expressed as an internal helper call
+    (not an inline ``revert``) is still a CFG sink. ``if (!auth[src]) _deny();
+    if (b[src]) return false; return true;`` where ``_deny`` always reverts.
+    The ``_deny()`` EXPRESSION node keeps a structural fall-through edge to
+    the ENDIF merge, so unless a call to a provably always-reverting callee is
+    sunk, the ``!auth`` guard leaks and the tail collapses to a lone
+    ``falsy[b]`` = public-minus-b (a fabrication). The fix ANDs the positive
+    ``auth`` guard with the ``b`` negation: ``allowed ⇔ src ∈ auth ∧ src ∉ b``.
+    Never a lone ``falsy``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) auth;
+            mapping(address => bool) b;
+            function _deny() internal pure { revert("denied"); }
+            function isAuthorized(address src) internal view returns (bool) {
+                if (!auth[src]) _deny();
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("auth", "truthy"),
+        ("b", "falsy"),
+    }, leaves
+    # The invariant the reviewer requires: no ``membership:falsy`` without a
+    # co-required ``truthy[auth]``.
+    assert any(le["operator"] == "truthy" and _membership_var(le) == "auth" for le in leaves), leaves
+    _assert_no_lone_falsy(tree)
+
+
+def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
+    """#120 round-3 point 1, library variant — a ``LibraryCall`` to an
+    always-reverting library function (``Guard.enforce()``) sinks control
+    identically to the internal-call and inline-``revert`` forms. Same shape
+    (``if (!auth[src]) Guard.enforce(); if (b[src]) return false; return
+    true;``) must yield ``AND(truthy[auth], falsy[b])``, never a lone
+    ``falsy[b]``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        library Guard { function enforce() internal pure { revert("denied"); } }
+        contract C {
+            mapping(address => bool) auth;
+            mapping(address => bool) b;
+            function isAuthorized(address src) internal view returns (bool) {
+                if (!auth[src]) Guard.enforce();
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    assert tree is not None
+    assert tree.get("op") == "AND", tree
+    leaves = _all_leaves(tree)
+    assert {(_membership_var(le), le["operator"]) for le in leaves} == {
+        ("auth", "truthy"),
+        ("b", "falsy"),
+    }, leaves
+    assert any(le["operator"] == "truthy" and _membership_var(le) == "auth" for le in leaves), leaves
+    _assert_no_lone_falsy(tree)
+
+
+def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
+    """#120 round-3 point 2 backstop — a deny routed through a call whose
+    revert can't be PROVEN (an external call) must fail closed, not leak.
+    ``if (!auth[src]) g.enforce(src); if (b[src]) return false; return true;``
+    where ``g.enforce`` is an external interface call: ``_callee_always_reverts``
+    can't see its body, so the ``!auth`` edge is not sunk and the ``!auth``
+    guard leaks. Because an unclassified mid-body call sits on the path to the
+    ``return true`` whose guards already opened cofinite (``falsy[b]``), the
+    child fails closed to ``unsupported`` — never the lone public-minus-b
+    opening."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IGuard { function enforce(address s) external; }
+        contract C {
+            mapping(address => bool) auth;
+            mapping(address => bool) b;
+            IGuard g;
+            function isAuthorized(address src) internal returns (bool) {
+                if (!auth[src]) g.enforce(src);
+                if (b[src]) return false;
+                return true;
+            }
+        }
+    """,
+    )
+    tree = build_return_predicate_tree(_function(sl, "isAuthorized"))
+    leaves = _all_leaves(tree)
+    # Fail-closed: no lone cofinite opening survives.
+    assert any(le["kind"] == "unsupported" for le in leaves), leaves
+    _assert_no_lone_falsy(tree)

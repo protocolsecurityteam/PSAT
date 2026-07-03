@@ -22,6 +22,8 @@ from typing import Literal
 import requests
 import urllib3.exceptions
 
+from services.discovery.classifier import ClassificationIncompleteError
+
 # psycopg2 wraps "connection lost mid-query" with OperationalError. Fold it
 # into the transient set so a Neon idle-disconnect doesn't terminally fail
 # an otherwise-fine job. Wrapped in try/except so test environments without
@@ -85,6 +87,10 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     urllib3.exceptions.ReadTimeoutError,
     urllib3.exceptions.NewConnectionError,
     urllib3.exceptions.ProtocolError,
+    # A failed proxy-slot read is a transient RPC condition: the fail-closed
+    # raise self-heals once the RPC recovers, so retry rather than terminally
+    # kill the job (which would itself erase the implementation's surface).
+    ClassificationIncompleteError,
     *_PSYCOPG2_OPERATIONAL,
 )
 
