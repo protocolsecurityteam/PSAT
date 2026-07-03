@@ -48,3 +48,9 @@ diff-cover.md
 # corpus is committable; the regenerated `out/`/`cache/` build dirs stay ignored.
 !labels_redesign/agent1/projects/**/contracts/
 !labels_redesign/agent1/projects/**/contracts/**
+
+# Claims auth-family matcher fixtures (compiled in-test by
+# tests/test_claims_auth_matchers.py). Same `contracts/` un-ignore as the
+# corpus above so the vendored `lib/*/contracts/` deps are committable.
+!tests/fixtures/claims_auth/**/contracts/
+!tests/fixtures/claims_auth/**/contracts/**

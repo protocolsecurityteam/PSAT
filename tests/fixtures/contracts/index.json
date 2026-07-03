@@ -5,189 +5,382 @@
       "category": "pause",
       "contract_name": "DirectOwnerPause",
       "description": "Pause is controlled by a direct msg.sender == owner check.",
-      "detection_patterns": ["direct_sender_check", "owner_guard", "pause_control"]
+      "detection_patterns": [
+        "direct_sender_check",
+        "owner_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/mapping_pause.sol",
       "category": "pause",
       "contract_name": "MappingPause",
       "description": "Pause is controlled by an authorization mapping lookup.",
-      "detection_patterns": ["mapping_auth", "pause_control"]
+      "detection_patterns": [
+        "mapping_auth",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/helper_pause.sol",
       "category": "pause",
       "contract_name": "HelperPause",
       "description": "Pause is controlled by an internal helper auth function.",
-      "detection_patterns": ["internal_helper_auth", "owner_guard", "pause_control"]
+      "detection_patterns": [
+        "internal_helper_auth",
+        "owner_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/role_pause.sol",
       "category": "pause",
       "contract_name": "RolePause",
       "description": "Pause is controlled by a role-based modifier and role constant.",
-      "detection_patterns": ["role_guard", "pause_control"]
+      "detection_patterns": [
+        "role_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/authority_pause.sol",
       "category": "pause",
       "contract_name": "AuthorityPause",
       "description": "Pause is controlled by an external boolean authorization check.",
-      "detection_patterns": ["external_authority", "pause_control"]
+      "detection_patterns": [
+        "external_authority",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/timelock_pause.sol",
       "category": "pause",
       "contract_name": "TimelockPause",
       "description": "Pause is controlled by a direct timelock address check.",
-      "detection_patterns": ["timelock_guard", "pause_control"]
+      "detection_patterns": [
+        "timelock_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/non_dominating_owner_pause.sol",
       "category": "pause",
       "contract_name": "NonDominatingOwnerPause",
       "description": "A branch-local owner check does not dominate the pause state write.",
-      "detection_patterns": ["non_dominating_guard", "pause_control"]
+      "detection_patterns": [
+        "non_dominating_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "pause/indirect_owner_pause.sol",
       "category": "pause",
       "contract_name": "IndirectOwnerPause",
       "description": "An entrypoint owner check protects a pause write performed in an internal helper.",
-      "detection_patterns": ["interprocedural_sink", "owner_guard", "pause_control"]
+      "detection_patterns": [
+        "interprocedural_sink",
+        "owner_guard",
+        "pause_control"
+      ]
     },
     {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",
       "description": "Upgrade is controlled by a direct msg.sender == admin check.",
-      "detection_patterns": ["direct_sender_check", "admin_guard", "upgrade_control"]
+      "detection_patterns": [
+        "direct_sender_check",
+        "admin_guard",
+        "upgrade_control"
+      ]
     },
     {
       "path": "upgrade/uups_ownable_upgrade.sol",
       "category": "upgrade",
       "contract_name": "UUPSOwnableUpgrade",
       "description": "UUPS upgrade path controlled by onlyOwner.",
-      "detection_patterns": ["uups", "owner_guard", "upgrade_control"]
+      "detection_patterns": [
+        "uups",
+        "owner_guard",
+        "upgrade_control"
+      ]
     },
     {
       "path": "upgrade/transparent_upgradeable_proxy.sol",
       "category": "upgrade",
       "contract_name": "TransparentUpgradeableProxy",
       "description": "Transparent proxy style upgrade path controlled by admin.",
-      "detection_patterns": ["transparent_proxy", "admin_guard", "upgrade_control"]
+      "detection_patterns": [
+        "transparent_proxy",
+        "admin_guard",
+        "upgrade_control"
+      ]
     },
     {
       "path": "upgrade/upgradeable_beacon.sol",
       "category": "upgrade",
       "contract_name": "UpgradeableBeacon",
       "description": "Beacon-style upgrade path controlled by onlyOwner.",
-      "detection_patterns": ["beacon", "owner_guard", "upgrade_control"]
+      "detection_patterns": [
+        "beacon",
+        "owner_guard",
+        "upgrade_control"
+      ]
     },
     {
       "path": "token/token_erc20_ownable_pausable.sol",
       "category": "token",
       "contract_name": "Token",
       "description": "ERC20 token with owner-gated minting and pausability.",
-      "detection_patterns": ["erc20", "owner_guard", "pausable", "mint_control"]
+      "detection_patterns": [
+        "erc20",
+        "owner_guard",
+        "pausable",
+        "mint_control"
+      ]
     },
     {
       "path": "nft/collectible_erc721.sol",
       "category": "nft",
       "contract_name": "Collectible",
       "description": "Minimal ERC721-compatible NFT implementation.",
-      "detection_patterns": ["erc721", "nft"]
+      "detection_patterns": [
+        "erc721",
+        "nft"
+      ]
     },
     {
       "path": "composed/upgrade_factory_uups.sol",
       "category": "composed",
       "contract_name": "UpgradeFactory",
       "description": "UUPS-style upgrade control plus timelock-like functions and factory deployment.",
-      "detection_patterns": ["uups", "factory", "timelock_like", "upgrade_control"]
+      "detection_patterns": [
+        "uups",
+        "factory",
+        "timelock_like",
+        "upgrade_control"
+      ]
     },
     {
       "path": "composed/auth_modifier_controller.sol",
       "category": "composed",
       "contract_name": "AuthModifierController",
       "description": "Inherited modifier-based auth expands into an internal helper with owner or external boolean authorization.",
-      "detection_patterns": ["modifier_auth", "internal_helper_auth", "external_authority", "owner_guard"]
+      "detection_patterns": [
+        "modifier_auth",
+        "internal_helper_auth",
+        "external_authority",
+        "owner_guard"
+      ]
     },
     {
       "path": "calls/external_call_control.sol",
       "category": "calls",
       "contract_name": "ExternalCallControl",
       "description": "An external contract call guarded by an owner check.",
-      "detection_patterns": ["external_call", "owner_guard", "guarded_call"]
+      "detection_patterns": [
+        "external_call",
+        "owner_guard",
+        "guarded_call"
+      ]
     },
     {
       "path": "calls/delegatecall_control.sol",
       "category": "calls",
       "contract_name": "DelegateCallControl",
       "description": "A delegatecall sink guarded by an owner check.",
-      "detection_patterns": ["delegatecall", "owner_guard", "guarded_call"]
+      "detection_patterns": [
+        "delegatecall",
+        "owner_guard",
+        "guarded_call"
+      ]
     },
     {
       "path": "calls/selfdestruct_control.sol",
       "category": "calls",
       "contract_name": "SelfDestructControl",
       "description": "A selfdestruct sink guarded by an owner check.",
-      "detection_patterns": ["selfdestruct", "owner_guard", "guarded_call"]
+      "detection_patterns": [
+        "selfdestruct",
+        "owner_guard",
+        "guarded_call"
+      ]
     },
     {
       "path": "calls/indirect_external_call_control.sol",
       "category": "calls",
       "contract_name": "IndirectExternalCallControl",
       "description": "An internal helper checks auth and performs the external call.",
-      "detection_patterns": ["interprocedural_sink", "external_call", "owner_guard", "guarded_call"]
+      "detection_patterns": [
+        "interprocedural_sink",
+        "external_call",
+        "owner_guard",
+        "guarded_call"
+      ]
     },
     {
       "path": "tracking/owner_update_no_event.sol",
       "category": "tracking",
       "contract_name": "OwnerNoEvent",
       "description": "Controller state changes through a writer function without an associated event, requiring polling fallback.",
-      "detection_patterns": ["controller_tracking", "state_only_tracking", "owner_guard"]
+      "detection_patterns": [
+        "controller_tracking",
+        "state_only_tracking",
+        "owner_guard"
+      ]
     },
     {
       "path": "authority/Governable.sol",
       "category": "authority",
       "contract_name": "Governable",
       "description": "Verbatim ether.fi LRTSquared Governable: onlyGovernor reads the governor from an explicit storage slot via the internal accessor _governor(), so the gate lowers to a view_call on _governor() (no external selector). Resolution must fall back to the canonical public governor() getter (bug #4).",
-      "detection_patterns": ["governor_guard", "internal_accessor_authority", "assembly_slot_authority", "canonical_getter_resolution"]
+      "detection_patterns": [
+        "governor_guard",
+        "internal_accessor_authority",
+        "assembly_slot_authority",
+        "canonical_getter_resolution"
+      ]
     },
     {
       "path": "authority/L1SyncPoolReceiver.sol",
       "category": "authority",
       "contract_name": "L1SyncPoolReceiver",
       "description": "Faithful ether.fi L1BaseSyncPool: onMessageReceived gates on msg.sender == receivers[originEid], a mapping(uint32 => address) keyed by a function parameter inside ERC-7201 namespaced storage (claim #3 group C). There is no getter to read; resolution must enumerate the mapping's VALUE set from its ReceiverSet setter events, or surface an external check when none are observed.",
-      "detection_patterns": ["receiver_guard", "param_keyed_mapping_authority", "mapping_value_enumeration", "namespaced_storage_authority"]
+      "detection_patterns": [
+        "receiver_guard",
+        "param_keyed_mapping_authority",
+        "mapping_value_enumeration",
+        "namespaced_storage_authority"
+      ]
     },
     {
       "path": "authority/MembershipNFT.sol",
       "category": "authority",
       "contract_name": "MembershipNFT",
       "description": "Faithful ether.fi MembershipNFT: onlyMembershipManagerContract gates on msg.sender == address(membershipManager), an INTERNAL address var declared without public so its getter reverts on every deployment (claim #3 group D). Resolution must read the var's sequential storage slot via eth_getStorageAt; the public liquidityPool sibling resolves via its auto-getter and must NOT get a slot.",
-      "detection_patterns": ["membership_manager_guard", "internal_var_authority", "getterless_state_var", "sequential_slot_authority"]
+      "detection_patterns": [
+        "membership_manager_guard",
+        "internal_var_authority",
+        "getterless_state_var",
+        "sequential_slot_authority"
+      ]
     },
     {
       "path": "authority/solady/Ownable.sol",
       "category": "authority",
       "contract_name": "Ownable",
       "description": "Verbatim Solady Ownable (as vendored by ether.fi TopUp/TopUpV2): owner lives in the bytes32 constant slot _OWNER_SLOT read via inline assembly, with canonical public getter owner(). A caller-equality gate naming _OWNER_SLOT must not become a dead role_identifier:_OWNER_SLOT target (bug #6).",
-      "detection_patterns": ["owner_guard", "solady_ownable", "assembly_slot_authority", "storage_slot_constant"]
+      "detection_patterns": [
+        "owner_guard",
+        "solady_ownable",
+        "assembly_slot_authority",
+        "storage_slot_constant"
+      ]
     },
     {
       "path": "authority/TopUpSolady.sol",
       "category": "authority",
       "contract_name": "TopUpSolady",
       "description": "ether.fi TopUp.processTopUp gate (verbatim) over the real Solady Ownable: address _owner = owner(); require(_owner == msg.sender). Reproduces the production state_variable:_OWNER_SLOT caller operand that resolution must read via owner() rather than _OWNER_SLOT() (bug #6).",
-      "detection_patterns": ["owner_guard", "solady_ownable", "storage_slot_constant", "canonical_getter_resolution"]
+      "detection_patterns": [
+        "owner_guard",
+        "solady_ownable",
+        "storage_slot_constant",
+        "canonical_getter_resolution"
+      ]
     },
     {
       "path": "authority/OzV5NamespacedOwnable.sol",
       "category": "authority",
       "contract_name": "OzV5AccessControlDefaultAdmin",
       "description": "OZ-v5 ERC-7201 namespaced ownership in the two etherfi forms: OzV5Ownable (OwnableUpgradeable, EtherfiL1SyncPoolETH cid 615) surfaces the suppressed OwnableStorageLocation slot constant, and OzV5AccessControlDefaultAdmin (AccessControlDefaultAdminRules with owner()=>defaultAdmin(), CumulativeMerkleDrop cid 462) inlines owner() to a view_call of the private _getAccessControlDefaultAdminRulesStorage() accessor. The owner controller and the gate principal must both resolve via owner(), never the dead slot/accessor.",
-      "detection_patterns": ["owner_guard", "oz_v5_namespaced_storage", "namespaced_storage_authority", "canonical_getter_resolution"]
+      "detection_patterns": [
+        "owner_guard",
+        "oz_v5_namespaced_storage",
+        "namespaced_storage_authority",
+        "canonical_getter_resolution"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/uups_eeth_upgrade.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "EETH",
+      "description": "UUPS positive (EETH-class): proxiableUUID sibling gates upgradeTo/upgradeToAndCall for the upgrade.implementation claim.",
+      "detection_patterns": [
+        "uups",
+        "upgrade_control",
+        "claim_upgrade_implementation"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/proxy_shell_wbeth.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "WBETHProxy",
+      "description": "Proxy-shell positive (wBETH-class zos): delegatecall-fallback gate recovers upgradeTo (upgrade.implementation) and changeAdmin (proxy.admin_change).",
+      "detection_patterns": [
+        "proxy_shell",
+        "delegatecall_fallback",
+        "upgrade_control",
+        "claim_proxy_admin_change"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/not_a_proxy_upgradeto.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "StrategyRegistry",
+      "description": "Adversarial near-miss NEGATIVE: upgradeTo/changeAdmin selectors present but no proxy gate (no proxiableUUID, delegatecall fallback, or marker event), so no upgrade/admin claim.",
+      "detection_patterns": [
+        "near_miss",
+        "no_proxy_gate",
+        "claim_negative"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/safe_wallet.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "SafeWallet",
+      "description": "Safe positive (SafeL2-class): getThreshold+getOwners+execTransaction gate yields safe.signer_mgmt/module_mgmt/set_guard plus exec.arbitrary on the execute entries.",
+      "detection_patterns": [
+        "safe",
+        "signer_mgmt",
+        "module_mgmt",
+        "set_guard",
+        "claim_exec_arbitrary"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/oz_timelock.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "TimelockController",
+      "description": "Timelock positive (OZ TimelockController): getMinDelay+schedule+execute+hashOperation gate yields per-selector timelock.* claims; execute/executeBatch also carry exec.arbitrary.",
+      "detection_patterns": [
+        "oz_timelock",
+        "timelock_schedule",
+        "timelock_execute",
+        "claim_exec_arbitrary"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/boring_vault_manage.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "BoringVault",
+      "description": "exec.arbitrary idiom positive (BoringVault.manage): a body-origin call forwarding a parameter-tainted destination and calldata, claimed at the idiom_structural tier.",
+      "detection_patterns": [
+        "manage_idiom",
+        "param_taint",
+        "claim_exec_arbitrary"
+      ]
+    },
+    {
+      "path": "claims_upgrade_exec/plain_transfer_call.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "PayableToken",
+      "description": "Adversarial taint near-miss NEGATIVE: address-tainted destination but no dynamic-bytes calldata parameter, so the value send earns no exec.arbitrary claim.",
+      "detection_patterns": [
+        "near_miss",
+        "address_taint_only",
+        "claim_negative"
+      ]
     }
   ]
 }
