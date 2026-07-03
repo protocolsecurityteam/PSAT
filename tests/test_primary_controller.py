@@ -19,10 +19,13 @@ def _p(addr: str, ptype: str) -> dict:
     return {"address": addr, "type": ptype}
 
 
-def _fn(callers: set[str], labels: set[str] | None = None) -> dict:
-    """One EffectiveFunction's caller set + effect labels, the shape
-    ``assign_co_controllers`` reads per contract."""
-    return {"callers": set(callers), "labels": set(labels or ())}
+def _fn(callers: set[str], labels: set[str] | None = None, *, claims: list[str] | None = None) -> dict:
+    """One EffectiveFunction's caller set + effect labels (and optional Plane-1
+    claim ids), the shape ``assign_co_controllers`` reads per contract."""
+    fn: dict = {"callers": set(callers), "labels": set(labels or ())}
+    if claims is not None:
+        fn["claims"] = list(claims)
+    return fn
 
 
 def test_unknown_type_excluded():
@@ -270,6 +273,64 @@ def test_co_controller_non_principal_types_ignored():
     result = assign_co_controllers([_p("0xinner", "contract"), _p("0xsafe", "safe")], detail, {"0xsafe": []})
     assert "0xinner" not in result
     assert result["0xsafe"] == [contract]
+
+
+def test_co_controller_privileged_claim_upgrade_gain():
+    """``upgrade.implementation`` now fires as a claim (its ``implementation_update``
+    legacy label was corpus-dead), so a Safe holding an upgrade function on a
+    contract it lost the primary contest for co-controls it — even with a wide
+    caller set the gate arm would reject."""
+    big, guardian, contract = "0xbig", "0xguardian", "0xc1"
+    wide = {guardian, big} | {f"0xrando{i}" for i in range(8)}
+    primary_for = {big: [contract], guardian: []}
+    detail = {contract: [_fn(wide, claims=["upgrade.implementation"])]}
+    result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
+    assert result[guardian] == [contract]
+    assert result[big] == []
+
+
+def test_co_controller_callee_pointer_claim_excluded():
+    """``callee_pointer.rotate`` (the precise hook-pointer rotation) is excluded
+    from the privileged claim set — like the legacy ``hook_update`` — so a wide
+    caller set on it does not make any caller a co-controller."""
+    contract = "0xc1"
+    wide = {f"0xcaller{i}" for i in range(8)}
+    principals = [_p(c, "safe") for c in wide]
+    primary_for = {c: [] for c in wide}
+    detail = {contract: [_fn(wide, claims=["callee_pointer.rotate"])]}
+    result = assign_co_controllers(principals, detail, primary_for)
+    assert all(result[c] == [] for c in wide)
+
+
+def test_co_controller_claims_take_precedence_over_legacy_labels():
+    """When a row carries claims, they are authoritative for significance and the
+    legacy labels are not consulted. A ``callee_pointer.rotate`` claim on a
+    function whose legacy label is the privileged ``pause_toggle`` is NOT
+    significant — the excluded claim wins over the would-be-privileged label."""
+    contract = "0xc1"
+    wide = {f"0xcaller{i}" for i in range(8)}
+    principals = [_p(c, "safe") for c in wide]
+    primary_for = {c: [] for c in wide}
+    detail = {contract: [_fn(wide, {"pause_toggle"}, claims=["callee_pointer.rotate"])]}
+    result = assign_co_controllers(principals, detail, primary_for)
+    assert all(result[c] == [] for c in wide), (
+        "claims are authoritative: the excluded callee_pointer.rotate claim must "
+        "not be overridden by a privileged legacy label on the same row"
+    )
+
+
+def test_co_controller_new_claim_families_are_privileged():
+    """The claim families with no legacy label — ``safe.*``, ``timelock.*`` — now
+    make their callers co-controllers (a wide-caller Safe/timelock guardian)."""
+    guardian, big, c_safe, c_tl = "0xguardian", "0xbig", "0xsafecontract", "0xtlcontract"
+    wide = {guardian, big} | {f"0xr{i}" for i in range(8)}
+    primary_for = {big: [c_safe, c_tl], guardian: []}
+    detail = {
+        c_safe: [_fn(wide, claims=["safe.signer_mgmt"])],
+        c_tl: [_fn(wide, claims=["timelock.schedule"])],
+    }
+    result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
+    assert sorted(result[guardian]) == [c_safe, c_tl]
 
 
 def test_co_controller_empty_and_shape():

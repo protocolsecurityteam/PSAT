@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -448,15 +449,20 @@ def _prefetch_child_tables(
             clauses.append(func.lower(node_ref.address).in_(list(cv_principal_addrs_lc)))
         return or_(*clauses)
 
-    def _ef_effects(s: Session) -> tuple[dict[int, list[list[str]]], int]:
-        local: dict[int, list[list[str]]] = {}
+    def _ef_effects(s: Session) -> tuple[dict[int, list[dict[str, list[str]]]], int]:
+        # Per function: legacy labels (drive value_effects) + Plane-1 claim_ids
+        # (drive the capability chips, claims-first). One record per function so
+        # the claims-vs-legacy choice stays per-function through aggregation.
+        local: dict[int, list[dict[str, list[str]]]] = {}
         rows = 0
-        for cid, labels in s.execute(
-            select(EffectiveFunction.contract_id, EffectiveFunction.effect_labels).where(
-                EffectiveFunction.contract_id.in_(id_list)
-            )
+        for cid, labels, claims in s.execute(
+            select(
+                EffectiveFunction.contract_id,
+                EffectiveFunction.effect_labels,
+                EffectiveFunction.claims,
+            ).where(EffectiveFunction.contract_id.in_(id_list))
         ).all():
-            local.setdefault(cid, []).append(list(labels or []))
+            local.setdefault(cid, []).append({"labels": list(labels or []), "claims": _claim_ids_list(claims)})
             rows += 1
         return local, rows
 
@@ -569,7 +575,7 @@ def _prefetch_child_tables(
 
     def _fp_function_detail(s: Session) -> tuple[dict[int, list[dict[str, Any]]], int]:
         """Per-contract, per-function ``{"function": str, "callers": set,
-        "labels": set}``. Drives two things:
+        "labels": set, "claims": list[claim_id]}``. Drives two things:
 
         * the co-controller rule in
           :func:`services.governance.primary_controller.assign_co_controllers`,
@@ -588,12 +594,13 @@ def _prefetch_child_tables(
         sibling FP projections: a signer of a message isn't a caller."""
         by_ef: dict[int, dict[str, Any]] = {}
         rows = 0
-        for cid, ef_id, fname, labels, addr in s.execute(
+        for cid, ef_id, fname, labels, claims, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
                 EffectiveFunction.id,
                 EffectiveFunction.function_name,
                 EffectiveFunction.effect_labels,
+                EffectiveFunction.claims,
                 func.lower(FunctionPrincipal.address),
             )
             .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -610,14 +617,25 @@ def _prefetch_child_tables(
                 continue
             entry = by_ef.get(ef_id)
             if entry is None:
-                entry = {"contract_id": cid, "function": fname, "labels": set(labels or ()), "callers": set()}
+                entry = {
+                    "contract_id": cid,
+                    "function": fname,
+                    "labels": set(labels or ()),
+                    "claims": _claim_ids_list(claims),
+                    "callers": set(),
+                }
                 by_ef[ef_id] = entry
             entry["callers"].add(addr)
             rows += 1
         local: dict[int, list[dict[str, Any]]] = {}
         for entry in by_ef.values():
             local.setdefault(entry["contract_id"], []).append(
-                {"function": entry["function"], "labels": entry["labels"], "callers": entry["callers"]}
+                {
+                    "function": entry["function"],
+                    "labels": entry["labels"],
+                    "claims": entry["claims"],
+                    "callers": entry["callers"],
+                }
             )
         return local, rows
 
@@ -937,9 +955,46 @@ def _principal_lookup_meta(
 # per-(controller, contract) detail (guardian / co-controller chips, sidebar
 # "Can Call"). One map means the same power reads the same word no matter what
 # you click — a Safe's "fund-out" on EETH matches the chip you'd see clicking
-# EETH itself. ``external_contract_call`` / ``hook_update`` are intentionally
-# unmapped — too coarse to name a power (they cover everything from
-# ``setCapacity`` to ``createBid``); those functions are shown by name instead.
+# EETH itself.
+#
+# ``_CLAIM_CAPABILITY`` is the Plane-1 vocabulary, authoritative per function.
+# It adds the ``timelock`` / ``safe`` chips (no legacy label ever mapped to
+# them) and finally produces ``arbitrary-call`` (its ``arbitrary_external_call``
+# legacy source was corpus-dead). The hook/external exclusion is now structural:
+# ``external_contract_call`` isn't representable as a claim at all, and
+# ``callee_pointer.rotate`` (the precise hook-pointer rotation) is deliberately
+# unmapped, so those functions are still shown by name.
+_CLAIM_CAPABILITY: dict[str, str] = {
+    "pause.set": "pause",
+    "pause.unset": "pause",
+    "ownership.transfer": "ownership",
+    "ownership.renounce": "ownership",
+    "ownership.accept": "ownership",
+    "authorized_caller.rotate": "authority",
+    "authority.replace": "authority",
+    "roles.grant": "roles",
+    "roles.revoke": "roles",
+    "roles.configure": "roles",
+    "upgrade.implementation": "upgrade",
+    "proxy.admin_change": "upgrade",
+    "timelock.schedule": "timelock",
+    "timelock.execute": "timelock",
+    "timelock.cancel": "timelock",
+    "timelock.set_delay": "timelock",
+    "safe.signer_mgmt": "safe",
+    "safe.module_mgmt": "safe",
+    "safe.set_guard": "safe",
+    "flow.out": "fund-out",
+    "flow.in": "fund-in",
+    "supply.mint": "mint",
+    "supply.burn": "burn",
+    "exec.arbitrary": "arbitrary-call",
+    "contract_deployment": "deploy",
+}
+
+# Legacy effect_labels → chip, the fallback for claim-less rows (stale data /
+# degraded artifact). ``delegatecall_execution`` is a Plane-0 fact with no claim
+# projection, so it only ever surfaces a chip through this path.
 _EFFECT_CAPABILITY: dict[str, str] = {
     "pause_toggle": "pause",
     "ownership_transfer": "ownership",
@@ -956,11 +1011,29 @@ _EFFECT_CAPABILITY: dict[str, str] = {
 }
 
 
-def _capabilities_for(labels: set[str]) -> list[str]:
-    """Sorted, de-duplicated human capability tags for a set of effect labels.
-    Coarse labels with no clean tag drop out — concrete function names carry
-    those instead."""
-    return sorted({_EFFECT_CAPABILITY[label] for label in labels if label in _EFFECT_CAPABILITY})
+def _claim_ids_list(claims: Any) -> list[str]:
+    """``claim_id`` strings from a stored ``EffectiveFunction.claims`` JSONB list
+    (``[{claim_id, tier, witness}, ...]``); anything else reads as empty."""
+    if not isinstance(claims, list):
+        return []
+    out: list[str] = []
+    for claim in claims:
+        if isinstance(claim, dict):
+            cid = claim.get("claim_id")
+            if isinstance(cid, str) and cid:
+                out.append(cid)
+    return out
+
+
+def _function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> set[str]:
+    """Capability chips for ONE function. Plane-1 claims are authoritative when
+    present; a claim-less function falls back to the legacy effect_labels map.
+    Coarse effects with no clean chip drop out — their functions are shown by
+    name instead."""
+    claim_id_set = set(claim_ids)
+    if claim_id_set:
+        return {_CLAIM_CAPABILITY[cid] for cid in claim_id_set if cid in _CLAIM_CAPABILITY}
+    return {_EFFECT_CAPABILITY[label] for label in labels if label in _EFFECT_CAPABILITY}
 
 
 def build_governance_view(
@@ -973,7 +1046,7 @@ def build_governance_view(
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     children = _prefetch_child_tables(session, relevant_contract_ids)
     controller_values_by_cid: dict[int, list[ControllerValue]] = children["controller_values"]
-    ef_effects_by_cid: dict[int, list[list[str]]] = children["ef_effects"]
+    ef_effects_by_cid: dict[int, list[dict[str, list[str]]]] = children["ef_effects"]
     fp_governance_by_cid: dict[int, list[dict[str, Any]]] = children["fp_governance_rows"]
     upgrade_events_count_by_cid: dict[int, int] = children["upgrade_events_count"]
     last_upgrade_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_last"]
@@ -1078,21 +1151,21 @@ def build_governance_view(
         ef_contract_ids = [primary_ef_cid] if primary_ef_cid else []
         ef_contract_ids += [sc.id for sc in secondary_impl_contracts]
 
+        # ``value_effects`` stays a Plane-0 fact off legacy labels (it drives the
+        # role classification + fund-flow lane); the capability chips key off
+        # Plane-1 claims per function, legacy labels the claim-less fallback.
         value_effects: list[str] = []
-        all_effects: set[str] = set()
+        caps_set: set[str] = set()
         for cid in ef_contract_ids:
-            for label_list in ef_effects_by_cid.get(cid, []):
-                for label in label_list:
-                    all_effects.add(label)
+            for rec in ef_effects_by_cid.get(cid, []):
+                for label in rec["labels"]:
                     if label in ("asset_pull", "asset_send", "mint", "burn") and label not in value_effects:
                         value_effects.append(label)
+                caps_set |= _function_capabilities(rec["labels"], rec["claims"])
 
-        # Contract capability tags, from the shared vocabulary (_EFFECT_CAPABILITY)
-        # so a contract's chips use the same words as the per-controller chips.
         # Two non-label extras layered on: ``upgradeable`` (it's a proxy shell)
         # and ``pause`` from the summary flag (a contract can be pausable without
         # a pause_toggle EffectiveFunction surfacing).
-        caps_set = set(_capabilities_for(all_effects))
         if is_proxy:
             caps_set.add("upgradeable")
         if summary_row and summary_row.is_pausable:
@@ -1323,15 +1396,17 @@ def build_governance_view(
     for caddr, functions in fp_function_detail_by_addr.items():
         for fn in functions:
             fname = fn.get("function")
-            fn_labels = fn.get("labels") or set()
+            # Capability chips are computed per function (claims-first) then
+            # unioned, so the claims-vs-legacy choice stays per-function.
+            fn_caps = _function_capabilities(fn.get("labels") or (), fn.get("claims") or ())
             for a in fn.get("callers", ()):
                 la = (a or "").lower()
                 if not la:
                     continue
-                detail = caller_detail.setdefault(caddr, {}).setdefault(la, {"functions": set(), "labels": set()})
+                detail = caller_detail.setdefault(caddr, {}).setdefault(la, {"functions": set(), "capabilities": set()})
                 if fname:
                     detail["functions"].add(fname)
-                detail["labels"].update(fn_labels)
+                detail["capabilities"].update(fn_caps)
 
     # Invert to per-principal: the contracts it can call, with functions +
     # capability tags. Drives the sidebar "Can Call" and the on-select chips for
@@ -1346,9 +1421,11 @@ def build_governance_view(
     detail_acc: dict[str, dict[str, dict[str, set[str]]]] = {}
 
     def _accumulate(principal_lc: str, contract_lc: str, src: dict[str, set[str]]) -> None:
-        slot = detail_acc.setdefault(principal_lc, {}).setdefault(contract_lc, {"functions": set(), "labels": set()})
+        slot = detail_acc.setdefault(principal_lc, {}).setdefault(
+            contract_lc, {"functions": set(), "capabilities": set()}
+        )
         slot["functions"].update(src.get("functions", ()))
-        slot["labels"].update(src.get("labels", ()))
+        slot["capabilities"].update(src.get("capabilities", ()))
 
     for caddr, callers_map in caller_detail.items():
         for la, detail in callers_map.items():
@@ -1363,7 +1440,7 @@ def build_governance_view(
     detail_by_principal: dict[str, list[dict[str, Any]]] = {}
     for la, by_contract in detail_acc.items():
         rows = [
-            {"address": caddr, "functions": sorted(d["functions"]), "capabilities": _capabilities_for(d["labels"])}
+            {"address": caddr, "functions": sorted(d["functions"]), "capabilities": sorted(d["capabilities"])}
             for caddr, d in by_contract.items()
         ]
         rows.sort(key=lambda e: e["address"])
@@ -1402,7 +1479,7 @@ def build_governance_view(
                 "type": (principal_meta.get(a) or {}).get("type"),
                 "label": (principal_meta.get(a) or {}).get("label"),
                 "functions": sorted(cd[a]["functions"]),
-                "capabilities": _capabilities_for(cd[a]["labels"]),
+                "capabilities": sorted(cd[a]["capabilities"]),
             }
             for a in sorted(callers)
         ]

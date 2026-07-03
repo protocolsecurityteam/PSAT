@@ -304,6 +304,116 @@ def test_build_company_overview_omits_functions_field(db_session):
     assert "pause" in entry["capabilities"]
 
 
+def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
+    return {"claim_id": claim_id, "tier": tier, "witness": {}}
+
+
+def test_capability_chips_key_on_claims(db_session):
+    """Contract capability chips key off Plane-1 claims (with the new
+    ``timelock`` / ``safe`` chips and a finally-producible ``arbitrary-call``);
+    the hook/external exclusion is structural — a claim-bearing row's legacy
+    hook_update/external label contributes no chip, and claims win over legacy
+    labels on the same row. A claim-less row falls back to the legacy map.
+    """
+    p = _add_protocol(db_session, f"cap-claims-{uuid.uuid4().hex[:8]}")
+    addr = _addr("capc1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Governor")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Governor")
+
+    def _ef(fname, selector, *, claims=None, effect_labels=None):
+        db_session.add(
+            EffectiveFunction(
+                contract_id=c.id,
+                function_name=fname,
+                selector=selector,
+                abi_signature=f"{fname}()",
+                effect_labels=effect_labels or [],
+                claims=claims,
+                effect_targets=[],
+                action_summary=fname,
+                authority_public=False,
+                authority_roles=[],
+            )
+        )
+
+    # New chips from claim families that had no legacy label.
+    _ef("schedule", "0x01000001", claims=[_claim("timelock.schedule")], effect_labels=["external_contract_call"])
+    _ef("addSigner", "0x01000002", claims=[_claim("safe.signer_mgmt")], effect_labels=["hook_update"])
+    _ef("manage", "0x01000003", claims=[_claim("exec.arbitrary")], effect_labels=["external_contract_call"])
+    # Claims win over legacy labels on the same row: flow.out → fund-out, and the
+    # ownership_transfer legacy label must NOT surface an "ownership" chip.
+    _ef("sweep", "0x01000004", claims=[_claim("flow.out")], effect_labels=["ownership_transfer"])
+    # A claim-less row falls back to the legacy map (chip + value_effects).
+    _ef("pause", "0x01000005", effect_labels=["pause_toggle"])
+    _ef("payout", "0x01000006", effect_labels=["asset_send"])
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    caps = set(entry["capabilities"])
+
+    assert {"timelock", "safe", "arbitrary-call", "fund-out", "pause"} <= caps
+    # Structural exclusion: hook_update / external_contract_call carry no chip.
+    # Claims-first: the ownership_transfer legacy label on the sweep row is
+    # ignored because that row has a claim.
+    assert "ownership" not in caps
+    # value_effects stays a Plane-0 fact off the legacy labels.
+    assert "asset_send" in entry["value_effects"]
+
+
+def test_controls_detail_capabilities_from_claims(db_session):
+    """A principal's ``controls_detail`` capability chips flow from the
+    ``fp_function_detail`` projection's Plane-1 claims: a Safe holding a
+    ``safe.signer_mgmt`` function surfaces the ``safe`` chip, and the row's
+    legacy hook_update label contributes nothing.
+    """
+    p = _add_protocol(db_session, f"cap-detail-{uuid.uuid4().hex[:8]}")
+    addr = _addr("capd1")
+    safe_addr = _addr("capdsafe").lower()
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Safe-Governed")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="SafeGoverned")
+
+    ef = EffectiveFunction(
+        contract_id=c.id,
+        function_name="addSigner",
+        selector="0x02000001",
+        abi_signature="addSigner(address)",
+        effect_labels=["hook_update"],  # legacy label must not surface a chip
+        claims=[_claim("safe.signer_mgmt")],
+        effect_targets=[],
+        action_summary="add signer",
+        authority_public=False,
+        authority_roles=[],
+    )
+    db_session.add(ef)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=safe_addr,
+            resolved_type="safe",
+            origin="role 0",
+            principal_type="authority_role",
+            details={"owners": [_addr("o1")], "threshold": 1},
+        )
+    )
+    db_session.add(ControlGraphNode(contract_id=c.id, address=safe_addr, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+    assert safe_addr in principals, "the FP-backed Safe must surface as a principal"
+
+    detail = principals[safe_addr].get("controls_detail") or []
+    row = next((r for r in detail if (r.get("address") or "").lower() == addr.lower()), None)
+    assert row is not None, f"expected a controls_detail row for {addr}, got {detail}"
+    assert row["capabilities"] == ["safe"], (
+        f"safe.signer_mgmt claim must surface the 'safe' chip and hook_update must "
+        f"contribute nothing; got {row['capabilities']}"
+    )
+    assert "addSigner" in row["functions"]
+
+
 def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
     """``build_functions_for_protocol`` returns ``{address: [function_entries]}``
     using the same shape that previously lived on each contract entry.
@@ -657,7 +767,10 @@ def _normalize_prefetch(result: dict) -> dict:
         "controller_values": {
             cid: sorted(cv_key(r) for r in rows) for cid, rows in result["controller_values"].items()
         },
-        "ef_effects": {cid: sorted(tuple(lbls) for lbls in rows) for cid, rows in result["ef_effects"].items()},
+        "ef_effects": {
+            cid: sorted((tuple(rec["labels"]), tuple(rec["claims"])) for rec in rows)
+            for cid, rows in result["ef_effects"].items()
+        },
         "fp_governance_rows": {
             cid: sorted((d["address"], d["resolved_type"], repr(d["details"])) for d in rows)
             for cid, rows in result["fp_governance_rows"].items()
