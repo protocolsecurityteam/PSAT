@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Golden effect-labels for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/label_corpus/regenerate.py only for reviewed, intended label changes.",
+  "description": "Golden effect-labels AND Plane-1 claim (claim_id, tier) tuples for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/label_corpus/regenerate.py only for reviewed, intended label/claim changes.",
   "contracts": [
     {
       "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
@@ -50,7 +50,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "resetHighwaterMark()",
@@ -66,7 +71,12 @@
           "effect_labels": [
             "authority_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authority.replace",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setRateProviderData(ERC20,bool,address)",
@@ -80,7 +90,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "unpause()",
@@ -88,7 +103,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateDelay(uint24)",
@@ -292,7 +312,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "lzComposeAlert(address,address,bytes32,uint16,uint256,uint256,bytes,bytes,bytes)",
@@ -374,7 +399,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "registerLibrary(address)",
@@ -390,7 +420,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "send(MessagingParams,address)",
@@ -398,7 +433,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "sendCompose(address,bytes32,uint16,bytes)",
@@ -488,7 +528,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "verifiable(Origin,address)",
@@ -524,7 +569,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "authorizationState(address,bytes32)",
@@ -552,7 +602,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "cancelAuthorization(address,bytes32,uint8,bytes32,bytes32)",
@@ -632,7 +687,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "minterAllowance(address)",
@@ -664,7 +724,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
@@ -694,7 +759,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "rescuer()",
@@ -714,7 +784,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -722,7 +797,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -730,7 +810,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)",
@@ -754,7 +839,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "updateBlacklister(address)",
@@ -762,7 +852,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateExchangeRate(uint256)",
@@ -776,7 +871,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateOracle(address)",
@@ -790,7 +890,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateRescuer(address)",
@@ -798,7 +903,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "version()",
@@ -883,7 +993,16 @@
             "asset_send",
             "mint"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "nextNonce(uint32,bytes32)",
@@ -903,7 +1022,12 @@
           "effect_labels": [
             "burn"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "owner()",
@@ -921,7 +1045,12 @@
           "full_name": "renounceOwnership()",
           "selector": "0x715018a6",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setDelegate(address)",
@@ -929,7 +1058,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "lz_oapp.set_delegate",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setDummyToken(uint32,address)",
@@ -947,7 +1081,12 @@
           "full_name": "setPeer(uint32,bytes32)",
           "selector": "0x3400288b",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "lz_oapp.set_peer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setReceiver(uint32,address)",
@@ -973,13 +1112,23 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
           "selector": "0xf2fde38b",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1013,7 +1162,12 @@
           "effect_labels": [
             "authority_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authority.replace",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setPublicCapability(address,bytes4,bool)",
@@ -1021,7 +1175,12 @@
           "effect_labels": [
             "role_management"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
@@ -1029,7 +1188,12 @@
           "effect_labels": [
             "role_management"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setUserRole(address,uint8,bool)",
@@ -1037,7 +1201,12 @@
           "effect_labels": [
             "role_management"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -1045,7 +1214,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1163,7 +1337,12 @@
           "full_name": "pause()",
           "selector": "0x8456cb59",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "refundDeposit(uint256,address,address,uint256,uint256,uint256,uint256)",
@@ -1185,7 +1364,12 @@
           "effect_labels": [
             "authority_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authority.replace",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setShareLockPeriod(uint64)",
@@ -1199,13 +1383,23 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "unpause()",
           "selector": "0x3f4ba83a",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1235,7 +1429,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "authorizationState(address,bytes32)",
@@ -1263,7 +1462,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "cancelAuthorization(address,bytes32,bytes)",
@@ -1351,7 +1555,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "minterAllowance(address)",
@@ -1377,7 +1586,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "permit(address,address,uint256,uint256,bytes)",
@@ -1423,7 +1637,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "rescuer()",
@@ -1443,7 +1662,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -1451,7 +1675,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -1459,7 +1688,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)",
@@ -1491,7 +1725,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "updateBlacklister(address)",
@@ -1499,7 +1738,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateMasterMinter(address)",
@@ -1507,7 +1751,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updatePauser(address)",
@@ -1515,7 +1764,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateRescuer(address)",
@@ -1523,7 +1777,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "version()",
@@ -1549,7 +1808,12 @@
           "full_name": "completeOwnershipHandover(address)",
           "selector": "0xf04e283e",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "initialize(address)",
@@ -1575,7 +1839,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "receive()",
@@ -1583,25 +1852,45 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "renounceOwnership()",
           "selector": "0x715018a6",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "requestOwnershipHandover()",
           "selector": "0x25692962",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.accept",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
           "selector": "0xf2fde38b",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1617,13 +1906,23 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "burn(address,uint256)",
           "selector": "0x9dc29fac",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "deny(address)",
@@ -1631,13 +1930,23 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.revoke",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "mint(address,uint256)",
           "selector": "0x40c10f19",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "move(address,address,uint256)",
@@ -1669,19 +1978,34 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.grant",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1703,7 +2027,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "enter(address,ERC20,uint256,address,uint256)",
@@ -1711,7 +2040,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "exit(address,ERC20,uint256,address,uint256)",
@@ -1719,7 +2053,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "manage(address,bytes,uint256)",
@@ -1727,7 +2066,16 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "manage(address[],bytes[],uint256[])",
@@ -1735,7 +2083,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)",
@@ -1773,7 +2126,12 @@
           "effect_labels": [
             "authority_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authority.replace",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setBeforeTransferHook(address)",
@@ -1781,7 +2139,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "callee_pointer.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "supportsInterface(bytes4)",
@@ -1795,7 +2158,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -1803,7 +2171,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -1811,7 +2184,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -1993,7 +2371,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "paused()",
@@ -2045,7 +2428,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "requestConsolidation(IEigenPodTypes.ConsolidationRequest[])",
@@ -2115,7 +2503,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "unPauseContract()",
@@ -2123,7 +2516,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "updateAllowedForwardedEigenpodCalls(address,bytes4,bool)",
@@ -2147,7 +2545,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeToAndCall(address,bytes)",
@@ -2155,7 +2558,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "verifyCheckpointProofs(address,BeaconChainProofs.BalanceContainerProof,BeaconChainProofs.BalanceProof[])",
@@ -2360,7 +2768,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "payProtocolFees(uint128)",
@@ -2404,7 +2817,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "requestMembershipNFTWithdraw(address,uint256,uint256)",
@@ -2412,7 +2830,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "requestWithdraw(address,uint256)",
@@ -2420,7 +2843,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "requestWithdrawWithPermit(address,uint256,ILiquidityPool.PermitInput)",
@@ -2428,7 +2856,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "setFeeRecipient(address)",
@@ -2494,7 +2927,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "unPauseContract()",
@@ -2502,7 +2940,12 @@
           "effect_labels": [
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "unregisterValidatorSpawner(address)",
@@ -2518,7 +2961,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeToAndCall(address,bytes)",
@@ -2526,7 +2974,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "withdraw(address,uint256)",
@@ -2534,7 +2987,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         }
       ]
     },
@@ -2558,7 +3016,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "proxy.admin_change",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "fallback()",
@@ -2590,7 +3053,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeToAndCall(address,bytes)",
@@ -2598,7 +3066,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -2666,7 +3139,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "depositIntoStrategyWithSignature(IStrategy,IERC20,uint256,address,uint256,bytes)",
@@ -2674,7 +3152,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "domainSeparator()",
@@ -2825,7 +3308,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setStrategyWhitelister(address)",
@@ -2833,7 +3321,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "authorized_caller.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "stakerDepositShares(address,IStrategy)",
@@ -2865,7 +3358,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "unpause(uint256)",
@@ -2901,7 +3399,12 @@
           "full_name": "cancel(bytes32)",
           "selector": "0xc4d252f5",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "timelock.cancel",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "execute(address,uint256,bytes,bytes32,bytes32)",
@@ -2909,7 +3412,20 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "standard_exact"
+            },
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "timelock.execute",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)",
@@ -2917,7 +3433,20 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "standard_exact"
+            },
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "timelock.execute",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "getMinDelay()",
@@ -2943,7 +3472,12 @@
           "effect_labels": [
             "role_management"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.grant",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "hasRole(bytes32,address)",
@@ -3023,19 +3557,34 @@
           "effect_labels": [
             "role_management"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "roles.revoke",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "schedule(address,uint256,bytes,bytes32,bytes32,uint256)",
           "selector": "0x01d5062a",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "timelock.schedule",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)",
           "selector": "0x8f2a0bb0",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "timelock.schedule",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "supportsInterface(bytes4)",
@@ -3047,7 +3596,12 @@
           "full_name": "updateDelay(uint256)",
           "selector": "0x64d62353",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "timelock.set_delay",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -3067,7 +3621,12 @@
           "full_name": "changeAdmin(address)",
           "selector": "0x8f283970",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "proxy.admin_change",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "fallback()",
@@ -3087,7 +3646,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeToAndCall(address,bytes)",
@@ -3095,7 +3659,16 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -3125,7 +3698,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "getExecutors()",
@@ -3271,7 +3849,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "balanceOf(address)",
@@ -3283,13 +3866,23 @@
           "full_name": "delegate(address)",
           "selector": "0x5c19a95c",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "gov.delegate",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)",
           "selector": "0xc3cda520",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "gov.delegate",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "getCurrentVotes(address)",
@@ -3307,13 +3900,23 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -3329,7 +3932,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "deposit()",
@@ -3337,7 +3945,16 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "weth.deposit",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "fallback()",
@@ -3357,13 +3974,23 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "withdraw(uint256)",
@@ -3371,7 +3998,20 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "supply.burn",
+              "tier": "idiom_structural"
+            },
+            {
+              "claim_id": "weth.withdraw",
+              "tier": "idiom_structural"
+            }
+          ]
         }
       ]
     },
@@ -3399,7 +4039,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "balanceOf(address)",
@@ -3504,7 +4149,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "recoverERC721(address,address,uint256)",
@@ -3512,7 +4162,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "recoverETH(address,uint256)",
@@ -3520,7 +4175,12 @@
           "effect_labels": [
             "asset_send"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "renounceOwnership()",
@@ -3528,7 +4188,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "shares(address)",
@@ -3562,7 +4227,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -3570,7 +4240,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -3578,7 +4253,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeTo(address)",
@@ -3586,7 +4266,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "upgradeToAndCall(address,bytes)",
@@ -3594,7 +4279,12 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "upgrade.implementation",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     },
@@ -3630,7 +4320,12 @@
           "effect_labels": [
             "hook_update"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "balanceOf(address)",
@@ -3644,7 +4339,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "checkpoints(address,uint32)",
@@ -3745,7 +4445,12 @@
             "ownership_transfer",
             "pause_toggle"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "idiom_structural"
+            }
+          ]
         },
         {
           "full_name": "mint(address,uint256)",
@@ -3753,7 +4458,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "name()",
@@ -3797,7 +4507,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "setAllowedFrom(address,bool)",
@@ -3841,7 +4556,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -3849,7 +4569,12 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -3857,7 +4582,12 @@
           "effect_labels": [
             "ownership_transfer"
           ],
-          "claims": []
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
         }
       ]
     }

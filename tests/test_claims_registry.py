@@ -9,10 +9,14 @@ suite.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
+    Claim,
     ClaimContext,
     ClaimEvidence,
     RegistryEntry,
@@ -23,6 +27,7 @@ from services.static.claims import (
     legacy_projections,
     register,
     registry,
+    resolve_claim_precedence,
 )
 from services.static.claims.registry import _REGISTRY
 
@@ -263,3 +268,101 @@ def test_build_claims_isolates_a_failing_matcher():
 def test_consumer_referenced_ids_are_subset_of_registry():
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())
+
+
+# The produced-side half of the coverage invariant (spec §6.5): registry ids must
+# appear in the frozen-corpus fixture output or carry a documented exemption.
+_GOLDEN_PATH = Path(__file__).resolve().parent / "label_corpus" / "golden.json"
+
+# Registry claim ids the frozen corpus does not exercise, each mapped to the
+# fixture that DOES cover it. Keep this minimal and honest: an id that starts
+# producing on the corpus must be removed here (the test fails otherwise).
+_SAFE_EXEMPTION = (
+    "no Gnosis Safe in the label corpus manifest; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
+)
+CORPUS_EXEMPT_CLAIM_IDS = {
+    "contract_deployment": (
+        "no contract factory in the label corpus; covered by this file's synthetic "
+        "factory and test_claims_pipeline_integration (compiled upgrade_factory_uups.sol)."
+    ),
+    "flow.in": (
+        "no compiled corpus positive — corpus vault deposits use SafeTransferLib's "
+        "non-standard selector, which the hardened facts do not tag as a "
+        "callee_erc20_selector; covered by "
+        "test_claims_behavior_families::test_flow_in_pull_from_third_party."
+    ),
+    "safe.signer_mgmt": _SAFE_EXEMPTION,
+    "safe.module_mgmt": _SAFE_EXEMPTION,
+    "safe.set_guard": _SAFE_EXEMPTION,
+}
+
+
+def _golden_produced_claim_ids() -> set[str]:
+    golden = json.loads(_GOLDEN_PATH.read_text())
+    return {
+        claim["claim_id"]
+        for contract in golden.get("contracts", [])
+        for function in contract.get("functions", [])
+        for claim in function.get("claims", [])
+    }
+
+
+def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
+    """Produced-side coverage invariant: every registered claim can be minted —
+    it appears in the frozen-corpus golden or carries a documented exemption
+    pointing at the fixture that produces it. This is what makes a dead claim a
+    build failure rather than silent rot."""
+    build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
+    registry_ids = set(registry())
+    produced = _golden_produced_claim_ids()
+    exempt = set(CORPUS_EXEMPT_CLAIM_IDS)
+
+    uncovered = registry_ids - produced - exempt
+    assert not uncovered, (
+        f"registry claim ids neither produced by the frozen corpus nor exempt: {sorted(uncovered)}. "
+        "Add a corpus fixture that produces them (regenerate the golden), or a documented "
+        "CORPUS_EXEMPT_CLAIM_IDS entry naming the fixture that covers them."
+    )
+    stale = exempt & produced
+    assert not stale, f"CORPUS_EXEMPT_CLAIM_IDS names ids the corpus now produces: {sorted(stale)}. Remove them."
+    assert exempt <= registry_ids, f"exemptions for unregistered ids: {sorted(exempt - registry_ids)}"
+
+
+# ---------------------------------------------------------------------------
+# Per-function precedence/dedup rule (standard_exact beats idiom_structural)
+# ---------------------------------------------------------------------------
+
+
+def test_precedence_keeps_strongest_tier_of_the_same_claim():
+    """Two witnesses for the SAME claim on one function collapse to the strongest
+    tier — a standard proof supersedes a structural idiom / policy derivation."""
+    claims: list[Claim] = [
+        {"claim_id": "upgrade.implementation", "tier": "idiom_structural", "witness": {"w": 1}},
+        {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"w": 2}},
+        {"claim_id": "upgrade.implementation", "tier": "policy_derived", "witness": {"w": 3}},
+    ]
+    resolved = resolve_claim_precedence(claims)
+    assert len(resolved) == 1
+    assert resolved[0]["tier"] == "standard_exact"
+    assert resolved[0]["witness"] == {"w": 2}  # the surviving witness is the strong one
+
+
+def test_precedence_preserves_distinct_sibling_claims_in_one_family():
+    """Sibling operations in a namespace are different sentences, never collapsed:
+    pause.set and pause.unset both survive even at different tiers."""
+    claims: list[Claim] = [
+        {"claim_id": "pause.unset", "tier": "idiom_structural", "witness": {}},
+        {"claim_id": "pause.set", "tier": "standard_exact", "witness": {}},
+        {"claim_id": "flow.out", "tier": "idiom_structural", "witness": {}},
+    ]
+    resolved = resolve_claim_precedence(claims)
+    assert [c["claim_id"] for c in resolved] == ["flow.out", "pause.set", "pause.unset"]
+
+
+def test_precedence_output_is_deterministically_sorted():
+    claims: list[Claim] = [
+        {"claim_id": "supply.mint", "tier": "standard_exact", "witness": {}},
+        {"claim_id": "authority.replace", "tier": "standard_exact", "witness": {}},
+    ]
+    resolved = resolve_claim_precedence(claims)
+    assert [c["claim_id"] for c in resolved] == ["authority.replace", "supply.mint"]

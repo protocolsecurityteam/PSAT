@@ -26,6 +26,7 @@ from .registry import (
     legacy_projections,
     register,
     registry,
+    resolve_claim_precedence,
 )
 from .types import (
     CONSUMER_FAMILIES,
@@ -62,4 +63,5 @@ __all__ = [
     "legacy_projections",
     "register",
     "registry",
+    "resolve_claim_precedence",
 ]

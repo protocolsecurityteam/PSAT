@@ -19,7 +19,7 @@ from typing import Any
 
 from .context import ClaimContext
 from .matchers import discover
-from .registry import emit_claim, registry
+from .registry import emit_claim, registry, resolve_claim_precedence
 from .types import SCHEMA_VERSION, Claim, ClaimsArtifact
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,8 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     """Run all registered matchers over the facts, returning the claims artifact.
 
     A matcher that raises is isolated: it forfeits only its own claims (logged),
-    never the whole pass. Claim ordering per function is deterministic.
+    never the whole pass. Per function the registry precedence rule then keeps
+    the strongest tier of each claim; claim ordering is deterministic.
     """
     discover()
     ctx = ClaimContext(contract, effects, predicate_trees)
@@ -54,7 +55,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
             )
 
     for signature in functions:
-        functions[signature].sort(key=lambda claim: (claim["claim_id"], claim["tier"]))
+        functions[signature] = resolve_claim_precedence(functions[signature])
 
     return {
         "schema_version": SCHEMA_VERSION,

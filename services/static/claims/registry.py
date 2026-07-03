@@ -16,12 +16,21 @@ matcher module so those decorators run.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
 from .context import ClaimContext
-from .types import CONSUMER_FAMILIES, TIERS, Claim, ClaimEvidence, ConsumerFamily, Tier, Witness
+from .types import (
+    CONSUMER_FAMILIES,
+    TIER_PRECEDENCE,
+    TIERS,
+    Claim,
+    ClaimEvidence,
+    ConsumerFamily,
+    Tier,
+    Witness,
+)
 
 # Contract-level corroboration (sibling selectors / views / sink shapes a
 # standard mandates). ``True`` means "this claim may apply to this contract".
@@ -90,3 +99,27 @@ def emit_claim(claim_id: str, tier: Tier, witness: Witness) -> Claim:
     if tier not in TIERS:
         raise ValueError(f"invalid claim tier {tier!r}; must be one of {sorted(TIERS)}")
     return {"claim_id": claim_id, "tier": tier, "witness": dict(witness)}
+
+
+def _tier_rank(tier: str) -> int:
+    return TIER_PRECEDENCE.get(tier, 0)
+
+
+def resolve_claim_precedence(claims: Iterable[Claim]) -> list[Claim]:
+    """The per-function precedence/dedup rule: collapse witnesses that assert the
+    SAME ``claim_id`` and keep only the strongest tier (``standard_exact`` beats
+    ``idiom_structural`` beats ``policy_derived``), so a consumer never sees one
+    claim sentence at two provenance levels.
+
+    Precedence is keyed on the atomic ``claim_id``, never a coarser namespace:
+    sibling claims in a family are distinct operations — ``pause.set`` and
+    ``pause.unset``, ``supply.mint`` and ``supply.burn``, ``timelock.execute``
+    and ``exec.arbitrary`` — and are all preserved. Returns a deterministically
+    sorted list."""
+    best: dict[str, Claim] = {}
+    for claim in claims:
+        claim_id = claim["claim_id"]
+        incumbent = best.get(claim_id)
+        if incumbent is None or _tier_rank(claim["tier"]) > _tier_rank(incumbent["tier"]):
+            best[claim_id] = claim
+    return sorted(best.values(), key=lambda claim: (claim["claim_id"], claim["tier"]))

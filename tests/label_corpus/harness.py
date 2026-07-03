@@ -12,9 +12,11 @@ deterministic and offline: it never lets Foundry's svm reach the network to
 resolve a version. CI installs those versions with solc-select (the same
 mechanism the other real-Slither tests use).
 
-The golden format carries a per-function ``claims`` list -- empty under current
-behavior -- so a later stage can attach ``(selector, claim_id, tier)`` claim
-tuples without a schema break.
+The golden format carries a per-function ``claims`` list of
+``{claim_id, tier}`` records, so the gate pins the Plane-1
+``(contract, selector, claim_id, tier)`` tuples alongside the legacy
+``effect_labels``. A matcher edit that silently mints or drops a claim on a
+corpus function fails the gate.
 """
 
 from __future__ import annotations
@@ -109,6 +111,7 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from slither import Slither
 
     from services.resolution.capability_resolver import _selector_for_signature
+    from services.static.claims import attach_claims_to_effects, build_claims
     from services.static.contract_analysis_pipeline.effects import (
         apply_authority_effect_labels,
         build_effects,
@@ -141,6 +144,8 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
         predicate_trees, _pause_info = build_predicate_artifacts_with_pause_info(subject)
         effects = build_effects(subject)
         apply_authority_effect_labels(subject, effects, predicate_trees)
+        claims_artifact = build_claims(subject, effects, predicate_trees)
+        attach_claims_to_effects(effects, claims_artifact)
 
     canonical = predicate_trees.get("canonical_signatures") or {}
     functions: list[dict[str, Any]] = []
@@ -151,9 +156,13 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
                 "full_name": full_name,
                 "selector": selector,
                 "effect_labels": sorted(info.get("effect_labels") or []),
-                # Reserved for the claims plane: a later stage appends
-                # {"claim_id": ..., "tier": ...} records here.
-                "claims": [],
+                # Plane-1 claims: only claim_id + tier are pinned (the witness is
+                # replayable and verbose; the A/B gate diffs the sentence-bearing
+                # tuple). Sorted for a deterministic golden.
+                "claims": sorted(
+                    ({"claim_id": c["claim_id"], "tier": c["tier"]} for c in (info.get("claims") or [])),
+                    key=lambda c: (c["claim_id"], c["tier"]),
+                ),
             }
         )
     functions.sort(key=lambda row: (row["full_name"], row["selector"]))
@@ -179,9 +188,9 @@ def build_golden(
     return {
         "schema_version": GOLDEN_SCHEMA_VERSION,
         "description": (
-            "Golden effect-labels for the frozen fixture corpus, pinned to CURRENT "
-            "producer behavior. Regenerate with tests/label_corpus/regenerate.py only "
-            "for reviewed, intended label changes."
+            "Golden effect-labels AND Plane-1 claim (claim_id, tier) tuples for the "
+            "frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with "
+            "tests/label_corpus/regenerate.py only for reviewed, intended label/claim changes."
         ),
         "contracts": contracts,
     }
