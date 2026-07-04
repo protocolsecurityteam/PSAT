@@ -25,9 +25,9 @@ pytest.importorskip("slither")
 from tests.support.label_corpus import SolcNotInstalled, claims_for_address  # noqa: E402
 
 # address -> name of every corpus contract these tests touch.
-TELLER = "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35"
-BORING_VAULT = "0x7223442cad8e9ca474fc40109ab981608f8c4273"
-L1_SYNC_POOL = "0x39272ee125ebd9214404f735baae50acb9d334c0"
+TOKEN = "0x0000000000000000000000000000000000000010"
+VAULT_HOOK = "0x0000000000000000000000000000000000000040"
+LZ_OAPP = "0x0000000000000000000000000000000000000050"
 WRAPPED_NATIVE = "0x000000000000000000000000000000000000dead"
 
 
@@ -53,15 +53,15 @@ def _one(claims: Sequence[dict[str, Any]], claim_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_pause_standard_teller_require_pause():
-    fns = _load(TELLER)
+def test_pause_standard_require_toggle():
+    fns = _load(TOKEN)
     assert _one(fns["pause()"], "pause.set")["tier"] == "standard_exact"
     assert _one(fns["unpause()"], "pause.unset")["tier"] == "standard_exact"
     # A require-based flag never mislabels its own toggle as the opposite polarity.
     assert "pause.unset" not in _ids(fns["pause()"])
     assert "pause.set" not in _ids(fns["unpause()"])
     # Counterexample: a non-toggle setter on the same contract carries no pause claim.
-    assert not _ids(fns["setShareLockPeriod(uint64)"]) & {"pause.set", "pause.unset"}
+    assert not _ids(fns["mint(address,uint256)"]) & {"pause.set", "pause.unset"}
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +124,10 @@ def test_flow_in_pull_from_third_party():
     assert "flow.out" not in _ids(claims)
 
 
-def test_supply_sign_idiom_boring_vault_enter_exit():
-    fns = _load(BORING_VAULT)
-    enter = "enter(address,ERC20,uint256,address,uint256)"
-    exit_ = "exit(address,ERC20,uint256,address,uint256)"
+def test_supply_sign_idiom_vault_enter_exit():
+    fns = _load(VAULT_HOOK)
+    enter = "enter(address,uint256)"
+    exit_ = "exit(address,uint256)"
     assert _one(fns[enter], "supply.mint")["tier"] == "idiom_structural"
     assert _one(fns[exit_], "supply.burn")["tier"] == "idiom_structural"
     # Direction is not crossed: enter never burns, exit never mints.
@@ -148,8 +148,8 @@ def test_flow_counterexample_pure_token_transfer_is_not_a_flow():
 # ---------------------------------------------------------------------------
 
 
-def test_callee_pointer_rotate_boring_vault_hook():
-    fns = _load(BORING_VAULT)
+def test_callee_pointer_rotate_vault_hook():
+    fns = _load(VAULT_HOOK)
     claim = _one(fns["setBeforeTransferHook(address)"], "callee_pointer.rotate")
     assert claim["tier"] == "idiom_structural"
     links = claim["witness"]["links"]
@@ -159,15 +159,15 @@ def test_callee_pointer_rotate_boring_vault_hook():
 def test_callee_pointer_counterexample_erc20_approve():
     """``approve`` writes a mapping, not a callable scalar pointer a sibling
     invokes — no callee_pointer claim."""
-    fns = _load(BORING_VAULT)
+    fns = _load(VAULT_HOOK)
     assert "callee_pointer.rotate" not in _ids(fns["approve(address,uint256)"])
 
 
 def test_callee_pointer_near_miss_ozv5_pseudo_slot_setter():
-    """L1SyncPoolETH ``setLockBox`` writes an OZ-v5 namespaced pseudo-slot
-    (hygiene ``storage_location_pseudo``), not a hygiene-normal scalar pointer —
-    no callee_pointer claim."""
-    fns = _load(L1_SYNC_POOL)
+    """``setLockBox`` writes an OZ-v5 namespaced pseudo-slot member (hygiene
+    ``storage_location_pseudo``), not a hygiene-normal scalar pointer — no
+    callee_pointer claim even though ``lockBox`` is address-typed."""
+    fns = _load(LZ_OAPP)
     assert "callee_pointer.rotate" not in _ids(fns["setLockBox(address)"])
 
 
@@ -190,9 +190,9 @@ def test_weth_wrap_unwrap_idiom():
 
 
 def test_erc20_counterexample_non_token_contract_has_no_erc20_claims():
-    """L1SyncPoolETH is not an ERC-20; its config setters carry no user-plane
-    token claims."""
-    fns = _load(L1_SYNC_POOL)
+    """LzOApp is not an ERC-20; its config setters carry no user-plane token
+    claims."""
+    fns = _load(LZ_OAPP)
     for sig, claims in fns.items():
         assert not _ids(claims) & {"erc20.approve", "erc20.transfer", "erc20.transfer_from"}, sig
 
@@ -230,7 +230,7 @@ def test_gov_delegate_counterexample_non_voting_token():
 
 
 def test_lz_oapp_config_claims():
-    fns = _load(L1_SYNC_POOL)
+    fns = _load(LZ_OAPP)
     assert _one(fns["setPeer(uint32,bytes32)"], "lz_oapp.set_peer")["tier"] == "standard_exact"
     assert _one(fns["setDelegate(address)"], "lz_oapp.set_delegate")["tier"] == "standard_exact"
 

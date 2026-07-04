@@ -16,15 +16,14 @@ Two layers, both driving the production stack (registry, gates, taint helper,
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 pytest.importorskip("slither")
 
 from services.static.claims import build_claims  # noqa: E402
+from tests.support.foundry_project import write_foundry_project  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "claims_upgrade_exec"
 
@@ -52,33 +51,12 @@ OWNED_CLAIM_IDS = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
-    project_dir = tmp_path / contract_name
-    (project_dir / "src").mkdir(parents=True)
-    (project_dir / "foundry.toml").write_text(
-        '[profile.default]\nsrc = "src"\nout = "out"\nlibs = ["lib"]\nsolc_version = "0.8.19"\n'
-    )
-    (project_dir / "src" / f"{contract_name}.sol").write_text(source_code)
-    (project_dir / "contract_meta.json").write_text(
-        json.dumps(
-            {
-                "address": "0x1111111111111111111111111111111111111111",
-                "contract_name": contract_name,
-                "compiler_version": "v0.8.19+commit.7dd6d404",
-            }
-        )
-        + "\n"
-    )
-    (project_dir / "slither_results.json").write_text(json.dumps({"results": {"detectors": []}}) + "\n")
-    return project_dir
-
-
 def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
     """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / fixture_file).read_text()
-    project_dir = _write_project(tmp_path, contract_name, source)
+    project_dir = write_foundry_project(tmp_path, contract_name, source)
     _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
     assert effects is not None and "functions" in effects
     out: dict[str, set[tuple[str, str]]] = {}
@@ -183,7 +161,12 @@ def test_plain_transfer_is_taint_near_miss_negative(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Pure-facts: gate discrimination without a compiler
+# Pure-facts: gate discrimination without a compiler.
+#
+# The gate POSITIVES (uups / proxy-shell / safe / timelock) are proven on the
+# compiled fixtures above; this layer keeps only the facts-level NEGATIVES —
+# deterministic gate discrimination that needs no solc and so runs in every
+# offline suite even when a compiled positive skips.
 # ---------------------------------------------------------------------------
 
 
@@ -191,47 +174,8 @@ def _fn(selector: str, *, sinks: list[dict] | None = None) -> dict:
     return {"selector": selector, "sinks": sinks or [], "effect_labels": []}
 
 
-def _delegatecall_fallback_sink() -> list[dict]:
-    return [{"id": "fallback():sink0:delegatecall", "kind": "delegatecall", "target": "impl", "origin": "body"}]
-
-
 def _external_call_sink(name: str) -> list[dict]:
     return [{"id": f"{name}:sink0:external_call", "kind": "external_call", "target": "to.call", "origin": "body"}]
-
-
-def _ids(claims: list[Any]) -> set[tuple[str, str]]:
-    return {(c["claim_id"], c["tier"]) for c in claims}
-
-
-def test_facts_uups_gate_emits_upgrade():
-    effects = {
-        "schema_version": "semantic-2",
-        "contract_name": "Impl",
-        "functions": {
-            "proxiableUUID()": _fn("0x52d1902d"),
-            "upgradeTo(address)": _fn("0x3659cfe6"),
-            "upgradeToAndCall(address,bytes)": _fn("0x4f1ef286"),
-        },
-    }
-    art = build_claims(None, effects, {})
-    assert _ids(art["functions"]["upgradeTo(address)"]) == {("upgrade.implementation", "standard_exact")}
-    assert _ids(art["functions"]["upgradeToAndCall(address,bytes)"]) == {("upgrade.implementation", "standard_exact")}
-    assert art["functions"]["proxiableUUID()"] == []
-
-
-def test_facts_proxy_shell_gate_emits_upgrade_and_admin():
-    effects = {
-        "schema_version": "semantic-2",
-        "contract_name": "Shell",
-        "functions": {
-            "fallback()": _fn("", sinks=_delegatecall_fallback_sink()),
-            "upgradeTo(address)": _fn("0x3659cfe6"),
-            "changeAdmin(address)": _fn("0x8f283970"),
-        },
-    }
-    art = build_claims(None, effects, {})
-    assert _ids(art["functions"]["upgradeTo(address)"]) == {("upgrade.implementation", "standard_exact")}
-    assert _ids(art["functions"]["changeAdmin(address)"]) == {("proxy.admin_change", "standard_exact")}
 
 
 def test_facts_no_gate_no_upgrade_claim():
@@ -250,29 +194,6 @@ def test_facts_no_gate_no_upgrade_claim():
     assert art["functions"]["changeAdmin(address)"] == []
 
 
-def test_facts_safe_gate_emits_control_and_exec():
-    effects = {
-        "schema_version": "semantic-2",
-        "contract_name": "Safe",
-        "functions": {
-            "getThreshold()": _fn("0xe75235b8"),
-            "getOwners()": _fn("0xa0e67e2b"),
-            "execTransaction(address,uint256,bytes,uint8,bytes)": _fn(
-                "0x65bc10d3", sinks=_external_call_sink("execTransaction")
-            ),
-            "swapOwner(address,address,address)": _fn("0xe318b52b"),
-            "enableModule(address)": _fn("0x610b5925"),
-            "setGuard(address)": _fn("0xe19a9dd9"),
-        },
-    }
-    art = build_claims(None, effects, {})
-    fns = art["functions"]
-    assert _ids(fns["swapOwner(address,address,address)"]) == {("safe.signer_mgmt", "standard_exact")}
-    assert _ids(fns["enableModule(address)"]) == {("safe.module_mgmt", "standard_exact")}
-    assert _ids(fns["setGuard(address)"]) == {("safe.set_guard", "standard_exact")}
-    assert _ids(fns["execTransaction(address,uint256,bytes,uint8,bytes)"]) == {("exec.arbitrary", "standard_exact")}
-
-
 def test_facts_safe_control_functions_need_the_gate():
     """swapOwner without the Safe sibling triple is not a Safe signer op."""
     effects = {
@@ -282,32 +203,6 @@ def test_facts_safe_control_functions_need_the_gate():
     }
     art = build_claims(None, effects, {})
     assert art["functions"]["swapOwner(address,address,address)"] == []
-
-
-def test_facts_oz_timelock_gate_emits_per_selector_and_exec():
-    effects = {
-        "schema_version": "semantic-2",
-        "contract_name": "Timelock",
-        "functions": {
-            "getMinDelay()": _fn("0xf27a0c92"),
-            "hashOperation(address,uint256,bytes,bytes32,bytes32)": _fn("0x8065657f"),
-            "schedule(address,uint256,bytes,bytes32,bytes32,uint256)": _fn("0x01d5062a"),
-            "execute(address,uint256,bytes,bytes32,bytes32)": _fn("0x134008d3", sinks=_external_call_sink("execute")),
-            "cancel(bytes32)": _fn("0xc4d252f5"),
-            "updateDelay(uint256)": _fn("0x64d62353"),
-        },
-    }
-    art = build_claims(None, effects, {})
-    fns = art["functions"]
-    assert _ids(fns["schedule(address,uint256,bytes,bytes32,bytes32,uint256)"]) == {
-        ("timelock.schedule", "standard_exact")
-    }
-    assert _ids(fns["execute(address,uint256,bytes,bytes32,bytes32)"]) == {
-        ("timelock.execute", "standard_exact"),
-        ("exec.arbitrary", "standard_exact"),
-    }
-    assert _ids(fns["cancel(bytes32)"]) == {("timelock.cancel", "standard_exact")}
-    assert _ids(fns["updateDelay(uint256)"]) == {("timelock.set_delay", "standard_exact")}
 
 
 def test_facts_manage_idiom_fails_closed_without_a_contract():

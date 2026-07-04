@@ -2,12 +2,15 @@
 
 Drives ``PolicyWorker._enrich_cross_contract`` end to end against a real
 Postgres session: a sibling job whose stored ``effects``/``control_snapshot``
-carry Plane-1 claims, a target job whose ``effects``/``classifications`` are
-stored, and target ``EffectiveFunction`` rows the derivation must update. The
-only wire stubbed is ``SessionLocal`` — repointed at the test engine so the
-parallel sibling fetch sees committed rows; the derivations, the registry,
-``emit_claim``, precedence resolution, and the DB writes are the production
-stack.
+carry Plane-1 claims, a target job whose ``effects`` are stored, and target
+``EffectiveFunction`` rows the derivation must update. The only wire stubbed is
+``SessionLocal`` — repointed at the test engine so the parallel sibling fetch
+sees committed rows; the derivations, the registry, ``emit_claim``, precedence
+resolution, and the DB writes are the production stack.
+
+Scope is the PolicyWorker plumbing only (sibling fetch → derive → EF-row write,
+plus the empty-evidence early return). The four typed derivations themselves are
+unit-tested in ``tests/test_cross_contract_effects.py``.
 """
 
 from __future__ import annotations
@@ -33,11 +36,8 @@ pytestmark = requires_postgres
 
 TARGET = "0x33aa000000000000000000000000000000000000"
 TOKEN = "0x11bb000000000000000000000000000000000000"
-VAULT = "0x22cc000000000000000000000000000000000000"
-IMPL = "0x99dd000000000000000000000000000000000000"
 
 TRANSFER_SELECTOR = "0xa9059cbb"  # transfer(address,uint256)
-UPGRADE_TO = "0x3659cfe6"  # upgradeTo(address)
 
 
 def _selector(signature: str) -> str:
@@ -164,133 +164,12 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
 
 
 # ---------------------------------------------------------------------------
-# Derivation 2: transfer_policy.configure via a sibling hook pointer
-# ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_transfer_policy_configure_from_sibling_hook(db_session, _repoint_session_local):
-    company = f"co-{uuid.uuid4()}"
-    target_job = _make_job(db_session, address=TARGET, company=company)
-    vault_job = _make_job(db_session, address=VAULT, company=company)
-
-    store_artifact(
-        db_session,
-        vault_job.id,
-        "effects",
-        data={
-            "schema_version": "semantic-2",
-            "functions": {
-                "setBeforeTransferHook(address)": {
-                    "selector": "0xaabbccdd",
-                    "claims": [
-                        {
-                            "claim_id": "callee_pointer.rotate",
-                            "tier": "idiom_structural",
-                            "witness": {"links": [{"pointer": "hook", "invoked_by": "transfer()"}]},
-                        }
-                    ],
-                }
-            },
-        },
-    )
-    # The vault's runtime hook pointer resolves to THIS target — the join edge.
-    store_artifact(
-        db_session,
-        vault_job.id,
-        "control_snapshot",
-        data={"controller_values": {"state_variable:hook": {"value": TARGET}}},
-    )
-
-    store_artifact(
-        db_session,
-        target_job.id,
-        "effects",
-        data={
-            "schema_version": "semantic-2",
-            "functions": {
-                "allowFrom(address)": {
-                    "selector": "0xccddeeff",
-                    "state_writes": [
-                        {
-                            "var": "allowlist",
-                            "declared_type": "mapping(address => bool)",
-                            "member_path": [],
-                            "granularity": "var",
-                            "hygiene_class": "normal",
-                            "origin": "body",
-                        }
-                    ],
-                    "claims": [],
-                }
-            },
-        },
-    )
-
-    contract = _make_target_functions(db_session, target_job, ["allowFrom(address)"])
-
-    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, {"controller_values": {}})
-
-    assert "allowFrom(address)" in enriched
-    claim = enriched["allowFrom(address)"][0]
-    assert claim["claim_id"] == "transfer_policy.configure"
-    assert claim["tier"] == "policy_derived"
-    assert claim["witness"]["configures"] == VAULT
-
-    ef = _ef(db_session, contract, "allowFrom(address)")
-    assert {c["claim_id"] for c in (ef.claims or [])} == {"transfer_policy.configure"}
-
-
-# ---------------------------------------------------------------------------
-# Derivation 4: proxy-verified upgrade provenance via classifications
-# ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_provenance_upgrade_from_classifications(db_session, _repoint_session_local):
-    company = f"co-{uuid.uuid4()}"
-    target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": TARGET})
-    # A benign sibling so the enrichment pass runs (it early-returns with none).
-    sibling_job = _make_job(db_session, address=TOKEN, company=company)
-    store_artifact(db_session, sibling_job.id, "effects", data={"schema_version": "semantic-2", "functions": {}})
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
-
-    store_artifact(
-        db_session,
-        target_job.id,
-        "effects",
-        data={
-            "schema_version": "semantic-2",
-            "functions": {"upgradeTo(address)": {"selector": UPGRADE_TO, "claims": []}},
-        },
-    )
-    store_artifact(
-        db_session,
-        target_job.id,
-        "classifications",
-        data={
-            "address": TARGET,
-            "classifications": {
-                TARGET: {"address": TARGET, "type": "proxy", "proxy_type": "eip1967", "implementation": IMPL}
-            },
-        },
-    )
-
-    contract = _make_target_functions(db_session, target_job, ["upgradeTo(address)"])
-
-    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, {"controller_values": {}})
-
-    claim = enriched["upgradeTo(address)"][0]
-    assert claim["claim_id"] == "upgrade.implementation"
-    assert claim["tier"] == "policy_derived"
-    assert claim["witness"]["implementation"] == IMPL
-
-    ef = _ef(db_session, contract, "upgradeTo(address)")
-    assert any(c["claim_id"] == "upgrade.implementation" for c in (ef.claims or []))
-
-
-# ---------------------------------------------------------------------------
 # Silence when there is no cross-contract evidence
+#
+# The per-derivation LOGIC (value-flow / transfer-policy hook / beacon / proxy
+# provenance) is owned by the pure-facts unit module test_cross_contract_effects;
+# this DB module only proves the PolicyWorker plumbing around it (the sibling
+# fetch + EF-row write above, and the empty-evidence early return below).
 # ---------------------------------------------------------------------------
 
 

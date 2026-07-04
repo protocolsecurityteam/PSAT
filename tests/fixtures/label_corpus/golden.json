@@ -3,6 +3,355 @@
   "description": "Golden effect-labels AND Plane-1 claim (claim_id, tier) tuples for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended label/claim changes.",
   "contracts": [
     {
+      "address": "0x0000000000000000000000000000000000000010",
+      "chain": "synthetic",
+      "contract": "Token",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "allowance(address,address)",
+          "selector": "0xdd62ed3e",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "approve(address,uint256)",
+          "selector": "0x095ea7b3",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "balanceOf(address)",
+          "selector": "0x70a08231",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "mint(address,uint256)",
+          "selector": "0x40c10f19",
+          "effect_labels": [
+            "mint"
+          ],
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "pause()",
+          "selector": "0x8456cb59",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "totalSupply()",
+          "selector": "0x18160ddd",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "transfer(address,uint256)",
+          "selector": "0xa9059cbb",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "transferFrom(address,address,uint256)",
+          "selector": "0x23b872dd",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "unpause()",
+          "selector": "0x3f4ba83a",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000020",
+      "chain": "synthetic",
+      "contract": "OzV5Ownable",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "owner()",
+          "selector": "0x8da5cb5b",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "renounceOwnership()",
+          "selector": "0x715018a6",
+          "effect_labels": [
+            "ownership_transfer"
+          ],
+          "claims": [
+            {
+              "claim_id": "ownership.renounce",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "setTokenOut(address)",
+          "selector": "0xc158910d",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "transferOwnership(address)",
+          "selector": "0xf2fde38b",
+          "effect_labels": [
+            "ownership_transfer"
+          ],
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000030",
+      "chain": "synthetic",
+      "contract": "SolmateRoles",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "canCall(address,address,bytes4)",
+          "selector": "0xb7009613",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "setAuthority(Authority)",
+          "selector": "0x7a9e5e4b",
+          "effect_labels": [
+            "authority_update"
+          ],
+          "claims": [
+            {
+              "claim_id": "authority.replace",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "setPublicCapability(address,bytes4,bool)",
+          "selector": "0xc6b0263e",
+          "effect_labels": [
+            "role_management"
+          ],
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
+          "selector": "0x7d40583d",
+          "effect_labels": [
+            "role_management"
+          ],
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "setUserRole(address,uint8,bool)",
+          "selector": "0x67aff484",
+          "effect_labels": [
+            "role_management"
+          ],
+          "claims": [
+            {
+              "claim_id": "roles.configure",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "transferOwnership(address)",
+          "selector": "0xf2fde38b",
+          "effect_labels": [
+            "ownership_transfer"
+          ],
+          "claims": [
+            {
+              "claim_id": "ownership.transfer",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000040",
+      "chain": "synthetic",
+      "contract": "VaultHook",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "approve(address,uint256)",
+          "selector": "0x095ea7b3",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "erc20.approve",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "enter(address,uint256)",
+          "selector": "0x7e348b7d",
+          "effect_labels": [
+            "mint"
+          ],
+          "claims": [
+            {
+              "claim_id": "supply.mint",
+              "tier": "idiom_structural"
+            }
+          ]
+        },
+        {
+          "full_name": "exit(address,uint256)",
+          "selector": "0xef693bed",
+          "effect_labels": [
+            "burn"
+          ],
+          "claims": [
+            {
+              "claim_id": "supply.burn",
+              "tier": "idiom_structural"
+            }
+          ]
+        },
+        {
+          "full_name": "setBeforeTransferHook(address)",
+          "selector": "0x8929565f",
+          "effect_labels": [
+            "hook_update"
+          ],
+          "claims": [
+            {
+              "claim_id": "callee_pointer.rotate",
+              "tier": "idiom_structural"
+            }
+          ]
+        },
+        {
+          "full_name": "transfer(address,uint256)",
+          "selector": "0xa9059cbb",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "erc20.transfer",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "transferFrom(address,address,uint256)",
+          "selector": "0x23b872dd",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "erc20.transfer_from",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000050",
+      "chain": "synthetic",
+      "contract": "LzOApp",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "peers(uint32)",
+          "selector": "0xbb0b6a53",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "setDelegate(address)",
+          "selector": "0xca5eb5e1",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "lz_oapp.set_delegate",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "setLockBox(address)",
+          "selector": "0x2d8c8039",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "setPeer(uint32,bytes32)",
+          "selector": "0x3400288b",
+          "effect_labels": [],
+          "claims": [
+            {
+              "claim_id": "lz_oapp.set_peer",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "address": "0x000000000000000000000000000000000000dead",
       "chain": "synthetic",
       "contract": "WrappedNative",
@@ -90,670 +439,6 @@
             {
               "claim_id": "weth.withdraw",
               "tier": "idiom_structural"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "address": "0x39272ee125ebd9214404f735baae50acb9d334c0",
-      "chain": "mainnet",
-      "contract": "L1SyncPoolETH",
-      "solc_version": "0.8.27",
-      "functions": [
-        {
-          "full_name": "allowInitializePath(Origin)",
-          "selector": "0xff7bd03d",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "composeMsgSender()",
-          "selector": "0xb92d0eff",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "endpoint()",
-          "selector": "0x5e280f11",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getDummyToken(uint32)",
-          "selector": "0x5b6988bd",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getLockBox()",
-          "selector": "0x8c6894fb",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getReceiver(uint32)",
-          "selector": "0x3c78fe07",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getTokenOut()",
-          "selector": "0x4423c7ab",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getTotalUnbackedTokens()",
-          "selector": "0xd0842512",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "getVault()",
-          "selector": "0x8d928af8",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "initialize(address,address,address,address)",
-          "selector": "0xf8c8765e",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "lzReceive(Origin,bytes32,bytes,address,bytes)",
-          "selector": "0x13137d65",
-          "effect_labels": [
-            "asset_send",
-            "mint"
-          ],
-          "claims": [
-            {
-              "claim_id": "flow.out",
-              "tier": "idiom_structural"
-            },
-            {
-              "claim_id": "supply.mint",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "nextNonce(uint32,bytes32)",
-          "selector": "0x7d25a05e",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "oAppVersion()",
-          "selector": "0x17442b70",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "onMessageReceived(uint32,bytes32,address,uint256,uint256)",
-          "selector": "0x141fb08a",
-          "effect_labels": [
-            "burn"
-          ],
-          "claims": [
-            {
-              "claim_id": "supply.burn",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "owner()",
-          "selector": "0x8da5cb5b",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "peers(uint32)",
-          "selector": "0xbb0b6a53",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "renounceOwnership()",
-          "selector": "0x715018a6",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
-          "claims": [
-            {
-              "claim_id": "ownership.renounce",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setDelegate(address)",
-          "selector": "0xca5eb5e1",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": [
-            {
-              "claim_id": "lz_oapp.set_delegate",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setDummyToken(uint32,address)",
-          "selector": "0x86dc6e9a",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setLockBox(address)",
-          "selector": "0x2d8c8039",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setPeer(uint32,bytes32)",
-          "selector": "0x3400288b",
-          "effect_labels": [],
-          "claims": [
-            {
-              "claim_id": "lz_oapp.set_peer",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setReceiver(uint32,address)",
-          "selector": "0x09f37812",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setTokenOut(address)",
-          "selector": "0xc158910d",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setVault(address)",
-          "selector": "0x6817031b",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "sweep(address,address,uint256)",
-          "selector": "0x62c06767",
-          "effect_labels": [
-            "asset_send"
-          ],
-          "claims": [
-            {
-              "claim_id": "flow.out",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "transferOwnership(address)",
-          "selector": "0xf2fde38b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
-          "claims": [
-            {
-              "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
-      "chain": "mainnet",
-      "contract": "RolesAuthority",
-      "solc_version": "0.8.27",
-      "functions": [
-        {
-          "full_name": "canCall(address,address,bytes4)",
-          "selector": "0xb7009613",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "doesRoleHaveCapability(uint8,address,bytes4)",
-          "selector": "0xb4bad06a",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "doesUserHaveRole(address,uint8)",
-          "selector": "0xea7ca276",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setAuthority(Authority)",
-          "selector": "0x7a9e5e4b",
-          "effect_labels": [
-            "authority_update"
-          ],
-          "claims": [
-            {
-              "claim_id": "authority.replace",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setPublicCapability(address,bytes4,bool)",
-          "selector": "0xc6b0263e",
-          "effect_labels": [
-            "role_management"
-          ],
-          "claims": [
-            {
-              "claim_id": "roles.configure",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
-          "selector": "0x7d40583d",
-          "effect_labels": [
-            "role_management"
-          ],
-          "claims": [
-            {
-              "claim_id": "roles.configure",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setUserRole(address,uint8,bool)",
-          "selector": "0x67aff484",
-          "effect_labels": [
-            "role_management"
-          ],
-          "claims": [
-            {
-              "claim_id": "roles.configure",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "transferOwnership(address)",
-          "selector": "0xf2fde38b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
-          "claims": [
-            {
-              "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
-      "chain": "mainnet",
-      "contract": "TellerWithMultiAssetSupport",
-      "solc_version": "0.8.27",
-      "functions": [
-        {
-          "full_name": "addAsset(ERC20)",
-          "selector": "0x298410e5",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "allowAll(address)",
-          "selector": "0xc29d2f10",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "allowFrom(address)",
-          "selector": "0xa924bf61",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "allowOperator(address)",
-          "selector": "0x1ba9a458",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "allowTo(address)",
-          "selector": "0x5f45bac8",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "beforeTransfer(address,address,address)",
-          "selector": "0xabd626b0",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "bulkDeposit(ERC20,uint256,uint256,address)",
-          "selector": "0x9d574420",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "bulkWithdraw(ERC20,uint256,uint256,address)",
-          "selector": "0x3e64ce99",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "denyAll(address)",
-          "selector": "0x18aed921",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "denyFrom(address)",
-          "selector": "0x2c524c42",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "denyOperator(address)",
-          "selector": "0x1b62636c",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "denyTo(address)",
-          "selector": "0x3b575407",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "deposit(ERC20,uint256,uint256)",
-          "selector": "0x0efe6a8b",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "depositWithPermit(ERC20,uint256,uint256,uint256,uint8,bytes32,bytes32)",
-          "selector": "0x3d935d9e",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "pause()",
-          "selector": "0x8456cb59",
-          "effect_labels": [
-            "pause_toggle"
-          ],
-          "claims": [
-            {
-              "claim_id": "pause.set",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "refundDeposit(uint256,address,address,uint256,uint256,uint256,uint256)",
-          "selector": "0x46b563f4",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": []
-        },
-        {
-          "full_name": "removeAsset(ERC20)",
-          "selector": "0x4a5e42b1",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setAuthority(Authority)",
-          "selector": "0x7a9e5e4b",
-          "effect_labels": [
-            "authority_update"
-          ],
-          "claims": [
-            {
-              "claim_id": "authority.replace",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setShareLockPeriod(uint64)",
-          "selector": "0x12056e2d",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "transferOwnership(address)",
-          "selector": "0xf2fde38b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
-          "claims": [
-            {
-              "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "unpause()",
-          "selector": "0x3f4ba83a",
-          "effect_labels": [
-            "pause_toggle"
-          ],
-          "claims": [
-            {
-              "claim_id": "pause.unset",
-              "tier": "standard_exact"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
-      "chain": "mainnet",
-      "contract": "BoringVault",
-      "solc_version": "0.8.27",
-      "functions": [
-        {
-          "full_name": "DOMAIN_SEPARATOR()",
-          "selector": "0x3644e515",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "approve(address,uint256)",
-          "selector": "0x095ea7b3",
-          "effect_labels": [],
-          "claims": [
-            {
-              "claim_id": "erc20.approve",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "enter(address,ERC20,uint256,address,uint256)",
-          "selector": "0x39d6ba32",
-          "effect_labels": [
-            "mint"
-          ],
-          "claims": [
-            {
-              "claim_id": "supply.mint",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "exit(address,ERC20,uint256,address,uint256)",
-          "selector": "0x18457e61",
-          "effect_labels": [
-            "burn"
-          ],
-          "claims": [
-            {
-              "claim_id": "supply.burn",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "manage(address,bytes,uint256)",
-          "selector": "0xf6e715d0",
-          "effect_labels": [
-            "arbitrary_external_call",
-            "asset_send"
-          ],
-          "claims": [
-            {
-              "claim_id": "exec.arbitrary",
-              "tier": "idiom_structural"
-            },
-            {
-              "claim_id": "flow.out",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "manage(address[],bytes[],uint256[])",
-          "selector": "0x224d8703",
-          "effect_labels": [
-            "asset_send"
-          ],
-          "claims": [
-            {
-              "claim_id": "flow.out",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)",
-          "selector": "0xbc197c81",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "onERC1155Received(address,address,uint256,uint256,bytes)",
-          "selector": "0xf23a6e61",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "onERC721Received(address,address,uint256,bytes)",
-          "selector": "0x150b7a02",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
-          "selector": "0xd505accf",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "receive()",
-          "selector": "0xa3e76c0f",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "setAuthority(Authority)",
-          "selector": "0x7a9e5e4b",
-          "effect_labels": [
-            "authority_update"
-          ],
-          "claims": [
-            {
-              "claim_id": "authority.replace",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "setBeforeTransferHook(address)",
-          "selector": "0x8929565f",
-          "effect_labels": [
-            "hook_update"
-          ],
-          "claims": [
-            {
-              "claim_id": "callee_pointer.rotate",
-              "tier": "idiom_structural"
-            }
-          ]
-        },
-        {
-          "full_name": "supportsInterface(bytes4)",
-          "selector": "0x01ffc9a7",
-          "effect_labels": [],
-          "claims": []
-        },
-        {
-          "full_name": "transfer(address,uint256)",
-          "selector": "0xa9059cbb",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": [
-            {
-              "claim_id": "erc20.transfer",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "transferFrom(address,address,uint256)",
-          "selector": "0x23b872dd",
-          "effect_labels": [
-            "external_contract_call"
-          ],
-          "claims": [
-            {
-              "claim_id": "erc20.transfer_from",
-              "tier": "standard_exact"
-            }
-          ]
-        },
-        {
-          "full_name": "transferOwnership(address)",
-          "selector": "0xf2fde38b",
-          "effect_labels": [
-            "ownership_transfer"
-          ],
-          "claims": [
-            {
-              "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
             }
           ]
         }

@@ -34,44 +34,64 @@ GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
 GOLDEN_SCHEMA_VERSION = 1
 
-# Frozen fixture corpus for the effect-labels A/B golden gate. Each entry is a
-# self-contained Foundry project under ``tests/fixtures/contracts/label_corpus``
-# (four Etherscan-verified real contracts + one synthetic WETH-shaped token). The
-# whole corpus is pinned to solc 0.8.27 so the gate runs in the default offline
-# suite. This list is the single source of truth for corpus membership.
+# Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
+# small synthetic source that reproduces one real-world claim SHAPE — either a
+# lone ``.sol`` (compiled directly with the pinned solc) or a self-contained
+# Foundry project directory under ``tests/fixtures/contracts``. Two entries reuse
+# fixtures already on main (``token/``, ``authority/``) at zero new-source cost.
+# The whole corpus is pinned to solc 0.8.27 (the version the offline CI ``test``
+# job installs) so the gate runs — never skips — in the default offline suite.
+# This list is the single source of truth for corpus membership; fake addresses
+# keep the golden keyed uniformly.
 MANIFEST: list[dict[str, Any]] = [
     {
-        "address": "0x39272ee125ebd9214404f735baae50acb9d334c0",
-        "name": "L1SyncPoolETH",
-        "chain": "mainnet",
+        # ERC-20 + OZ-Pausable + owner-gated mint. Covers pause.set / pause.unset
+        # (standard require-based toggle) and the erc20.* / supply.mint families.
+        "address": "0x0000000000000000000000000000000000000010",
+        "name": "Token",
+        "chain": "synthetic",
         "solc_version": "0.8.27",
-        "source_path": "tests/fixtures/contracts/label_corpus/l1_sync_pool",
+        "source_path": "tests/fixtures/contracts/token/token_erc20_ownable_pausable.sol",
     },
     {
-        "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
-        "name": "RolesAuthority",
-        "chain": "mainnet",
+        # OZ-v5 ERC-7201 namespaced Ownable (reused from main). Covers
+        # ownership.transfer / ownership.renounce and pins the ghost-immune
+        # namespaced-storage handling (no ownership claim on owner()/setTokenOut).
+        "address": "0x0000000000000000000000000000000000000020",
+        "name": "OzV5Ownable",
+        "chain": "synthetic",
         "solc_version": "0.8.27",
-        "source_path": "tests/fixtures/contracts/label_corpus/roles_authority",
+        "source_path": "tests/fixtures/contracts/authority/OzV5NamespacedOwnable.sol",
     },
     {
-        "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
-        "name": "TellerWithMultiAssetSupport",
-        "chain": "mainnet",
+        # Solmate Auth + RolesAuthority: roles.configure (canonical selectors),
+        # authority.replace (setAuthority + authority write), ownership.transfer.
+        "address": "0x0000000000000000000000000000000000000030",
+        "name": "SolmateRoles",
+        "chain": "synthetic",
         "solc_version": "0.8.27",
-        "source_path": "tests/fixtures/contracts/label_corpus/teller",
+        "source_path": "tests/fixtures/contracts/label_corpus/solmate_roles.sol",
     },
     {
-        "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
-        "name": "BoringVault",
-        "chain": "mainnet",
+        # BoringVault-shaped share token: callee_pointer.rotate (hook setter +
+        # sibling invoke) and supply.mint / supply.burn (enter/exit sign idiom).
+        "address": "0x0000000000000000000000000000000000000040",
+        "name": "VaultHook",
+        "chain": "synthetic",
         "solc_version": "0.8.27",
-        "source_path": "tests/fixtures/contracts/label_corpus/boring_vault",
+        "source_path": "tests/fixtures/contracts/label_corpus/vault_hook.sol",
     },
     {
-        # Synthetic WETH-shaped token (no real deployment); a fake address keeps
-        # the golden keyed uniformly. Covers the weth.* / erc20.* / supply.* /
-        # flow.out families with one small compile.
+        # LayerZero OApp on OZ-v5 namespaced storage: lz_oapp.set_peer /
+        # set_delegate, and the setLockBox pseudo-slot callee_pointer near-miss.
+        "address": "0x0000000000000000000000000000000000000050",
+        "name": "LzOApp",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/lz_oapp.sol",
+    },
+    {
+        # WETH-shaped wrapped-native token: weth.* / erc20.* / supply.* / flow.out.
         "address": "0x000000000000000000000000000000000000dead",
         "name": "WrappedNative",
         "chain": "synthetic",
@@ -138,13 +158,6 @@ def _compile_subject(entry: dict[str, Any], workdir: Path):
     absent so callers can skip cleanly."""
     from slither import Slither
 
-    from services.static.claims import build_claims
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
-        build_predicate_artifacts_with_pause_info,
-    )
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
-
     version = entry["solc_version"]
     solc_binary = _solc_select_binary(version)
     if not solc_binary.exists():
@@ -154,20 +167,38 @@ def _compile_subject(entry: dict[str, Any], workdir: Path):
         )
 
     source = REPO_ROOT / entry["source_path"]
-    if not source.is_dir():
-        raise FileNotFoundError(f"corpus source missing for {entry['name']}: {source}")
+    if source.is_dir():
+        # Self-contained Foundry project: copy fresh (no cached build output) and
+        # compile via FOUNDRY_SOLC so svm never reaches the network.
+        project = workdir / entry["address"]
+        _copy_project(source, project)
+        with _foundry_env(solc_binary):
+            slither = Slither(str(project))
+            subject, effects, predicate_trees, claims_artifact = _run_static_sequence(slither, entry)
+        return subject, effects, predicate_trees, claims_artifact
+    if source.is_file() and source.suffix == ".sol":
+        # Lone, dependency-free source: crytic-compile drives the pinned solc
+        # binary directly (``solc=``), so this stays offline and deterministic.
+        with _foundry_env(solc_binary):
+            slither = Slither(str(source), solc=str(solc_binary))
+            return _run_static_sequence(slither, entry)
+    raise FileNotFoundError(f"corpus source missing for {entry['name']}: {source}")
 
-    project = workdir / entry["address"]
-    _copy_project(source, project)
 
-    with _foundry_env(solc_binary):
-        slither = Slither(str(project))
-        subject = _select_subject_contract(slither, entry["name"])
-        if subject is None:
-            raise RuntimeError(f"no analyzable subject contract for {entry['name']} ({entry['address']})")
-        predicate_trees, _pause_info = build_predicate_artifacts_with_pause_info(subject)
-        effects = build_effects(subject)
-        claims_artifact = build_claims(subject, effects, predicate_trees)
+def _run_static_sequence(slither: Any, entry: dict[str, Any]):
+    from services.static.claims import build_claims
+    from services.static.contract_analysis_pipeline.effects import build_effects
+    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+        build_predicate_artifacts_with_pause_info,
+    )
+    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+
+    subject = _select_subject_contract(slither, entry["name"])
+    if subject is None:
+        raise RuntimeError(f"no analyzable subject contract for {entry['name']} ({entry['address']})")
+    predicate_trees, _pause_info = build_predicate_artifacts_with_pause_info(subject)
+    effects = build_effects(subject)
+    claims_artifact = build_claims(subject, effects, predicate_trees)
     return subject, effects, predicate_trees, claims_artifact
 
 

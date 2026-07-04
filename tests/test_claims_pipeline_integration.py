@@ -11,7 +11,6 @@ the solc binary + Postgres are external; nothing under test is faked.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -23,31 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 pytest.importorskip("slither")
 
 from tests.conftest import requires_postgres  # noqa: E402
+from tests.support.foundry_project import write_foundry_project  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
-
-
-def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
-    """Minimal Foundry scaffold the static pipeline can compile (mirrors the
-    ``test_contract_analysis`` helper: solc 0.8.19, no build output)."""
-    project_dir = tmp_path / contract_name
-    (project_dir / "src").mkdir(parents=True)
-    (project_dir / "foundry.toml").write_text(
-        '[profile.default]\nsrc = "src"\nout = "out"\nlibs = ["lib"]\nsolc_version = "0.8.19"\n'
-    )
-    (project_dir / "src" / f"{contract_name}.sol").write_text(source_code)
-    (project_dir / "contract_meta.json").write_text(
-        json.dumps(
-            {
-                "address": "0x1111111111111111111111111111111111111111",
-                "contract_name": contract_name,
-                "compiler_version": "v0.8.19+commit.7dd6d404",
-            }
-        )
-        + "\n"
-    )
-    (project_dir / "slither_results.json").write_text(json.dumps({"results": {"detectors": []}}) + "\n")
-    return project_dir
 
 
 def _has_deploy_claim(claims: object) -> bool:
@@ -67,7 +44,7 @@ def test_claims_flow_from_static_pipeline_to_effective_function_row(tmp_path, db
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / "composed" / "upgrade_factory_uups.sol").read_text()
-    project_dir = _write_project(tmp_path, "UpgradeFactory", source)
+    project_dir = write_foundry_project(tmp_path, "UpgradeFactory", source)
 
     # (1) The static pipeline's claims phase minted a claim onto the effects
     #     facts carrier (the real core.py invocation, not a stub).
