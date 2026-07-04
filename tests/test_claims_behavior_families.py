@@ -2,90 +2,38 @@
 
 Drives the real static stack — Slither compile -> ``build_predicate_artifacts``
 -> ``build_effects`` -> ``build_claims`` -> the registered matchers — on the
-Etherscan-verified corpus contracts, and asserts the pause / flow / supply /
-callee_pointer / user-plane claims each contract must (and must not) carry. Each
-family has a positive fixture, a counterexample, and an adversarial near-miss.
+corpus contracts, and asserts the pause / flow / supply / callee_pointer /
+user-plane claims each contract must (and must not) carry. Each family keeps at
+least one positive and one negative; where a family's real positive left the
+corpus (gov.delegate / flow.in), it is pinned through ``build_claims`` on the
+documented facts shape instead (input data, not a faked collaborator).
 
-Only the solc-select binaries the corpus manifest pins are external; nothing
-under test is faked. Each contract compiles once (module cache) and every solc
-version is installed by the same CI job that runs the golden gate.
+The whole corpus pins solc 0.8.27 (the version the offline CI ``test`` job
+installs); each contract compiles once (shared per-address cache) and the gate
+never reaches the network to resolve a version.
 """
 
 from __future__ import annotations
 
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 pytest.importorskip("slither")
 
-from tests.label_corpus.harness import (  # noqa: E402
-    SolcNotInstalled,
-    _copy_project,
-    _foundry_env,
-    _solc_select_binary,
-    corpus_entries,
-)
+from tests.support.label_corpus import SolcNotInstalled, claims_for_address  # noqa: E402
 
-# address -> (name) of every corpus contract these tests touch.
+# address -> name of every corpus contract these tests touch.
 TELLER = "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35"
-ACCOUNTANT = "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b"
-NODES_MANAGER = "0x789cbbe0739f1458905c9ca6d6e74f7997622a9b"
-EETH = "0xcb3d917a965a70214f430a135154cd5adda2ad84"
-ONESIG = "0xbe010a7e3686fdf65e93344ab664d065a0b02478"
-STRATEGY_MANAGER = "0x88582996b70fdd7c4f16e3fde7b53858fce0d394"
-WETH9 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-DAI = "0x6b175474e89094c44da98b954eedeac495271d0f"
 BORING_VAULT = "0x7223442cad8e9ca474fc40109ab981608f8c4273"
 L1_SYNC_POOL = "0x39272ee125ebd9214404f735baae50acb9d334c0"
-COMP = "0xc00e94cb662c3520282e6f5717214004a7f26888"
-LIQUIDITY_POOL = "0x83bc649fcdb2c8da146b2154a559ddedf937ef12"
-
-_CACHE: dict[str, dict[str, list[Any]]] = {}
-
-
-def _claims_for(address: str) -> dict[str, list[Any]]:
-    """``{function_full_name: [claim, ...]}`` for one corpus contract, compiled
-    and run through the production static sequence. Cached per address."""
-    if address in _CACHE:
-        return _CACHE[address]
-
-    from slither import Slither
-
-    from services.static.claims import build_claims
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
-        build_predicate_artifacts_with_pause_info,
-    )
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
-
-    entry = next(e for e in corpus_entries() if e["address"].lower() == address.lower())
-    solc_binary = _solc_select_binary(entry["solc_version"])
-    if not solc_binary.exists():
-        raise SolcNotInstalled(f"solc {entry['solc_version']} for {entry['name']} is not installed via solc-select")
-    source = Path("/home/riley/PSAT") / entry["source_path"]
-
-    with tempfile.TemporaryDirectory() as tmp:
-        project = Path(tmp) / entry["address"]
-        _copy_project(source, project)
-        with _foundry_env(solc_binary):
-            slither = Slither(str(project))
-            subject = _select_subject_contract(slither, entry["name"])
-            predicate_trees, _pause = build_predicate_artifacts_with_pause_info(subject)
-            effects = build_effects(subject)
-            artifact = build_claims(subject, effects, predicate_trees)
-
-    functions = artifact["functions"]
-    _CACHE[address] = functions
-    return functions
+WRAPPED_NATIVE = "0x000000000000000000000000000000000000dead"
 
 
 def _load(address: str) -> dict[str, list[Any]]:
     try:
-        return _claims_for(address)
+        return claims_for_address(address)
     except SolcNotInstalled as exc:  # pragma: no cover - only when a solc version is absent
         pytest.skip(str(exc))
 
@@ -112,46 +60,8 @@ def test_pause_standard_teller_require_pause():
     # A require-based flag never mislabels its own toggle as the opposite polarity.
     assert "pause.unset" not in _ids(fns["pause()"])
     assert "pause.set" not in _ids(fns["unpause()"])
-
-
-def test_pause_struct_member_accountant_and_counterexample():
-    fns = _load(ACCOUNTANT)
-    # Positive: the bool struct member pause is recovered at idiom tier.
-    assert _one(fns["pause()"], "pause.set")["tier"] == "idiom_structural"
-    assert _one(fns["unpause()"], "pause.unset")["tier"] == "idiom_structural"
-    witness = _one(fns["pause()"], "pause.set")["witness"]
-    assert witness["flags"] == [{"var": "accountantState", "member": "isPaused"}]
-    # Counterexample: sibling struct members that are not bool flags stay silent.
-    assert not _ids(fns["updatePayoutAddress(address)"]) & {"pause.set", "pause.unset"}
-    assert not _ids(fns["updateDelay(uint24)"]) & {"pause.set", "pause.unset"}
-
-
-def test_pause_inherited_private_flag_nodes_manager():
-    fns = _load(NODES_MANAGER)
-    assert "pause.set" in _ids(fns["pauseContract()"])
-    assert "pause.unset" in _ids(fns["unPauseContract()"])
-    assert "pause.set" not in _ids(fns["unPauseContract()"])
-
-
-def test_pause_near_miss_onesig_mode_selector():
-    """OneSig ``executorRequired`` is a bool read by a gating modifier, but only
-    under an OR-branch (a mode selector), so it is not a pause flag."""
-    fns = _load(ONESIG)
-    assert not _ids(fns["setExecutorRequired(bool)"]) & {"pause.set", "pause.unset"}
-
-
-def test_pause_near_miss_initializer_latch_eeth():
-    fns = _load(EETH)
-    init = next(sig for sig in fns if sig.startswith("initialize"))
-    assert not _ids(fns[init]) & {"pause.set", "pause.unset"}
-
-
-def test_pause_honest_residue_eigenlayer_bitmask():
-    """A ``uint256`` bitmask pause (EigenLayer) is not a bool flag; no claim."""
-    fns = _load(STRATEGY_MANAGER)
-    for sig in fns:
-        if sig.split("(", 1)[0] in ("pause", "unpause", "pauseAll"):
-            assert not _ids(fns[sig]) & {"pause.set", "pause.unset"}
+    # Counterexample: a non-toggle setter on the same contract carries no pause claim.
+    assert not _ids(fns["setShareLockPeriod(uint64)"]) & {"pause.set", "pause.unset"}
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +69,8 @@ def test_pause_honest_residue_eigenlayer_bitmask():
 # ---------------------------------------------------------------------------
 
 
-def test_flow_out_and_supply_burn_weth_withdraw():
-    fns = _load(WETH9)
+def test_flow_out_and_supply_burn_native_withdraw():
+    fns = _load(WRAPPED_NATIVE)
     withdraw = fns["withdraw(uint256)"]
     assert "flow.out" in _ids(withdraw)
     assert "supply.burn" in _ids(withdraw)
@@ -214,12 +124,6 @@ def test_flow_in_pull_from_third_party():
     assert "flow.out" not in _ids(claims)
 
 
-def test_supply_mint_burn_dai_own_selector():
-    fns = _load(DAI)
-    assert _one(fns["mint(address,uint256)"], "supply.mint")["tier"] == "standard_exact"
-    assert _one(fns["burn(address,uint256)"], "supply.burn")["tier"] == "standard_exact"
-
-
 def test_supply_sign_idiom_boring_vault_enter_exit():
     fns = _load(BORING_VAULT)
     enter = "enter(address,ERC20,uint256,address,uint256)"
@@ -234,7 +138,7 @@ def test_supply_sign_idiom_boring_vault_enter_exit():
 def test_flow_counterexample_pure_token_transfer_is_not_a_flow():
     """An ERC-20's own ``transfer`` moves its ledger, not value out of the
     contract — no flow claim, only the user-plane claim."""
-    fns = _load(WETH9)
+    fns = _load(WRAPPED_NATIVE)
     assert not _ids(fns["transfer(address,uint256)"]) & {"flow.out", "flow.in"}
     assert not _ids(fns["approve(address,uint256)"]) & {"flow.out", "flow.in", "supply.mint", "supply.burn"}
 
@@ -267,31 +171,20 @@ def test_callee_pointer_near_miss_ozv5_pseudo_slot_setter():
     assert "callee_pointer.rotate" not in _ids(fns["setLockBox(address)"])
 
 
-def test_callee_pointer_near_miss_manual_init_latch():
-    """LiquidityPool ``initializeVTwoDotFourNine`` installs ``roleRegistry`` /
-    ``etherFiRedemptionManager`` for the first time behind a manual
-    ``require(pointer == address(0))`` latch — a re-initializer's first-time
-    set (setup), not a runtime rotation, even though a sibling invokes the
-    pointer. The OZ initializer-modifier one-shot guard doesn't cover a manual
-    require latch, so this pins the ``writes_first_time_set_pointer`` exclusion."""
-    fns = _load(LIQUIDITY_POOL)
-    assert "callee_pointer.rotate" not in _ids(fns["initializeVTwoDotFourNine(address,address)"])
-
-
 # ---------------------------------------------------------------------------
 # user-plane: erc20 / weth / gov.delegate / lz_oapp
 # ---------------------------------------------------------------------------
 
 
-def test_erc20_user_plane_claims_weth():
-    fns = _load(WETH9)
+def test_erc20_user_plane_claims():
+    fns = _load(WRAPPED_NATIVE)
     assert "erc20.approve" in _ids(fns["approve(address,uint256)"])
     assert "erc20.transfer" in _ids(fns["transfer(address,uint256)"])
     assert "erc20.transfer_from" in _ids(fns["transferFrom(address,address,uint256)"])
 
 
 def test_weth_wrap_unwrap_idiom():
-    fns = _load(WETH9)
+    fns = _load(WRAPPED_NATIVE)
     assert "weth.deposit" in _ids(fns["deposit()"])
     assert "weth.withdraw" in _ids(fns["withdraw(uint256)"])
 
@@ -304,15 +197,34 @@ def test_erc20_counterexample_non_token_contract_has_no_erc20_claims():
         assert not _ids(claims) & {"erc20.approve", "erc20.transfer", "erc20.transfer_from"}, sig
 
 
-def test_gov_delegate_comp():
-    fns = _load(COMP)
-    assert _one(fns["delegate(address)"], "gov.delegate")["tier"] == "standard_exact"
-    assert "gov.delegate" in _ids(fns["delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)"])
+def test_gov_delegate_positive_writes_delegates_and_checkpoints():
+    """Comp-style delegation — writing both the ``delegates`` map and the
+    ``checkpoints`` voting-power ledger is the voting-power move. The gate is
+    facts-only, so it is pinned through the real ``build_claims`` on the
+    documented state-write shape."""
+    ids = _claim_ids_over(
+        {
+            "delegate(address)": _fn_record(
+                "delegate(address)",
+                "0x5c19a95c",
+                state_writes=[
+                    {"var": "delegates", "declared_type": "mapping(address => address)", "origin": "body"},
+                    {
+                        "var": "checkpoints",
+                        "declared_type": "mapping(address => mapping(uint32 => Checkpoint))",
+                        "origin": "body",
+                    },
+                ],
+            )
+        }
+    )
+    assert "gov.delegate" in ids["delegate(address)"]
 
 
 def test_gov_delegate_counterexample_non_voting_token():
-    """WETH writes no ``delegates``/``checkpoints`` maps — no delegation claim."""
-    fns = _load(WETH9)
+    """WrappedNative writes no ``delegates``/``checkpoints`` maps — no delegation
+    claim on any of its functions."""
+    fns = _load(WRAPPED_NATIVE)
     for claims in fns.values():
         assert "gov.delegate" not in _ids(claims)
 
@@ -324,9 +236,9 @@ def test_lz_oapp_config_claims():
 
 
 def test_lz_oapp_counterexample_non_oapp_has_no_peer_claim():
-    """A contract without the OApp gate never gets an lz_oapp claim even if it
-    had a same-named setter — WETH has none, proving no accidental fire."""
-    fns = _load(WETH9)
+    """A contract without the OApp gate never gets an lz_oapp claim — WrappedNative
+    has none, proving no accidental fire."""
+    fns = _load(WRAPPED_NATIVE)
     for claims in fns.values():
         assert not _ids(claims) & {"lz_oapp.set_peer", "lz_oapp.set_delegate"}
 

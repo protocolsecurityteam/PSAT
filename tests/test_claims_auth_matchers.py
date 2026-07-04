@@ -4,9 +4,10 @@ facts interface.
 These drive the real production code — ``build_claims``, ``ClaimContext``, the
 registry, and every auth matcher/``_authcommon`` reader — with ``effects``- and
 ``predicate_trees``-shaped fact *data* (not faked collaborators), mirroring the
-shapes measured on the real corpus contracts in ``test_claims_auth_corpus.py``.
-No Slither/DB, so they run in every offline suite and exercise each standard
-gate, corroboration path, and near-miss branch.
+shapes measured on real corpus contracts (Solmate DSAuth, OZ AccessControl,
+Solady handover, FiatToken rotate, LayerZero composeQueue). No Slither/DB, so
+they run in every offline suite and exercise each standard gate, corroboration
+path, and near-miss branch.
 
 Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher
 (pause, flow, exec, LayerZero) firing on the same synthetic function never

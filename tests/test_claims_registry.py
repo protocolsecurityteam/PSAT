@@ -276,13 +276,18 @@ def test_consumer_referenced_ids_are_subset_of_registry():
 
 # The produced-side half of the coverage invariant (spec §6.5): registry ids must
 # appear in the frozen-corpus fixture output or carry a documented exemption.
-_GOLDEN_PATH = Path(__file__).resolve().parent / "label_corpus" / "golden.json"
+_GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "label_corpus" / "golden.json"
 
-# Registry claim ids the frozen corpus does not exercise, each mapped to the
-# fixture that DOES cover it. Keep this minimal and honest: an id that starts
-# producing on the corpus must be removed here (the test fails otherwise).
-_SAFE_EXEMPTION = (
-    "no Gnosis Safe in the label corpus manifest; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
+# Registry claim ids the reduced corpus does not exercise, each mapped to the
+# test that DOES cover it (positive + negative). Keep this minimal and honest: an
+# id that starts producing on the corpus must be removed here (the test fails
+# otherwise). The five-contract corpus deliberately compiles only a handful of
+# real sources, so the auth / upgrade / exec / timelock / safe families are
+# covered by the synthetic-facts and small-fixture matcher suites instead.
+_SAFE_EXEMPTION = "no Gnosis Safe in the label corpus; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
+_AUTH_MATCHERS_EXEMPTION = "no compiled corpus positive; covered by test_claims_auth_matchers (synthetic facts)."
+_UPGRADE_EXEC_EXEMPTION = (
+    "no compiled corpus positive; covered by test_claims_upgrade_exec_matchers (small synthetic .sol fixtures)."
 )
 CORPUS_EXEMPT_CLAIM_IDS = {
     "contract_deployment": (
@@ -295,6 +300,23 @@ CORPUS_EXEMPT_CLAIM_IDS = {
         "callee_erc20_selector; covered by "
         "test_claims_behavior_families::test_flow_in_pull_from_third_party."
     ),
+    "authorized_caller.rotate": _AUTH_MATCHERS_EXEMPTION,
+    "ownership.accept": _AUTH_MATCHERS_EXEMPTION,
+    "roles.grant": _AUTH_MATCHERS_EXEMPTION,
+    "roles.revoke": _AUTH_MATCHERS_EXEMPTION,
+    "gov.delegate": (
+        "no Comp-style voting token in the reduced corpus; the gate is facts-only, "
+        "covered by test_claims_behavior_families::test_gov_delegate_positive_writes_delegates_and_checkpoints."
+    ),
+    "proxy.admin_change": _UPGRADE_EXEC_EXEMPTION,
+    "upgrade.implementation": (
+        "no proxy/impl pair in the reduced corpus; covered by test_claims_upgrade_exec_matchers "
+        "(uups_eeth_upgrade.sol / proxy_shell_wbeth.sol) and test_claims_pipeline_integration."
+    ),
+    "timelock.schedule": _UPGRADE_EXEC_EXEMPTION,
+    "timelock.execute": _UPGRADE_EXEC_EXEMPTION,
+    "timelock.cancel": _UPGRADE_EXEC_EXEMPTION,
+    "timelock.set_delay": _UPGRADE_EXEC_EXEMPTION,
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,

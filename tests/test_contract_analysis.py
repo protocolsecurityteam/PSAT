@@ -79,7 +79,15 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
 
 def test_fixture_index_covers_all_solidity_contract_fixtures():
     indexed_paths = {entry["path"] for entry in _fixture_index()}
-    fixture_paths = {str(path.relative_to(FIXTURES_DIR)) for path in FIXTURES_DIR.rglob("*.sol")}
+    # The detection-pattern index catalogs the hand-authored single-file fixtures.
+    # ``label_corpus/`` holds whole vendored Foundry projects for the effect-labels
+    # golden gate (their own manifest is the source of truth), so they are not
+    # indexed here.
+    fixture_paths = {
+        str(path.relative_to(FIXTURES_DIR))
+        for path in FIXTURES_DIR.rglob("*.sol")
+        if "label_corpus" not in path.relative_to(FIXTURES_DIR).parts
+    }
 
     assert indexed_paths == fixture_paths
 

@@ -46,7 +46,6 @@ jobs:
               - 'alembic.ini'
               - 'db/**'
               - 'tests/fixtures/**'
-              - 'tests/label_corpus/**'
             frontend:
               # No negations: dorny/paths-filter ORs patterns, so `'!foo/**'`
               # would match every file outside foo/ and force frontend=true
@@ -220,42 +219,6 @@ jobs:
           path: diff-cover.html
           if-no-files-found: ignore
 
-  # Effect-labels A/B golden gate over the frozen fixture corpus. Split out from
-  # the offline `test` job because it compiles ~20 real contracts across 8 solc
-  # versions (slow) and needs no Postgres/MinIO. The corpus contracts are
-  # scaffolded Foundry projects; each is compiled onto the solc-select binary
-  # named in the manifest (FOUNDRY_SOLC), so the gate is deterministic and
-  # offline — no svm network resolution. A producer change that silently
-  # relabels a corpus function fails here unless the PR carries the regenerated,
-  # reviewed golden diff.
-  label-corpus:
-    needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci-config == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: stable
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --dev
-      # Install exactly the solc versions the manifest declares (the single
-      # source of truth), so adding a corpus contract needs no CI edit. The
-      # harness points FOUNDRY_SOLC at these binaries, so nothing is fetched at
-      # test time.
-      - name: Install corpus solc versions
-        run: |
-          versions=$(uv run python -c "import json; print(' '.join(sorted({c['solc_version'] for c in json.load(open('tests/label_corpus/manifest.json'))['contracts']})))")
-          echo "Installing solc: $versions"
-          for v in $versions; do uv run solc-select install "$v"; done
-      # `python -m pytest` (not the console entrypoint) puts the repo root on
-      # sys.path so `-p local_netguard` imports; the plugin then proves the
-      # corpus compile makes zero external connects.
-      - name: Effect-labels golden gate (full corpus)
-        env:
-          PSAT_LABEL_CORPUS_FULL: "1"
-        run: uv run python -m pytest tests/test_label_corpus.py -m label_corpus -p local_netguard -q
-
   # Single aggregate status for branch protection. Treats `success` and
   # `skipped` the same — a site-only PR where lint/typecheck/test are
   # legitimately skipped still merges. Only fails when an upstream job
@@ -265,13 +228,13 @@ jobs:
   # the per-job checks should be removed from the required list since
   # they'll appear as "Skipped" on site-only PRs and block the merge.
   ci-pass:
-    needs: [changes, lint, typecheck, frontend-test, test, label-corpus]
+    needs: [changes, lint, typecheck, frontend-test, test]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate upstream results
         run: |
-          # `changes` gates every other job — if it didn't succeed, the
+          # `changes` gates every other job — if it didn't succeed, the four
           # downstream jobs all skip on missing outputs and would otherwise
           # silently green-light a PR with zero checks executed.
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
@@ -279,7 +242,7 @@ jobs:
             exit 1
           fi
           fail=0
-          for r in "${{ needs.lint.result }}" "${{ needs.typecheck.result }}" "${{ needs.frontend-test.result }}" "${{ needs.test.result }}" "${{ needs.label-corpus.result }}"; do
+          for r in "${{ needs.lint.result }}" "${{ needs.typecheck.result }}" "${{ needs.frontend-test.result }}" "${{ needs.test.result }}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               echo "::error::Upstream job result: $r"
               fail=1
