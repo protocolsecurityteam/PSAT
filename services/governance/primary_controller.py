@@ -178,6 +178,48 @@ PRIVILEGED_EFFECT_LABELS: frozenset[str] = frozenset(
     }
 )
 
+# Plane-1 claims mirror of :data:`PRIVILEGED_EFFECT_LABELS` — the claim families
+# whose presence on a function marks its authorized callers as real
+# co-controllers: control-plane + value-flow + exec. ``callee_pointer.rotate``
+# (the precise hook-pointer rotation) and external-call facts are excluded for
+# the same reason the legacy set omits ``hook_update`` / ``external_contract_call``
+# — they ride on permissionless callers too, so they don't discriminate.
+# ``upgrade.*`` now fires (it never did as the corpus-dead ``implementation_update``
+# label), so upgrade functions gain co-controller significance for the first time.
+_PRIVILEGED_CLAIM_PREFIXES = (
+    "ownership.",
+    "roles.",
+    "authority.",
+    "upgrade.",
+    "timelock.",
+    "safe.",
+    "pause.",
+    "proxy.",
+    "authorized_caller.",
+    "lz_oapp.",
+    "flow.",
+    "supply.",
+    "exec.",
+)
+_PRIVILEGED_CLAIM_IDS: frozenset[str] = frozenset({"contract_deployment"})
+_EXCLUDED_CLAIM_IDS: frozenset[str] = frozenset({"callee_pointer.rotate"})
+
+
+def _function_is_privileged(claims: Any, labels_lc: set[str], privileged_labels: frozenset[str]) -> bool:
+    """Whether a function is a governance/admin power on its own. Plane-1 claims
+    (the ``fp_function_detail`` projection's pre-extracted claim-id strings) are
+    authoritative when present; a claim-less function falls back to the legacy
+    effect_labels."""
+    claim_ids = {c for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
+    if claim_ids:
+        return any(
+            cid not in _EXCLUDED_CLAIM_IDS
+            and (cid in _PRIVILEGED_CLAIM_IDS or cid.startswith(_PRIVILEGED_CLAIM_PREFIXES))
+            for cid in claim_ids
+        )
+    return bool(labels_lc & privileged_labels)
+
+
 # A function shared by more than this many distinct authorized callers reads as
 # a broad whitelist (permissionless-ish), not an access-controlled governance
 # gate. EtherFi's ``createBid`` is shared by ~33 callers; real admin gates
@@ -206,10 +248,12 @@ def assign_co_controllers(
     permissionless callers like whitelisted auction bidders.
 
     *fp_function_detail_by_contract* — ``{contract_addr_lc: [{"callers":
-    set[addr], "labels": set[str]}, ...]}``, one entry per ``EffectiveFunction``
-    of the contract that has at least one (non-``signature_witness``) FP caller.
-    Contract addresses are the *rendered* (proxy) addresses, matching
-    *primary_for* and Surface group containment.
+    set[addr], "labels": set[str], "claims": [claim_id, ...]}, ...]}``, one entry
+    per ``EffectiveFunction`` of the contract that has at least one
+    (non-``signature_witness``) FP caller. ``claims`` is optional (Plane-1); when
+    present it is authoritative for the privileged-function test, with ``labels``
+    the fallback for claim-less rows. Contract addresses are the *rendered*
+    (proxy) addresses, matching *primary_for* and Surface group containment.
 
     *primary_for* — the :func:`assign_primary_controllers` output. A principal
     is never listed as co-controlling a contract it already primary-controls.
@@ -245,7 +289,9 @@ def assign_co_controllers(
         for fn in functions:
             callers = {(a or "").lower() for a in fn.get("callers", ())}
             labels = {(label or "").lower() for label in fn.get("labels", ())}
-            significant = bool(labels & privileged_labels) or len(callers) <= max_gate_callers
+            significant = (
+                _function_is_privileged(fn.get("claims"), labels, privileged_labels) or len(callers) <= max_gate_callers
+            )
             if not significant:
                 continue
             for caller in callers:

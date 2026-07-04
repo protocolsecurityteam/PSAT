@@ -269,7 +269,6 @@ _LABEL_TO_FLOW_DIRECTION = {
     "mint": "mint",
     "burn": "burn",
 }
-_TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 
 # Canonical 4-byte selectors for standardized access-control entrypoints,
 # keyed by ABI selector (interface params normalized to ``address``). Matched
@@ -378,246 +377,6 @@ def _function_has_low_level_value_call(function) -> bool:
     return _check(function)
 
 
-def _writes_delegatecall_target(function) -> bool:
-    """Structural impl detection: does this function write a state var that
-    a fallback/receive reads before delegatecalling?  Works regardless of
-    variable name."""
-    contract = function.contract
-    written_vars = set(function.all_state_variables_written())
-    if not written_vars:
-        return False
-
-    for fn in contract.functions:
-        if not (fn.is_fallback or fn.is_receive):
-            continue
-        # Check if fallback has delegatecall in IR
-        has_dc = any("delegatecall" in str(ir).lower() for node in fn.nodes for ir in node.irs)
-        if not has_dc:
-            continue
-        # Check if fallback reads any var this function writes
-        fallback_reads = set(fn.all_state_variables_read())
-        if written_vars & fallback_reads:
-            return True
-    return False
-
-
-def _writes_assembly_delegatecall_slot(function) -> bool:
-    """Detect assembly sstore to a slot that the fallback sloads before delegatecalling."""
-    contract = function.contract
-
-    # Find sstore slots in this function
-    sstore_slots: set[str] = set()
-    for node in function.nodes:
-        for ir in node.irs:
-            ir_str = str(ir)
-            if "sstore" in ir_str.lower():
-                # Extract slot argument: sstore(slot, value)
-                # IR looks like: SOLIDITY_CALL sstore(uint256,uint256)(slot_var, val_var)
-                parts = ir_str.split("(")
-                if len(parts) >= 3:
-                    args = parts[-1].rstrip(")")
-                    slot_arg = args.split(",")[0].strip()
-                    sstore_slots.add(slot_arg)
-    if not sstore_slots:
-        return False
-
-    # Check if fallback sloads the same slot and delegatecalls the result
-    for fn in contract.functions:
-        if not (fn.is_fallback or fn.is_receive):
-            continue
-        sload_slots: set[str] = set()
-        has_dc = False
-        for node in fn.nodes:
-            for ir in node.irs:
-                ir_str = str(ir)
-                if "sload" in ir_str.lower():
-                    parts = ir_str.split("(")
-                    if len(parts) >= 3:
-                        args = parts[-1].rstrip(")")
-                        sload_slots.add(args.split(",")[0].strip())
-                if "delegatecall" in ir_str.lower():
-                    has_dc = True
-        if has_dc and sstore_slots & sload_slots:
-            return True
-    return False
-
-
-def _writes_pause_like_bool(function) -> bool:
-    """Structural pause detection: does this function write a bool state var
-    that a modifier reads, and that modifier gates other functions?"""
-    contract = function.contract
-    written_bools = {v for v in function.all_state_variables_written() if str(getattr(v, "type", "")) == "bool"}
-    if not written_bools:
-        return False
-    for modifier in contract.modifiers:
-        mod_bools = {v for v in modifier.all_state_variables_read() if str(getattr(v, "type", "")) == "bool"}
-        if not (written_bools & mod_bools):
-            continue
-        # This modifier reads a bool we write — check if it gates other functions
-        for fn in contract.functions:
-            if fn != function and modifier in fn.modifiers:
-                return True
-    return False
-
-
-def _writes_owner_like_address(function) -> bool:
-    """Structural ownership detection: does this function write an address state var
-    that a modifier compares against msg.sender?"""
-    contract = function.contract
-    written_addrs = {v for v in function.all_state_variables_written() if str(getattr(v, "type", "")) == "address"}
-    if not written_addrs:
-        return False
-    written_names = {getattr(v, "name", "").lower() for v in written_addrs}
-    for modifier in contract.modifiers:
-        for node in modifier.nodes:
-            for ir in node.irs:
-                ir_str = str(ir).lower()
-                # Look for: TMP = msg.sender == <var_name>
-                if "msg.sender" in ir_str:
-                    for name in written_names:
-                        if name and name in ir_str:
-                            return True
-            for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
-                if not _internal_call_reads_written_var_from_sender(ir, written_addrs):
-                    continue
-                return True
-    return False
-
-
-def _internal_call_reads_written_var_from_sender(ir: Any, written_vars: set[Any]) -> bool:
-    if type(ir).__name__ not in {"InternalCall", "LibraryCall"}:
-        return False
-    callee = getattr(ir, "function", None)
-    if callee is None:
-        return False
-    if not any("msg.sender" in str(arg) for arg in getattr(ir, "arguments", ()) or ()):
-        return False
-    return bool(set(getattr(callee, "all_state_variables_read", lambda: [])()) & written_vars)
-
-
-def _writes_authority_reference(function) -> bool:
-    """Structural authority detection: does this function write an address state var
-    that a modifier makes a high-level call to (i.e., calls it for auth checks)?"""
-    contract = function.contract
-    written_vars = set(function.all_state_variables_written())
-    if not written_vars:
-        return False
-    for modifier in contract.modifiers:
-        # Get all state vars that the modifier calls (not just reads/compares)
-        for callee_contract, call_ir in modifier.all_high_level_calls():
-            ir_str = str(call_ir)
-            # The IR contains "dest:VARNAME(Type)" — check if the dest is a var we write
-            for var in written_vars:
-                var_name = getattr(var, "name", "")
-                if var_name and f"dest:{var_name}" in ir_str:
-                    return True
-    return False
-
-
-def _writes_hook_reference(function) -> bool:
-    """Structural hook detection: does this function write an address state var
-    that another function calls AND that other function also writes to a mapping
-    (i.e., it's a transfer/state-changing function with a hook callback)?"""
-    contract = function.contract
-    written_vars = set(function.all_state_variables_written())
-    if not written_vars:
-        return False
-    for fn in contract.functions:
-        if fn == function or fn.is_constructor:
-            continue
-        # Does this function write to a mapping? (balance-changing function)
-        writes_mapping = any("mapping" in str(getattr(v, "type", "")) for v in fn.all_state_variables_written())
-        if not writes_mapping:
-            continue
-        # Does it call a state var that our function writes?
-        for callee_contract, call_ir in fn.all_high_level_calls():
-            ir_str = str(call_ir)
-            for var in written_vars:
-                var_name = getattr(var, "name", "")
-                if var_name and f"dest:{var_name}" in ir_str:
-                    return True
-    return False
-
-
-def _is_address_like_state_var(var) -> bool:
-    """Address or contract/interface-typed state var."""
-    type_str = str(getattr(var, "type", ""))
-    if "address" in type_str.lower():
-        return True
-    # User-defined contract/interface types start uppercase (e.g. "IHook", "AuthorityLike").
-    return bool(type_str) and type_str[0].isupper()
-
-
-def _writes_unclassified_address_pointer(function) -> bool:
-    """Bare setter that writes a single address/contract state var with no other effects
-    and no owner/authority/pause/impl role — e.g. ``function setHook(address h) { hook = h; }``."""
-    if _writes_owner_like_address(function):
-        return False
-    if _writes_authority_reference(function):
-        return False
-    if _writes_pause_like_bool(function):
-        return False
-    if _writes_delegatecall_target(function):
-        return False
-    if _writes_assembly_delegatecall_slot(function):
-        return False
-    written = list(function.all_state_variables_written())
-    if len(written) != 1 or not _is_address_like_state_var(written[0]):
-        return False
-    # Modifier auth calls don't count as effects; only inspect the body.
-    for node in function.nodes:
-        for ir in node.irs:
-            op = type(ir).__name__
-            if op in ("HighLevelCall", "LowLevelCall", "LibraryCall"):
-                return False
-    return True
-
-
-def _detect_supply_change_pattern(function) -> str | None:
-    """Mint/burn via pre/post totalSupply selector checks around another call."""
-
-    def _extract_dest(ir_str: str) -> str | None:
-        idx = ir_str.find("dest:")
-        if idx < 0:
-            return None
-        rest = ir_str[idx + 5 :]
-        paren = rest.find("(")
-        return rest[:paren] if paren > 0 else None
-
-    total_supply_dests: list[str] = []
-    other_dests: set[str] = set()
-    has_greater = False
-    has_less = False
-    for node in function.nodes:
-        for ir in node.irs:
-            op = type(ir).__name__
-            ir_str = str(ir)
-            if op == "HighLevelCall":
-                dest = _extract_dest(ir_str)
-                if not dest:
-                    continue
-                selector = _selector_for_signature(_callee_signature_from_ir(ir))
-                if selector == _TOTAL_SUPPLY_SELECTOR:
-                    total_supply_dests.append(dest)
-                else:
-                    other_dests.add(dest)
-            elif op == "Binary":
-                if " > " in ir_str:
-                    has_greater = True
-                elif " < " in ir_str:
-                    has_less = True
-
-    from collections import Counter
-
-    for receiver, count in Counter(total_supply_dests).items():
-        if count >= 2 and receiver in other_dests:
-            if has_greater:
-                return "mint"
-            if has_less:
-                return "burn"
-    return None
-
-
 def _detect_encoded_selectors(function) -> set[str]:
     """Scan IR for abi.encodeWithSelector calls with known ERC20 selectors."""
     labels: set[str] = set()
@@ -662,24 +421,14 @@ def _detect_encoded_selectors(function) -> set[str]:
 
 
 def _effect_labels(function, graph_entry: dict | None) -> list[str]:
+    """The retained fact-tier labels: value-flow selector facts, low-level
+    value movement, canonical access-control selectors, and sink-kind
+    capabilities. The semantic labels (ownership, pause, upgrade, hook,
+    supply, authority) are minted by the Plane-1 claims registry and folded
+    into ``effect_labels`` by ``project_effect_labels`` — this function no
+    longer guesses them from single-function structure."""
     labels: set[str] = set()
     sink_kinds = set(graph_entry.get("sink_kinds", [])) if graph_entry else set()
-
-    # Pause: writes a bool that a modifier reads and gates other functions
-    if _writes_pause_like_bool(function):
-        labels.add("pause_toggle")
-
-    # Ownership: writes an address var that a modifier compares to msg.sender
-    if _writes_owner_like_address(function):
-        labels.add("ownership_transfer")
-
-    # Implementation update: writes a var the fallback reads before delegatecall
-    if _writes_delegatecall_target(function):
-        labels.add("implementation_update")
-
-    # Implementation update: assembly sstore to a slot the fallback sloads + delegatecalls
-    if _writes_assembly_delegatecall_slot(function):
-        labels.add("implementation_update")
 
     # Asset send: low-level .call{value:} (ETH transfer)
     if _function_has_low_level_value_call(function):
@@ -689,25 +438,8 @@ def _effect_labels(function, graph_entry: dict | None) -> list[str]:
     labels.update(_detect_encoded_selectors(function))
     labels.update(_labels_from_external_call_sinks(graph_entry))
 
-    supply_change = _detect_supply_change_pattern(function)
-    if supply_change:
-        labels.add(supply_change)
-
-    # Authority: writes an address var that a modifier calls for auth checks
-    if _writes_authority_reference(function):
-        labels.add("authority_update")
-
-    # Hook: writes an address var that a mapping-writing function calls
-    if _writes_hook_reference(function):
-        labels.add("hook_update")
-
-    # Ownership mutation is labelled by a cross-function post-pass
-    # (``apply_authority_effect_labels`` in effects.py) that reads the
-    # predicate trees' caller_authority equality leaves — it knows precisely
-    # which scalar authorizes the caller, which a single-function scan cannot.
-    # Roles/authority are matched by canonical selector instead (see
-    # _ACCESS_CONTROL_SELECTORS for why membership can't go through the
-    # post-pass).
+    # Roles / authority replacement matched on the canonical ABI selector of a
+    # standardized access-control entry point (OZ AccessControl, Solmate).
     access_control = _access_control_label(function)
     if access_control:
         labels.add(access_control)
@@ -722,10 +454,6 @@ def _effect_labels(function, graph_entry: dict | None) -> list[str]:
     # Downgrade generic external_contract_call when a more specific label applies
     if labels.intersection({"asset_pull", "asset_send", "arbitrary_external_call", "mint", "burn"}):
         labels.discard("external_contract_call")
-
-    # Fallback: fires only if no more specific label matched.
-    if not labels and _writes_unclassified_address_pointer(function):
-        labels.add("hook_update")
 
     return _dedupe_strings(list(labels))
 

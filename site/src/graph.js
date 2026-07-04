@@ -1,3 +1,13 @@
+import { claimSummaryLine } from "./claimsVocab.js";
+
+// Chip/meta line for a function: registry claim sentences + provenance tier
+// when claims are present, else the legacy effect_labels strings (stale rows).
+export function functionEffectLine(entry) {
+  const claims = claimSummaryLine(entry);
+  if (claims) return claims.label;
+  return (entry?.effect_labels || []).join(" · ");
+}
+
 export function shortenAddress(value) {
   if (!value || typeof value !== "string" || !value.startsWith("0x") || value.length < 12) {
     return value || "Unknown";
@@ -319,7 +329,7 @@ export function buildVisualPermissionGraph(detail) {
       column: "function",
       title: prettyFunctionName(entry.function),
       subtitle: entry.action_summary || "",
-      meta: (entry.effect_labels || []).join(" · ") || "permissioned function",
+      meta: functionEffectLine(entry) || "permissioned function",
       kind: "function",
       detailTitle: entry.function,
       raw: entry,

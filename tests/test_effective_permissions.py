@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +12,7 @@ def _effect(
     *,
     targets: list[str] | None = None,
     labels: list[str] | None = None,
+    claims: list[dict] | None = None,
     summary: str = "Performs a contract action.",
     sink_kind: str = "state_write",
 ) -> dict:
@@ -18,10 +20,15 @@ def _effect(
         signature: {
             "effect_targets": targets or [],
             "effect_labels": labels or [],
+            "claims": claims or [],
             "action_summary": summary,
             "sinks": [{"kind": sink_kind, "target": (targets or ["state"])[0]}],
         }
     }
+
+
+def _claim(claim_id: str, tier: str = "idiom_structural") -> dict:
+    return {"claim_id": claim_id, "tier": tier, "witness": {}}
 
 
 def _effects(*records: dict) -> dict:
@@ -289,6 +296,7 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
                 "manage(address,bytes,uint256)",
                 targets=["target.functionCallWithValue"],
                 labels=["arbitrary_external_call"],
+                claims=[_claim("exec.arbitrary", tier="standard_exact")],
                 summary="Executes arbitrary external calldata from the contract.",
                 sink_kind="external_call",
             ),
@@ -296,6 +304,7 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
                 "setBeforeTransferHook(address)",
                 targets=["hook"],
                 labels=["hook_update"],
+                claims=[_claim("callee_pointer.rotate")],
                 summary="Updates hook configuration that can affect later contract behavior.",
             ),
         ),
@@ -303,11 +312,14 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
 
     assert payload["authority_contract"] is None
     assert payload["principal_resolution"]["status"] == "complete"
-    functions = {item["function"]: item for item in payload["functions"]}
+    functions: dict[str, Any] = {item["function"]: item for item in payload["functions"]}
 
     manage = functions["manage(address,bytes,uint256)"]
     assert manage["selector"] == "0xf6e715d0"
     assert manage["effect_labels"] == ["arbitrary_external_call"]
+    # The Plane-1 claim provenance rides through to the payload alongside the
+    # legacy projection, so a consumer can key off the typed claim id.
+    assert [c["claim_id"] for c in manage["claims"]] == ["exec.arbitrary"]
     assert manage["action_summary"] == "Executes arbitrary external calldata from the contract."
     assert manage["authority_roles"] == []
     manage_cap = manage.get("capability_expr")
@@ -316,6 +328,10 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
     hook = functions["setBeforeTransferHook(address)"]
     assert hook["selector"] == "0x8929565f"
     assert hook["effect_targets"] == ["hook"]
+    # ``hook_update`` is now the legacy projection of the ``callee_pointer.rotate``
+    # claim; both are carried.
+    assert hook["effect_labels"] == ["hook_update"]
+    assert [c["claim_id"] for c in hook["claims"]] == ["callee_pointer.rotate"]
     assert hook["authority_roles"] == []
     hook_cap = hook.get("capability_expr")
     assert isinstance(hook_cap, dict)

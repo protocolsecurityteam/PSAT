@@ -281,6 +281,7 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
             "selector": ef.selector,
             "effect_labels": list(ef.effect_labels or []),
             "effect_targets": list(ef.effect_targets or []),
+            "claims": list(getattr(ef, "claims", None) or []),
             "action_summary": ef.action_summary,
             "authority_public": ef.authority_public,
             "controllers": [{"principals": controller_principals}] if controller_principals else [],

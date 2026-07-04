@@ -53,6 +53,8 @@ class EffectiveFunctionPermission(TypedDict):
     controllers: list[ResolvedControllerGrant]
     effect_targets: list[str]
     effect_labels: list[str]
+    # Plane-1 claims dual-written alongside effect_labels: {claim_id, tier, witness}.
+    claims: NotRequired[list[dict[str, Any]]]
     action_summary: str
     notes: list[str]
     capability_expr: NotRequired[dict[str, Any]]

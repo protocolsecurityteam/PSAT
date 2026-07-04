@@ -17,7 +17,8 @@ from slither.slither import Slither
 from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
 from utils.logging import record_degraded, record_stage_metric
 
-from .effects import EffectsArtifact, apply_authority_effect_labels, build_effects
+from ..claims import attach_claims_to_effects, build_claims, project_effect_labels
+from .effects import EffectsArtifact, build_effects
 from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
@@ -233,19 +234,23 @@ def collect_contract_analysis_with_artifacts(
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
-    # Cross-reference the two artifacts: label ownership/role mutation from the
-    # predicate trees' caller_authority leaves (single source of truth, per the
-    # note above). Must run before semantic_control, which reads effect_labels.
-    with _phase("authority_effect_labels", durations_ms):
+    # Plane 1: mint typed claims from the Plane-0 facts and project them onto the
+    # legacy ``effect_labels`` (ownership/pause/upgrade/hook/... now come from
+    # evidenced claims, not single-function structural guesses). Rides through the
+    # effects artifact so the policy stage carries it with no new plumbing. Must
+    # run before semantic_control, which reads effect_labels.
+    with _phase("claims", durations_ms):
         try:
-            apply_authority_effect_labels(subject_contract, effects_artifact, predicate_trees_artifact)
+            claims_artifact = build_claims(subject_contract, effects_artifact, predicate_trees_artifact)
+            attach_claims_to_effects(effects_artifact, claims_artifact)
+            project_effect_labels(effects_artifact)
         except Exception as exc:
             logger.warning(
-                "authority effect-label post-pass failed for %s",
+                "claims emit failed for %s",
                 project_dir,
-                extra={"exc_type": type(exc).__name__, "phase": "authority_effect_labels"},
+                extra={"exc_type": type(exc).__name__, "phase": "claims"},
             )
-            record_degraded(phase="authority_effect_labels", exc=exc, context={"project_dir": str(project_dir)})
+            record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)

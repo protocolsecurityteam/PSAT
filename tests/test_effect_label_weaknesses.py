@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from slither.slither import Slither
 
+from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
 from services.static.contract_analysis_pipeline.effects import build_effects
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts,
@@ -42,9 +43,12 @@ def _scaffold_and_analyze(solidity_source: str, contract_name: str = "Target") -
         if subject is None:
             raise RuntimeError(f"Contract {contract_name} not found")
 
-        # _build_semantic_control_summary reads predicate_trees + effects.
+        # Full production label sequence: facts -> Plane-1 claims -> projection.
         predicate_trees = build_predicate_artifacts(subject)
         effects = build_effects(subject)
+        claims_artifact = build_claims(subject, effects, predicate_trees)
+        attach_claims_to_effects(effects, claims_artifact)
+        project_effect_labels(effects)
         semantic_control = _build_semantic_control_summary(subject, project_dir, predicate_trees, effects)
 
         return {"semantic_control": semantic_control, "effects": effects}
@@ -71,8 +75,10 @@ def _all_labels(analysis: dict) -> dict[str, set[str]]:
 
 # =========================================================================
 # WEAKNESS 1: Non-standard naming for implementation slots
-# Implementation updates should be found from fallback/delegatecall slot
-# semantics, not from the state-variable name.
+# The bespoke same-contract impl-slot dataflow detector is retired (0 firings
+# on prod + both local samples). ``upgrade.implementation`` is standard-gated;
+# a non-standard ``setLogic``/``_logic`` proxy pattern yields no upgrade claim,
+# and the delegatecall remains a fact on the fallback.
 # =========================================================================
 
 
@@ -109,7 +115,8 @@ def test_nonstandard_impl_slot_name():
     """)
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, "setLogic")
-    assert "implementation_update" in labels, f"Expected implementation_update for setLogic, got: {labels}"
+    assert "implementation_update" not in labels, f"Expected NO implementation_update for setLogic, got: {labels}"
+    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
 # =========================================================================

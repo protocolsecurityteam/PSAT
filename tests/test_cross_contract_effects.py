@@ -1,411 +1,373 @@
-"""Cross-contract effect label enrichment tests.
+"""Cross-contract policy-derived claim tests (unit layer).
 
-Tests that when contract A calls contract B.someFunc(), and we've analyzed
-contract B and know someFunc's effect labels, those labels propagate to A.
+Drives the real production functions in ``services.static.cross_contract`` — the
+registry, ``emit_claim``, ``resolve_claim_precedence``, and every derivation —
+over ``effects``-shaped fact dicts (input data, not faked collaborators). No
+Slither/DB, so these run in every offline suite.
+
+The legacy propagate-every-effect-label rule is gone: these assert typed
+``policy_derived`` claims only, and that a control-plane label never rides across
+a call boundary.
 """
 
-import random
-import string
-import sys
-from pathlib import Path
+from __future__ import annotations
 
 from eth_utils.crypto import keccak
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from services.static.claims import is_registered
+from services.static.cross_contract import (
+    TRANSFER_POLICY_CONFIGURE,
+    build_callee_claim_map,
+    derive_cross_contract_claims,
+    proxy_provenance_from_classifications,
+    sibling_transfer_hook_links,
+)
 
-from services.static.cross_contract import build_callee_effect_map, enrich_cross_contract_effects
+TOKEN = "0x1111111111111111111111111111111111111111"
+VAULT = "0x2222222222222222222222222222222222222222"
+TELLER = "0x3333333333333333333333333333333333333333"
+BEACON = "0x4444444444444444444444444444444444444444"
+IMPL = "0x9999999999999999999999999999999999999999"
 
-
-def _rand(n: int = 8) -> str:
-    return "".join(random.choices(string.ascii_lowercase, k=n))
+TRANSFER_SELECTOR = "0xa9059cbb"  # transfer(address,uint256)
+UPGRADE_TO = "0x3659cfe6"  # upgradeTo(address)
 
 
 def _selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
-def _callee_effects(callee_signature: str, labels: list[str]) -> dict:
-    return {
-        "schema_version": "semantic",
+def _callee(selector: str, claims: list[dict]) -> dict:
+    return {"functions": {"someFn()": {"selector": selector, "claims": claims}}}
+
+
+def _std(claim_id: str) -> dict:
+    return {"claim_id": claim_id, "tier": "standard_exact", "witness": {}}
+
+
+def _external_sink(target: str, selector: str, *, origin: str = "body", sid: str = "s0") -> dict:
+    return {"id": sid, "kind": "external_call", "target": target, "selector": selector, "origin": origin}
+
+
+def _caller(fn_sig: str, sinks: list[dict]) -> dict:
+    return {"functions": {fn_sig: {"selector": _selector(fn_sig), "sinks": sinks, "claims": []}}}
+
+
+# ---------------------------------------------------------------------------
+# The new claim id is registered (emit_claim would fail closed otherwise)
+# ---------------------------------------------------------------------------
+
+
+def test_transfer_policy_claim_is_registered():
+    assert is_registered(TRANSFER_POLICY_CONFIGURE)
+
+
+# ---------------------------------------------------------------------------
+# build_callee_claim_map — only propagatable claims survive
+# ---------------------------------------------------------------------------
+
+
+def test_callee_map_keeps_flow_drops_control_and_weak_tiers():
+    effects = {
         "functions": {
-            callee_signature: {
-                "selector": _selector(callee_signature),
-                "effect_labels": labels,
-            }
-        },
+            "transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]},
+            "grantRole(bytes32,address)": {"selector": "0x2f2ff15d", "claims": [_std("roles.grant")]},
+            "burn(uint256)": {
+                "selector": "0x42966c68",
+                "claims": [{"claim_id": "supply.burn", "tier": "idiom_structural", "witness": {}}],
+            },
+        }
     }
+    callee_map = build_callee_claim_map({TOKEN: effects})
+    assert TOKEN in callee_map
+    # flow.out (flow family, standard) kept; roles.grant (control plane) and
+    # supply.burn (only idiom tier) dropped.
+    assert set(callee_map[TOKEN]) == {TRANSFER_SELECTOR}
+    assert callee_map[TOKEN][TRANSFER_SELECTOR][0]["claim_id"] == "flow.out"
 
 
-def _target_effects(
-    caller_signature: str,
-    target_var: str,
-    callee_signature: str,
-    *,
-    effect_labels: list[str] | None = None,
-) -> dict:
-    callee_name = callee_signature.split("(", 1)[0]
+def test_callee_map_empty_for_missing_claims():
+    assert build_callee_claim_map({TOKEN: {"functions": {}}}) == {}
+    assert build_callee_claim_map(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# Derivation 1: value-flow propagation
+# ---------------------------------------------------------------------------
+
+
+def test_value_flow_propagation_emits_policy_derived():
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
+    controller_values = {"state_variable:token": {"value": TOKEN}}
+
+    out = derive_cross_contract_claims(target, controller_values, callee_map)
+
+    assert "sweep(address)" in out
+    claim = out["sweep(address)"][0]
+    assert claim["claim_id"] == "flow.out"
+    assert claim["tier"] == "policy_derived"
+    assert claim["witness"]["callee"] == TOKEN
+    assert claim["witness"]["selector"] == TRANSFER_SELECTOR
+    assert claim["witness"]["source_tier"] == "standard_exact"
+
+
+def test_guard_origin_call_is_not_a_value_flow():
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
+    target = _caller("guarded(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin="guard")])
+    out = derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map)
+    assert out == {}
+
+
+def test_no_join_when_controller_value_unresolved():
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
+    # No controller_values: "token" cannot resolve to an address.
+    assert derive_cross_contract_claims(target, {}, callee_map) == {}
+
+
+def test_no_join_when_callee_not_analyzed():
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
+    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, {}) == {}
+
+
+def test_control_plane_callee_claim_never_propagates():
+    # A callee whose transfer selector somehow carried an authority claim must
+    # not contaminate the caller: build_callee_claim_map already dropped it.
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("authority.replace")])})
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
+    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map) == {}
+
+
+def test_external_contract_controller_id_format_resolves():
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.in")])})
+    target = _caller("pull(address)", [_external_sink("registry.transferFrom", TRANSFER_SELECTOR)])
+    controller_values = {"external_contract:registry": {"value": TOKEN}}
+    out = derive_cross_contract_claims(target, controller_values, callee_map)
+    assert out["pull(address)"][0]["claim_id"] == "flow.in"
+
+
+# ---------------------------------------------------------------------------
+# Derivation 3: beacon upgrade (the one control-plane claim that DOES ride)
+# ---------------------------------------------------------------------------
+
+
+def test_beacon_upgrade_propagates_upgrade_implementation():
+    callee_map = build_callee_claim_map({BEACON: _callee(UPGRADE_TO, [_std("upgrade.implementation")])})
+    target = _caller("upgradeEtherFiNode(address)", [_external_sink("beacon.upgradeTo", UPGRADE_TO)])
+    controller_values = {"state_variable:beacon": {"value": BEACON}}
+    out = derive_cross_contract_claims(target, controller_values, callee_map)
+    claim = out["upgradeEtherFiNode(address)"][0]
+    assert claim["claim_id"] == "upgrade.implementation"
+    assert claim["tier"] == "policy_derived"
+
+
+# ---------------------------------------------------------------------------
+# Derivation 2: transfer_policy.configure
+# ---------------------------------------------------------------------------
+
+
+def _vault_with_hook_pointer(pointer: str = "hook") -> dict:
     return {
-        "schema_version": "semantic",
         "functions": {
-            caller_signature: {
-                "effect_labels": effect_labels or [],
-                "sinks": [
+            "setBeforeTransferHook(address)": {
+                "selector": "0xaabbccdd",
+                "claims": [
                     {
-                        "kind": "external_call",
-                        "target": f"{target_var}.{callee_name}",
-                        "selector": _selector(callee_signature),
+                        "claim_id": "callee_pointer.rotate",
+                        "tier": "idiom_structural",
+                        "witness": {"kind": "use_link", "links": [{"pointer": pointer, "invoked_by": "transfer()"}]},
                     }
                 ],
             }
-        },
+        }
     }
 
 
-TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111"
-CALLER_ADDRESS = "0x2222222222222222222222222222222222222222"
-
-
-def test_basic_cross_contract_mint():
-    """A calls token.randomMint() → B's randomMint has 'mint' label → A gets 'mint'."""
-    mint_fn = _rand()
-    callee_signature = f"{mint_fn}(address,uint256)"
-    caller_signature = "doStuff(address,uint256)"
-
-    # Contract B's analysis (the token)
-    token_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": callee_signature,
-                    "effect_labels": ["mint"],
-                    "effect_targets": ["balances", "totalSupply"],
-                }
-            ]
-        },
+def _teller_with_setter(var: str, declared_type: str) -> dict:
+    return {
+        "functions": {
+            "allowFrom(address)": {
+                "selector": "0xccddeeff",
+                "state_writes": [
+                    {
+                        "var": var,
+                        "declared_type": declared_type,
+                        "member_path": [],
+                        "granularity": "var",
+                        "hygiene_class": "normal",
+                        "origin": "body",
+                    }
+                ],
+                "claims": [],
+            }
+        }
     }
 
-    # Build callee map from B's analysis
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: token_analysis},
-        effects_by_address={TOKEN_ADDRESS: _callee_effects(callee_signature, ["mint"])},
+
+def test_sibling_transfer_hook_links_resolves_to_this_contract():
+    links = sibling_transfer_hook_links(
+        TELLER,
+        {VAULT: _vault_with_hook_pointer()},
+        {VAULT: {"controller_values": {"state_variable:hook": {"value": TELLER}}}},
     )
-    assert TOKEN_ADDRESS in callee_map
-    assert f"name:{mint_fn}" not in callee_map[TOKEN_ADDRESS]
-    assert _selector(callee_signature) in callee_map[TOKEN_ADDRESS]
+    assert links == [{"sibling_address": VAULT, "pointer_var": "hook"}]
 
-    # Contract A's analysis (calls token.randomMint)
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": ["external_contract_call"],
-                    "effect_targets": [f"token.{mint_fn}"],
-                }
-            ]
-        },
-    }
 
-    # Controller values: token state var → actual address
-    controller_values = {
-        "state_variable:token": {"value": TOKEN_ADDRESS},
-    }
-
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
-        callee_map,
-        target_effects=_target_effects(caller_signature, "token", callee_signature),
+def test_sibling_transfer_hook_links_ignores_pointer_to_other_address():
+    links = sibling_transfer_hook_links(
+        TELLER,
+        {VAULT: _vault_with_hook_pointer()},
+        {VAULT: {"controller_values": {"state_variable:hook": {"value": TOKEN}}}},
     )
-    assert caller_signature in enriched
-    assert "mint" in enriched[caller_signature]
+    assert links == []
 
 
-def test_cross_contract_burn():
-    """A calls token.randomBurn() → propagates 'burn'."""
-    burn_fn = _rand()
-    callee_signature = f"{burn_fn}(address,uint256)"
-    caller_signature = "doStuff(uint256)"
-
-    token_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": callee_signature,
-                    "effect_labels": ["burn"],
-                    "effect_targets": [],
-                }
-            ]
-        },
-    }
-
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: token_analysis},
-        effects_by_address={TOKEN_ADDRESS: _callee_effects(callee_signature, ["burn"])},
+def test_transfer_policy_configure_on_bool_mapping_setter():
+    links = sibling_transfer_hook_links(
+        TELLER,
+        {VAULT: _vault_with_hook_pointer()},
+        {VAULT: {"controller_values": {"state_variable:hook": {"value": TELLER}}}},
     )
-
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": ["external_contract_call"],
-                    "effect_targets": [f"token.{burn_fn}"],
-                }
-            ]
-        },
-    }
-
-    controller_values = {"state_variable:token": {"value": TOKEN_ADDRESS}}
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
-        callee_map,
-        target_effects=_target_effects(caller_signature, "token", callee_signature),
-    )
-    assert "burn" in enriched.get(caller_signature, [])
-
-
-def test_cross_contract_multiple_effects():
-    """Target function has multiple effects → all propagate."""
-    fn = _rand()
-    callee_signature = f"{fn}(address,uint256)"
-    caller_signature = "execute(address,uint256)"
-
-    token_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": callee_signature,
-                    "effect_labels": ["mint", "role_management", "external_contract_call"],
-                    "effect_targets": [],
-                }
-            ]
-        },
-    }
-
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: token_analysis},
-        effects_by_address={
-            TOKEN_ADDRESS: _callee_effects(callee_signature, ["mint", "role_management", "external_contract_call"])
-        },
-    )
-
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": [],
-                    "effect_targets": [f"token.{fn}"],
-                }
-            ]
-        },
-    }
-
-    controller_values = {"state_variable:token": {"value": TOKEN_ADDRESS}}
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
-        callee_map,
-        target_effects=_target_effects(caller_signature, "token", callee_signature),
-    )
-    new_labels = enriched.get(caller_signature, [])
-    assert "mint" in new_labels
-    assert "role_management" in new_labels
-
-
-def test_no_enrichment_when_callee_not_analyzed():
-    """If the callee contract isn't in the callee map, nothing happens."""
-    caller_signature = "doStuff()"
-    callee_signature = "randomMint(address,uint256)"
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": ["external_contract_call"],
-                    "effect_targets": ["token.randomMint"],
-                }
-            ]
-        },
-    }
-
-    controller_values = {"state_variable:token": {"value": TOKEN_ADDRESS}}
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
+    out = derive_cross_contract_claims(
+        _teller_with_setter("allowlist", "mapping(address => bool)"),
         {},
-        target_effects=_target_effects(caller_signature, "token", callee_signature),
-    )
-    assert enriched == {}
-
-
-def test_no_enrichment_when_address_unknown():
-    """If the state variable's address isn't resolved, nothing happens."""
-    caller_signature = "doStuff()"
-    callee_signature = "mint(address,uint256)"
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: {}},
-        effects_by_address={TOKEN_ADDRESS: _callee_effects(callee_signature, ["mint"])},
-    )
-
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": ["external_contract_call"],
-                    "effect_targets": ["token.mint"],
-                }
-            ]
-        },
-    }
-
-    # No controller_values → can't resolve "token" to an address
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
         {},
+        sibling_transfer_hooks=links,
+    )
+    claim = out["allowFrom(address)"][0]
+    assert claim["claim_id"] == TRANSFER_POLICY_CONFIGURE
+    assert claim["tier"] == "policy_derived"
+    assert claim["witness"]["configures"] == VAULT
+    assert claim["witness"]["set_vars"] == ["allowlist"]
+
+
+def test_transfer_policy_requires_bool_mapping_shape():
+    links = [{"sibling_address": VAULT, "pointer_var": "hook"}]
+    # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
+    out = derive_cross_contract_claims(
+        _teller_with_setter("owner", "address"),
+        {},
+        {},
+        sibling_transfer_hooks=links,
+    )
+    assert out == {}
+
+
+def test_transfer_policy_requires_a_sibling_hook_link():
+    out = derive_cross_contract_claims(
+        _teller_with_setter("allowlist", "mapping(address => bool)"),
+        {},
+        {},
+        sibling_transfer_hooks=[],
+    )
+    assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# Derivation 4: proxy-verified upgrade provenance
+# ---------------------------------------------------------------------------
+
+
+def _classifications(address: str, **info) -> dict:
+    return {"classifications": {address: {"address": address, **info}}}
+
+
+def test_proxy_provenance_from_slot_confirmed_proxy():
+    art = _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
+    pp = proxy_provenance_from_classifications(TELLER, art)
+    assert pp is not None
+    assert pp == {"proxy": TELLER, "implementation": IMPL, "proxy_type": "eip1967", "slot": pp["slot"]}
+    assert pp["slot"].startswith("0x360894")
+
+
+def test_proxy_provenance_none_for_non_slot_proxy_or_non_proxy():
+    # eip1167 is a bytecode proxy, not a slot-confirmed one.
+    assert (
+        proxy_provenance_from_classifications(
+            TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1167", implementation=IMPL)
+        )
+        is None
+    )
+    assert proxy_provenance_from_classifications(TELLER, _classifications(TELLER, type="eoa")) is None
+    assert proxy_provenance_from_classifications(TELLER, {}) is None
+
+
+def test_provenance_upgrade_emits_policy_derived():
+    pp = proxy_provenance_from_classifications(
+        TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
+    )
+    impl_effects = {
+        "functions": {
+            "upgradeTo(address)": {"selector": UPGRADE_TO, "claims": []},
+            "foo()": {"selector": "0x12341234", "claims": []},
+        }
+    }
+    out = derive_cross_contract_claims(impl_effects, {}, {}, proxy_provenance=pp)
+    claim = out["upgradeTo(address)"][0]
+    assert claim["claim_id"] == "upgrade.implementation"
+    assert claim["tier"] == "policy_derived"
+    assert claim["witness"]["implementation"] == IMPL
+    assert "foo()" not in out  # non-upgrade selectors untouched
+
+
+def test_provenance_does_not_override_static_standard_exact():
+    """A static standard_exact upgrade claim on the same function survives the
+    per-function precedence merge; the policy_derived duplicate is dropped."""
+    from services.static.claims import Claim, resolve_claim_precedence
+
+    pp = proxy_provenance_from_classifications(
+        TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
+    )
+    out = derive_cross_contract_claims(
+        {"functions": {"upgradeTo(address)": {"selector": UPGRADE_TO, "claims": []}}},
+        {},
+        {},
+        proxy_provenance=pp,
+    )
+    static_claim: Claim = {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"static": True}}
+    merged = resolve_claim_precedence([static_claim, *out["upgradeTo(address)"]])
+    assert len(merged) == 1
+    assert merged[0]["tier"] == "standard_exact"
+
+
+# ---------------------------------------------------------------------------
+# The four derivations compose without clobbering each other
+# ---------------------------------------------------------------------------
+
+
+def test_derivations_merge_per_function():
+    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
+    target = {
+        "functions": {
+            "sweep(address)": {
+                "selector": _selector("sweep(address)"),
+                "sinks": [_external_sink("token.transfer", TRANSFER_SELECTOR)],
+                "state_writes": [],
+                "claims": [],
+            },
+            "allowFrom(address)": {
+                "selector": "0xccddeeff",
+                "sinks": [],
+                "state_writes": [
+                    {
+                        "var": "allowlist",
+                        "declared_type": "mapping(address => bool)",
+                        "member_path": [],
+                        "granularity": "var",
+                        "hygiene_class": "normal",
+                        "origin": "body",
+                    }
+                ],
+                "claims": [],
+            },
+        }
+    }
+    out = derive_cross_contract_claims(
+        target,
+        {"state_variable:token": {"value": TOKEN}},
         callee_map,
-        target_effects=_target_effects(caller_signature, "token", callee_signature),
+        sibling_transfer_hooks=[{"sibling_address": VAULT, "pointer_var": "hook"}],
     )
-    assert enriched == {}
-
-
-def test_no_duplicate_labels():
-    """If the caller already has the label, don't add it again."""
-    caller_signature = "withdraw(address)"
-    callee_signature = "transfer(address,uint256)"
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: {}},
-        effects_by_address={TOKEN_ADDRESS: _callee_effects(callee_signature, ["asset_send"])},
-    )
-
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": ["asset_send"],  # already has it
-                    "effect_targets": ["token.transfer"],
-                }
-            ]
-        },
-    }
-
-    controller_values = {"state_variable:token": {"value": TOKEN_ADDRESS}}
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
-        callee_map,
-        target_effects=_target_effects(caller_signature, "token", callee_signature, effect_labels=["asset_send"]),
-    )
-    assert enriched == {}  # nothing new added
-
-
-def test_external_contract_controller_id_format():
-    """Controller IDs can be 'external_contract:xxx' not just 'state_variable:xxx'."""
-    fn = _rand()
-    callee_signature = f"{fn}(uint256)"
-    caller_signature = "manage()"
-
-    callee_map = build_callee_effect_map(
-        {TOKEN_ADDRESS: {}},
-        effects_by_address={TOKEN_ADDRESS: _callee_effects(callee_signature, ["pause_toggle"])},
-    )
-
-    caller_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": caller_signature,
-                    "effect_labels": [],
-                    "effect_targets": [f"registry.{fn}"],
-                }
-            ]
-        },
-    }
-
-    controller_values = {"external_contract:registry": {"value": TOKEN_ADDRESS}}
-    enriched = enrich_cross_contract_effects(
-        caller_analysis,
-        controller_values,
-        callee_map,
-        target_effects=_target_effects(caller_signature, "registry", callee_signature),
-    )
-    assert "pause_toggle" in enriched.get(caller_signature, [])
-
-
-def test_chain_propagation():
-    """A calls B.foo(), B.foo() calls C.bar() — if we analyze in sequence,
-    B's enriched labels should propagate to A."""
-    fn_b = _rand()
-    fn_c = _rand()
-    sig_b = f"{fn_b}(address,uint256)"
-    sig_c = f"{fn_c}(address,uint256)"
-    sig_a = "execute(address,uint256)"
-    addr_b = "0x3333333333333333333333333333333333333333"
-    addr_c = "0x4444444444444444444444444444444444444444"
-
-    # C's analysis: fn_c has "mint"
-    c_analysis = {
-        "semantic_control": {
-            "semantic_functions": [{"function": sig_c, "effect_labels": ["mint"], "effect_targets": []}]
-        },
-    }
-
-    # B's analysis: fn_b calls C's fn_c
-    b_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": sig_b,
-                    "effect_labels": ["external_contract_call"],
-                    "effect_targets": [f"registry.{fn_c}"],
-                }
-            ]
-        },
-    }
-
-    # First pass: enrich B with C's effects
-    callee_map_1 = build_callee_effect_map(
-        {addr_c: c_analysis},
-        effects_by_address={addr_c: _callee_effects(sig_c, ["mint"])},
-    )
-    b_controllers = {"state_variable:registry": {"value": addr_c}}
-    enriched_b = enrich_cross_contract_effects(
-        b_analysis,
-        b_controllers,
-        callee_map_1,
-        target_effects=_target_effects(sig_b, "registry", sig_c),
-    )
-
-    assert "mint" in enriched_b.get(sig_b, [])
-
-    # Second pass: enrich A with B's semantically updated effects carrier.
-    callee_map_2 = build_callee_effect_map(
-        {addr_b: b_analysis},
-        effects_by_address={addr_b: _callee_effects(sig_b, ["external_contract_call", *enriched_b.get(sig_b, [])])},
-    )
-
-    a_analysis = {
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": sig_a,
-                    "effect_labels": [],
-                    "effect_targets": [f"handler.{fn_b}"],
-                }
-            ]
-        },
-    }
-    a_controllers = {"state_variable:handler": {"value": addr_b}}
-    enriched = enrich_cross_contract_effects(
-        a_analysis,
-        a_controllers,
-        callee_map_2,
-        target_effects=_target_effects(sig_a, "handler", sig_b),
-    )
-
-    # A should also have "mint" now (propagated through B)
-    assert "mint" in enriched.get(sig_a, [])
+    assert out["sweep(address)"][0]["claim_id"] == "flow.out"
+    assert out["allowFrom(address)"][0]["claim_id"] == TRANSFER_POLICY_CONFIGURE

@@ -188,6 +188,55 @@
       "contract_name": "OzV5AccessControlDefaultAdmin",
       "description": "OZ-v5 ERC-7201 namespaced ownership in the two etherfi forms: OzV5Ownable (OwnableUpgradeable, EtherfiL1SyncPoolETH cid 615) surfaces the suppressed OwnableStorageLocation slot constant, and OzV5AccessControlDefaultAdmin (AccessControlDefaultAdminRules with owner()=>defaultAdmin(), CumulativeMerkleDrop cid 462) inlines owner() to a view_call of the private _getAccessControlDefaultAdminRulesStorage() accessor. The owner controller and the gate principal must both resolve via owner(), never the dead slot/accessor.",
       "detection_patterns": ["owner_guard", "oz_v5_namespaced_storage", "namespaced_storage_authority", "canonical_getter_resolution"]
+    },
+    {
+      "path": "claims_upgrade_exec/uups_eeth_upgrade.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "EETH",
+      "description": "UUPS positive (EETH-class): proxiableUUID sibling gates upgradeTo/upgradeToAndCall for the upgrade.implementation claim.",
+      "detection_patterns": ["uups", "upgrade_control", "claim_upgrade_implementation"]
+    },
+    {
+      "path": "claims_upgrade_exec/proxy_shell_wbeth.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "WBETHProxy",
+      "description": "Proxy-shell positive (wBETH-class zos): delegatecall-fallback gate recovers upgradeTo (upgrade.implementation) and changeAdmin (proxy.admin_change).",
+      "detection_patterns": ["proxy_shell", "delegatecall_fallback", "upgrade_control", "claim_proxy_admin_change"]
+    },
+    {
+      "path": "claims_upgrade_exec/not_a_proxy_upgradeto.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "StrategyRegistry",
+      "description": "Adversarial near-miss NEGATIVE: upgradeTo/changeAdmin selectors present but no proxy gate (no proxiableUUID, delegatecall fallback, or marker event), so no upgrade/admin claim.",
+      "detection_patterns": ["near_miss", "no_proxy_gate", "claim_negative"]
+    },
+    {
+      "path": "claims_upgrade_exec/safe_wallet.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "SafeWallet",
+      "description": "Safe positive (SafeL2-class): getThreshold+getOwners+execTransaction gate yields safe.signer_mgmt/module_mgmt/set_guard plus exec.arbitrary on the execute entries.",
+      "detection_patterns": ["safe", "signer_mgmt", "module_mgmt", "set_guard", "claim_exec_arbitrary"]
+    },
+    {
+      "path": "claims_upgrade_exec/oz_timelock.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "TimelockController",
+      "description": "Timelock positive (OZ TimelockController): getMinDelay+schedule+execute+hashOperation gate yields per-selector timelock.* claims; execute/executeBatch also carry exec.arbitrary.",
+      "detection_patterns": ["oz_timelock", "timelock_schedule", "timelock_execute", "claim_exec_arbitrary"]
+    },
+    {
+      "path": "claims_upgrade_exec/boring_vault_manage.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "BoringVault",
+      "description": "exec.arbitrary idiom positive (BoringVault.manage): a body-origin call forwarding a parameter-tainted destination and calldata, claimed at the idiom_structural tier.",
+      "detection_patterns": ["manage_idiom", "param_taint", "claim_exec_arbitrary"]
+    },
+    {
+      "path": "claims_upgrade_exec/plain_transfer_call.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "PayableToken",
+      "description": "Adversarial taint near-miss NEGATIVE: address-tainted destination but no dynamic-bytes calldata parameter, so the value send earns no exec.arbitrary claim.",
+      "detection_patterns": ["near_miss", "address_taint_only", "claim_negative"]
     }
   ]
 }

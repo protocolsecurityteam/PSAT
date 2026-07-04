@@ -73,7 +73,6 @@ def _stub_analysis_phases(monkeypatch):
     monkeypatch.setattr(core, "Slither", lambda _target: object())
     monkeypatch.setattr(core, "_select_subject_contract", lambda *_a, **_k: subject)
     monkeypatch.setattr(core, "build_effects", lambda *_a, **_k: {})
-    monkeypatch.setattr(core, "apply_authority_effect_labels", lambda *_a, **_k: None)
     monkeypatch.setattr(
         core,
         "_detect_contract_classification",

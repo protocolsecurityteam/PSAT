@@ -220,6 +220,9 @@ def write_effective_function_rows(
         for col_name in ("capability_expr", "conditions", "status"):
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = cap_columns.get(col_name)
+        # Plane-1 claims ride through unchanged alongside the legacy effect_labels.
+        if hasattr(EffectiveFunction, "claims"):
+            ef_kwargs["claims"] = fn.get("claims", [])
         ef = EffectiveFunction(**ef_kwargs)
         session.add(ef)
         session.flush()

@@ -36,6 +36,69 @@ def _slug(value: str) -> str:
     return lowered.strip("_")
 
 
+# --- Plane-1 claim → principal-tag vocabulary --------------------------------
+# Which claim families grant which enrichment tag. Keyed on the atomic claim_id
+# (namespace prefix or exact id), NOT consumer_family: ``pause.*`` / ``lz_oapp.*``
+# are control-plane but not admin powers, and ``exec.arbitrary`` is a manager
+# power that ``contract_deployment`` (also exec-family) is not.
+# ``callee_pointer.rotate`` IS an admin power — the precise use-link idiom that
+# replaced the diluted ``hook_update`` label.
+_ADMIN_CLAIM_PREFIXES = ("ownership.", "roles.", "authority.", "upgrade.", "timelock.", "safe.")
+_ADMIN_CLAIM_IDS = frozenset({"authorized_caller.rotate", "proxy.admin_change", "callee_pointer.rotate"})
+_OPERATOR_CLAIM_PREFIXES = ("flow.", "supply.")
+_MANAGER_CLAIM_IDS = frozenset({"exec.arbitrary"})
+
+# Legacy effect_labels → tag: the fallback for rows written before the claims
+# plane (or a degraded effects artifact). ``hook_update`` is deliberately absent
+# from the admin set — it was the 1/69-correct diluted label, and no measured
+# prod principal depends on it for an admin tag.
+_LEGACY_ADMIN_LABELS = frozenset(
+    {"authority_update", "ownership_transfer", "implementation_update", "role_management", "timelock_operation"}
+)
+_LEGACY_OPERATOR_LABELS = frozenset({"asset_pull", "asset_send", "mint", "burn"})
+_LEGACY_MANAGER_LABELS = frozenset({"arbitrary_external_call"})
+
+
+def _claim_ids(claims: Any) -> set[str]:
+    """The ``claim_id`` strings from a function's ``claims`` list — the
+    ``{claim_id, tier, witness}`` dict shape the effective-permissions payload
+    carries. An unexpected shape reads as empty (claims-less fallback)."""
+    out: set[str] = set()
+    if not isinstance(claims, list):
+        return out
+    for claim in claims:
+        if isinstance(claim, dict):
+            cid = claim.get("claim_id")
+            if isinstance(cid, str) and cid:
+                out.add(cid)
+    return out
+
+
+def _enrichment_tags(claims: Any, effect_labels_set: set[str]) -> set[str]:
+    """The admin/operator/manager tags a function grants its authorized callers.
+
+    Plane-1 claims are authoritative when present; a claim-less function (stale
+    row / degraded artifact) falls back to the legacy effect_labels."""
+    claim_ids = _claim_ids(claims)
+    tags: set[str] = set()
+    if claim_ids:
+        for cid in claim_ids:
+            if cid in _ADMIN_CLAIM_IDS or cid.startswith(_ADMIN_CLAIM_PREFIXES):
+                tags.add("admin")
+            if cid.startswith(_OPERATOR_CLAIM_PREFIXES):
+                tags.add("operator")
+            if cid in _MANAGER_CLAIM_IDS:
+                tags.add("manager")
+        return tags
+    if effect_labels_set & _LEGACY_ADMIN_LABELS:
+        tags.add("admin")
+    if effect_labels_set & _LEGACY_OPERATOR_LABELS:
+        tags.add("operator")
+    if effect_labels_set & _LEGACY_MANAGER_LABELS:
+        tags.add("manager")
+    return tags
+
+
 def _display_from_type(resolved_type: str) -> str:
     return {
         "safe": "Safe",
@@ -74,6 +137,9 @@ def _collect_permissions(
         effect_labels = [str(label) for label in function.get("effect_labels", [])]
         authority_public = bool(function.get("authority_public", False))
         effect_labels_set = set(effect_labels)
+        # Tags depend only on the function's effects, not the caller — compute
+        # once and stamp every authorized principal below.
+        function_tags = _enrichment_tags(function.get("claims"), effect_labels_set)
         direct_owner = function.get("direct_owner")
         if direct_owner:
             address = direct_owner["address"].lower()
@@ -117,19 +183,11 @@ def _collect_permissions(
                         f"{contract_slug}_role_{controller_role_label}_holder",
                     }
                 )
-                if "arbitrary_external_call" in effect_labels_set:
+                if "manager" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_manager")
-                if effect_labels_set.intersection({"asset_pull", "asset_send", "mint", "burn"}):
+                if "operator" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_operator")
-                if effect_labels_set.intersection(
-                    {
-                        "authority_update",
-                        "ownership_transfer",
-                        "hook_update",
-                        "implementation_update",
-                        "role_management",
-                    }
-                ):
+                if "admin" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_admin")
 
         for controller in function.get("controllers", []):
@@ -153,18 +211,11 @@ def _collect_permissions(
                         f"{contract_slug}_controller_{controller_slug}",
                     }
                 )
-                if "arbitrary_external_call" in effect_labels_set:
+                # Controller-path parity with the pre-claims behavior: a
+                # state-variable controller earns manager/admin, never operator.
+                if "manager" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_manager")
-                if effect_labels_set.intersection(
-                    {
-                        "authority_update",
-                        "ownership_transfer",
-                        "hook_update",
-                        "implementation_update",
-                        "role_management",
-                        "timelock_operation",
-                    }
-                ):
+                if "admin" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_admin")
 
     return by_address, {address: ",".join(sorted(labels)) for address, labels in permission_labels.items()}

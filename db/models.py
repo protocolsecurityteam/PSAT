@@ -713,6 +713,9 @@ class EffectiveFunction(Base):
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Plane-1 claims: list of {claim_id, tier, witness}, dual-written alongside
+    # the legacy effect_labels. NULL/[] on rows written before the claims plane.
+    claims: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="effective_functions")
     principals: Mapped[list["FunctionPrincipal"]] = relationship(

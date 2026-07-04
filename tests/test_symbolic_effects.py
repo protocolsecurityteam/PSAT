@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from slither.slither import Slither
 
+from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
 from services.static.contract_analysis_pipeline.effects import build_effects
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts,
@@ -32,6 +33,11 @@ def _rand(n: int = 8) -> str:
 
 
 def _analyze(source: str, name: str = "Target"):
+    """Run the full static label sequence the production pipeline runs:
+    facts (``build_effects``) -> Plane-1 claims -> ``project_effect_labels``,
+    so ``effect_labels`` is the claim projection the redesign emits. The
+    per-function claim ids are stashed on the returned summary for tests that
+    assert the claim directly (labels with no legacy projection)."""
     with tempfile.TemporaryDirectory(prefix="psat_test_sym_") as tmp:
         p = Path(tmp) / f"{name}.sol"
         p.write_text(source)
@@ -42,13 +48,28 @@ def _analyze(source: str, name: str = "Target"):
         # _build_semantic_control_summary reads predicate_trees + effects.
         predicate_trees = build_predicate_artifacts(subject)
         effects = build_effects(subject)
-        return _build_semantic_control_summary(subject, Path(tmp), predicate_trees, effects)
+        claims_artifact = build_claims(subject, effects, predicate_trees)
+        attach_claims_to_effects(effects, claims_artifact)
+        project_effect_labels(effects)
+        ac: dict = dict(_build_semantic_control_summary(subject, Path(tmp), predicate_trees, effects))
+        ac["_claims_by_fn"] = {
+            sig: [claim["claim_id"] for claim in (info.get("claims") or [])]
+            for sig, info in effects["functions"].items()
+        }
+        return ac
 
 
 def _labels(ac, fn_name: str) -> set[str]:
     for pf in ac.get("semantic_functions", []):
         if pf["function"].split("(")[0] == fn_name:
             return set(pf.get("effect_labels", []))
+    return set()
+
+
+def _claims(ac, fn_name: str) -> set[str]:
+    for sig, claim_ids in ac.get("_claims_by_fn", {}).items():
+        if sig.split("(")[0] == fn_name:
+            return set(claim_ids)
     return set()
 
 
@@ -280,13 +301,18 @@ contract Target {{
 # =========================================================================
 # Q4: CAN THE CODE CHANGE? (implementation update)
 #
-# Storage role: "delegation target" — address read in fallback, passed to
-# delegatecall. Writing this = implementation_update.
+# The bespoke same-contract impl-slot dataflow detectors are RETIRED (they
+# fired 0 times on prod and both local samples). ``upgrade.implementation`` is
+# standard-gated (UUPS/1967/proxy-shell selectors); a bespoke, non-standard
+# impl-slot setter gets no upgrade claim. The delegatecall remains a Plane-0
+# fact on the fallback (``delegatecall_execution``), available as evidence for
+# a future bespoke-pattern registry entry.
 # =========================================================================
 
 
 def test_q4_random_impl_slot_delegatecall():
-    """Random variable name stores impl address, fallback delegatecalls to it."""
+    """Random variable name stores impl address, fallback delegatecalls to it.
+    No standard upgrade selector, so no ``implementation_update`` claim."""
     var = f"_{_rand()}"
     fn = _rand()
     source = f"""
@@ -304,11 +330,14 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    assert "implementation_update" in _labels(ac, fn)
+    assert "implementation_update" not in _labels(ac, fn)
+    # The delegatecall is a fact carried on the fallback, not the setter.
+    assert "delegatecall_execution" in _labels(ac, "fallback")
 
 
 def test_q4_assembly_sstore_sload_delegatecall():
-    """Pure assembly: sstore a slot, fallback sloads it and delegatecalls."""
+    """Pure assembly: sstore a slot, fallback sloads it and delegatecalls. The
+    retired assembly-slot detector no longer mints ``implementation_update``."""
     fn = _rand()
     source = f"""
 // SPDX-License-Identifier: MIT
@@ -333,19 +362,25 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    assert "implementation_update" in _labels(ac, fn)
+    assert "implementation_update" not in _labels(ac, fn)
+    assert "delegatecall_execution" in _labels(ac, "fallback")
 
 
 # =========================================================================
-# Q5: CAN WHO'S IN CHARGE CHANGE? (ownership transfer)
+# Q5: CAN WHO'S IN CHARGE CHANGE? (ownership vs caller-authority rotation)
 #
-# Storage role: "owner/admin" — address compared to msg.sender in a modifier.
-# Writing this = ownership_transfer.
+# ``ownership.transfer`` is standards-gated (canonical selectors + an
+# ``owner()`` sibling / two-step standard) so it stays ghost-immune. A bespoke,
+# non-standard caller-authority scalar that a random function rotates is the
+# ``authorized_caller.rotate`` idiom instead: same admin weight, a truthful
+# claim, but NOT the "Transfers contract ownership" sentence (it carries no
+# legacy ownership_transfer projection).
 # =========================================================================
 
 
 def test_q5_random_owner_var():
-    """Random variable name used as msg.sender check in modifier, then written."""
+    """Random caller-authority scalar rotated by a random function, with no
+    ownership standard on the contract -> ``authorized_caller.rotate``."""
     var = f"_{_rand()}"
     mod = _rand()
     fn = _rand()
@@ -360,11 +395,14 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    assert "ownership_transfer" in _labels(ac, fn)
+    assert "authorized_caller.rotate" in _claims(ac, fn)
+    assert "ownership_transfer" not in _labels(ac, fn)
 
 
 def test_q5_two_step_ownership():
-    """Two-step ownership: nominate + accept, both with random names."""
+    """Two-step nominate + accept over bespoke caller-authority scalars: the
+    accept function rotates the admin scalar -> ``authorized_caller.rotate``
+    (no ownership standard, so no ownership_transfer)."""
     admin_var = f"_{_rand()}"
     pending_var = f"_{_rand()}"
     nominate_fn = _rand()
@@ -386,8 +424,8 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    # The accept function writes the admin var which is used in the modifier
-    assert "ownership_transfer" in _labels(ac, accept_fn)
+    assert "authorized_caller.rotate" in _claims(ac, accept_fn)
+    assert "ownership_transfer" not in _labels(ac, accept_fn)
 
 
 # =========================================================================
@@ -402,7 +440,11 @@ contract Target {{
 
 
 def test_q6_random_authority_var():
-    """Random variable stores authority contract, called in modifier for auth checks."""
+    """Random variable stores authority contract, called in modifier for auth
+    checks. The structural ``dest:{name}`` authority detector is RETIRED (it was
+    a category error: a data-freshness call in a modifier matched it too), so a
+    bespoke, non-``setAuthority`` setter is silent. ``authority.replace`` is
+    reserved for the canonical Solmate ``setAuthority`` selector."""
     auth_var = f"_{_rand()}"
     mod = _rand()
     set_fn = _rand()
@@ -421,7 +463,7 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    assert "authority_update" in _labels(ac, set_fn)
+    assert "authority_update" not in _labels(ac, set_fn)
 
 
 def test_q6_random_hook_var():
@@ -478,7 +520,10 @@ contract Target {{
 
 
 def test_compound_pause_and_ownership():
-    """One function pauses AND transfers ownership — should get both labels."""
+    """One function pauses AND rotates the caller-authority scalar. Pause is a
+    claim (``pause.set`` -> ``pause_toggle``); the bespoke admin rotation is
+    ``authorized_caller.rotate`` (no ownership standard), so it carries no
+    ``ownership_transfer`` legacy label."""
     bool_var = f"_{_rand()}"
     admin_var = f"_{_rand()}"
     mod_auth = _rand()
@@ -504,7 +549,8 @@ contract Target {{
     ac = _analyze(source)
     labels = _labels(ac, fn)
     assert "pause_toggle" in labels
-    assert "ownership_transfer" in labels
+    assert "authorized_caller.rotate" in _claims(ac, fn)
+    assert "ownership_transfer" not in labels
 
 
 # =========================================================================
@@ -513,7 +559,9 @@ contract Target {{
 
 
 def test_q6_recursive_authority():
-    """Auth check hidden behind internal helper, setter hidden behind internal helper."""
+    """Auth check + setter hidden behind internal helpers. Same retirement as
+    the direct case: a bespoke authority setter is not the canonical
+    ``setAuthority`` selector, so no ``authority_update``."""
     auth_var = f"_{_rand()}"
     mod = _rand()
     set_fn = _rand()
@@ -538,7 +586,7 @@ contract Target {{
 }}
 """
     ac = _analyze(source)
-    assert "authority_update" in _labels(ac, set_fn)
+    assert "authority_update" not in _labels(ac, set_fn)
 
 
 def test_q6_recursive_hook():

@@ -1,0 +1,67 @@
+"""``flow.out`` / ``flow.in`` — value leaves or enters the contract.
+
+Thin claims over the hardened value-flow facts: ERC-20 callee selectors with the
+``from == address(this)`` direction correction, native ``transfer``/``send``
+sinks, and low-level ``call{value:}``. A callee selector proves the mechanism
+exactly (``standard_exact``); a native/low-level move is structural
+(``idiom_structural``). Guard-origin flows are excluded by the fact layer.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..context import ClaimContext
+from ..decorator import claim_matcher
+from ..types import ClaimEvidence
+from . import _facts
+
+
+def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvidence | None:
+    flows = [f for f in _facts.value_flows(ctx, function) if f.get("direction") == direction]
+    if not flows:
+        return None
+
+    selectors = {f.get("selector") for f in flows if f.get("selector")}
+    sink_ids = [
+        s["id"]
+        for s in _facts.body_sinks(ctx, function)
+        if s.get("kind") == "external_call" and (s.get("selector") in selectors or _is_value_call(s))
+    ]
+    exact = any(f.get("kind") == "callee_erc20_selector" for f in flows)
+    return ClaimEvidence(
+        tier="standard_exact" if exact else "idiom_structural",
+        witness={
+            "kind": "value_flow",
+            "direction": direction,
+            "flows": [
+                {"kind": f.get("kind"), "selector": f.get("selector"), "from_is_self": f.get("from_is_self")}
+                for f in flows
+            ],
+            "sink_ids": sorted(set(sink_ids)),
+        },
+    )
+
+
+def _is_value_call(sink: dict[str, Any]) -> bool:
+    return sink.get("selector") is None and str(sink.get("target") or "").endswith(".call")
+
+
+@claim_matcher(
+    claim_id="flow.out",
+    sentence="sends value out of the contract",
+    legacy_projection="asset_send",
+    consumer_family="flow",
+)
+def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+    return _flow_evidence(ctx, function, "out")
+
+
+@claim_matcher(
+    claim_id="flow.in",
+    sentence="pulls value into the contract",
+    legacy_projection="asset_pull",
+    consumer_family="flow",
+)
+def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+    return _flow_evidence(ctx, function, "in")

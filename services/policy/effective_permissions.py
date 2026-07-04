@@ -483,6 +483,7 @@ def _function_records_from_semantic_artifacts(
             "controller_refs": _controller_refs_from_tree(predicate_trees_by_function.get(signature)),
             "effect_targets": list(effect_info.get("effect_targets") or []),
             "effect_labels": list(effect_info.get("effect_labels") or []),
+            "claims": list(effect_info.get("claims") or []),
             "action_summary": effect_info.get("action_summary") or "Performs a contract action.",
         }
         if signature not in capability_dicts:
@@ -582,11 +583,15 @@ def build_effective_permissions(
         semantic_effect_labels = effects_record.get("effect_labels") if effects_record else None
         semantic_effect_targets = effects_record.get("effect_targets") if effects_record else None
         semantic_action_summary = effects_record.get("action_summary") if effects_record else None
+        semantic_claims = effects_record.get("claims") if effects_record else None
 
         effect_labels_out = (
             list(semantic_effect_labels)
             if isinstance(semantic_effect_labels, list)
             else list(function_record.get("effect_labels", []))
+        )
+        claims_out = (
+            list(semantic_claims) if isinstance(semantic_claims, list) else list(function_record.get("claims", []))
         )
         effect_targets_out = (
             list(semantic_effect_targets)
@@ -609,6 +614,7 @@ def build_effective_permissions(
             "controllers": controller_grants,
             "effect_targets": effect_targets_out,
             "effect_labels": effect_labels_out,
+            "claims": claims_out,
             "action_summary": action_summary_out,
             "notes": notes,
         }

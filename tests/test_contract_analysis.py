@@ -79,7 +79,15 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
 
 def test_fixture_index_covers_all_solidity_contract_fixtures():
     indexed_paths = {entry["path"] for entry in _fixture_index()}
-    fixture_paths = {str(path.relative_to(FIXTURES_DIR)) for path in FIXTURES_DIR.rglob("*.sol")}
+    # The detection-pattern index catalogs the hand-authored single-file fixtures.
+    # ``label_corpus/`` holds the effect-labels golden-gate sources (synthetic
+    # single-file .sol + one Foundry project); their own manifest is the source of
+    # truth, so they are not indexed here.
+    fixture_paths = {
+        str(path.relative_to(FIXTURES_DIR))
+        for path in FIXTURES_DIR.rglob("*.sol")
+        if "label_corpus" not in path.relative_to(FIXTURES_DIR).parts
+    }
 
     assert indexed_paths == fixture_paths
 
@@ -113,7 +121,7 @@ def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp
     # set `error` instead.
     assert "trees" in predicate_trees or "error" in predicate_trees
     assert effects is not None
-    assert effects.get("schema_version") == "semantic"
+    assert effects.get("schema_version") == "semantic-2"
     assert "functions" in effects or "error" in effects
 
 
@@ -127,8 +135,15 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
 
     analysis = collect_contract_analysis(project_dir)
 
-    assert analysis["summary"]["is_upgradeable"] is False
-    assert analysis["upgradeability"]["pattern"] == "none"
+    # Upgradeability is recovered from the UUPS *standard* (``proxiableUUID`` +
+    # ``upgradeTo`` selector), not by guessing on the ``upgradeTo`` name — the
+    # ``upgrade.implementation`` claim projects to ``implementation_update``,
+    # which ``_detect_upgradeability`` consumes. The empty ``upgradeTo`` body
+    # writes no slot, so no implementation slot is inferred.
+    assert analysis["summary"]["is_upgradeable"] is True
+    assert analysis["upgradeability"]["pattern"] == "custom"
+    # Timelock still is NOT name-guessed: bespoke ``schedule``/``execute`` carry
+    # no OZ-timelock standard gate (no getMinDelay / hashOperation), so no claim.
     assert analysis["timelock"]["has_timelock"] is False
     assert analysis["timelock"]["pattern"] == "none"
     assert analysis["contract_classification"]["is_factory"] is True
@@ -291,17 +306,23 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
 
     manage = _semantic_function(analysis, "manage(PingTarget,uint256)")
     assert manage["effect_labels"] == ["external_contract_call"]
-    # Semantic effects include both body and modifier-level external_call
-    # sinks. ``target.ping`` is the body sink; ``auth.canCall`` comes from
-    # the modifier ``isAuthorized`` body.
+    # ``target.ping`` is the body sink and the sole driver of the label. The
+    # modifier ``requiresAuth``'s ``auth.canCall`` is now a guard-origin sink,
+    # excluded from effect_targets so it can't dilute the effect (it stays in
+    # the raw ``sinks`` list as an ``origin=guard`` fact).
     assert "target.ping" in manage["effect_targets"]
+    assert not any("canCall" in target for target in manage["effect_targets"])
     assert manage["action_summary"] == "Calls an external contract from the contract context."
 
     set_hook = _semantic_function(analysis, "setHook(address)")
-    assert set_hook["effect_labels"] == ["hook_update"]
-    # See manage() — modifier sinks now appear alongside body sinks.
-    assert "hook" in set_hook["effect_targets"]
-    assert set_hook["action_summary"] == "Updates hook configuration that can affect later contract behavior."
+    # No sibling entry point invokes ``hook`` at runtime, so ``callee_pointer.rotate``
+    # does not fire — the retired unclassified-pointer fallback used to mislabel
+    # this bare setter ``hook_update``. It now collapses to silence + fact text
+    # (the ``hook`` state write is still the only body sink; the guard-origin
+    # ``auth.canCall`` from ``requiresAuth`` is not a target).
+    assert set_hook["effect_labels"] == []
+    assert set_hook["effect_targets"] == ["hook"]
+    assert set_hook["action_summary"] == "Writes or calls into: hook."
 
     transfer_ownership = _semantic_function(analysis, "transferOwnership(address)")
     assert transfer_ownership["effect_labels"] == ["ownership_transfer"]

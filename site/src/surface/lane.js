@@ -13,8 +13,20 @@ import {
   OUTPUT_HINTS,
 } from "./meta.js";
 import { functionName, hasHint } from "./format.js";
+import {
+  hasClaims,
+  laneForClaims,
+  priorityForClaims,
+  sentenceForClaims,
+  toneForClaims,
+} from "../claimsVocab.js";
 
 export function laneForFunction(fn) {
+  // Claims (Plane 1) decide the lane when present; name-hints stay layout-only
+  // and only fire for claim-less functions.
+  const claimLane = laneForClaims(fn);
+  if (claimLane) return claimLane;
+
   const effects = new Set(fn.effect_labels || []);
   const loweredName = functionName(fn.function).toLowerCase();
 
@@ -28,6 +40,12 @@ export function laneForFunction(fn) {
 }
 
 export function toneForFunction(fn, lane) {
+  const claimTone = toneForClaims(fn);
+  if (claimTone) return claimTone;
+  // A claim-bearing function with no tone of its own (e.g. approve/delegate)
+  // wears its lane tone — never a legacy effect-label tone.
+  if (hasClaims(fn)) return LANE_META[lane].tone;
+
   const effects = new Set(fn.effect_labels || []);
   if (effects.has("implementation_update") || effects.has("delegatecall_execution")) return "#9b8a9e";
   if (effects.has("ownership_transfer")) return "#9e8a8d";
@@ -40,6 +58,11 @@ export function toneForFunction(fn, lane) {
 }
 
 export function compactActionSummary(fn) {
+  // Every vocab entry carries a sentence, so a claim-bearing function always
+  // resolves here and never falls through to the legacy phrases below.
+  const claimSentence = sentenceForClaims(fn);
+  if (claimSentence) return claimSentence;
+
   const effects = new Set(fn.effect_labels || []);
   if (effects.has("implementation_update")) return "changes logic";
   if (effects.has("delegatecall_execution")) return "delegatecall path";
@@ -54,6 +77,9 @@ export function compactActionSummary(fn) {
 }
 
 export function lanePriority(fn) {
+  const claimPriority = priorityForClaims(fn);
+  if (claimPriority !== null) return claimPriority;
+
   const effects = new Set(fn.effect_labels || []);
   if (effects.has("implementation_update") || effects.has("delegatecall_execution")) return 0;
   if (effects.has("ownership_transfer")) return 1;

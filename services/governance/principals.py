@@ -125,6 +125,7 @@ def _build_company_function_entry(
         "selector": ef.selector,
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
+        "claims": list(getattr(ef, "claims", None) or []),
         "action_summary": ef.action_summary,
         "authority_public": ef.authority_public,
         "controllers": controllers,
