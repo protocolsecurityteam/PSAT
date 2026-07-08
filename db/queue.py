@@ -72,6 +72,10 @@ HEARTBEAT_AUDIT_SCOPE = "audit_scope_extraction"
 HEARTBEAT_PROTOCOL_SCANNER = "protocol_scanner"
 HEARTBEAT_PROTOCOL_POLLER = "protocol_poller"
 HEARTBEAT_PROTOCOL_TVL = "protocol_tvl"
+# The ops watchdog runs in the web app lifespan; its heartbeat row doubles as
+# the CAS-guarded store for alert dedupe/cooldown state (services/monitoring/
+# ops_alerts.py).
+HEARTBEAT_OPS_ALERTER = "ops_alerter"
 
 
 def record_heartbeat(process: str, *, status: str = "running", detail: dict[str, Any] | None = None) -> None:

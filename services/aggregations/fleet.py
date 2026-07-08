@@ -40,25 +40,14 @@ from db.queue import (
     HEARTBEAT_AUDIT_SCOPE,
     HEARTBEAT_AUDIT_TEXT,
     HEARTBEAT_COVERAGE_VERIFY,
-    HEARTBEAT_ENROLLMENT_RECONCILER,
     HEARTBEAT_EVENT_INDEXER,
+    HEARTBEAT_PROTOCOL_SCANNER,
 )
+from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
 
 from .audits_pipeline import build_audits_pipeline
 
 logger = logging.getLogger(__name__)
-
-# Per-process display metadata + staleness window. ``interval_s`` is the
-# loop cadence; a process is flagged ``stale`` when its last beat is older
-# than ``3 × interval`` (with a 120s floor) — long enough to absorb one slow
-# pass, short enough to surface a crash. ``kind`` groups processes for the UI.
-PROCESS_META: dict[str, dict[str, Any]] = {
-    HEARTBEAT_COVERAGE_VERIFY: {"kind": "drainer", "interval_s": 30, "label": "Coverage / source-equivalence"},
-    HEARTBEAT_AUDIT_TEXT: {"kind": "drainer", "interval_s": 30, "label": "Audit text extraction"},
-    HEARTBEAT_AUDIT_SCOPE: {"kind": "drainer", "interval_s": 30, "label": "Audit scope extraction"},
-    HEARTBEAT_EVENT_INDEXER: {"kind": "indexer", "interval_s": 90, "label": "Event-log indexer"},
-    HEARTBEAT_ENROLLMENT_RECONCILER: {"kind": "daemon", "interval_s": 660, "label": "Enrollment reconciler"},
-}
 
 # A cursor more than this many blocks behind the leading cursor is "lagging" —
 # the signature of one still backfilling from its contract's creation block
@@ -216,6 +205,14 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
                 "block_spread": spread,
                 "lagging_cursors": idx_lagging,
             }
+        if process == HEARTBEAT_PROTOCOL_SCANNER:
+            # The scanner writes its head-lag into its own heartbeat detail
+            # (design §2.1). Surface it here so "behind" is a first-class number
+            # in the fleet view; tolerate absence (stage-1 scanner deploys
+            # separately and older beats predate the field).
+            hb = beats.get(process)
+            detail = hb.detail if hb and isinstance(hb.detail, dict) else {}
+            return {"max_lag_blocks": detail.get("max_lag_blocks")}
         return None
 
     daemons: list[dict[str, Any]] = []
@@ -223,7 +220,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         hb = beats.get(process)
         beat_at = hb.beat_at if hb else None
         age = _age_seconds(beat_at, now)
-        stale_after = max(3 * meta["interval_s"], 120)
+        stale_after = stale_after_seconds(meta["interval_s"])
         if age is None or age >= stale_after:
             _warn_stale_daemon(process, age)
         daemons.append(

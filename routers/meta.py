@@ -77,6 +77,26 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
     return body
 
 
+@router.get("/api/health/monitoring")
+def monitoring_health() -> Any:
+    """Monitoring-fleet liveness, for an external uptime checker.
+
+    Unauthenticated like ``/api/health`` (it is a probe surface), but where
+    that endpoint proves only that *web* is alive, this one 503s the moment any
+    background monitoring daemon goes stale or errors — closing the "web up,
+    monitoring dead" blind spot. 200 with an empty ``stale`` list when all
+    processes are fresh; 503 with the offending processes otherwise.
+    """
+    from services.monitoring.ops_alerts import collect_stale_processes
+
+    with deps.SessionLocal() as session:
+        stale = collect_stale_processes(session)
+    body: dict[str, Any] = {"status": "ok" if not stale else "unavailable", "stale": stale}
+    if stale:
+        return JSONResponse(body, status_code=503)
+    return body
+
+
 @router.get("/api/version")
 def version() -> dict[str, str]:
     """Returns the deployed git SHA. Used by post-deploy smoke checks to confirm

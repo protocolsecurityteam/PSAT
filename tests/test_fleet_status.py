@@ -47,6 +47,10 @@ _KNOWN_PROCESSES = {
     "audit_scope_extraction",
     "event_log_indexer",
     "enrollment_reconciler",
+    "protocol_scanner",
+    "protocol_poller",
+    "protocol_tvl",
+    "ops_alerter",
 }
 
 
