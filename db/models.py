@@ -343,6 +343,11 @@ class Protocol(Base):
     # so different spellings ("ether fi" vs "etherfi") collapse to one row.
     canonical_slug: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Set to NOW() each time the enrollment reconciler successfully drains this
+    # protocol. The K-per-tick slow sweep enqueues the least-recently-reconciled
+    # protocols (NULLS FIRST) so drift from unknown write sites still converges.
+    last_enrollment_reconcile_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     audit_reports: Mapped[list["AuditReport"]] = relationship(
         "AuditReport", backref="protocol", cascade="all, delete-orphan"
     )
@@ -1066,6 +1071,31 @@ class DaemonLease(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     holder: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MonitoringEnrollmentQueue(Base):
+    """Dirty-flag queue driving the enrollment reconciler (design §2.3).
+
+    One row per protocol that needs its ``monitored_contracts`` (and
+    controllers) reconciled. Write sites call
+    ``services.monitoring.enrollment.mark_enrollment_dirty`` after a
+    protocol-changing action commits; the drainer in
+    ``services.monitoring.reconciler`` claims due rows with a lease
+    (``lease_id`` + ``lease_expires_at``, same pattern as ``db.queue.claim_job``),
+    runs the full ``enroll_protocol_contracts`` build in a fresh session,
+    then deletes the row it claimed. ``dirty_at`` doubles as the due-time
+    cursor: a failed drain pushes it forward exponentially so a poisoned
+    protocol cannot wedge the queue.
+    """
+
+    __tablename__ = "monitoring_enrollment_queue"
+
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), primary_key=True)
+    dirty_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    lease_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EtherscanCache(Base):

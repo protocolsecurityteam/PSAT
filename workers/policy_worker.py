@@ -634,6 +634,14 @@ class PolicyWorker(BaseWorker):
                             "Auto-enrolled protocol %s contracts into monitoring",
                             job.protocol_id,
                         )
+                        # Fast path skipped the controller pass; enqueue a drain
+                        # so the reconciler runs it (enroll_controllers=True).
+                        # Commit now so the initial-TVL block's rollback-on-failure
+                        # below can't discard the pending dirty row.
+                        from services.monitoring.enrollment import mark_enrollment_dirty
+
+                        mark_enrollment_dirty(session, job.protocol_id, "policy_complete")
+                        session.commit()
                         # Fetch DeFiLlama TVL so the protocol has a number immediately.
                         # Per-contract tracked value is already in contract_balances
                         # from the resolution stage — the hourly loop will create

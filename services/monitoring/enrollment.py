@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from db.models import (
     Job,
     JobStatus,
     MonitoredContract,
+    MonitoringEnrollmentQueue,
     WatchedProxy,
 )
 from services.governance.control_graph_types import reconcile_control_graph_types
@@ -27,6 +28,35 @@ from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
+
+
+# Reason vocabulary for ``mark_enrollment_dirty`` — the write site that
+# enqueued the protocol. ``governance_rotation`` (unified_watcher governance
+# sync) is added by a later package. Kept as documentation; not enforced.
+ENROLLMENT_DIRTY_REASONS = frozenset({"policy_complete", "discovery_adoption", "audit_added", "manual", "sweep"})
+
+
+def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str) -> None:
+    """Enqueue *protocol_id* for the enrollment reconciler drain.
+
+    One upsert: a fresh dirty row, or a bump of the existing row's
+    ``dirty_at`` to now() with the new ``reason``. The drainer
+    (``services.monitoring.reconciler.drain_enrollment_queue``) claims due
+    rows, so re-marking a protocol that is mid-build simply re-arms it —
+    the drain's ``dirty_at``-guarded delete keeps the re-dirtied row alive.
+
+    Does not commit; the caller commits so the mark lands atomically with
+    (or right after) the action that triggered it. Callers mark *after* the
+    triggering write commits, so a dirty row never references rolled-back work.
+    """
+    session.execute(
+        pg_insert(MonitoringEnrollmentQueue)
+        .values(protocol_id=protocol_id, reason=reason)
+        .on_conflict_do_update(
+            index_elements=["protocol_id"],
+            set_={"dirty_at": func.now(), "reason": reason},
+        )
+    )
 
 
 def maybe_enroll_protocol(
