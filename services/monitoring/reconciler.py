@@ -294,9 +294,10 @@ def reconcile_enrollments(
     """DEPRECATED — walk-all reconciliation pass; superseded by the dirty-queue
     drain (:func:`drain_enrollment_queue` + :func:`sweep_enqueue_stale`).
 
-    Walks every ``Protocol`` row and re-enrolls it. Retained and exported only
-    because ``unified_watcher._boot_reconcile`` still imports it until stage 1
-    lands; new code must use the drain. A per-protocol exception is logged and
+    Walks every ``Protocol`` row and re-enrolls it. Production callers are
+    gone (stage 1 deleted ``_boot_reconcile``); retained for the anvil
+    enrollment suite until it migrates to the drain. New code must use the
+    drain. A per-protocol exception is logged and
     swallowed so one broken protocol does not abort the sweep. Returns the count
     of protocols successfully reconciled.
     """

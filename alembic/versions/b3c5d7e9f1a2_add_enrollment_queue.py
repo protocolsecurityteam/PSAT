@@ -1,7 +1,7 @@
 """add monitoring_enrollment_queue and protocols.last_enrollment_reconcile_at
 
 Revision ID: b3c5d7e9f1a2
-Revises: a1b2c3d4e5f6
+Revises: b2c3d4e5f6a7
 Create Date: 2026-07-08
 
 Dirty-flag enrollment queue + slow-sweep cursor for the monitoring restructure

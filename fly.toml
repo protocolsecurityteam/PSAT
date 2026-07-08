@@ -27,10 +27,6 @@ kill_timeout = 30
   # ~13 min). Cache misses still fall through to a live call that is persisted.
   PSAT_EXA_CACHE = "1"
   PSAT_TAVILY_CACHE = "1"
-  # Interim (stage 1): the reconciler still runs full sweeps until the
-  # dirty-queue lands in stage 5, which removes this. Cut 6× from the
-  # 600s default now that it runs on the 16GB workers box, not the monitor.
-  PSAT_ENROLLMENT_RECONCILE_INTERVAL = "3600"
 
 # One-shot schema migration in a temporary machine. Runs once per
 # deploy, before any long-lived machine boots — so the four process
