@@ -45,7 +45,6 @@ from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.rpc import (
     MAX_BATCH_SIZE,
-    normalize_hex,
     rpc_batch_request,
     rpc_request,
 )
@@ -182,6 +181,9 @@ def _notify_window(session: Session, events: list[MonitoredEvent]) -> None:
         notify_protocol_events(session, events)
     except Exception as exc:
         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
+        # The window is already committed; a failed read here must not leave
+        # the session in a pending-rollback state that would abort the pass.
+        session.rollback()
 
 
 def _process_window(
