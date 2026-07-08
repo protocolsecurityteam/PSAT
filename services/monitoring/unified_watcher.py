@@ -44,6 +44,8 @@ from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.rpc import (
+    MAX_BATCH_SIZE,
+    normalize_hex,
     rpc_batch_request,
     rpc_request,
 )
@@ -55,6 +57,9 @@ logger = logging.getLogger(__name__)
 MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
+# Poller rotation slice — how many needs_polling contracts one pass claims,
+# ordered oldest-cursor-first. Bounds the pass to O(slice) memory (design §1.3).
+DEFAULT_POLL_CONTRACTS_PER_PASS = 500
 
 # monitored_events must only ingest confirmed logs — a reorg-rewound event
 # would have already fired a Discord notification and a reanalysis job that
@@ -1078,33 +1083,178 @@ def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list] | None:
     return None
 
 
+def _apply_poll_result(
+    session: Session,
+    mc: MonitoredContract,
+    entry: dict,
+    raw: str | None,
+    new_events: list[MonitoredEvent],
+) -> None:
+    """Decode one poll result and, when the value changed, persist the new
+    ``last_known_state``, emit a ``state_changed_poll`` event, and run the
+    downstream sync (proxy write-through, relational, reanalysis, per-entry
+    scanner-duplicate suppression).
+
+    The computation is identical to the pre-rotation inline driver; only the
+    framing moved from a single flat loop to per-chunk dispatch.
+    """
+    field_name = entry.get("field")
+    if not isinstance(field_name, str) or not field_name:
+        return
+    new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
+    if new_value is None:
+        return
+
+    state = dict(mc.last_known_state or {})
+    old_value = state.get(field_name)
+    if new_value == old_value:
+        return
+
+    # Always record the new value in last_known_state, even on the
+    # first observation — subsequent polls then have a baseline.
+    state[field_name] = new_value
+    mc.last_known_state = state
+    flag_modified(mc, "last_known_state")
+
+    # First observation after enrollment isn't a real state change.
+    if old_value is None:
+        logger.debug(
+            "Initial %s observation on %s: %s (no event emitted)",
+            field_name,
+            mc.address,
+            new_value,
+        )
+        return
+
+    # Suppress when the event scanner already recorded the same
+    # mutation. Per-entry suppress lists come from the enrollment-
+    # time projection: vendored entries carry the canonical
+    # event_types for their slot, analyzer-derived entries carry
+    # event_types whose ``effect_tags.writes`` includes this field.
+    scan_types = entry.get("suppress_when_scan_event_types") or []
+    if isinstance(scan_types, list) and scan_types:
+        suppression_cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=DEFAULT_POLL_INTERVAL * 2,
+        )
+        already = session.execute(
+            select(MonitoredEvent.id)
+            .where(
+                MonitoredEvent.monitored_contract_id == mc.id,
+                MonitoredEvent.event_type.in_(scan_types),
+                MonitoredEvent.detected_at >= suppression_cutoff,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if already is not None:
+            logger.debug(
+                "Suppressing poll event for %s/%s — scanner already detected it",
+                mc.address,
+                field_name,
+            )
+            return
+
+    event = MonitoredEvent(
+        id=uuid.uuid4(),
+        monitored_contract_id=mc.id,
+        event_type="state_changed_poll",
+        block_number=0,
+        tx_hash="",
+        data={
+            "field": field_name,
+            "old_value": str(old_value),
+            "new_value": str(new_value),
+        },
+    )
+    session.add(event)
+    new_events.append(event)
+
+    logger.info(
+        "Poll detected %s change on %s: %s -> %s",
+        field_name,
+        mc.address,
+        old_value,
+        new_value,
+    )
+
+    # Write-through for proxy implementation changes
+    if field_name == "implementation" and mc.watched_proxy_id:
+        wp = session.get(WatchedProxy, mc.watched_proxy_id)
+        if wp:
+            upgrade_event = ProxyUpgradeEvent(
+                watched_proxy_id=wp.id,
+                block_number=0,
+                tx_hash="",
+                old_implementation=str(old_value) if old_value else None,
+                new_implementation=str(new_value),
+                event_type="storage_poll",
+            )
+            session.add(upgrade_event)
+            wp.last_known_implementation = str(new_value)
+
+    # Propagate to relational tables
+    _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
+
+    # Queue a re-analysis job if the state change warrants it
+    try:
+        poll_data = {
+            "field": field_name,
+            "old_value": str(old_value),
+            "new_value": str(new_value),
+        }
+        reanalysis_job = maybe_queue_reanalysis(
+            session,
+            mc,
+            "state_changed_poll",
+            poll_data,
+        )
+        if reanalysis_job:
+            updated = dict(event.data or {})
+            updated["reanalysis_job_id"] = str(reanalysis_job.id)
+            event.data = updated
+    except Exception as exc:
+        logger.warning(
+            "Failed to queue re-analysis for %s: %s",
+            mc.address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+
+
 def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
     """Poll for state changes by walking each contract's persisted
     ``polling_plan``.
 
     The plan is built at enrollment (``polling_plan.build_polling_plan``)
     from the static analyzer's tracked_controllers, plus vendored proxy
-    storage slots and Safe/Timelock standard ABIs. Each tick:
+    storage slots and Safe/Timelock standard ABIs.
 
-      1. Expand every entry into a batched RPC call.
-      2. Decode each result by the entry's ``type_kind`` / ``type``.
-      3. Compare against ``mc.last_known_state[entry["field"]]``; if it
-         changed, persist the new value, emit a ``state_changed_poll``
-         event, and run downstream sync (relational, reanalysis,
-         per-entry suppression of scanner duplicates).
+    Rotation (design §2.2): each pass claims only the
+    ``PSAT_POLL_CONTRACTS_PER_PASS`` least-recently-polled active
+    ``needs_polling`` contracts (``last_polled_at ASC NULLS FIRST``), so the
+    pass is O(slice) in memory rather than O(all monitored contracts). Their
+    plan entries are expanded and packed into ``MAX_BATCH_SIZE``-call chunks —
+    a contract's calls never split across a chunk — and each chunk is decoded,
+    synced, stamped (``last_polled_at`` = server ``now()``), and committed on
+    its own. A chunk whose batch RPC fails is left unstamped so its contracts
+    sort first next pass (retry-first), and the pass continues with the
+    remaining chunks, reporting ``partial``.
 
-    Contracts whose ``monitoring_config`` lacks a ``polling_plan`` are
-    skipped — the reconciler (``services/monitoring/reconciler.py``)
-    backfills the plan within its interval (default 600s) so this is a
-    bounded transient on freshly-migrated rows.
+    Contracts whose ``monitoring_config`` lacks a ``polling_plan`` still
+    rotate (they get stamped with an empty chunk) — the reconciler
+    (``services/monitoring/reconciler.py``) backfills the plan within its
+    interval so this is a bounded transient on freshly-migrated rows.
     """
     started = time.monotonic()
+    slice_size = int(os.getenv("PSAT_POLL_CONTRACTS_PER_PASS", str(DEFAULT_POLL_CONTRACTS_PER_PASS)))
     contracts = (
         session.execute(
-            select(MonitoredContract).where(
+            select(MonitoredContract)
+            .where(
                 MonitoredContract.is_active == True,  # noqa: E712
                 MonitoredContract.needs_polling == True,  # noqa: E712
             )
+            .order_by(MonitoredContract.last_polled_at.asc().nullsfirst())
+            .limit(slice_size)
         )
         .scalars()
         .all()
@@ -1121,183 +1271,88 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         )
         return []
 
-    batch_calls: list[tuple[str, list]] = []
-    # (contract, batch_index, entry_dict)
-    poll_dispatch: list[tuple[MonitoredContract, int, dict]] = []
+    # Oldest rotation cursor in the selected slice, measured before we stamp —
+    # a NULL (never-polled) member reads as unbounded age (reported as None).
+    now = datetime.now(timezone.utc)
+    polled_ats = [mc.last_polled_at for mc in contracts]
+    if any(ts is None for ts in polled_ats):
+        oldest_age_s = None
+    else:
+        oldest_age_s = int((now - min(ts for ts in polled_ats if ts)).total_seconds())
 
+    # Expand each contract's polling plan, then pack whole contracts into
+    # <=MAX_BATCH_SIZE-call chunks — a contract's calls never split across a
+    # chunk boundary, so its dispatch indexes stay contiguous within one batch.
+    chunks: list[list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]]] = []
+    current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
+    current_calls = 0
     for mc in contracts:
         plan = (mc.monitoring_config or {}).get("polling_plan") or []
-        if not isinstance(plan, list):
-            continue
-        for entry in plan:
-            if not isinstance(entry, dict):
-                continue
-            call = _rpc_call_for_entry(mc.address, entry)
-            if call is None:
-                continue
-            poll_dispatch.append((mc, len(batch_calls), entry))
-            batch_calls.append(call)
-
-    if not batch_calls:
-        emit_monitor_cycle(
-            HEARTBEAT_PROTOCOL_POLLER,
-            started=started,
-            contracts_scanned=len(contracts),
-            blocks_scanned=0,
-            events_found=0,
-            partial=False,
-            note="no_poll_entries",
-        )
-        return []
-
-    try:
-        results = rpc_batch_request(rpc_url, batch_calls)
-    except Exception as exc:
-        logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
-        emit_monitor_cycle(
-            HEARTBEAT_PROTOCOL_POLLER,
-            started=started,
-            contracts_scanned=len(contracts),
-            blocks_scanned=0,
-            events_found=0,
-            partial=True,
-            note="batch_rpc_failed",
-        )
-        return []
+        entries: list[tuple[dict, tuple[str, list]]] = []
+        if isinstance(plan, list):
+            for entry in plan:
+                if not isinstance(entry, dict):
+                    continue
+                call = _rpc_call_for_entry(mc.address, entry)
+                if call is None:
+                    continue
+                entries.append((entry, call))
+        if current and current_calls + len(entries) > MAX_BATCH_SIZE:
+            chunks.append(current)
+            current = []
+            current_calls = 0
+        current.append((mc, entries))
+        current_calls += len(entries)
+    if current:
+        chunks.append(current)
 
     new_events: list[MonitoredEvent] = []
+    chunks_failed = 0
 
-    for mc, idx, entry in poll_dispatch:
-        raw = results[idx]
-        field_name = entry.get("field")
-        if not isinstance(field_name, str) or not field_name:
-            continue
-        new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
-        if new_value is None:
-            continue
+    for chunk in chunks:
+        batch_calls: list[tuple[str, list]] = []
+        # (contract, batch_index, entry_dict)
+        dispatch: list[tuple[MonitoredContract, int, dict]] = []
+        for mc, entries in chunk:
+            for entry, call in entries:
+                dispatch.append((mc, len(batch_calls), entry))
+                batch_calls.append(call)
 
-        state = dict(mc.last_known_state or {})
-        old_value = state.get(field_name)
-        if new_value == old_value:
-            continue
-
-        # Always record the new value in last_known_state, even on the
-        # first observation — subsequent polls then have a baseline.
-        state[field_name] = new_value
-        mc.last_known_state = state
-        flag_modified(mc, "last_known_state")
-
-        # First observation after enrollment isn't a real state change.
-        if old_value is None:
-            logger.debug(
-                "Initial %s observation on %s: %s (no event emitted)",
-                field_name,
-                mc.address,
-                new_value,
-            )
-            continue
-
-        # Suppress when the event scanner already recorded the same
-        # mutation. Per-entry suppress lists come from the enrollment-
-        # time projection: vendored entries carry the canonical
-        # event_types for their slot, analyzer-derived entries carry
-        # event_types whose ``effect_tags.writes`` includes this field.
-        scan_types = entry.get("suppress_when_scan_event_types") or []
-        if isinstance(scan_types, list) and scan_types:
-            suppression_cutoff = datetime.now(timezone.utc) - timedelta(
-                seconds=DEFAULT_POLL_INTERVAL * 2,
-            )
-            already = session.execute(
-                select(MonitoredEvent.id)
-                .where(
-                    MonitoredEvent.monitored_contract_id == mc.id,
-                    MonitoredEvent.event_type.in_(scan_types),
-                    MonitoredEvent.detected_at >= suppression_cutoff,
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if already is not None:
-                logger.debug(
-                    "Suppressing poll event for %s/%s — scanner already detected it",
-                    mc.address,
-                    field_name,
-                )
+        if batch_calls:
+            try:
+                results = rpc_batch_request(rpc_url, batch_calls)
+            except Exception as exc:
+                logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
+                # Leave this chunk's contracts unstamped so they sort first
+                # (retry-first) next pass; press on with the remaining chunks.
+                chunks_failed += 1
                 continue
+            for mc, idx, entry in dispatch:
+                _apply_poll_result(session, mc, entry, results[idx], new_events)
 
-        event = MonitoredEvent(
-            id=uuid.uuid4(),
-            monitored_contract_id=mc.id,
-            event_type="state_changed_poll",
-            block_number=0,
-            tx_hash="",
-            data={
-                "field": field_name,
-                "old_value": str(old_value),
-                "new_value": str(new_value),
-            },
+        # Stamp the rotation cursor (server clock) for every contract in the
+        # chunk and commit — durable per chunk, so a later chunk's failure
+        # cannot roll back an earlier chunk's detections or stamps.
+        session.execute(
+            update(MonitoredContract)
+            .where(MonitoredContract.id.in_([mc.id for mc, _ in chunk]))
+            .values(last_polled_at=func.now())
         )
-        session.add(event)
-        new_events.append(event)
+        session.commit()
 
-        logger.info(
-            "Poll detected %s change on %s: %s -> %s",
-            field_name,
-            mc.address,
-            old_value,
-            new_value,
-        )
-
-        # Write-through for proxy implementation changes
-        if field_name == "implementation" and mc.watched_proxy_id:
-            wp = session.get(WatchedProxy, mc.watched_proxy_id)
-            if wp:
-                upgrade_event = ProxyUpgradeEvent(
-                    watched_proxy_id=wp.id,
-                    block_number=0,
-                    tx_hash="",
-                    old_implementation=str(old_value) if old_value else None,
-                    new_implementation=str(new_value),
-                    event_type="storage_poll",
-                )
-                session.add(upgrade_event)
-                wp.last_known_implementation = str(new_value)
-
-        # Propagate to relational tables
-        _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
-
-        # Queue a re-analysis job if the state change warrants it
-        try:
-            poll_data = {
-                "field": field_name,
-                "old_value": str(old_value),
-                "new_value": str(new_value),
-            }
-            reanalysis_job = maybe_queue_reanalysis(
-                session,
-                mc,
-                "state_changed_poll",
-                poll_data,
-            )
-            if reanalysis_job:
-                updated = dict(event.data or {})
-                updated["reanalysis_job_id"] = str(reanalysis_job.id)
-                event.data = updated
-        except Exception as exc:
-            logger.warning(
-                "Failed to queue re-analysis for %s: %s",
-                mc.address,
-                exc,
-                extra={"exc_type": type(exc).__name__},
-            )
-
-    session.commit()
     emit_monitor_cycle(
         HEARTBEAT_PROTOCOL_POLLER,
         started=started,
         contracts_scanned=len(contracts),
         blocks_scanned=0,
         events_found=len(new_events),
-        partial=False,
+        partial=chunks_failed > 0,
+        extra_detail={
+            "contracts_selected": len(contracts),
+            "chunks": len(chunks),
+            "chunks_failed": chunks_failed,
+            "oldest_last_polled_age_s": oldest_age_s,
+        },
     )
     return new_events
 

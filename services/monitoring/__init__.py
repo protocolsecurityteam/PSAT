@@ -55,9 +55,10 @@ def emit_monitor_cycle(
     the heartbeat to ``degraded`` so the fleet view distinguishes a healthy
     quiet cycle from a degraded one. Called once per cycle regardless of
     outcome — including the 0-active-contracts and 0-event branches.
-    ``extra_detail`` carries daemon-specific fields (e.g. the scanner's
-    ``max_lag_blocks`` / ``windows_scanned`` / ``budget_exhausted``) so a pass
-    still emits exactly one heartbeat.
+    ``extra_detail`` carries daemon-specific fields (the scanner's
+    ``max_lag_blocks`` / ``windows_scanned`` / ``budget_exhausted``, the
+    poller's rotation-slice counts) so a pass still emits exactly one
+    heartbeat.
     """
     duration_ms = int((time.monotonic() - started) * 1000)
     detail: dict[str, Any] = {

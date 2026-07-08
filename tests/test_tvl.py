@@ -272,6 +272,53 @@ class TestRefreshAllProtocols:
         snapshots = db_session.query(TvlSnapshot).all()
         assert len(snapshots) == 2
 
+    def test_rotation_oldest_and_no_snapshot_first_capped(self, db_session, monkeypatch, _cleanup):
+        from datetime import datetime, timezone
+
+        recent = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        p_a = Protocol(name="RotA")
+        p_b = Protocol(name="RotB")
+        p_c = Protocol(name="RotC")
+        p_d = Protocol(name="RotD")
+        db_session.add_all([p_a, p_b, p_c, p_d])
+        db_session.flush()
+
+        # p_a/p_b/p_d carry aged snapshots (beyond MIN_SNAPSHOT_INTERVAL);
+        # p_c has none, so it must sort first.
+        db_session.add(
+            TvlSnapshot(protocol_id=p_a.id, timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc), source="on_chain")
+        )
+        db_session.add(
+            TvlSnapshot(protocol_id=p_b.id, timestamp=datetime(2021, 1, 1, tzinfo=timezone.utc), source="on_chain")
+        )
+        db_session.add(
+            TvlSnapshot(protocol_id=p_d.id, timestamp=datetime(2022, 1, 1, tzinfo=timezone.utc), source="on_chain")
+        )
+        db_session.commit()
+
+        monkeypatch.setenv("PSAT_TVL_PROTOCOLS_PER_PASS", "2")
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+        count = refresh_all_protocols(db_session)
+        assert count == 2  # cap honored
+
+        def _fresh(pid: int) -> bool:
+            return (
+                db_session.query(TvlSnapshot)
+                .filter(TvlSnapshot.protocol_id == pid, TvlSnapshot.timestamp > recent)
+                .count()
+                > 0
+            )
+
+        # no-snapshot (p_c) + oldest existing (p_a) selected; p_b/p_d beyond the cap.
+        assert _fresh(p_c.id)
+        assert _fresh(p_a.id)
+        assert not _fresh(p_b.id)
+        assert not _fresh(p_d.id)
+
 
 # ---------------------------------------------------------------------------
 # Issue: duplicate snapshot dedup

@@ -840,6 +840,9 @@ class MonitoredContract(Base):
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
     last_scanned_block: Mapped[int] = mapped_column(Integer, default=0)
+    # Poller rotation cursor: NULLS FIRST selection stamps this at chunk-commit
+    # time so never-polled and least-recently-polled contracts rotate first.
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     needs_polling: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     enrollment_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
