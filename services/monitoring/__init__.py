@@ -6,10 +6,11 @@ The substitute (house standard §2.4) is a per-cycle ``record_heartbeat`` whose
 ``detail`` carries the cycle counts, plus one unconditional INFO per cycle so a
 wedged or silently-idle watcher is detectable even when nothing happened.
 
-The ``HEARTBEAT_PROTOCOL_*`` process-name constants live here rather than in
-``db.queue`` because the Wave-0 foundation did not land them; ``/api/fleet``
-keys off the constants exported by ``db.queue`` and so will not surface these
-daemons until they are promoted there (see patch blocker note).
+The ``HEARTBEAT_PROTOCOL_*`` process-name constants are defined in ``db.queue``
+alongside the other daemon heartbeat names — ``/api/fleet`` keys off the
+constants that module exports, so co-locating them there is what lets it
+surface the scan/poll/TVL daemons. They are re-exported here for the
+watcher/TVL call sites that import them from this package.
 """
 
 from __future__ import annotations
@@ -18,14 +19,21 @@ import logging
 import time
 from typing import Any
 
-from db.queue import record_heartbeat
+from db.queue import (
+    HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_SCANNER,
+    HEARTBEAT_PROTOCOL_TVL,
+    record_heartbeat,
+)
 
 logger = logging.getLogger(__name__)
 
-# Canonical process names for the three unified-watcher cycle daemons.
-HEARTBEAT_PROTOCOL_SCANNER = "protocol_scanner"
-HEARTBEAT_PROTOCOL_POLLER = "protocol_poller"
-HEARTBEAT_PROTOCOL_TVL = "protocol_tvl"
+__all__ = [
+    "HEARTBEAT_PROTOCOL_POLLER",
+    "HEARTBEAT_PROTOCOL_SCANNER",
+    "HEARTBEAT_PROTOCOL_TVL",
+    "emit_monitor_cycle",
+]
 
 
 def emit_monitor_cycle(

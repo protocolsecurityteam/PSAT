@@ -1047,6 +1047,24 @@ class WorkerHeartbeat(Base):
     )
 
 
+class DaemonLease(Base):
+    """A named, TTL'd singleton lease for a background daemon pass.
+
+    One row per logical lease name (e.g. ``'protocol_scanner:ethereum'``).
+    The holder writes its ``holder`` uuid and an ``expires_at`` in the
+    future; a competitor can only take the row over once ``expires_at`` has
+    passed. Unlike a pg advisory lock this survives per-window commits and
+    is safe under Neon/pgbouncer transaction pooling (which breaks
+    session-scoped advisory locks). See ``db.queue.try_acquire_daemon_lease``.
+    """
+
+    __tablename__ = "daemon_leases"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class EtherscanCache(Base):
     """Persistent Etherscan response cache. Read/written by ``utils/etherscan.py``
     via raw SQL; the model exists so the schema participates in
