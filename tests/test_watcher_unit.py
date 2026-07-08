@@ -167,122 +167,124 @@ class TestJsonbDirtyTracking:
 # =========================================================================
 
 
-class TestPerContractScanBlock:
-    """Verify scan filters addresses per chunk based on last_scanned_block."""
+class TestCohortScanBlock:
+    """Verify the cohort scanner groups contracts by block bucket and never
+    re-scans a block range a cohort has already covered.
 
-    def test_already_scanned_address_excluded_from_chunks(self, db_session: SASession):
-        """If contract A is at block 100 and B is at block 5000, chunks
-        ending at or below 5000 should only include A's address — B has
-        already scanned those blocks.
-        """
-        from services.monitoring.unified_watcher import scan_for_events
+    The scanner now issues eth_getLogs through the shared bisecting fetcher
+    (``services.resolution.repos.event_logs_rpc``), so both RPC entry points
+    are stubbed: the head read on ``unified_watcher.rpc_request`` and getLogs
+    on the fetcher's ``rpc_request``.
+    """
 
-        mc_behind = MonitoredContract(
-            id=uuid.uuid4(),
-            address=ADDR(1),
-            chain="ethereum",
-            contract_type="regular",
-            monitoring_config={},
-            last_known_state={},
-            last_scanned_block=100,
-            needs_polling=False,
-            is_active=True,
-        )
-        mc_ahead = MonitoredContract(
-            id=uuid.uuid4(),
-            address=ADDR(2),
-            chain="ethereum",
-            contract_type="regular",
-            monitoring_config={},
-            last_known_state={},
-            last_scanned_block=5000,
-            needs_polling=False,
-            is_active=True,
-        )
-        db_session.add_all([mc_behind, mc_ahead])
-        db_session.commit()
-
-        rpc_calls = []
-
+    @staticmethod
+    def _install(monkeypatch, head, calls):
         def mock_rpc(url, method, params):
-            rpc_calls.append((method, params))
+            calls.append((method, params))
             if method == "eth_blockNumber":
-                return hex(6000)
+                return hex(head)
             if method == "eth_getLogs":
                 return []
             return None
 
-        with patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc):
-            scan_for_events(db_session, "http://fake-rpc")
+        monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+        monkeypatch.setattr("services.monitoring.unified_watcher.rpc_request", mock_rpc)
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", mock_rpc)
 
-        log_calls = [c for c in rpc_calls if c[0] == "eth_getLogs"]
-
-        # Chunks whose entire range is already scanned by mc_ahead
-        # (toBlock <= 5000) should only include ADDR(1).
-        early_chunks = [c for c in log_calls if int(c[1][0]["toBlock"], 16) <= 5000]
-        assert len(early_chunks) > 0, "Expected at least one early chunk"
-        for call in early_chunks:
-            addrs = call[1][0]["address"]
-            assert ADDR(2) not in addrs, (
-                f"Already-scanned address {ADDR(2)} was included in chunk ending at {call[1][0]['toBlock']}"
-            )
-            assert ADDR(1) in addrs
-
-        # Chunks that extend past mc_ahead's last_scanned_block (toBlock > 5000)
-        # should include both addresses.
-        late_chunks = [c for c in log_calls if int(c[1][0]["toBlock"], 16) > 5000]
-        assert len(late_chunks) > 0
-        for call in late_chunks:
-            addrs = call[1][0]["address"]
-            assert ADDR(1) in addrs
-            assert ADDR(2) in addrs
-
-    def test_all_scanned_chunks_skipped_entirely(self, db_session: SASession):
-        """When all contracts are at the same block, only new blocks are scanned."""
+    def test_contracts_at_different_heights_scan_in_separate_cohorts(self, db_session: SASession, monkeypatch):
+        """A contract at block 100 (bucket 0) and one at 5000 (bucket 2) land
+        in different cohorts; neither cohort's getLogs re-scans blocks the
+        other has already covered."""
         from services.monitoring.unified_watcher import scan_for_events
 
-        mc_a = MonitoredContract(
-            id=uuid.uuid4(),
-            address=ADDR(1),
-            chain="ethereum",
-            contract_type="regular",
-            monitoring_config={},
-            last_known_state={},
-            last_scanned_block=1000,
-            needs_polling=False,
-            is_active=True,
+        behind = ADDR(1)
+        ahead = ADDR(2)
+        db_session.add_all(
+            [
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=behind,
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=100,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ahead,
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=5000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+            ]
         )
-        mc_b = MonitoredContract(
-            id=uuid.uuid4(),
-            address=ADDR(2),
-            chain="ethereum",
-            contract_type="regular",
-            monitoring_config={},
-            last_known_state={},
-            last_scanned_block=1000,
-            needs_polling=False,
-            is_active=True,
-        )
-        db_session.add_all([mc_a, mc_b])
         db_session.commit()
 
-        rpc_calls = []
+        calls: list = []
+        self._install(monkeypatch, 6000, calls)
+        scan_for_events(db_session, "http://fake-rpc")
 
-        def mock_rpc(url, method, params):
-            rpc_calls.append((method, params))
-            if method == "eth_blockNumber":
-                return hex(1500)
-            if method == "eth_getLogs":
-                return []
-            return None
+        log_calls = [c for c in calls if c[0] == "eth_getLogs"]
+        # No getLogs ever mixes the two cohorts' addresses.
+        for _, params in log_calls:
+            addrs = {a.lower() for a in params[0]["address"]}
+            assert addrs in ({behind.lower()}, {ahead.lower()})
 
-        with patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc):
-            scan_for_events(db_session, "http://fake-rpc")
+        behind_calls = [c for c in log_calls if behind.lower() in {a.lower() for a in c[1][0]["address"]}]
+        ahead_calls = [c for c in log_calls if ahead.lower() in {a.lower() for a in c[1][0]["address"]}]
+        # The ahead cohort starts at 5001 — its already-scanned range is never re-read.
+        assert min(int(c[1][0]["fromBlock"], 16) for c in ahead_calls) == 5001
+        assert min(int(c[1][0]["fromBlock"], 16) for c in behind_calls) == 101
 
-        log_calls = [c for c in rpc_calls if c[0] == "eth_getLogs"]
-        # Only 1 chunk needed: blocks 1001-1500, both addresses
+    def test_same_block_contracts_share_one_cohort(self, db_session: SASession, monkeypatch):
+        """Contracts at the same block form one cohort scanned in a single
+        multi-address getLogs over only the new blocks."""
+        from services.monitoring.unified_watcher import scan_for_events
+
+        db_session.add_all(
+            [
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ADDR(1),
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=1000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ADDR(2),
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=1000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        calls: list = []
+        self._install(monkeypatch, 1500, calls)
+        scan_for_events(db_session, "http://fake-rpc")
+
+        log_calls = [c for c in calls if c[0] == "eth_getLogs"]
         assert len(log_calls) == 1
-        assert set(log_calls[0][1][0]["address"]) == {ADDR(1), ADDR(2)}
+        assert {a.lower() for a in log_calls[0][1][0]["address"]} == {ADDR(1).lower(), ADDR(2).lower()}
+        assert int(log_calls[0][1][0]["fromBlock"], 16) == 1001
+        assert int(log_calls[0][1][0]["toBlock"], 16) == 1500
 
 
 # =========================================================================
@@ -810,6 +812,8 @@ class TestBatchTimelockDedupe:
                         "data": log_data,
                         "blockNumber": "0x96",  # 150
                         "transactionHash": "0x" + "fe" * 32,
+                        "blockHash": "0x" + "11" * 32,
+                        "transactionIndex": "0x0",
                         "logIndex": "0x0",
                     },
                     {
@@ -822,12 +826,17 @@ class TestBatchTimelockDedupe:
                         "data": log_data,
                         "blockNumber": "0x96",
                         "transactionHash": "0x" + "fe" * 32,
+                        "blockHash": "0x" + "11" * 32,
+                        "transactionIndex": "0x0",
                         "logIndex": "0x1",
                     },
                 ]
             return None
 
-        with patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc):
+        with (
+            patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc),
+            patch("services.resolution.repos.event_logs_rpc.rpc_request", side_effect=mock_rpc),
+        ):
             new_events = scan_for_events(db_session, "http://fake-rpc")
 
         assert len(new_events) == 2, f"expected 2 batch-event rows, got {len(new_events)}"
@@ -891,6 +900,8 @@ class TestBatchTimelockDedupe:
                         "data": log_data,
                         "blockNumber": "0xfa",  # 250
                         "transactionHash": "0x" + "ba" * 32,
+                        "blockHash": "0x" + "22" * 32,
+                        "transactionIndex": "0x0",
                         "logIndex": "0x0",
                     },
                     {
@@ -903,12 +914,17 @@ class TestBatchTimelockDedupe:
                         "data": log_data,
                         "blockNumber": "0xfa",
                         "transactionHash": "0x" + "ba" * 32,
+                        "blockHash": "0x" + "22" * 32,
+                        "transactionIndex": "0x0",
                         "logIndex": "0x1",
                     },
                 ]
             return None
 
-        with patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc):
+        with (
+            patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc),
+            patch("services.resolution.repos.event_logs_rpc.rpc_request", side_effect=mock_rpc),
+        ):
             new_events = scan_for_events(db_session, "http://fake-rpc")
 
         assert len(new_events) == 2

@@ -45,6 +45,7 @@ def emit_monitor_cycle(
     events_found: int,
     partial: bool,
     note: str | None = None,
+    extra_detail: dict[str, Any] | None = None,
 ) -> None:
     """Emit one per-cycle summary: a fleet heartbeat plus a single INFO.
 
@@ -54,6 +55,9 @@ def emit_monitor_cycle(
     the heartbeat to ``degraded`` so the fleet view distinguishes a healthy
     quiet cycle from a degraded one. Called once per cycle regardless of
     outcome — including the 0-active-contracts and 0-event branches.
+    ``extra_detail`` carries daemon-specific fields (e.g. the scanner's
+    ``max_lag_blocks`` / ``windows_scanned`` / ``budget_exhausted``) so a pass
+    still emits exactly one heartbeat.
     """
     duration_ms = int((time.monotonic() - started) * 1000)
     detail: dict[str, Any] = {
@@ -65,6 +69,8 @@ def emit_monitor_cycle(
     }
     if note:
         detail["note"] = note
+    if extra_detail:
+        detail.update(extra_detail)
     record_heartbeat(process, status="degraded" if partial else "running", detail=detail)
     # ``process`` is reserved on LogRecord (the OS pid) — expose the daemon
     # name as ``daemon`` so the JsonFormatter promotes it without collision.

@@ -79,6 +79,13 @@ ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 PROTO_NAME = "__test_relational_sync__"
 
 
+@pytest.fixture(autouse=True)
+def _disable_scan_confirmation_depth(monkeypatch):
+    # These anvil chains are only a handful of blocks long; the production
+    # 12-block confirmation clamp would hide every just-emitted event.
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

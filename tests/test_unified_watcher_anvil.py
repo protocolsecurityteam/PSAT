@@ -73,6 +73,13 @@ PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff8
 ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
 
+@pytest.fixture(autouse=True)
+def _disable_scan_confirmation_depth(monkeypatch):
+    # These anvil chains are only a handful of blocks long; the production
+    # 12-block confirmation clamp would hide every just-emitted event.
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+
+
 # ---------------------------------------------------------------------------
 # Helpers (copied from test_proxy_watcher_anvil.py)
 # ---------------------------------------------------------------------------

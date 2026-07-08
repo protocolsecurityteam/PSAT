@@ -6,12 +6,14 @@ import logging
 import os
 import time
 import uuid
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from dotenv import load_dotenv
-from sqlalchemy import select
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -40,8 +42,8 @@ from services.monitoring.event_topics import (
 )
 from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
+from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.rpc import (
-    normalize_hex,
     rpc_batch_request,
     rpc_request,
 )
@@ -53,6 +55,30 @@ logger = logging.getLogger(__name__)
 MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
+
+# monitored_events must only ingest confirmed logs — a reorg-rewound event
+# would have already fired a Discord notification and a reanalysis job that
+# cannot be un-sent. Every window end is clamped to head − this depth.
+DEFAULT_CONFIRMATION_DEPTH = 12
+# The shared getLogs fetcher bisects a rejected window down to this floor
+# before re-raising. It must sit well below MAX_BLOCK_RANGE so a provider
+# range/response-cap rejection actually bisects instead of failing the cohort.
+FETCHER_MIN_BISECT_SPAN = 125
+
+
+def _scan_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _scan_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 
 # Controller IDs that represent the contract owner. Used by relational sync
 # to update only the real owner row, not unrelated controller values that
@@ -68,22 +94,283 @@ def get_latest_block(rpc_url: str) -> int:
     return int(result, 16)
 
 
-def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
-    """Scan new blocks for all governance and proxy events.
+@dataclass
+class _Cohort:
+    """A block-aligned batch of monitored contracts scanned together.
 
-    Uses a single eth_getLogs call per block chunk with all monitored
-    addresses and all event topic0s. Returns list of new MonitoredEvent
-    records created.
+    Members share a chain and a ``last_scanned_block // MAX_BLOCK_RANGE``
+    bucket, and are capped at ``PSAT_SCAN_ADDRESS_BATCH`` addresses so one
+    eth_getLogs request stays under provider multi-address caps. ``cursor``
+    is the running max-scanned block for the batch; it only advances in the
+    transaction that persisted a window's events.
     """
-    started = time.monotonic()
-    contracts = (
+
+    chain: str
+    member_ids: list[uuid.UUID]
+    addresses: list[str]
+    cursor: int
+    done: bool = False
+    failed: bool = False
+
+
+class ScanResult(list):
+    """The new events from one scan pass, plus pass-level heartbeat metrics.
+
+    Subclasses ``list`` so every existing caller that treats the return as a
+    list of ``MonitoredEvent`` (``len``, iteration, indexing, truthiness) keeps
+    working, while ``run_scan_loop`` reads ``budget_exhausted`` to pick the
+    busy vs. full re-run interval.
+    """
+
+    def __init__(
+        self,
+        events: list[MonitoredEvent],
+        *,
+        budget_exhausted: bool = False,
+        windows_scanned: int = 0,
+        cohorts: int = 0,
+        max_lag_blocks: int = 0,
+        degraded: bool = False,
+    ) -> None:
+        super().__init__(events)
+        self.budget_exhausted = budget_exhausted
+        self.windows_scanned = windows_scanned
+        self.cohorts = cohorts
+        self.max_lag_blocks = max_lag_blocks
+        self.degraded = degraded
+
+
+def _scan_topics_union(session: Session) -> list[str]:
+    """Registry topic0s ∪ the per-pass set of tracked-topic topic0s.
+
+    The hand-rolled registry owns OZ / Safe / Timelock / proxy events
+    (semantics beyond raw decode); the ``SELECT DISTINCT`` over
+    ``monitoring_config->'tracked_topics'`` covers the long tail of per-emitter
+    ABI variants (Solmate, DSAuth, Compound, …) without hydrating any row.
+    """
+    rows = session.execute(
+        text(
+            """
+            SELECT DISTINCT lower(elem ->> 'topic0') AS topic0
+            FROM monitored_contracts,
+                 LATERAL jsonb_array_elements(
+                     CASE
+                         WHEN jsonb_typeof(monitoring_config -> 'tracked_topics') = 'array'
+                         THEN monitoring_config -> 'tracked_topics'
+                         ELSE '[]'::jsonb
+                     END
+                 ) AS elem
+            WHERE is_active = true
+            """
+        )
+    ).all()
+    extra = {row[0] for row in rows if row[0]}
+    return sorted({t.lower() for t in ALL_EVENT_TOPICS.keys()} | extra)
+
+
+def _notify_window(session: Session, events: list[MonitoredEvent]) -> None:
+    if not events:
+        return
+    try:
+        from services.monitoring.notifier import notify_protocol_events
+
+        notify_protocol_events(session, events)
+    except Exception as exc:
+        logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
+
+
+def _process_window(
+    session: Session,
+    cohort: _Cohort,
+    fetched_logs: list,
+    window_start: int,
+    window_end: int,
+) -> list[MonitoredEvent]:
+    """Decode a window's logs and run the full side-effect pipeline.
+
+    Hydrates only the cohort members that actually emitted a log, then reuses
+    the existing decode / watch-gate / state-update / relational-sync /
+    reanalysis pipeline. Events are added to ``session`` but not committed —
+    the caller advances the cursor and commits in one transaction.
+    """
+    if not fetched_logs:
+        return []
+
+    emitter_addrs = {fl.address for fl in fetched_logs if fl.address}
+    if not emitter_addrs:
+        return []
+
+    hydrated = (
         session.execute(
-            select(MonitoredContract).where(MonitoredContract.is_active == True)  # noqa: E712
+            select(MonitoredContract).where(
+                MonitoredContract.id.in_(cohort.member_ids),
+                func.lower(MonitoredContract.address).in_(emitter_addrs),
+            )
         )
         .scalars()
         .all()
     )
-    if not contracts:
+    mc_by_addr: dict[str, MonitoredContract] = {c.address.lower(): c for c in hydrated}
+    if not mc_by_addr:
+        return []
+
+    # Per-emitter topic0 → tracked-topic spec, built from the hydrated rows'
+    # monitoring_config (the analysis tracking_plan persisted at enrollment).
+    tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
+    for addr, mc in mc_by_addr.items():
+        topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
+        spec_map: dict[str, dict] = {}
+        for spec in topics_list:
+            t0 = (spec.get("topic0") or "").lower()
+            if t0:
+                spec_map[t0] = spec
+        if spec_map:
+            tracked_specs_by_emitter[addr] = spec_map
+
+    # Bounded per-window dedupe: the 4-tuple already-stored guard, scoped to
+    # this window's block range and the emitting members. Replaces the old
+    # pass-wide preload; guards the overlap re-scanned after a failed window.
+    hydrated_ids = [mc.id for mc in hydrated]
+    existing_rows = session.execute(
+        select(
+            MonitoredEvent.monitored_contract_id,
+            MonitoredEvent.tx_hash,
+            MonitoredEvent.block_number,
+            MonitoredEvent.event_type,
+        ).where(
+            MonitoredEvent.monitored_contract_id.in_(hydrated_ids),
+            MonitoredEvent.block_number >= window_start,
+            MonitoredEvent.block_number <= window_end,
+        )
+    ).all()
+    db_events = {(str(r[0]), r[1], r[2], r[3]) for r in existing_rows}
+    # In-scan 5-tuple key (incl. log_index) so batch timelock ops
+    # (scheduleBatch / executeBatch — one CallScheduled / CallExecuted per
+    # call, sharing tx+block+type) land as distinct rows within one window.
+    in_scan_events: set[tuple] = set()
+
+    new_events: list[MonitoredEvent] = []
+
+    for fl in fetched_logs:
+        raw = fl.raw
+        if raw is None:
+            continue
+        emitter = fl.address
+        parsed = parse_any_log(raw)
+        if not parsed:
+            emitter_specs = tracked_specs_by_emitter.get(emitter)
+            if not emitter_specs:
+                continue
+            if not fl.topics:
+                continue
+            spec = emitter_specs.get(fl.topics[0])
+            if not spec:
+                continue
+            parsed = parse_tracked_log(raw, spec)
+            if not parsed:
+                continue
+
+        mc = mc_by_addr.get(emitter)
+        if not mc:
+            continue
+
+        event_type = parsed["event_type"]
+
+        if mc.monitoring_config and not _should_watch(mc, parsed):
+            continue
+
+        db_key = (
+            str(mc.id),
+            parsed.get("tx_hash", ""),
+            parsed["block_number"],
+            event_type,
+        )
+        if db_key in db_events:
+            continue
+
+        in_scan_key = (*db_key, parsed.get("log_index", 0))
+        if in_scan_key in in_scan_events:
+            continue
+        in_scan_events.add(in_scan_key)
+
+        event_data = {
+            k: v
+            for k, v in parsed.items()
+            if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
+        }
+
+        monitored_event = MonitoredEvent(
+            id=uuid.uuid4(),
+            monitored_contract_id=mc.id,
+            event_type=event_type,
+            block_number=parsed["block_number"],
+            tx_hash=parsed.get("tx_hash", ""),
+            data=event_data if event_data else None,
+        )
+        session.add(monitored_event)
+        new_events.append(monitored_event)
+
+        logger.info(
+            "Detected %s on %s (block %d)",
+            event_type,
+            mc.address,
+            parsed["block_number"],
+        )
+
+        topic0 = fl.topics[0] if fl.topics else ""
+        if topic0 in PROXY_EVENT_TOPICS and mc.watched_proxy_id:
+            _write_through_proxy_event(session, mc, parsed)
+
+        _update_state_from_event(mc, parsed)
+        _sync_relational_tables(session, mc, parsed)
+
+        try:
+            reanalysis_job = maybe_queue_reanalysis(session, mc, event_type, event_data)
+            if reanalysis_job:
+                updated = dict(monitored_event.data or {})
+                updated["reanalysis_job_id"] = str(reanalysis_job.id)
+                monitored_event.data = updated
+                flag_modified(monitored_event, "data")
+        except Exception as exc:
+            logger.warning(
+                "Failed to queue re-analysis for %s: %s",
+                mc.address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+
+    return new_events
+
+
+def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
+    """Scan new blocks for all governance and proxy events, bounded per pass.
+
+    Contracts are loaded columns-only (no ORM hydration, no ``monitoring_config``
+    JSONB), grouped into block-aligned address-capped cohorts, and scanned
+    most-behind-first under per-cohort and per-pass window budgets. Each window
+    is one multi-address eth_getLogs (via the shared bisect-on-reject fetcher)
+    clamped to ``head − CONFIRMATION_DEPTH``; its events + monotonic cursor
+    advance commit together, then notify. A failed window ends that cohort's
+    turn without advancing its cursor (behind ≠ skipped); other cohorts
+    continue. Returns the pass's new events plus heartbeat metrics.
+    """
+    started = time.monotonic()
+
+    address_batch = max(1, _scan_int_env("PSAT_SCAN_ADDRESS_BATCH", 200))
+    max_windows_cohort = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", 25))
+    max_windows_pass = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_PASS", 50))
+    confirmation_depth = max(0, _scan_int_env("PSAT_SCAN_CONFIRMATION_DEPTH", DEFAULT_CONFIRMATION_DEPTH))
+
+    index_rows = session.execute(
+        select(
+            MonitoredContract.id,
+            MonitoredContract.address,
+            MonitoredContract.chain,
+            MonitoredContract.last_scanned_block,
+        ).where(MonitoredContract.is_active == True)  # noqa: E712
+    ).all()
+
+    if not index_rows:
         # Nothing enrolled yet — still emit a cycle so a dead watcher (or a
         # never-populated monitored_contracts table) is distinguishable from
         # a healthy idle one.
@@ -96,256 +383,166 @@ def scan_for_events(session: Session, rpc_url: str) -> list[MonitoredEvent]:
             partial=False,
             note="no_active_contracts",
         )
-        return []
+        return ScanResult([])
 
-    contract_by_address: dict[str, MonitoredContract] = {c.address.lower(): c for c in contracts}
+    # Cohorts: (chain, block bucket) groups, split at the address batch size.
+    grouped: dict[tuple[str, int], list] = defaultdict(list)
+    for row in index_rows:
+        grouped[(row.chain, row.last_scanned_block // MAX_BLOCK_RANGE)].append(row)
 
-    # Per-emitter map of topic0 → tracked-topic spec (from the static
-    # analysis ``tracking_plan``, persisted onto monitoring_config by
-    # enrollment). Lets the dispatcher decode events from ABIs the
-    # hand-rolled registry doesn't know about — Solmate OwnerUpdated /
-    # AuthorityUpdated, DSAuth LogSetOwner, Compound NewAdmin, etc.
-    tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
-    extra_topic0s: set[str] = set()
-    for addr, mc in contract_by_address.items():
-        topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
-        if not topics_list:
-            continue
-        spec_map: dict[str, dict] = {}
-        for spec in topics_list:
-            t0 = (spec.get("topic0") or "").lower()
-            if not t0:
+    cohorts: list[_Cohort] = []
+    for (chain, _bucket), members in grouped.items():
+        for i in range(0, len(members), address_batch):
+            batch = members[i : i + address_batch]
+            cohorts.append(
+                _Cohort(
+                    chain=chain,
+                    member_ids=[r.id for r in batch],
+                    addresses=[r.address.lower() for r in batch],
+                    cursor=min(r.last_scanned_block for r in batch),
+                )
+            )
+
+    # Ships ethereum-only: the single rpc_url arg serves every chain present.
+    # Cohort keys already carry chain so a per-chain rpc map is the only change
+    # a second chain needs.
+    rpc_by_chain = {chain: rpc_url for chain in {c.chain for c in cohorts}}
+    fetchers: dict[str, RpcEventLogFetcher] = {}
+    head_by_chain: dict[str, int] = {}
+
+    def _head_for(chain: str) -> int:
+        if chain not in head_by_chain:
+            head_by_chain[chain] = get_latest_block(rpc_by_chain[chain])
+        return head_by_chain[chain]
+
+    def _fetcher_for(chain: str) -> RpcEventLogFetcher:
+        if chain not in fetchers:
+            fetchers[chain] = RpcEventLogFetcher(
+                rpc_by_chain[chain],
+                max_block_range=MAX_BLOCK_RANGE,
+                min_bisect_span=FETCHER_MIN_BISECT_SPAN,
+            )
+        return fetchers[chain]
+
+    topics_union = _scan_topics_union(session)
+
+    total_new_events: list[MonitoredEvent] = []
+    windows_scanned = 0
+    blocks_scanned = 0
+    degraded = False
+    budget_exhausted = False
+
+    while windows_scanned < max_windows_pass:
+        eligible: list[tuple[_Cohort, int]] = []
+        for cohort in cohorts:
+            if cohort.done or cohort.failed:
                 continue
-            spec_map[t0] = spec
-            extra_topic0s.add(t0)
-        if spec_map:
-            tracked_specs_by_emitter[addr] = spec_map
-
-    from_block = min(c.last_scanned_block for c in contracts)
-    latest_block = get_latest_block(rpc_url)
-
-    if from_block >= latest_block:
-        logger.debug("Scan: no new blocks (from=%d, latest=%d)", from_block, latest_block)
-        emit_monitor_cycle(
-            HEARTBEAT_PROTOCOL_SCANNER,
-            started=started,
-            contracts_scanned=len(contracts),
-            blocks_scanned=0,
-            events_found=0,
-            partial=False,
-            note="no_new_blocks",
-        )
-        return []
-
-    logger.debug(
-        "Scan: %d contracts, block range %d->%d (%d blocks)",
-        len(contracts),
-        from_block + 1,
-        latest_block,
-        latest_block - from_block,
-    )
-
-    new_events: list[MonitoredEvent] = []
-    # Set when an eth_getLogs chunk fails mid-scan: the cursor stops early so
-    # this pass covered only part of the requested range — surfaced as
-    # ``partial=True`` in the cycle summary (degraded heartbeat).
-    partial = False
-    # Union the hand-rolled global registry with per-contract topic0s
-    # discovered from the analysis tracking_plan. The hand-rolled set
-    # owns OZ / Safe / Timelock / proxy events (semantics beyond raw
-    # decode); per-contract topics cover the long tail of ABI variants.
-    topics = [sorted(set(ALL_EVENT_TOPICS.keys()) | extra_topic0s)]
-
-    # Two-tier dedupe:
-    #   ``db_events`` is loaded from already-persisted MonitoredEvent rows
-    #   keyed by the 4-tuple the table can express today (no log_index
-    #   column). It guards against duplicating rows we've already stored.
-    #   ``in_scan_events`` is the 5-tuple key used within a single scan
-    #   pass; the extra log_index lets batch timelock ops (scheduleBatch /
-    #   executeBatch emit one CallScheduled / CallExecuted per call,
-    #   sharing tx + block + event_type) all land as distinct rows.
-    db_events: set[tuple] = set()
-    in_scan_events: set[tuple] = set()
-    max_scanned = max(c.last_scanned_block for c in contracts)
-    if from_block < max_scanned:
-        existing_rows = session.execute(
-            select(
-                MonitoredEvent.monitored_contract_id,
-                MonitoredEvent.tx_hash,
-                MonitoredEvent.block_number,
-                MonitoredEvent.event_type,
-            ).where(
-                MonitoredEvent.block_number > from_block,
-                MonitoredEvent.block_number <= max_scanned,
-            )
-        ).all()
-        for row in existing_rows:
-            db_events.add((str(row[0]), row[1], row[2], row[3]))
-
-    last_successful_block = from_block
-    cursor = from_block + 1
-
-    while cursor <= latest_block:
-        to_block = min(cursor + MAX_BLOCK_RANGE - 1, latest_block)
-
-        # Only include addresses that still need blocks in this chunk.
-        # A contract with last_scanned_block >= to_block has already
-        # processed all blocks in this range — no need to re-scan for it.
-        chunk_addresses = [addr for addr, mc in contract_by_address.items() if mc.last_scanned_block < to_block]
-        if not chunk_addresses:
-            cursor = to_block + 1
-            last_successful_block = to_block
-            continue
-
-        filter_params = {
-            "fromBlock": hex(cursor),
-            "toBlock": hex(to_block),
-            "address": chunk_addresses,
-            "topics": topics,
-        }
-
-        try:
-            logs = rpc_request(rpc_url, "eth_getLogs", [filter_params])
-        except Exception as exc:
-            logger.warning(
-                "eth_getLogs failed for blocks %d-%d: %s",
-                cursor,
-                to_block,
-                exc,
-                extra={"exc_type": type(exc).__name__},
-            )
-            partial = True
+            confirmed_head = _head_for(cohort.chain) - confirmation_depth
+            if cohort.cursor >= confirmed_head:
+                cohort.done = True
+                continue
+            eligible.append((cohort, confirmed_head))
+        if not eligible:
             break
 
-        if not isinstance(logs, list):
-            logs = []
+        # Most-behind cohort first (largest confirmed_head − cursor).
+        eligible.sort(key=lambda item: item[1] - item[0].cursor, reverse=True)
+        cohort, confirmed_head = eligible[0]
 
-        for log in logs:
-            emitter = normalize_hex(log.get("address", "")).lower()
-            parsed = parse_any_log(log)
-            if not parsed:
-                # Fall through to the per-contract tracked-topic
-                # dispatcher: events from non-OZ ABIs (Solmate,
-                # DSAuth, Compound, …) the hand-rolled registry
-                # doesn't know about. Spec was attached at enrollment
-                # time from the analysis tracking_plan.
-                emitter_specs = tracked_specs_by_emitter.get(emitter)
-                if not emitter_specs:
-                    continue
-                log_topics = log.get("topics") or []
-                if not log_topics:
-                    continue
-                spec = emitter_specs.get((log_topics[0] or "").lower())
-                if not spec:
-                    continue
-                parsed = parse_tracked_log(log, spec)
-                if not parsed:
-                    continue
+        turn_windows = 0
+        while turn_windows < max_windows_cohort and windows_scanned < max_windows_pass:
+            window_start = cohort.cursor + 1
+            if window_start > confirmed_head:
+                cohort.done = True
+                break
+            window_end = min(cohort.cursor + MAX_BLOCK_RANGE, confirmed_head)
 
-            mc = contract_by_address.get(emitter)
-            if not mc:
-                continue
+            # A cohort always has ≥1 address — an empty list would match ANY
+            # address on the wire, so the getLogs is never issued without one.
+            if not cohort.addresses:
+                cohort.done = True
+                break
 
-            event_type = parsed["event_type"]
-
-            # Check monitoring config
-            if mc.monitoring_config and not _should_watch(mc, parsed):
-                continue
-
-            # First gate: have we already stored ANY row for this
-            # (mc, tx, block, type) combo in a previous scan? If so,
-            # skip — re-scanning shouldn't duplicate. Note this means
-            # historically-collapsed batch rows stay collapsed; the
-            # log_index dimension only helps NEW scans onward.
-            db_key = (
-                str(mc.id),
-                parsed.get("tx_hash", ""),
-                parsed["block_number"],
-                event_type,
-            )
-            if db_key in db_events:
-                continue
-
-            # Second gate: in-scan dedup keyed on log_index so batch
-            # timelock ops (``scheduleBatch`` / ``executeBatch`` emit
-            # one CallScheduled / CallExecuted per call with identical
-            # tx+block+type but distinct logIndex) all land as separate
-            # rows in the SAME scan.
-            in_scan_key = (*db_key, parsed.get("log_index", 0))
-            if in_scan_key in in_scan_events:
-                continue
-            in_scan_events.add(in_scan_key)
-
-            # Build event data (everything except standard fields)
-            event_data = {
-                k: v
-                for k, v in parsed.items()
-                if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
-            }
-
-            monitored_event = MonitoredEvent(
-                id=uuid.uuid4(),
-                monitored_contract_id=mc.id,
-                event_type=event_type,
-                block_number=parsed["block_number"],
-                tx_hash=parsed.get("tx_hash", ""),
-                data=event_data if event_data else None,
-            )
-            session.add(monitored_event)
-            new_events.append(monitored_event)
-
-            logger.info(
-                "Detected %s on %s (block %d)",
-                event_type,
-                mc.address,
-                parsed["block_number"],
-            )
-
-            # Write-through to ProxyUpgradeEvent for proxy events
-            topic0 = log.get("topics", [""])[0].lower()
-            if topic0 in PROXY_EVENT_TOPICS and mc.watched_proxy_id:
-                _write_through_proxy_event(session, mc, parsed)
-
-            # Update last_known_state
-            _update_state_from_event(mc, parsed)
-
-            # Propagate to relational tables (Contract, ControllerValue, UpgradeEvent)
-            _sync_relational_tables(session, mc, parsed)
-
-            # Queue a re-analysis job if the event warrants it
             try:
-                reanalysis_job = maybe_queue_reanalysis(session, mc, event_type, event_data)
-                if reanalysis_job:
-                    updated = dict(monitored_event.data or {})
-                    updated["reanalysis_job_id"] = str(reanalysis_job.id)
-                    monitored_event.data = updated
-                    flag_modified(monitored_event, "data")
+                fetched_logs = _fetcher_for(cohort.chain).fetch_logs(
+                    event_address=cohort.addresses,
+                    topics=topics_union,
+                    from_block=window_start,
+                    to_block=window_end,
+                )
             except Exception as exc:
+                # The fetcher's own bisect already gave up. End this cohort's
+                # turn WITHOUT advancing its cursor — behind ≠ skipped.
                 logger.warning(
-                    "Failed to queue re-analysis for %s: %s",
-                    mc.address,
+                    "eth_getLogs failed for blocks %d-%d: %s",
+                    window_start,
+                    window_end,
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
+                degraded = True
+                cohort.failed = True
+                break
 
-        last_successful_block = to_block
-        cursor = to_block + 1
+            window_events = _process_window(session, cohort, fetched_logs, window_start, window_end)
 
-    # Advance last_scanned_block
-    for mc in contracts:
-        if last_successful_block > mc.last_scanned_block:
-            mc.last_scanned_block = last_successful_block
+            # Advance cursors monotonically in the SAME transaction that
+            # persists this window's events. GREATEST means a stale or zombie
+            # writer can only no-op, never rewind.
+            session.execute(
+                update(MonitoredContract)
+                .where(MonitoredContract.id.in_(cohort.member_ids))
+                .values(last_scanned_block=func.greatest(MonitoredContract.last_scanned_block, window_end))
+                .execution_options(synchronize_session=False)
+            )
+            session.commit()
 
-    session.commit()
+            # Notify per window so a long catch-up doesn't buffer thousands of
+            # notifications; the events are already durably committed.
+            _notify_window(session, window_events)
+
+            cohort.cursor = window_end
+            total_new_events.extend(window_events)
+            blocks_scanned += window_end - window_start + 1
+            windows_scanned += 1
+            turn_windows += 1
+
+    # Budget-exhausted only if we stopped at the hard pass cap with work left.
+    if windows_scanned >= max_windows_pass:
+        budget_exhausted = any(
+            not c.done and not c.failed and c.cursor < (_head_for(c.chain) - confirmation_depth) for c in cohorts
+        )
+
+    # max_lag_blocks: head − min cursor across all contracts (raw head, so
+    # "behind" is the operator-facing number, independent of confirmation depth).
+    max_lag = 0
+    for cohort in cohorts:
+        max_lag = max(max_lag, _head_for(cohort.chain) - cohort.cursor)
+    max_lag = max(0, max_lag)
+
     emit_monitor_cycle(
         HEARTBEAT_PROTOCOL_SCANNER,
         started=started,
-        contracts_scanned=len(contracts),
-        blocks_scanned=max(last_successful_block - from_block, 0),
-        events_found=len(new_events),
-        partial=partial,
+        contracts_scanned=len(index_rows),
+        blocks_scanned=blocks_scanned,
+        events_found=len(total_new_events),
+        partial=degraded,
+        note="no_new_blocks" if windows_scanned == 0 and not degraded else None,
+        extra_detail={
+            "max_lag_blocks": max_lag,
+            "windows_scanned": windows_scanned,
+            "cohorts": len(cohorts),
+            "budget_exhausted": budget_exhausted,
+        },
     )
-    return new_events
+    return ScanResult(
+        total_new_events,
+        budget_exhausted=budget_exhausted,
+        windows_scanned=windows_scanned,
+        cohorts=len(cohorts),
+        max_lag_blocks=max_lag,
+        degraded=degraded,
+    )
 
 
 # Per-write-target → monitoring_config flag gates. Tag-driven dispatch
@@ -1110,39 +1307,25 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 # ---------------------------------------------------------------------------
 
 
-def _boot_reconcile(rpc_url: str) -> None:
-    """Best-effort enrollment reconcile on watcher startup.
-
-    Catches the case where a migration / admin fix-up landed while the
-    watcher was down. The reconciler converges on every tick anyway, so
-    a failure here is non-fatal — but the boot pass closes the deploy-
-    window gap so monitored_contracts is correct before the first scan.
-    """
-    try:
-        from services.monitoring.reconciler import reconcile_enrollments
-
-        with SessionLocal() as session:
-            reconcile_enrollments(session, rpc_url)
-    except Exception as exc:
-        logger.warning("Boot reconcile failed: %s", exc, extra={"exc_type": type(exc).__name__})
-
-
 def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None:
-    """Run the unified event scanner in a blocking loop."""
+    """Run the unified event scanner in a blocking loop.
+
+    ``scan_for_events`` now commits and notifies per window, so a long
+    catch-up drains at RPC speed without buffering. When a pass exhausts its
+    window budget with work still queued, re-run after the short busy interval
+    instead of the full scan interval.
+    """
     logger.info("Starting unified protocol monitor (interval=%ss)", interval)
-    _boot_reconcile(rpc_url)
+    busy_interval = _scan_float_env("PSAT_SCAN_BUSY_INTERVAL_S", 5.0)
     while True:
+        sleep_for = interval
         try:
             with SessionLocal() as session:
-                new_events = scan_for_events(session, rpc_url)
-                if new_events:
-                    logger.info("Detected %d new event(s)", len(new_events))
-                    try:
-                        from services.monitoring.notifier import notify_protocol_events
-
-                        notify_protocol_events(session, new_events)
-                    except Exception as exc:
-                        logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
+                result = scan_for_events(session, rpc_url)
+            if result:
+                logger.info("Detected %d new event(s)", len(result))
+            if result.budget_exhausted:
+                sleep_for = busy_interval
         except Exception as exc:
             logger.warning("Scan cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
             # ``scan_for_events`` raised before it could emit its own cycle
@@ -1152,13 +1335,12 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
                 status="degraded",
                 detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
             )
-        time.sleep(interval)
+        time.sleep(sleep_for)
 
 
 def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None:
     """Run the unified state polling loop."""
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
-    _boot_reconcile(rpc_url)
     while True:
         try:
             with SessionLocal() as session:

@@ -79,8 +79,10 @@ def test_emit_monitor_cycle_partial_marks_degraded():
 
 def test_scan_for_events_zero_active_contracts_still_emits_cycle(caplog):
     # No enrolled contracts: scan_for_events returns [] early but must still
-    # beat so a dead watcher is distinguishable from a healthy idle one.
+    # beat so a dead watcher is distinguishable from a healthy idle one. The
+    # columns-only index load reads ``session.execute(...).all()`` directly.
     session = MagicMock()
+    session.execute.return_value.all.return_value = []
     session.execute.return_value.scalars.return_value.all.return_value = []
 
     with patch.object(monitoring, "record_heartbeat") as hb:

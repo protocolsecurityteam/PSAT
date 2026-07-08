@@ -91,7 +91,7 @@ class LogFetcher(Protocol):
     def fetch_logs(
         self,
         *,
-        event_address: str,
+        event_address: str | Sequence[str],
         topics: Sequence[str],
         from_block: int,
         to_block: int,
