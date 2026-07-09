@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 
 
 # Reason vocabulary for ``mark_enrollment_dirty`` — the write site that
-# enqueued the protocol. ``governance_rotation`` (unified_watcher governance
-# sync) is added by a later package. Kept as documentation; not enforced.
-ENROLLMENT_DIRTY_REASONS = frozenset({"policy_complete", "discovery_adoption", "audit_added", "manual", "sweep"})
+# enqueued the protocol. Kept as documentation; not enforced.
+ENROLLMENT_DIRTY_REASONS = frozenset(
+    {"policy_complete", "discovery_adoption", "audit_added", "manual", "sweep", "governance_rotation"}
+)
 
 
 def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str) -> None:
