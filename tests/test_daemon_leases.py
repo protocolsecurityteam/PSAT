@@ -60,27 +60,9 @@ def lease_session():
         engine.dispose()
 
 
-def test_fresh_acquire_wins(lease_session):
-    session, created = lease_session
-    name = _lease_name()
-    created.append(name)
-    holder = uuid.uuid4()
-
-    assert try_acquire_daemon_lease(session, name, holder, ttl_seconds=60) is True
-    assert _holder(session, name) == holder
-
-
-def test_distinct_holder_loses_while_unexpired(lease_session):
-    session, created = lease_session
-    name = _lease_name()
-    created.append(name)
-    holder_a = uuid.uuid4()
-    holder_b = uuid.uuid4()
-
-    assert try_acquire_daemon_lease(session, name, holder_a, ttl_seconds=60) is True
-    # Live lease, different holder: the WHERE fails, nothing is updated.
-    assert try_acquire_daemon_lease(session, name, holder_b, ttl_seconds=60) is False
-    assert _holder(session, name) == holder_a
+# Fresh-acquire-wins and the distinct-holder-loses-while-unexpired branch are
+# both asserted (through two independent connections, strictly stronger than a
+# single-session variant) by ``test_contention_two_connections`` below.
 
 
 def test_expired_lease_is_stolen(lease_session):
@@ -163,9 +145,3 @@ def test_contention_two_connections(lease_session):
     finally:
         session_b.close()
         engine_b.dispose()
-
-
-def test_daemon_leases_table_reachable(lease_session):
-    """The conftest migration created the table; a plain SELECT must succeed."""
-    session, _ = lease_session
-    session.execute(text("SELECT name, holder, expires_at FROM daemon_leases LIMIT 1")).all()

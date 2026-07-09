@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
 from db.models import MonitoredContract, MonitoredEvent
 from services.monitoring.event_topics import OWNERSHIP_TRANSFERRED_TOPIC0
@@ -172,19 +172,10 @@ def test_most_behind_cohort_scanned_first(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_per_pass_budget_stops_with_budget_exhausted(db_session, monkeypatch):
-    """A single deeply-behind cohort stops at the 50-window pass cap."""
-    from services.monitoring.unified_watcher import scan_for_events
-
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    mc_id = _mk(db_session, ADDR(1), 0)
-    Wire(head=500_000).install(monkeypatch)  # 250 windows of work
-
-    result = scan_for_events(db_session, "http://stub")
-
-    assert result.windows_scanned == 50
-    assert result.budget_exhausted is True
-    assert _cursor(db_session, mc_id) == 50 * MAX_BLOCK_RANGE
+# The single-cohort 50-window pass cap (windows_scanned==50, budget_exhausted,
+# cursor at 50×MAX_BLOCK_RANGE) is asserted by pass 1 of
+# ``test_36_day_gap_converges_in_three_passes`` below, which additionally pins
+# cohorts==1 and flat single-address hydration.
 
 
 def test_per_cohort_turn_cap_hands_off_within_pass(db_session, monkeypatch):
@@ -333,28 +324,10 @@ def test_lower_head_second_pass_does_not_rewind(db_session, monkeypatch):
     assert _cursor(db_session, mc_id) == 6000  # unchanged
 
 
-def test_greatest_update_no_ops_for_stale_writer(db_session, monkeypatch):
-    """The exact GREATEST cursor UPDATE scan issues can only move forward — a
-    zombie/lagging writer replaying an old window end is a no-op."""
-    mc_id = _mk(db_session, ADDR(1), 5000)
-
-    # Forward move wins.
-    db_session.execute(
-        update(MonitoredContract)
-        .where(MonitoredContract.id == mc_id)
-        .values(last_scanned_block=func.greatest(MonitoredContract.last_scanned_block, 8000))
-    )
-    db_session.commit()
-    assert _cursor(db_session, mc_id) == 8000
-
-    # Stale replay cannot rewind.
-    db_session.execute(
-        update(MonitoredContract)
-        .where(MonitoredContract.id == mc_id)
-        .values(last_scanned_block=func.greatest(MonitoredContract.last_scanned_block, 4000))
-    )
-    db_session.commit()
-    assert _cursor(db_session, mc_id) == 8000
+# The GREATEST cursor monotonicity (a stale/zombie writer replaying an old
+# window end can never rewind) is asserted through the real ``scan_for_events``
+# in ``test_lower_head_second_pass_does_not_rewind`` above; a raw-UPDATE
+# re-assertion here would only re-test Postgres ``GREATEST``.
 
 
 # ---------------------------------------------------------------------------

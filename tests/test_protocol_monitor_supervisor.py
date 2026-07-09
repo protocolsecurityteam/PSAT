@@ -15,9 +15,12 @@ Two layers:
 
 from __future__ import annotations
 
+import importlib
 import sys
 import threading
 import time
+
+import pytest
 
 from db.models import SessionLocal, WorkerHeartbeat
 from db.queue import (
@@ -282,99 +285,73 @@ def test_default_mode_spawns_exactly_three_named_threads():
         sup.join()
 
 
-def test_tvl_flag_dispatches_tvl_loop(monkeypatch):
-    import services.monitoring.tvl as tvl_mod
+@pytest.mark.parametrize(
+    "argv, patch_targets, expected",
+    [
+        # --tvl → run_tvl_loop(interval)  [local import from services.monitoring.tvl]
+        (
+            ["--tvl", "--interval", "7"],
+            {"tvl": ("services.monitoring.tvl", "run_tvl_loop")},
+            {"tvl": ((7.0,), {})},
+        ),
+        # --reconcile → run_enrollment_reconciler_loop(rpc_url, interval=interval)
+        (
+            ["--reconcile", "--rpc-url", "http://x", "--interval", "9"],
+            {"rec": ("services.monitoring.reconciler", "run_enrollment_reconciler_loop")},
+            {"rec": (("http://x",), {"interval": 9.0})},
+        ),
+        # --poll (unified) → run_poll_loop(rpc_url, interval)
+        (
+            ["--poll", "--rpc-url", "http://p", "--interval", "3"],
+            {"poll": ("services.monitoring.unified_watcher", "run_poll_loop")},
+            {"poll": (("http://p", 3.0), {})},
+        ),
+        # --legacy → proxy_watcher.run_scan_loop only (poll untouched)
+        (
+            ["--legacy", "--rpc-url", "http://l", "--interval", "4"],
+            {
+                "scan": ("services.monitoring.proxy_watcher", "run_scan_loop"),
+                "poll": ("services.monitoring.proxy_watcher", "run_poll_loop"),
+            },
+            {"scan": (("http://l", 4.0), {}), "poll": None},
+        ),
+        # --legacy --poll → proxy_watcher.run_poll_loop only (scan untouched)
+        (
+            ["--legacy", "--poll", "--rpc-url", "http://l", "--interval", "4"],
+            {
+                "scan": ("services.monitoring.proxy_watcher", "run_scan_loop"),
+                "poll": ("services.monitoring.proxy_watcher", "run_poll_loop"),
+            },
+            {"scan": None, "poll": (("http://l", 4.0), {})},
+        ),
+        # default (no mode flag) → _run_supervised_default(rpc_url, interval)
+        (
+            ["--rpc-url", "http://d"],
+            {"default": ("workers.protocol_monitor", "_run_supervised_default")},
+            {"default": (("http://d", None), {})},
+        ),
+    ],
+)
+def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
+    """Each CLI mode flag routes ``main()`` to exactly its loop entry point with
+    the parsed rpc-url/interval, and mutually-exclusive siblings (legacy scan vs
+    poll) are not invoked. The loops are patched where ``main`` imports them, so
+    the real functions never run."""
+    seen: dict[str, tuple] = {}
 
-    seen: dict[str, float] = {}
+    for label, (mod_path, attr) in patch_targets.items():
+        mod = importlib.import_module(mod_path)
 
-    def fake_tvl(interval, stop_event=None):
-        seen["interval"] = interval
+        def _rec(*a, _label=label, **k):
+            seen[_label] = (a, k)
 
-    monkeypatch.setattr(tvl_mod, "run_tvl_loop", fake_tvl)
-    monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--tvl", "--interval", "7"])
+        monkeypatch.setattr(mod, attr, _rec)
 
+    monkeypatch.setattr(sys, "argv", ["protocol_monitor", *argv])
     main()
 
-    assert seen == {"interval": 7.0}
-
-
-def test_reconcile_flag_dispatches_reconciler(monkeypatch):
-    import services.monitoring.reconciler as rec_mod
-
-    seen: dict[str, object] = {}
-
-    def fake_reconcile(rpc_url, interval=None, **kwargs):
-        seen["rpc_url"] = rpc_url
-        seen["interval"] = interval
-
-    monkeypatch.setattr(rec_mod, "run_enrollment_reconciler_loop", fake_reconcile)
-    monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--reconcile", "--rpc-url", "http://x", "--interval", "9"])
-
-    main()
-
-    assert seen == {"rpc_url": "http://x", "interval": 9.0}
-
-
-def test_poll_flag_dispatches_unified_poll(monkeypatch):
-    import services.monitoring.unified_watcher as uw
-
-    seen: dict[str, object] = {}
-
-    def fake_poll(rpc_url, interval, stop_event=None):
-        seen["rpc_url"] = rpc_url
-        seen["interval"] = interval
-
-    monkeypatch.setattr(uw, "run_poll_loop", fake_poll)
-    monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--poll", "--rpc-url", "http://p", "--interval", "3"])
-
-    main()
-
-    assert seen == {"rpc_url": "http://p", "interval": 3.0}
-
-
-def test_legacy_flag_dispatches_proxy_scanner(monkeypatch):
-    import services.monitoring.proxy_watcher as pw
-
-    seen: dict[str, object] = {}
-
-    monkeypatch.setattr(pw, "run_scan_loop", lambda rpc, interval: seen.setdefault("scan", (rpc, interval)))
-    monkeypatch.setattr(pw, "run_poll_loop", lambda rpc, interval: seen.setdefault("poll", (rpc, interval)))
-    monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--legacy", "--rpc-url", "http://l", "--interval", "4"])
-
-    main()
-
-    assert seen == {"scan": ("http://l", 4.0)}
-
-
-def test_legacy_poll_flag_dispatches_proxy_poller(monkeypatch):
-    import services.monitoring.proxy_watcher as pw
-
-    seen: dict[str, object] = {}
-
-    monkeypatch.setattr(pw, "run_scan_loop", lambda rpc, interval: seen.setdefault("scan", (rpc, interval)))
-    monkeypatch.setattr(pw, "run_poll_loop", lambda rpc, interval: seen.setdefault("poll", (rpc, interval)))
-    monkeypatch.setattr(
-        sys, "argv", ["protocol_monitor", "--legacy", "--poll", "--rpc-url", "http://l", "--interval", "4"]
-    )
-
-    main()
-
-    assert seen == {"poll": ("http://l", 4.0)}
-
-
-def test_default_mode_dispatches_supervised(monkeypatch):
-    seen: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        pm,
-        "_run_supervised_default",
-        lambda rpc, interval: seen.update(rpc=rpc, interval=interval),
-    )
-    monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--rpc-url", "http://d"])
-
-    main()
-
-    assert seen == {"rpc": "http://d", "interval": None}
+    for label, exp in expected.items():
+        assert seen.get(label) == exp
 
 
 def test_run_supervised_default_installs_signals_and_runs(monkeypatch):

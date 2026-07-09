@@ -136,48 +136,41 @@ def test_collect_stale_processes_missing_and_old(db_session, _clean_heartbeats):
 
 
 @requires_postgres
-def test_down_transition_fires_once_then_dedupes(db_session, _clean_heartbeats, posts):
+def test_down_dedupe_recovery_transition_graph(db_session, _clean_heartbeats, posts):
+    """The full watchdog state machine over one shared world: down fires once,
+    a still-stale tick dedupes, a recovered tick posts recovery once, and a
+    subsequent healthy tick does not repeat it."""
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=100_000, now=now)
     db_session.commit()
 
+    # 1) fresh → down: one alert.
     out1 = run_ops_alert_tick(db_session, now=now)
     assert out1["posted_down"] == 1
     assert len(posts) == 1
     assert "Monitoring down: protocol_scanner" in posts[0]["json"]["embeds"][0]["title"]
 
-    # Still stale on the next tick → no second post (dedupe).
-    later = now + timedelta(seconds=120)
-    _restamp_fresh(db_session, later, exclude={HEARTBEAT_PROTOCOL_SCANNER})
-    out2 = run_ops_alert_tick(db_session, now=later)
+    # 2) still stale → deduped (no second down post).
+    t2 = now + timedelta(seconds=120)
+    _restamp_fresh(db_session, t2, exclude={HEARTBEAT_PROTOCOL_SCANNER})
+    out2 = run_ops_alert_tick(db_session, now=t2)
     assert out2["posted_down"] == 0
     assert len(posts) == 1
 
-
-@requires_postgres
-def test_recovery_fires_once(db_session, _clean_heartbeats, posts):
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-    _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
-    _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=100_000, now=now)
-    db_session.commit()
-
-    run_ops_alert_tick(db_session, now=now)
-    assert len(posts) == 1  # the down post
-
-    # Scanner beats again → recovery.
-    later = now + timedelta(seconds=205)
-    _restamp_fresh(db_session, later)  # includes the scanner now → all healthy
-    out = run_ops_alert_tick(db_session, now=later)
-    assert out["posted_recovery"] == 1
+    # 3) scanner beats again → recovery fires once.
+    t3 = now + timedelta(seconds=205)
+    _restamp_fresh(db_session, t3)  # includes the scanner now → all healthy
+    out3 = run_ops_alert_tick(db_session, now=t3)
+    assert out3["posted_recovery"] == 1
     assert len(posts) == 2
     assert "recovered" in posts[1]["json"]["embeds"][0]["title"]
 
-    # No repeat recovery once healthy.
-    later2 = later + timedelta(seconds=1)
-    _restamp_fresh(db_session, later2)
-    out2 = run_ops_alert_tick(db_session, now=later2)
-    assert out2["posted_recovery"] == 0
+    # 4) still healthy → no repeat recovery.
+    t4 = t3 + timedelta(seconds=1)
+    _restamp_fresh(db_session, t4)
+    out4 = run_ops_alert_tick(db_session, now=t4)
+    assert out4["posted_recovery"] == 0
     assert len(posts) == 2
 
 

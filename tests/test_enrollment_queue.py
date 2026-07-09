@@ -277,24 +277,10 @@ def test_redirty_during_build_survives_success_delete(qsession):
     assert row.lease_expires_at is None
 
 
-def test_success_delete_removes_unchanged_row(qsession):
-    proto = _make_protocol(qsession)
-    mark_enrollment_dirty(qsession, proto.id, "manual")
-    qsession.commit()
-
-    claims = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)
-    reconciler._finish_success(qsession, claims[0])
-
-    assert (
-        qsession.execute(
-            select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
-        ).scalar_one_or_none()
-        is None
-    )
-    assert (
-        qsession.execute(select(Protocol.last_enrollment_reconcile_at).where(Protocol.id == proto.id)).scalar_one()
-        is not None
-    )
+# The unchanged-row delete + reconcile-stamp path of ``_finish_success`` is
+# covered end-to-end by ``test_mark_then_drain_enrolls_controllers`` (queue row
+# consumed, ``last_enrollment_reconcile_at`` stamped); the re-dirtied branch is
+# ``test_redirty_during_build_survives_success_delete`` above.
 
 
 # ---------------------------------------------------------------------------
@@ -379,27 +365,9 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
         assert reason == "sweep"
 
 
-def test_sweep_full_table_orders_null_before_dated(qsession):
-    """With only our seeded protocols present the ordering is deterministic:
-    a NULL-reconcile protocol outranks a 10-day-old one."""
-    # Remove any pre-existing protocols' interference by asserting relative order
-    # within a fresh two-protocol cohort claimed via the real ordering query.
-    never = _make_protocol(qsession, "order_never")
-    dated = _make_protocol(qsession, "order_dated")
-    qsession.execute(
-        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() - INTERVAL '1 day' WHERE id = :pid"),
-        {"pid": dated.id},
-    )
-    qsession.commit()
-
-    ordered = list(
-        qsession.execute(
-            select(Protocol.id)
-            .where(Protocol.id.in_([never.id, dated.id]))
-            .order_by(Protocol.last_enrollment_reconcile_at.asc().nullsfirst())
-        ).scalars()
-    )
-    assert ordered == [never.id, dated.id]
+# The NULLS-FIRST-then-oldest ordering is asserted through the real
+# ``sweep_enqueue_stale`` in ``test_sweep_enqueues_k_oldest_nulls_first`` above;
+# a raw ``order_by`` re-assertion here would only re-test SQLAlchemy.
 
 
 # ---------------------------------------------------------------------------
@@ -576,47 +544,11 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_drain_failure_backs_off_and_continues(qsession, wired_drain, monkeypatch):
-    proto = _seed_protocol_with_controller(qsession)
-    mark_enrollment_dirty(qsession, proto.id, "policy_complete")
-    qsession.commit()
-
-    def _boom(*a, **kw):
-        raise RuntimeError("enroll blew up")
-
-    monkeypatch.setattr("services.monitoring.reconciler.enroll_protocol_contracts", _boom)
-
-    result = drain_enrollment_queue("http://rpc.invalid")
-    assert result == {"drained": 0, "failed": 1}
-
-    qsession.expire_all()
-    row = qsession.execute(
-        select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
-    ).scalar_one()
-    assert row.attempts == 1
-    assert row.lease_id is None
-
-
-def test_sweep_skips_already_queued_protocol(qsession):
-    """A protocol already sitting in the queue must not be re-marked by the
-    sweep — otherwise the sweep would reset its ``dirty_at`` and defeat the
-    poisoned-protocol backoff."""
-    queued = _make_protocol(qsession, "sweep_queued")
-    mark_enrollment_dirty(qsession, queued.id, "manual")
-    qsession.commit()
-
-    enqueued = sweep_enqueue_stale(qsession, k=50)
-    # Don't leak queue rows the sweep created for unrelated protocols.
-    collateral = [pid for pid in enqueued if pid != queued.id]
-    if collateral:
-        qsession.execute(delete(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id.in_(collateral)))
-        qsession.commit()
-
-    assert queued.id not in enqueued, "already-queued protocol must be skipped by the sweep"
-    reason = qsession.execute(
-        select(MonitoringEnrollmentQueue.reason).where(MonitoringEnrollmentQueue.protocol_id == queued.id)
-    ).scalar_one()
-    assert reason == "manual", "sweep must not overwrite an existing queue row's reason"
+# The drain-level failure path (drain returns ``{"drained":0,"failed":1}``,
+# attempts bumped, lease cleared) and the sweep's skip-already-queued branch
+# (``dirty_at`` and ``reason`` preserved for a backed-off row) are both asserted
+# by ``test_poisoned_protocol_not_redrained_each_tick`` below, which drives the
+# same drain+sweep sequence with strictly stronger assertions.
 
 
 def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkeypatch):
