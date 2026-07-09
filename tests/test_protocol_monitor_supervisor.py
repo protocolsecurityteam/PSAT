@@ -5,9 +5,9 @@ Two layers:
 * The ``Supervisor`` (unit under test) is driven with injected fast-failing loop
   callables — acceptable here because the supervisor's restart/backoff/heartbeat
   policy is exactly what we're asserting, and a real scan/poll pass is neither
-  fast nor deterministic. Heartbeats still go through the real
-  ``record_heartbeat`` against the real test DB (only assertions add a delegating
-  spy).
+  fast nor deterministic. The error-heartbeat assertion captures the
+  supervisor's ``record_heartbeat`` calls via a pure spy (no DB) — ``db.queue``'s
+  write path is covered against the real test DB elsewhere.
 * The *real* loops' stop-event plumbing is integration-tested by running
   ``run_scan_loop`` / ``run_poll_loop`` briefly (only the RPC wire stubbed) and
   proving a stop request returns promptly instead of sleeping out the interval.
@@ -22,7 +22,6 @@ import time
 
 import pytest
 
-from db.models import SessionLocal, WorkerHeartbeat
 from db.queue import (
     HEARTBEAT_PROTOCOL_POLLER,
     HEARTBEAT_PROTOCOL_SCANNER,
@@ -101,13 +100,11 @@ def test_backoff_resets_after_a_healthy_stretch():
 
 
 def test_error_heartbeat_recorded_with_exc_type_on_each_death(monkeypatch):
-    """Each escape records status='error' + exc_type, and persists to the DB."""
+    """Each escape records a status='error' heartbeat carrying the exc_type."""
     calls: list[tuple[str, str, dict | None]] = []
-    real = pm.record_heartbeat
 
     def spy(process, *, status="running", detail=None):
         calls.append((process, status, detail))
-        real(process, status=status, detail=detail)
 
     monkeypatch.setattr(pm, "record_heartbeat", spy)
 
@@ -120,15 +117,9 @@ def test_error_heartbeat_recorded_with_exc_type_on_each_death(monkeypatch):
     sup._supervise(HEARTBEAT_PROTOCOL_SCANNER, raiser)
 
     assert len(calls) == 3
+    assert all(process == HEARTBEAT_PROTOCOL_SCANNER for process, _, _ in calls)
     assert all(status == "error" for _, status, _ in calls)
     assert all(detail == {"exc_type": "ValueError"} for _, _, detail in calls)
-
-    # Persisted (upsert → single row carrying the last death).
-    with SessionLocal() as session:
-        row = session.get(WorkerHeartbeat, HEARTBEAT_PROTOCOL_SCANNER)
-        assert row is not None
-        assert row.status == "error"
-        assert row.detail == {"exc_type": "ValueError"}
 
 
 # ---------------------------------------------------------------------------
