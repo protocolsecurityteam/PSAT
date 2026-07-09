@@ -42,6 +42,7 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
+    DaemonLease,
     IndexedEventCursor,
     IndexedEventLog,
     MonitoredContract,
@@ -609,6 +610,10 @@ def db_session():
             IndexedEventCursor,
             Contract,
             Protocol,
+            # Scanner/poller passes commit durable daemon_leases rows (with a
+            # live 120s TTL under a per-process holder). Clear them so warm-DB
+            # reruns don't couple lease state across unrelated passes.
+            DaemonLease,
         ]:
             session.query(model).delete()
         session.commit()

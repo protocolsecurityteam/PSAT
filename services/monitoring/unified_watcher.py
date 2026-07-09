@@ -14,7 +14,8 @@ from typing import Callable
 
 from dotenv import load_dotenv
 from sqlalchemy import func, select, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import (
@@ -27,12 +28,18 @@ from db.models import (
     UpgradeEvent,
     WatchedProxy,
 )
-from db.queue import record_heartbeat
+from db.queue import (
+    DEFAULT_DAEMON_LEASE_TTL_S,
+    record_heartbeat,
+    renew_daemon_lease,
+    try_acquire_daemon_lease,
+)
 from services.monitoring import (
     HEARTBEAT_PROTOCOL_POLLER,
     HEARTBEAT_PROTOCOL_SCANNER,
     emit_monitor_cycle,
 )
+from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
@@ -68,6 +75,35 @@ DEFAULT_CONFIRMATION_DEPTH = 12
 # before re-raising. It must sit well below MAX_BLOCK_RANGE so a provider
 # range/response-cap rejection actually bisects instead of failing the cohort.
 FETCHER_MIN_BISECT_SPAN = 125
+
+# Reason stamped on the enrollment-queue row when the watcher's relational sync
+# observes an on-chain controller rotation (owner/admin/authority/implementation).
+# Closes the gap where a rotation installs a new governance Safe that would
+# otherwise stay unmonitored until the slow sweep (design §2.3 call-site 5).
+_GOVERNANCE_ROTATION_REASON = "governance_rotation"
+
+# Write targets whose sync actually installs a new privileged controller — the
+# only changes that can bring a new governance principal into scope and so
+# warrant re-enrolling the protocol. Pause/threshold/roles writes mutate state
+# but don't add a controller address, so they don't mark.
+_GOVERNANCE_ROTATION_WRITE_TARGETS = frozenset(
+    {"owner", "_owner", "admin", "_admin", "authority", "implementation", "beacon"}
+)
+
+
+# Stable per-process lease holder. Generated once at import so every pass this
+# interpreter runs re-acquires its OWN lease (the ``holder = EXCLUDED.holder``
+# branch always wins), and a genuinely separate process — the thing the
+# singleton lease exists to exclude — carries a different uuid and loses.
+_LEASE_HOLDER = uuid.uuid4()
+
+
+def _scanner_lease_name(chain: str) -> str:
+    return f"protocol_scanner:{chain}"
+
+
+def _poller_lease_name(chain: str) -> str:
+    return f"protocol_poller:{chain}"
 
 
 def _scan_int_env(name: str, default: int) -> int:
@@ -234,28 +270,14 @@ def _process_window(
         if spec_map:
             tracked_specs_by_emitter[addr] = spec_map
 
-    # Bounded per-window dedupe: the 4-tuple already-stored guard, scoped to
-    # this window's block range and the emitting members. Replaces the old
-    # pass-wide preload; guards the overlap re-scanned after a failed window.
-    hydrated_ids = [mc.id for mc in hydrated]
-    existing_rows = session.execute(
-        select(
-            MonitoredEvent.monitored_contract_id,
-            MonitoredEvent.tx_hash,
-            MonitoredEvent.block_number,
-            MonitoredEvent.event_type,
-        ).where(
-            MonitoredEvent.monitored_contract_id.in_(hydrated_ids),
-            MonitoredEvent.block_number >= window_start,
-            MonitoredEvent.block_number <= window_end,
-        )
-    ).all()
-    db_events = {(str(r[0]), r[1], r[2], r[3]) for r in existing_rows}
-    # In-scan 5-tuple key (incl. log_index) so batch timelock ops
-    # (scheduleBatch / executeBatch — one CallScheduled / CallExecuted per
-    # call, sharing tx+block+type) land as distinct rows within one window.
-    in_scan_events: set[tuple] = set()
-
+    # No pre-read dedupe: the partial unique index (monitored_contract_id,
+    # tx_hash, log_index, event_type) is the identity of a scan event, so the
+    # insert below uses ON CONFLICT DO NOTHING and gates every side effect on
+    # winning the row. That subsumes both the old pass-wide preload AND the
+    # in-scan 5-tuple guard — a duplicate within the window (provider echo) or
+    # across passes (overlap after a failed window) loses the ON CONFLICT and
+    # is skipped. Batch timelock ops share tx+block+type but carry distinct
+    # log_index, so their identities differ and all rows land.
     new_events: list[MonitoredEvent] = []
 
     for fl in fetched_logs:
@@ -286,34 +308,50 @@ def _process_window(
         if mc.monitoring_config and not _should_watch(mc, parsed):
             continue
 
-        db_key = (
-            str(mc.id),
-            parsed.get("tx_hash", ""),
-            parsed["block_number"],
-            event_type,
-        )
-        if db_key in db_events:
-            continue
-
-        in_scan_key = (*db_key, parsed.get("log_index", 0))
-        if in_scan_key in in_scan_events:
-            continue
-        in_scan_events.add(in_scan_key)
-
         event_data = {
             k: v
             for k, v in parsed.items()
             if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
         }
 
+        event_id = uuid.uuid4()
+        insert_stmt = (
+            pg_insert(MonitoredEvent)
+            .values(
+                id=event_id,
+                monitored_contract_id=mc.id,
+                event_type=event_type,
+                block_number=parsed["block_number"],
+                tx_hash=parsed.get("tx_hash", ""),
+                log_index=fl.log_index,
+                data=event_data if event_data else None,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["monitored_contract_id", "tx_hash", "log_index", "event_type"],
+                index_where=text("log_index IS NOT NULL"),
+            )
+            .returning(MonitoredEvent.id)
+        )
+        # Gate EVERY side effect on the insert winning: a duplicate (lost to a
+        # concurrent/replayed pass) must not double-post Discord, double-queue
+        # reanalysis, or re-sync relational tables (design HR2).
+        if session.execute(insert_stmt).first() is None:
+            continue
+
+        # The core insert wrote the row but left the ORM identity map empty.
+        # Rehydrate it as a persistent instance from the values we already hold
+        # (make_transient_to_detached + add: no SELECT round-trip) so the later
+        # data mutation flushes as an UPDATE.
         monitored_event = MonitoredEvent(
-            id=uuid.uuid4(),
+            id=event_id,
             monitored_contract_id=mc.id,
             event_type=event_type,
             block_number=parsed["block_number"],
             tx_hash=parsed.get("tx_hash", ""),
+            log_index=fl.log_index,
             data=event_data if event_data else None,
         )
+        make_transient_to_detached(monitored_event)
         session.add(monitored_event)
         new_events.append(monitored_event)
 
@@ -410,6 +448,31 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 )
             )
 
+    # Layer-1 singleton gate (design §2.4): a scan pass runs only under the
+    # per-chain daemon lease. Acquire at pass start; a chain whose lease is
+    # held elsewhere is skipped. If none are held we still beat (note=
+    # 'lease_lost') so the fleet view sees a live-but-yielding process, not a
+    # dead one.
+    lease_holder = _LEASE_HOLDER
+    lease_ttl = _scan_int_env("PSAT_DAEMON_LEASE_TTL_S", DEFAULT_DAEMON_LEASE_TTL_S)
+    held_chains = {
+        chain
+        for chain in {c.chain for c in cohorts}
+        if try_acquire_daemon_lease(session, _scanner_lease_name(chain), lease_holder, lease_ttl)
+    }
+    if not held_chains:
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_SCANNER,
+            started=started,
+            contracts_scanned=len(index_rows),
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="lease_lost",
+        )
+        return ScanResult([])
+    cohorts = [c for c in cohorts if c.chain in held_chains]
+
     # Ships ethereum-only: the single rpc_url arg serves every chain present.
     # Cohort keys already carry chain so a per-chain rpc map is the only change
     # a second chain needs.
@@ -443,6 +506,8 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         eligible: list[tuple[_Cohort, int]] = []
         for cohort in cohorts:
             if cohort.done or cohort.failed:
+                continue
+            if cohort.chain not in held_chains:
                 continue
             confirmed_head = _head_for(cohort.chain) - confirmation_depth
             if cohort.cursor >= confirmed_head:
@@ -513,6 +578,14 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             blocks_scanned += window_end - window_start + 1
             windows_scanned += 1
             turn_windows += 1
+
+            # Renew now that this window is durably committed. renew_daemon_lease
+            # commits even when it LOSES, so a lost renew aborts the pass AFTER
+            # this committed window (never rewind, never fetch again). Dropping
+            # the chain from held_chains ends its cohorts' eligibility above.
+            if not renew_daemon_lease(session, _scanner_lease_name(cohort.chain), lease_holder, lease_ttl):
+                held_chains.discard(cohort.chain)
+                break
 
     # Budget-exhausted only if we stopped at the hard pass cap with work left.
     if windows_scanned >= max_windows_pass:
@@ -892,6 +965,11 @@ def _sync_relational_tables(
     ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
 
     Only updates rows when the MonitoredContract has a linked contract_id.
+
+    A controller rotation (owner/admin/authority/implementation actually
+    moving) marks the protocol dirty so the enrollment reconciler picks up any
+    newly-installed governance Safe within one drain tick (design §2.3
+    call-site 5) instead of waiting for the slow sweep.
     """
     if not mc.contract_id:
         return
@@ -902,6 +980,7 @@ def _sync_relational_tables(
     delegates = bool(tags.get("delegates"))
 
     contract: Contract | None = None
+    rotated = False
 
     def _get_contract() -> Contract | None:
         nonlocal contract
@@ -919,6 +998,8 @@ def _sync_relational_tables(
             c = _get_contract()
             if c is not None:
                 old_impl = c.implementation
+                if (old_impl or "").lower() != str(new_impl).lower():
+                    rotated = True
                 c.implementation = new_impl
                 session.add(
                     UpgradeEvent(
@@ -949,9 +1030,18 @@ def _sync_relational_tables(
         if write_target == "admin":
             c = _get_contract()
             if c is not None:
+                if (c.admin or "").lower() != str(new_value).lower():
+                    rotated = True
                 c.admin = str(new_value)
 
-        _update_controller_value_rows(session, mc, write_target, new_value)
+        if _update_controller_value_rows(session, mc, write_target, new_value):
+            if write_target in _GOVERNANCE_ROTATION_WRITE_TARGETS:
+                rotated = True
+
+    if rotated:
+        c = _get_contract()
+        if c is not None and c.protocol_id:
+            mark_enrollment_dirty(session, c.protocol_id, _GOVERNANCE_ROTATION_REASON)
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:
@@ -991,7 +1081,7 @@ def _update_controller_value_rows(
     mc: MonitoredContract,
     write_target: str,
     new_value: object,
-) -> None:
+) -> bool:
     """Write *new_value* into every ControllerValue row keyed by the
     three canonical controller_id forms the analyzer emits
     (``{name}``, ``state_variable:{name}``, ``external_contract:{name}``).
@@ -1000,10 +1090,11 @@ def _update_controller_value_rows(
     poll-driven sync (``_sync_relational_from_poll``) so the two paths
     converge on the same row-keying rules and a custom slot like
     ``protocolAdmin`` propagates through either path without per-slot
-    code.
+    code. Returns True iff a row's value actually moved — the caller uses
+    that to decide whether a governance rotation needs re-enrollment.
     """
     if not mc.contract_id:
-        return
+        return False
     controller_ids = (
         write_target,
         f"state_variable:{write_target}",
@@ -1019,8 +1110,13 @@ def _update_controller_value_rows(
         .scalars()
         .all()
     )
+    changed = False
+    nv = str(new_value)
     for cv in cv_rows:
-        cv.value = str(new_value)
+        if cv.value != nv:
+            cv.value = nv
+            changed = True
+    return changed
 
 
 def _sync_relational_from_poll(
@@ -1037,6 +1133,12 @@ def _sync_relational_from_poll(
     are side effects ControllerValue can't reproduce. Every other field
     flows through the generic ControllerValue updater so custom slots
     (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
+
+    A controller rotation marks the protocol dirty (design §2.3 call-site 5)
+    so a newly-installed governance Safe is enrolled within one drain tick.
+    The caller only reaches here when ``new_value != old_value``, so an
+    implementation swap (or a governance-relevant slot moving) is always a real
+    change.
     """
     if not mc.contract_id:
         return
@@ -1056,9 +1158,15 @@ def _sync_relational_from_poll(
                 )
             )
             _refresh_coverage_after_upgrade(session, contract.protocol_id)
+            if contract.protocol_id:
+                mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
         return
 
-    _update_controller_value_rows(session, mc, field_name, new_value)
+    if _update_controller_value_rows(session, mc, field_name, new_value):
+        if field_name in _GOVERNANCE_ROTATION_WRITE_TARGETS:
+            contract = session.get(Contract, mc.contract_id)
+            if contract is not None and contract.protocol_id:
+                mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
 
 
 # ---------------------------------------------------------------------------
@@ -1245,6 +1353,14 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     rotate (they get stamped with an empty chunk) — the reconciler
     (``services/monitoring/reconciler.py``) backfills the plan within its
     interval so this is a bounded transient on freshly-migrated rows.
+
+    Singleton correctness (design §2.4): the poll path is gated by the
+    ``protocol_poller:<chain>`` daemon lease and — unlike the scan path — the
+    lease is **load-bearing, not belt-and-braces**. ``state_changed_poll`` rows
+    carry ``tx_hash=''`` / block 0 and stay ``log_index NULL``, so they sit
+    outside the partial identity index by design; there is no Layer-2 idempotency
+    to catch a duplicate poll detection. Two concurrent poll passes without the
+    lease MAY double-insert poll events (accepted, documented as design Risk #7).
     """
     started = time.monotonic()
     slice_size = int(os.getenv("PSAT_POLL_CONTRACTS_PER_PASS", str(DEFAULT_POLL_CONTRACTS_PER_PASS)))
@@ -1272,6 +1388,29 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             note="no_active_contracts",
         )
         return []
+
+    # Acquire the per-chain poll lease before any RPC. A chain held elsewhere is
+    # dropped; if none are held, yield the pass (note='lease_lost') so the fleet
+    # view sees a live process, not a dead one.
+    lease_holder = _LEASE_HOLDER
+    lease_ttl = int(os.getenv("PSAT_DAEMON_LEASE_TTL_S", str(DEFAULT_DAEMON_LEASE_TTL_S)))
+    held_chains = {
+        chain
+        for chain in {mc.chain for mc in contracts}
+        if try_acquire_daemon_lease(session, _poller_lease_name(chain), lease_holder, lease_ttl)
+    }
+    if not held_chains:
+        emit_monitor_cycle(
+            HEARTBEAT_PROTOCOL_POLLER,
+            started=started,
+            contracts_scanned=len(contracts),
+            blocks_scanned=0,
+            events_found=0,
+            partial=False,
+            note="lease_lost",
+        )
+        return []
+    contracts = [mc for mc in contracts if mc.chain in held_chains]
 
     # Oldest rotation cursor in the selected slice, measured before we stamp —
     # a NULL (never-polled) member reads as unbounded age (reported as None).
@@ -1341,6 +1480,16 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             .values(last_polled_at=func.now())
         )
         session.commit()
+
+        # Renew now that this chunk is durable. renew commits even when it
+        # LOSES, so a lost renew aborts the remaining chunks AFTER this one —
+        # never roll back. Conservative for multi-chain (any chain's loss ends
+        # the pass; those contracts just retry next pass); ships ethereum-only.
+        renewed = [
+            renew_daemon_lease(session, _poller_lease_name(chain), lease_holder, lease_ttl) for chain in held_chains
+        ]
+        if not all(renewed):
+            break
 
     emit_monitor_cycle(
         HEARTBEAT_PROTOCOL_POLLER,

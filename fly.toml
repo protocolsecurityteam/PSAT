@@ -35,7 +35,8 @@ kill_timeout = 30
   release_command = "uv run --no-sync alembic upgrade head"
 
 # Each group scales independently. `fly scale count --process-group <name> N`.
-# monitor runs chain-scan singletons — DO NOT scale above 1.
+# monitor scan/poll passes are daemon-lease-gated singletons: scaling above 1
+# is safe (duplicates acquire nothing and skip) but wasteful — run 1.
 [processes]
   web     = "./start_web.sh"
   workers = "./start_workers.sh"

@@ -3,8 +3,12 @@
 # tracker. The enrollment reconciler runs on the 16GB `workers` box
 # instead — its per-tick governance-view computation is the heavy
 # compute this 512MB VM must not carry.
-# DO NOT scale above 1 — the scanner/poller race on scan state and
-# duplicate writes.
+# Scaling above 1 is safe but wasteful: scan/poll passes are gated by the
+# per-chain 'protocol_scanner:<chain>' / 'protocol_poller:<chain>' daemon
+# leases (db/queue.py), so a duplicate machine acquires nothing and skips its
+# passes. Independently on the scan path, the partial unique index on
+# monitored_events makes a duplicate insert a no-op. Extra machines burn RPC
+# for zero extra work — run 1.
 set -e
 
 cd "$(dirname "$0")"

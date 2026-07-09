@@ -844,7 +844,7 @@ class MonitoredContract(Base):
     last_known_state: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
-    last_scanned_block: Mapped[int] = mapped_column(Integer, default=0)
+    last_scanned_block: Mapped[int] = mapped_column(BigInteger, default=0)
     # Poller rotation cursor: NULLS FIRST selection stamps this at chunk-commit
     # time so never-polled and least-recently-polled contracts rotate first.
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -876,6 +876,11 @@ class MonitoredEvent(Base):
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     block_number: Mapped[int] = mapped_column(Integer, nullable=False)
     tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    # On-chain log index — the scan path populates it so identity is
+    # (contract, tx_hash, log_index, event_type). NULL for poll-path
+    # ``state_changed_poll`` rows (tx_hash='' / block 0), which are outside the
+    # partial identity index below by design (design §2.4 Layer 2).
+    log_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     data: Mapped[dict[str, Any] | None] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -885,6 +890,15 @@ class MonitoredEvent(Base):
         Index("ix_monitored_events_contract_id", "monitored_contract_id"),
         Index("ix_monitored_events_event_type", "event_type"),
         Index("ix_monitored_events_detected_at", "detected_at"),
+        Index(
+            "uq_monitored_events_identity",
+            "monitored_contract_id",
+            "tx_hash",
+            "log_index",
+            "event_type",
+            unique=True,
+            postgresql_where=text("log_index IS NOT NULL"),
+        ),
     )
 
 
