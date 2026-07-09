@@ -330,6 +330,33 @@ def test_lower_head_second_pass_does_not_rewind(db_session, monkeypatch):
 # re-assertion here would only re-test Postgres ``GREATEST``.
 
 
+def test_cohort_greatest_does_not_rewind_ahead_member(db_session, monkeypatch):
+    """Within one cohort, the shared per-window UPDATE commits ``window_end`` to
+    every member, but GREATEST clamps it so a member already AHEAD of that end
+    is never rewound.
+
+    A (cursor 100) and B (cursor 1500) share block-bucket 0 (both ``//2000``),
+    so they form a single cohort whose cursor is ``min == 100``. With head 1000
+    the cohort's only window ends at ``window_end = min(100+2000, 1000) = 1000``
+    — below B's 1500. A advances 100→1000; B, already past the window end
+    (a reorged/lower head after B was scanned further in a prior pass), stays at
+    1500. Drop GREATEST from the production UPDATE and B rewinds to 1000.
+    """
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    a_id = _mk(db_session, ADDR(1), 100)  # bucket 0, defines the cohort window
+    b_id = _mk(db_session, ADDR(2), 1500)  # bucket 0, already ahead of window_end
+
+    Wire(head=1000).install(monkeypatch)  # confirmed_head lands between A and B
+    result = scan_for_events(db_session, "http://stub")
+
+    # A and B were bucketed together into one cohort committed in one UPDATE.
+    assert result.cohorts == 1
+    assert _cursor(db_session, a_id) == 1000  # advanced to the window end
+    assert _cursor(db_session, b_id) == 1500  # NOT rewound to 1000
+
+
 # ---------------------------------------------------------------------------
 # Convergence + metrics
 # ---------------------------------------------------------------------------
