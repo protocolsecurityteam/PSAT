@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from threading import Event
 
 import requests
 from dotenv import load_dotenv
@@ -403,10 +404,16 @@ def refresh_all_protocols(session: Session) -> int:
 # ---------------------------------------------------------------------------
 
 
-def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
-    """Run the TVL tracking loop."""
+def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL, stop_event: Event | None = None) -> None:
+    """Run the TVL tracking loop.
+
+    ``stop_event`` (supplied by the thread supervisor) breaks the inter-pass
+    wait mid-interval on shutdown; omitting it keeps the original
+    blocking-forever behaviour.
+    """
+    stop_event = stop_event or Event()
     logger.info("Starting TVL tracker (interval=%ss)", interval)
-    while True:
+    while not stop_event.is_set():
         try:
             with SessionLocal() as session:
                 count = refresh_all_protocols(session)
@@ -421,4 +428,4 @@ def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
                 status="degraded",
                 detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
             )
-        time.sleep(interval)
+        stop_event.wait(interval)

@@ -10,6 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 from dotenv import load_dotenv
@@ -1513,17 +1514,26 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 # ---------------------------------------------------------------------------
 
 
-def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None:
+def run_scan_loop(
+    rpc_url: str,
+    interval: float = DEFAULT_SCAN_INTERVAL,
+    stop_event: Event | None = None,
+) -> None:
     """Run the unified event scanner in a blocking loop.
 
     ``scan_for_events`` now commits and notifies per window, so a long
     catch-up drains at RPC speed without buffering. When a pass exhausts its
     window budget with work still queued, re-run after the short busy interval
     instead of the full scan interval.
+
+    ``stop_event`` (supplied by the thread supervisor) lets a shutdown break the
+    inter-pass wait mid-interval instead of sleeping out the full interval;
+    callers that omit it keep the original blocking-forever behaviour.
     """
+    stop_event = stop_event or Event()
     logger.info("Starting unified protocol monitor (interval=%ss)", interval)
     busy_interval = _scan_float_env("PSAT_SCAN_BUSY_INTERVAL_S", 5.0)
-    while True:
+    while not stop_event.is_set():
         sleep_for = interval
         try:
             with SessionLocal() as session:
@@ -1541,13 +1551,22 @@ def run_scan_loop(rpc_url: str, interval: float = DEFAULT_SCAN_INTERVAL) -> None
                 status="degraded",
                 detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
             )
-        time.sleep(sleep_for)
+        stop_event.wait(sleep_for)
 
 
-def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None:
-    """Run the unified state polling loop."""
+def run_poll_loop(
+    rpc_url: str,
+    interval: float = DEFAULT_POLL_INTERVAL,
+    stop_event: Event | None = None,
+) -> None:
+    """Run the unified state polling loop.
+
+    ``stop_event`` lets the supervisor cut the inter-pass wait short on
+    shutdown; omitting it preserves the original blocking-forever behaviour.
+    """
+    stop_event = stop_event or Event()
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
-    while True:
+    while not stop_event.is_set():
         try:
             with SessionLocal() as session:
                 new_events = poll_for_state_changes(session, rpc_url)
@@ -1568,4 +1587,4 @@ def run_poll_loop(rpc_url: str, interval: float = DEFAULT_POLL_INTERVAL) -> None
                 status="degraded",
                 detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
             )
-        time.sleep(interval)
+        stop_event.wait(interval)
