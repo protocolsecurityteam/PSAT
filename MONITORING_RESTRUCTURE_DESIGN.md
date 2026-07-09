@@ -382,7 +382,7 @@ depth 12 kills reorg phantoms. Lag exported (`max_lag_blocks`) and alerted on it
 threshold. Acceptance: the live 250k-block gap = 125 windows ≈ 3 passes, < 1h, flat RAM.
 
 **HR5 — Migration-safe, incremental, no new infra.** Six PR-sized stages (§4), each
-leaving prod working, each revertible; all migrations additive (2 tables + 4 columns +
+leaving prod working, each revertible; all migrations additive (2 tables + 3 columns +
 1 index + 1 type widen); zero new services — queue/lease are Postgres rows, alerter
 lives in the existing web process, webhook is the existing Discord path.
 
