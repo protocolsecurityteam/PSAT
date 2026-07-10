@@ -291,11 +291,12 @@ def test_default_mode_spawns_exactly_three_named_threads():
             {"rec": ("services.monitoring.reconciler", "run_enrollment_reconciler_loop")},
             {"rec": (("http://x",), {"interval": 9.0})},
         ),
-        # --poll (unified) → run_poll_loop(rpc_url, interval)
+        # --poll (unified) → run_poll_loop(rpc_url, interval, startup_offset_s=0)
+        # (standalone poller has no co-scheduled scanner to de-phase from).
         (
             ["--poll", "--rpc-url", "http://p", "--interval", "3"],
             {"poll": ("services.monitoring.unified_watcher", "run_poll_loop")},
-            {"poll": (("http://p", 3.0), {})},
+            {"poll": (("http://p", 3.0), {"startup_offset_s": 0.0})},
         ),
         # --legacy → proxy_watcher.run_scan_loop only (poll untouched)
         (

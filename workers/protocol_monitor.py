@@ -300,7 +300,8 @@ def main():
 
         interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
         logger.info("Unified protocol poller starting (rpc=%s, interval=%ss)", sanitize_url(args.rpc_url), interval)
-        run_poll_loop(args.rpc_url, interval)
+        # No co-scheduled scanner in this process, so nothing to de-phase from.
+        run_poll_loop(args.rpc_url, interval, startup_offset_s=0.0)
         return
 
     # Default mode: scanner + poller + TVL as supervised daemon threads.

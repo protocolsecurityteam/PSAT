@@ -348,6 +348,41 @@ class TestBuildInitialState:
         state = _build_initial_state(contract, [active, nested])
         assert state["admin"] == "0x" + "1" * 40
 
+    def test_zero_address_owner_is_not_seeded(self):
+        """A renounced/zero owner is never a useful baseline: seeding it makes
+        the first live poll of a real owner false-fire a state change (and
+        re-enrollment re-arms it). Leaving it unseeded makes that first
+        observation silent instead.
+        """
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        cv = _mock_controller_value(controller_id="owner", value="0x" + "0" * 40)
+        state = _build_initial_state(contract, [cv])
+        assert "owner" not in state
+
+    def test_zero_address_variants_and_plan_fields_not_seeded(self):
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract(implementation="0x0")
+        admin = _mock_controller_value(controller_id="state_variable:admin", value="0x0")
+        custom = _mock_controller_value(controller_id="state_variable:feeRecipient", value="0x" + "0" * 40)
+        plan = [{"field": "feeRecipient", "kind": "getter_call", "selector": "0xab"}]
+        state = _build_initial_state(contract, [admin, custom], plan)
+        assert "admin" not in state
+        assert "feeRecipient" not in state
+        assert "implementation" not in state  # zero impl is dropped too
+
+    def test_real_field_still_seeded_when_zero_sibling_present(self):
+        from services.monitoring.enrollment import _build_initial_state
+
+        contract = _mock_contract()
+        real = _mock_controller_value(controller_id="owner", value="0x" + "a" * 40)
+        zero_admin = _mock_controller_value(controller_id="state_variable:admin", value="0x" + "0" * 40)
+        state = _build_initial_state(contract, [real, zero_admin])
+        assert state["owner"] == "0x" + "a" * 40
+        assert "admin" not in state
+
 
 # ---------------------------------------------------------------------------
 # Tests for maybe_enroll_protocol
@@ -1182,6 +1217,117 @@ class TestEnrollmentIntegration:
             select(func.count()).select_from(MonitoredContract).where(MonitoredContract.address == ("0x" + "f1" * 20))
         ).scalar()
         assert count == 1
+
+    def test_reenrollment_merges_state_without_clobbering_observations(self, pg_session):
+        """Re-enrollment must not overwrite a value the watcher already observed
+        — a blind reset re-armed a phantom event every reconcile. Observed keys
+        win; the seed only fills keys the observed state is missing.
+        """
+        from db.models import Contract, ControllerValue, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        impl = "0x" + "a2" * 20
+        seed_owner = "0x" + "b1" * 20
+        observed_owner = "0x" + "cd" * 20  # the live rotation the watcher recorded
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "a1" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            contract_name="Vault",
+            is_proxy=True,
+            proxy_type="eip1967",
+            implementation=impl,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        pg_session.add(ControllerValue(contract_id=contract.id, controller_id="owner", value=seed_owner))
+        _create_completed_job(pg_session, "0x" + "a1" * 20, proto.id)
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == ("0x" + "a1" * 20))
+        ).scalar_one()
+        assert mc.last_known_state["owner"] == seed_owner  # first enroll seeds
+
+        # Simulate a watcher observation: owner rotated live, and drop the seeded
+        # implementation key so the merge has a missing key to re-fill.
+        mc.last_known_state = {"owner": observed_owner}
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        pg_session.expire_all()
+        mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == ("0x" + "a1" * 20))
+        ).scalar_one()
+        assert mc.last_known_state["owner"] == observed_owner  # observation preserved
+        assert mc.last_known_state["implementation"] == impl  # missing key re-seeded
+
+    def test_reenrollment_merge_hygiene_cleanses_zero_and_prunes_stale(self, pg_session):
+        """Re-enrollment merge hygiene: (a) a zero-address observation is dropped
+        (cleanses a row seeded 0x0 before the seed fix, so it can't fire one last
+        phantom), (b) a key neither seeded nor read by the current polling plan is
+        pruned (last_known_state is served verbatim by the API), and (c) canonical
+        owner/admin/implementation keys survive regardless.
+        """
+        from db.models import Contract, ControllerValue, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        impl = "0x" + "a2" * 20
+        real_admin = "0x" + "dd" * 20
+        zero = "0x" + "0" * 40
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        contract = Contract(
+            address="0x" + "a1" * 20,
+            chain="ethereum",
+            protocol_id=proto.id,
+            contract_name="Vault",
+            is_proxy=True,
+            proxy_type="eip1967",
+            implementation=impl,
+        )
+        pg_session.add(contract)
+        pg_session.flush()
+        pg_session.add(ControllerValue(contract_id=contract.id, controller_id="admin", value=real_admin))
+        _create_completed_job(pg_session, "0x" + "a1" * 20, proto.id)
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == ("0x" + "a1" * 20))
+        ).scalar_one()
+        # A persisted state carrying: a poisoned zero owner (pre-seed-fix), an
+        # observed real admin (canonical), and a legacy key no longer produced.
+        mc.last_known_state = {"owner": zero, "admin": real_admin, "legacyField": "0x" + "ee" * 20}
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        pg_session.expire_all()
+        mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == ("0x" + "a1" * 20))
+        ).scalar_one()
+        state = mc.last_known_state
+        assert "owner" not in state  # (a) zero observation cleansed, not re-seeded
+        assert "legacyField" not in state  # (b) stale non-plan key pruned
+        assert state["admin"] == real_admin  # (c) canonical observed value kept
+        assert state["implementation"] == impl  # canonical seed re-fills the missing key
 
     def test_controller_rows_survive_stale_detection(self, pg_session):
         """Controller addresses enrolled by _enroll_controller_addresses must

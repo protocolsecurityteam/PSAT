@@ -16,6 +16,7 @@ from typing import Callable
 from dotenv import load_dotenv
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -121,6 +122,78 @@ def _scan_float_env(name: str, default: float) -> float:
         return default
 
 
+# psycopg2 raises DeadlockDetected (SQLSTATE 40P01) when Postgres aborts one
+# side of a lock cycle. Driver errors from real cursor executes (including
+# autoflush) always arrive wrapped in a SQLAlchemy OperationalError (``.orig``);
+# the raw psycopg2 form only occurs when an error is raised from an event
+# listener (e.g. before_cursor_execute in tests), which SQLAlchemy does not
+# wrap. Both shapes are recognized as belt-and-braces. The
+# defensive import mirrors workers/retry_policy.py so a psycopg2-less test env
+# still imports the module.
+try:
+    import psycopg2  # type: ignore[import-untyped]
+    from psycopg2.errors import DeadlockDetected as _PgDeadlockDetected  # type: ignore[import-untyped]
+
+    _DEADLOCK_TYPES: tuple[type[BaseException], ...] = (_PgDeadlockDetected,)
+    _PSYCOPG2_ERROR: tuple[type[BaseException], ...] = (psycopg2.Error,)
+except Exception:  # pragma: no cover — psycopg2 is a hard dep in production
+    _DEADLOCK_TYPES = ()
+    _PSYCOPG2_ERROR = ()
+
+_DEADLOCK_PGCODE = "40P01"
+
+# Every DB error shape a chunk's writes can raise: SQLAlchemy's wrapper plus the
+# raw psycopg2 error (which is NOT a subclass of SQLAlchemy's). Both poison the
+# session, so both must reach the chunk handler rather than a bare
+# ``except Exception`` that would swallow them into a pending-rollback session.
+_DB_ERROR_TYPES: tuple[type[BaseException], ...] = (OperationalError,) + _PSYCOPG2_ERROR
+
+
+def _is_deadlock_error(exc: BaseException) -> bool:
+    """True iff *exc* is (or wraps) a Postgres deadlock — only ONE side is
+    aborted and the aborted side can simply retry, everything else stays
+    committed.
+
+    Handles both the SQLAlchemy-wrapped form (psycopg2 error on ``.orig``) and
+    the raw psycopg2 form. Deliberately narrow otherwise: a connection-loss
+    error returns False so the caller re-raises it and the pass dies honestly
+    instead of masking a lost database as a per-chunk hiccup.
+    """
+    if _DEADLOCK_TYPES and isinstance(exc, _DEADLOCK_TYPES):
+        return True
+    if getattr(exc, "pgcode", None) == _DEADLOCK_PGCODE:
+        return True
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return False
+    if _DEADLOCK_TYPES and isinstance(orig, _DEADLOCK_TYPES):
+        return True
+    return getattr(orig, "pgcode", None) == _DEADLOCK_PGCODE
+
+
+def _poll_startup_offset(interval: float) -> float:
+    """Delay before the poller's FIRST pass so it doesn't fire in lockstep with
+    the scanner.
+
+    The scan and poll loops share the same interval and the supervisor boots
+    them together, so without a phase shift both write ``monitored_contracts``
+    at the same instant every cycle. A half-interval offset de-phases them for
+    the whole run (equal periods stay half a cycle apart). Only the poller
+    shifts — the scanner's first pass must not be delayed, since watchers care
+    about scan latency, not poll latency. The offset stays well under the
+    poller's staleness window (``3 × interval``, process_meta) so the delayed
+    first heartbeat never reads as dead. Overridable via
+    ``PSAT_POLL_STARTUP_OFFSET_S`` (0 disables the shift).
+    """
+    raw = os.getenv("PSAT_POLL_STARTUP_OFFSET_S")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return max(0.0, interval / 2.0)
+
+
 # Controller IDs that represent the contract owner. Used by relational sync
 # to update only the real owner row, not unrelated controller values that
 # happen to contain "owner" in their name (e.g. token_owner_registry).
@@ -209,7 +282,13 @@ def _scan_topics_union(session: Session) -> list[str]:
     return sorted({t.lower() for t in ALL_EVENT_TOPICS.keys()} | extra)
 
 
-def _notify_window(session: Session, events: list[MonitoredEvent]) -> None:
+def _notify_committed_events(session: Session, events: list[MonitoredEvent]) -> None:
+    """Notify a batch of already-committed events, swallowing failures.
+
+    Shared by the scanner (per window) and the poller (per chunk): both notify
+    only after the events are durable, so a notification failure must not leave
+    the session pending-rollback and abort the rest of the pass.
+    """
     if not events:
         return
     try:
@@ -218,7 +297,7 @@ def _notify_window(session: Session, events: list[MonitoredEvent]) -> None:
         notify_protocol_events(session, events)
     except Exception as exc:
         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
-        # The window is already committed; a failed read here must not leave
+        # The events are already committed; a failed read here must not leave
         # the session in a pending-rollback state that would abort the pass.
         session.rollback()
 
@@ -572,7 +651,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
 
             # Notify per window so a long catch-up doesn't buffer thousands of
             # notifications; the events are already durably committed.
-            _notify_window(session, window_events)
+            _notify_committed_events(session, window_events)
 
             cohort.cursor = window_end
             total_new_events.extend(window_events)
@@ -1322,6 +1401,17 @@ def _apply_poll_result(
             updated = dict(event.data or {})
             updated["reanalysis_job_id"] = str(reanalysis_job.id)
             event.data = updated
+    except _DB_ERROR_TYPES:
+        # maybe_queue_reanalysis's first statement is a Job SELECT whose
+        # autoflush flushes the staged last_known_state UPDATE — the same row
+        # the scanner's cohort UPDATE locks, so this is a deadlock candidate.
+        # Any DB error here has already poisoned the session; let it reach the
+        # chunk handler, which owns rollback + retry-first. Swallowing it would
+        # leave the session pending-rollback and the next statement would raise
+        # PendingRollbackError (not a DB error) past that handler, killing the
+        # pass. Only genuinely local reanalysis-logic failures fall through to
+        # the warn-and-continue below so they can't block a real detection.
+        raise
     except Exception as exc:
         logger.warning(
             "Failed to queue re-analysis for %s: %s",
@@ -1345,10 +1435,13 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     pass is O(slice) in memory rather than O(all monitored contracts). Their
     plan entries are expanded and packed into ``MAX_BATCH_SIZE``-call chunks —
     a contract's calls never split across a chunk — and each chunk is decoded,
-    synced, stamped (``last_polled_at`` = server ``now()``), and committed on
-    its own. A chunk whose batch RPC fails is left unstamped so its contracts
-    sort first next pass (retry-first), and the pass continues with the
-    remaining chunks, reporting ``partial``.
+    synced, stamped (``last_polled_at`` = server ``now()``), committed, and its
+    events notified, all on its own. A chunk whose batch RPC fails — or whose
+    write side deadlocks against the scanner's cohort UPDATE — is rolled back
+    and left unstamped so its contracts sort first next pass (retry-first), and
+    the pass continues with the remaining chunks, reporting ``partial``. Only a
+    Postgres deadlock is recovered per-chunk; any other database error
+    (e.g. a lost connection) is re-raised to end the pass honestly.
 
     Contracts whose ``monitoring_config`` lacks a ``polling_plan`` still
     rotate (they get stamped with an empty chunk) — the reconciler
@@ -1452,6 +1545,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     chunks_failed = 0
 
     for chunk in chunks:
+        chunk_ids = [mc.id for mc, _ in chunk]
         batch_calls: list[tuple[str, list]] = []
         # (contract, batch_index, entry_dict)
         dispatch: list[tuple[MonitoredContract, int, dict]] = []
@@ -1469,18 +1563,47 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                 # (retry-first) next pass; press on with the remaining chunks.
                 chunks_failed += 1
                 continue
-            for mc, idx, entry in dispatch:
-                _apply_poll_result(session, mc, entry, results[idx], new_events)
+        else:
+            results = []
 
-        # Stamp the rotation cursor (server clock) for every contract in the
-        # chunk and commit — durable per chunk, so a later chunk's failure
-        # cannot roll back an earlier chunk's detections or stamps.
-        session.execute(
-            update(MonitoredContract)
-            .where(MonitoredContract.id.in_([mc.id for mc, _ in chunk]))
-            .values(last_polled_at=func.now())
-        )
-        session.commit()
+        # Decode + apply + stamp + commit as one unit under deadlock isolation.
+        # The scanner advances cursors with a bulk UPDATE over the same
+        # monitored_contracts rows this chunk touches, so any of the apply-loop
+        # autoflush, the suppression SELECT, the stamp, or the commit can be the
+        # side Postgres aborts. Collect the chunk's events locally so a rollback
+        # discards exactly the detections that rolled back with it.
+        chunk_events: list[MonitoredEvent] = []
+        try:
+            for mc, idx, entry in dispatch:
+                _apply_poll_result(session, mc, entry, results[idx], chunk_events)
+            session.execute(
+                update(MonitoredContract).where(MonitoredContract.id.in_(chunk_ids)).values(last_polled_at=func.now())
+            )
+            session.commit()
+        except _DB_ERROR_TYPES as exc:
+            if not _is_deadlock_error(exc):
+                # Connection loss and other DB failures aren't per-chunk
+                # recoverable — let the pass die so run_poll_loop records an
+                # honest degraded cycle rather than masking it.
+                raise
+            # Postgres aborted this chunk. Roll back (which also reverts the
+            # in-memory last_known_state mutations the apply loop staged) and
+            # leave the chunk unstamped so it sorts first next pass; press on.
+            session.rollback()
+            chunks_failed += 1
+            logger.warning(
+                "Poll chunk deadlocked; rolled back, retrying next pass: %s",
+                [mc.address for mc, _ in chunk],
+                extra={"exc_type": type(getattr(exc, "orig", None) or exc).__name__},
+            )
+            continue
+
+        # Chunk is durable. Notify its events now — mirroring the scanner's
+        # per-window notify — so a later chunk's failure can't strand
+        # already-committed detections. A chunk that rolled back never reaches
+        # here, so its events are never notified.
+        _notify_committed_events(session, chunk_events)
+        new_events.extend(chunk_events)
 
         # Renew now that this chunk is durable. renew commits even when it
         # LOSES, so a lost renew aborts the remaining chunks AFTER this one —
@@ -1558,26 +1681,37 @@ def run_poll_loop(
     rpc_url: str,
     interval: float = DEFAULT_POLL_INTERVAL,
     stop_event: Event | None = None,
+    startup_offset_s: float | None = None,
 ) -> None:
     """Run the unified state polling loop.
 
     ``stop_event`` lets the supervisor cut the inter-pass wait short on
     shutdown; omitting it preserves the original blocking-forever behaviour.
+
+    Notification happens per chunk inside ``poll_for_state_changes`` (so a later
+    chunk's failure can't strand committed detections); this loop only schedules
+    passes. Its first pass is offset from the scanner's (``_poll_startup_offset``)
+    so the two equal-interval loops don't fire in lockstep and deadlock on
+    ``monitored_contracts`` every cycle. ``startup_offset_s`` overrides that shift
+    — the standalone ``--poll`` runner passes 0 because there is no co-scheduled
+    scanner in its process to de-phase from.
     """
     stop_event = stop_event or Event()
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
+    offset = _poll_startup_offset(interval) if startup_offset_s is None else max(0.0, startup_offset_s)
+    # One beat before the offset wait: a never-beaten heartbeat classifies as
+    # stale (process_meta.is_stale(None)) and the ops watchdog pages on the
+    # first tick, so on a fresh DB the offset gap would otherwise emit a false
+    # "poller down" + "recovered" pair on every preview deploy.
+    record_heartbeat(HEARTBEAT_PROTOCOL_POLLER, status="starting", detail={"note": "starting", "partial": False})
+    if offset and stop_event.wait(offset):
+        return
     while not stop_event.is_set():
         try:
             with SessionLocal() as session:
                 new_events = poll_for_state_changes(session, rpc_url)
                 if new_events:
                     logger.info("Poll detected %d state change(s)", len(new_events))
-                    try:
-                        from services.monitoring.notifier import notify_protocol_events
-
-                        notify_protocol_events(session, new_events)
-                    except Exception as exc:
-                        logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
         except Exception as exc:
             logger.warning("Poll cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
             # ``poll_for_state_changes`` raised before it could emit its own

@@ -241,7 +241,25 @@ def enroll_protocol_contracts(
             existing.contract_id = contract.id
             existing.contract_type = contract_type
             existing.monitoring_config = monitoring_config
-            existing.last_known_state = initial_state
+            # Merge, not replace: an observed value is the live truth and wins,
+            # so re-enrollment only fills keys the observation is missing. Two
+            # hygiene rules keep the merge from carrying junk forever, since the
+            # API serves last_known_state verbatim: a zero-address observation
+            # is dropped (the zero address is never a useful baseline; a real
+            # renounce re-observes silently), and a key that is neither seeded
+            # nor read by the current polling plan is pruned —
+            # except the canonical owner/admin/implementation keys, which the
+            # API and reanalysis expect whenever a value exists. The insert
+            # branch below still seeds wholesale (no observations exist yet).
+            allowed_keys = set(initial_state) | _polling_plan_fields(polling_plan) | _CANONICAL_STATE_KEYS
+            merged_state = dict(initial_state)
+            for key, value in (existing.last_known_state or {}).items():
+                if key not in allowed_keys:
+                    continue
+                if isinstance(value, str) and _is_zero_address(value):
+                    continue
+                merged_state[key] = value
+            existing.last_known_state = merged_state
             existing.needs_polling = needs_poll
             existing.is_active = True
             # Clear stale watched_proxy link when contract isn't an actual proxy shell
@@ -472,6 +490,39 @@ _INITIAL_STATE_OWNER_IDS = frozenset({"owner", "_owner", "state_variable:owner",
 _INITIAL_STATE_ADMIN_IDS = frozenset({"admin", "state_variable:admin"})
 
 
+# Fields the API and reanalysis snapshot expect in last_known_state whenever a
+# value exists, independent of the polling plan — so the merge keeps them even
+# when a plan no longer projects them.
+_CANONICAL_STATE_KEYS = frozenset({"owner", "admin", "implementation"})
+
+
+def _polling_plan_fields(polling_plan: list[dict] | None) -> set[str]:
+    """The set of ``field`` names the current polling plan reads."""
+    if not polling_plan:
+        return set()
+    return {
+        entry["field"]
+        for entry in polling_plan
+        if isinstance(entry, dict) and isinstance(entry.get("field"), str) and entry["field"]
+    }
+
+
+def _is_zero_address(value: str | None) -> bool:
+    """True for the zero address in any hex form (``0x0``, the 40-zero
+    canonical form, or an un-prefixed run of zeros).
+
+    Callers use this to keep a zero value out of ``last_known_state``: the zero
+    address is never a meaningful comparison baseline, and a renounced value is
+    re-observed as ``0x0`` live with its first observation silent.
+    """
+    if not value:
+        return False
+    v = value.strip().lower()
+    if v.startswith("0x"):
+        v = v[2:]
+    return len(v) > 0 and set(v) == {"0"}
+
+
 def _candidate_controller_ids_for_field(field: str) -> tuple[str, ...]:
     """Controller_id forms the analyzer emits for a given state-var
     name. Mirrors ``_update_controller_value_rows`` in the watcher so
@@ -514,13 +565,16 @@ def _build_initial_state(
     """
     state: dict[str, Any] = {}
 
-    if contract.implementation:
+    if contract.implementation and not _is_zero_address(contract.implementation):
         state["implementation"] = contract.implementation
 
+    # A zero-address CV is never a useful comparison baseline (see
+    # _is_zero_address): dropping it here keeps owner/admin and every
+    # polling-plan field below out of the seed unless a real address exists.
     cv_by_id: dict[str, str] = {}
     for cv in controller_values:
         cid = (cv.controller_id or "").lower()
-        if cid and cv.value:
+        if cid and cv.value and not _is_zero_address(cv.value):
             cv_by_id.setdefault(cid, cv.value)
 
     # Pass 1: canonical owner/admin seeding from CV rows.
