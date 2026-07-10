@@ -99,7 +99,15 @@ class Wire:
         return self
 
 
-def _mk(session, address: str, cursor: int, *, chain: str = "ethereum", config: dict | None = None) -> uuid.UUID:
+def _mk(
+    session,
+    address: str,
+    cursor: int,
+    *,
+    chain: str = "ethereum",
+    config: dict | None = None,
+    enrollment_block: int | None = None,
+) -> uuid.UUID:
     mc = MonitoredContract(
         id=uuid.uuid4(),
         address=address,
@@ -108,6 +116,7 @@ def _mk(session, address: str, cursor: int, *, chain: str = "ethereum", config: 
         monitoring_config=config if config is not None else {},
         last_known_state={},
         last_scanned_block=cursor,
+        enrollment_block=enrollment_block,
         needs_polling=False,
         is_active=True,
     )
@@ -467,3 +476,98 @@ def test_notify_fires_once_per_window(db_session, monkeypatch):
         select(func.count()).select_from(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc_id)
     ).scalar_one()
     assert stored == 2
+
+
+# ---------------------------------------------------------------------------
+# Pre-enrollment notification floor (enrollment_block)
+# ---------------------------------------------------------------------------
+
+
+def _install_notify_capture(monkeypatch) -> list:
+    import services.monitoring.notifier as notifier
+
+    seen: list = []
+    monkeypatch.setattr(notifier, "notify_protocol_events", lambda session, events: seen.extend(events))
+    return seen
+
+
+def _jobs_for(session, address: str) -> int:
+    from db.models import Job
+
+    return session.execute(
+        select(func.count()).select_from(Job).where(func.lower(Job.address) == address.lower())
+    ).scalar_one()
+
+
+def test_pre_enrollment_event_recorded_but_not_notified_or_reanalyzed(db_session, monkeypatch):
+    """An event below enrollment_block is pre-enrollment history: persisted with
+    a ``historical`` marker, but never notified and never queues reanalysis
+    (the observed 2018-USDC failure mode). The cohort scans from the low cursor,
+    so the ancient event is fetched even though the floor is higher."""
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    # cursor below the event, floor above it → the event is scanned but historical.
+    mc_id = _mk(db_session, ADDR(1), cursor=100, enrollment_block=1000)
+    Wire(head=2000, logs=[_ownership_log(ADDR(1), ADDR(0xBEEF), block=500)]).install(monkeypatch)
+    notified = _install_notify_capture(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    assert len(result) == 0  # not among the pass's notifiable events
+    assert notified == []  # never notified
+    assert _jobs_for(db_session, ADDR(1)) == 0  # no reanalysis queued
+
+    rows = (
+        db_session.execute(select(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc_id)).scalars().all()
+    )
+    assert len(rows) == 1  # still recorded for the timeline
+    assert rows[0].data and rows[0].data.get("historical") is True
+
+
+def test_post_enrollment_event_notified_and_reanalyzed(db_session, monkeypatch):
+    """A fresh event at/above enrollment_block notifies exactly once and queues
+    reanalysis, exactly as before the floor existed."""
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    mc_id = _mk(db_session, ADDR(1), cursor=100, enrollment_block=100)
+    Wire(head=2000, logs=[_ownership_log(ADDR(1), ADDR(0xBEEF), block=1500)]).install(monkeypatch)
+    notified = _install_notify_capture(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    assert len(result) == 1
+    assert len(notified) == 1  # notified exactly once
+    assert _jobs_for(db_session, ADDR(1)) == 1  # reanalysis queued
+
+    rows = (
+        db_session.execute(select(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc_id)).scalars().all()
+    )
+    assert len(rows) == 1
+    assert not (rows[0].data or {}).get("historical")
+
+
+def test_catch_up_event_after_enrollment_is_notified(db_session, monkeypatch):
+    """Chosen catch-up semantics: an event that occurred while monitoring was
+    behind but AFTER enrollment (block >= enrollment_block) is a real change the
+    operator hasn't seen — notify it, even though it's far from head."""
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    monkeypatch.setenv("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", "50")
+    monkeypatch.setenv("PSAT_SCAN_MAX_WINDOWS_PER_PASS", "50")
+    # Enrolled at 100, badly behind (cursor 100, head 50000); a post-enrollment
+    # governance change at block 10000 that the backlog hadn't reached yet.
+    mc_id = _mk(db_session, ADDR(1), cursor=100, enrollment_block=100)
+    Wire(head=50000, logs=[_ownership_log(ADDR(1), ADDR(0xBEEF), block=10000)]).install(monkeypatch)
+    notified = _install_notify_capture(monkeypatch)
+
+    scan_for_events(db_session, "http://stub")
+
+    assert len(notified) == 1  # catch-up change is notified, not suppressed
+    rows = (
+        db_session.execute(select(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc_id)).scalars().all()
+    )
+    assert len(rows) == 1
+    assert not (rows[0].data or {}).get("historical")

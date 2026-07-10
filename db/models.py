@@ -845,6 +845,12 @@ class MonitoredContract(Base):
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
     last_scanned_block: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Stable block at which monitoring began for this contract — seeded once at
+    # enrollment and never advanced (unlike last_scanned_block, which tracks the
+    # scan frontier). The scanner treats an event below this floor as
+    # pre-enrollment history: recorded, but never notified or reanalyzed. NULL
+    # (legacy rows the backfill couldn't stamp) disables the floor — notify.
+    enrollment_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Poller rotation cursor: NULLS FIRST selection stamps this at chunk-commit
     # time so never-polled and least-recently-polled contracts rotate first.
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1329,6 +1329,113 @@ class TestEnrollmentIntegration:
         assert state["admin"] == real_admin  # (c) canonical observed value kept
         assert state["implementation"] == impl  # canonical seed re-fills the missing key
 
+    def test_enroll_iterates_contracts_in_sorted_address_order(self, pg_session):
+        """Contracts are processed in lowercased-address order so concurrent
+        enrollers of the same protocol acquire monitored_contracts row locks in
+        one global order (no AB/BA deadlock). The returned list is built in that
+        iteration order, so its addresses must come out sorted regardless of
+        insert order."""
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        # Insert deliberately out of order.
+        for suffix in ("c3", "a1", "b2"):
+            addr = "0x" + suffix * 20
+            pg_session.add(Contract(address=addr, chain="ethereum", protocol_id=proto.id, contract_name=suffix))
+            _create_completed_job(pg_session, addr, proto.id)
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enrolled = enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        addrs = [mc.address for mc in enrolled]
+        assert addrs == sorted(addrs)
+        assert addrs == ["0x" + "a1" * 20, "0x" + "b2" * 20, "0x" + "c3" * 20]
+
+    def _seed_one_contract_protocol(self, pg_session):
+        from db.models import Contract, Protocol
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+        addr = "0x" + "a1" * 20
+        pg_session.add(Contract(address=addr, chain="ethereum", protocol_id=proto.id, contract_name="V"))
+        _create_completed_job(pg_session, addr, proto.id)
+        pg_session.commit()
+        return proto
+
+    def test_maybe_enroll_skips_and_marks_dirty_when_lock_held(self, pg_session):
+        """The load-bearing assertion: while a sibling holds the enrollment lock,
+        maybe_enroll writes ZERO MonitoredContract rows and leaves a dirty queue
+        row (so the reconciler converges what this run's snapshot missed). Once
+        the holder's txn ends, the next call enrolls normally."""
+        from sqlalchemy import func
+
+        from db.models import MonitoringEnrollmentQueue
+        from services.monitoring.enrollment import maybe_enroll_protocol
+
+        proto = self._seed_one_contract_protocol(pg_session)
+
+        # A sibling holds the same transaction-scoped advisory lock.
+        holder_engine = create_engine(DATABASE_URL)
+        holder = Session(holder_engine, expire_on_commit=False)
+        held = holder.execute(
+            text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
+            {"pid": proto.id},
+        ).scalar()
+        assert held is True
+        try:
+            with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+                fired = maybe_enroll_protocol(pg_session, proto.id, "http://rpc")
+            assert fired is False
+            n = pg_session.execute(
+                select(func.count()).select_from(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
+            ).scalar()
+            assert n == 0  # nothing enrolled while the lock was held
+            q = pg_session.execute(
+                select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
+            ).scalar_one_or_none()
+            assert q is not None  # dirty row left for the reconciler
+        finally:
+            holder.rollback()  # release the lock
+            holder.close()
+            holder_engine.dispose()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            fired2 = maybe_enroll_protocol(pg_session, proto.id, "http://rpc")
+        assert fired2 is True
+        pg_session.expire_all()
+        n2 = pg_session.execute(
+            select(func.count()).select_from(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
+        ).scalar()
+        assert n2 == 1
+
+    def test_advisory_lock_released_on_enroll_commit(self, pg_session):
+        """A normal maybe_enroll holds the lock only for its own transaction —
+        a separate session can acquire it immediately after (release-on-commit)."""
+        from services.monitoring.enrollment import maybe_enroll_protocol
+
+        proto = self._seed_one_contract_protocol(pg_session)
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            assert maybe_enroll_protocol(pg_session, proto.id, "http://rpc") is True
+
+        other_engine = create_engine(DATABASE_URL)
+        other = Session(other_engine, expire_on_commit=False)
+        try:
+            got = other.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
+                {"pid": proto.id},
+            ).scalar()
+            assert got is True  # lock was freed when maybe_enroll committed
+        finally:
+            other.rollback()
+            other.close()
+            other_engine.dispose()
+
     def test_controller_rows_survive_stale_detection(self, pg_session):
         """Controller addresses enrolled by _enroll_controller_addresses must
         not be immediately deactivated by the stale-detection query in

@@ -394,6 +394,17 @@ def _process_window(
             if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
         }
 
+        # Pre-enrollment floor: an event below the contract's enrollment_block
+        # predates monitoring (a cohort scans from its MIN member cursor, so a
+        # low-cursor cohort-mate can drag this contract's ancient events into a
+        # window). Record it for the timeline with a marker, but never notify,
+        # sync, or reanalyze — those are for changes since we started watching.
+        # A NULL floor (legacy rows) disables suppression: notify, as before.
+        is_historical = mc.enrollment_block is not None and parsed["block_number"] < mc.enrollment_block
+        if is_historical:
+            event_data = dict(event_data)
+            event_data["historical"] = True
+
         event_id = uuid.uuid4()
         insert_stmt = (
             pg_insert(MonitoredEvent)
@@ -433,6 +444,20 @@ def _process_window(
         )
         make_transient_to_detached(monitored_event)
         session.add(monitored_event)
+
+        if is_historical:
+            # Persisted with its ``historical`` marker, but excluded from the
+            # notify list and all side effects: applying a pre-enrollment event
+            # would page on 8-year-old news and overwrite current state.
+            logger.info(
+                "Recorded historical %s on %s (block %d < enrollment %s) — not notified",
+                event_type,
+                mc.address,
+                parsed["block_number"],
+                mc.enrollment_block,
+            )
+            continue
+
         new_events.append(monitored_event)
 
         logger.info(

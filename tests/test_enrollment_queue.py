@@ -189,6 +189,59 @@ def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
     assert reconciled_at is not None
 
 
+def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
+    """e2e: when the fast-path enroll skips (a sibling holds the advisory lock),
+    its mark-dirty-on-skip enqueues the protocol, and the reconciler drain
+    enrolls the contract the holder's snapshot could have missed."""
+    from services.monitoring.enrollment import maybe_enroll_protocol
+
+    proto = _seed_protocol_with_controller(qsession)
+
+    # A sibling holds the enrollment lock, so the fast path must skip.
+    holder_engine = _engine()
+    holder = Session(holder_engine, expire_on_commit=False)
+    holder.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
+        {"pid": proto.id},
+    )
+    try:
+        fired = maybe_enroll_protocol(qsession, proto.id, "http://rpc")
+        assert fired is False
+        # Nothing enrolled yet — but a dirty row was queued by the skip.
+        enrolled_now = (
+            qsession.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)).scalars().all()
+        )
+        assert enrolled_now == []
+        assert (
+            qsession.execute(
+                select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
+            ).scalar_one_or_none()
+            is not None
+        )
+    finally:
+        holder.rollback()  # release the lock so the drain can proceed
+        holder.close()
+        holder_engine.dispose()
+
+    result = drain_enrollment_queue("http://rpc.invalid")
+    assert result == {"drained": 1, "failed": 0}
+
+    qsession.expire_all()
+    enrolled = (
+        qsession.execute(
+            select(MonitoredContract).where(
+                MonitoredContract.protocol_id == proto.id,
+                MonitoredContract.is_active.is_(True),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # The vault contract the skipped fast path missed is now enrolled.
+    addrs = {mc.address for mc in enrolled}
+    assert VAULT_ADDR.lower() in addrs
+
+
 # ---------------------------------------------------------------------------
 # Lease exclusivity + expiry
 # ---------------------------------------------------------------------------

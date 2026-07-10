@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -105,6 +105,31 @@ def maybe_enroll_protocol(
         logger.debug("Protocol %s has no completed jobs, skipping enrollment", protocol_id)
         return False
 
+    # Serialize concurrent fast-path enrollers of the SAME protocol. Two policy
+    # workers finishing sibling jobs both reach here and would enroll in
+    # parallel, deadlocking on monitored_contracts row locks and duplicating the
+    # whole build. The lock is transaction-scoped: it releases automatically when
+    # this transaction ends, and enroll_protocol_contracts is one transaction
+    # with a single commit, so it spans the entire enroll. Different protocols
+    # hash to different keys and never contend. Only the fast path is gated — the
+    # reconciler drain and manual re-enroll must never skip.
+    got_lock = session.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
+        {"pid": protocol_id},
+    ).scalar()
+    if not got_lock:
+        # A sibling holds the lock and is enrolling now. Mark dirty so the
+        # reconciler enrolls whatever the holder's contract snapshot missed
+        # (its snapshot can predate this job) within one drain tick — this is
+        # load-bearing, not belt-and-braces: the holder's dirty row may be
+        # drained and deleted before it sees this job's contract. This commit
+        # deviates from mark_enrollment_dirty's caller-commits convention so the
+        # dirty row lands before the skip returns.
+        mark_enrollment_dirty(session, protocol_id, "policy_complete")
+        session.commit()
+        logger.debug("Protocol %s enrollment already in progress; marked dirty for reconcile", protocol_id)
+        return False
+
     # Fast-path hint: enroll contract rows immediately but skip the
     # primary-controller pass (it runs build_governance_view per call). The
     # reconciler converges controllers on its cadence; manual re-enroll runs
@@ -160,11 +185,19 @@ def enroll_protocol_contracts(
         if calling_job and calling_job.address:
             analyzed_addrs.add(calling_job.address)
 
-    contracts = [
-        c
-        for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
-        if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
-    ]
+    # Sort by lowercased address so every enroller touches monitored_contracts
+    # rows in one global order. Two policy workers auto-enrolling the same
+    # protocol both run this function; without a shared acquisition order their
+    # per-row UPDATEs form an AB/BA cycle and deadlock. Sorted, the second
+    # enroller queues on the first conflicting row instead.
+    contracts = sorted(
+        (
+            c
+            for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
+            if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
+        ),
+        key=lambda c: c.address.lower(),
+    )
 
     if not contracts:
         logger.info("Protocol %s has no analyzed contracts, nothing to enroll", protocol_id)
@@ -286,6 +319,7 @@ def enroll_protocol_contracts(
                     monitoring_config=monitoring_config,
                     last_known_state=initial_state,
                     last_scanned_block=current_block,
+                    enrollment_block=current_block,
                     needs_polling=needs_poll,
                     is_active=True,
                     enrollment_source="auto",
@@ -346,6 +380,13 @@ def enroll_protocol_contracts(
         .scalars()
         .all()
     }
+    # These is_active=False mutations have no intervening execute, so they flush
+    # as one UPDATE batch at commit. SQLAlchemy orders a same-table batch by
+    # primary key, so two concurrent stale passes acquire these row locks in one
+    # deterministic (PK) order regardless of query order — no sort needed here.
+    # Cross-phase overlap with the address-ordered contract loop above is rare;
+    # the caller's broad exception handling plus the dirty-queue drain retry
+    # cover it.
     stale = (
         session.execute(
             select(MonitoredContract).where(
@@ -704,7 +745,10 @@ def _enroll_controller_addresses(
     controllers = controllers_for_protocol(session, protocol_id)
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).
-    for addr, monitored_type in controllers.items():
+    # Sorted by lowercased address: this loop takes progressive row locks via
+    # per-iteration SELECTs, so a concurrent drain and manual re-enroll that
+    # overlap here acquire them in one global order and can't deadlock.
+    for addr, monitored_type in sorted(controllers.items(), key=lambda kv: (kv[0] or "").lower()):
         if not addr or addr in enrolled_contract_addrs:
             continue
         existing = session.execute(
@@ -744,6 +788,7 @@ def _enroll_controller_addresses(
                     monitoring_config=config,
                     last_known_state={},
                     last_scanned_block=current_block,
+                    enrollment_block=current_block,
                     needs_polling=bool(polling_plan),
                     is_active=True,
                     enrollment_source="auto",
