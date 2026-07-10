@@ -108,6 +108,13 @@ ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 PROTO_NAME = "__test_enrollment_anvil__"
 
 
+@pytest.fixture(autouse=True)
+def _disable_scan_confirmation_depth(monkeypatch):
+    # These anvil chains are only a handful of blocks long; the production
+    # 12-block confirmation clamp would hide every just-emitted event.
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+
+
 # ---------------------------------------------------------------------------
 # Anvil helpers
 # ---------------------------------------------------------------------------

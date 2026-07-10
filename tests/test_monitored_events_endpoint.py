@@ -242,3 +242,35 @@ def test_same_detected_at_orders_stably_by_block_then_id(api_client, db_session)
             db_session.delete(e)
         db_session.delete(mc)
         db_session.commit()
+
+
+def test_upsert_monitoring_seeds_enrollment_block_at_head(api_client, db_session, monkeypatch):
+    """A manually-added (surface_alert) contract starts watching from the current
+    head, not block 0, and records enrollment_block as the pre-watch floor — so
+    the scanner won't notify its entire pre-add history on the first pass."""
+    from sqlalchemy import select
+
+    from db.models import MonitoredContract, Protocol
+
+    head = 21_000_000
+    monkeypatch.setattr("routers.monitored.rpc_request", lambda *a, **k: hex(head))
+
+    proto = Protocol(name="__test_upsert_monitoring__")
+    db_session.add(proto)
+    db_session.commit()
+
+    addr = "0x" + "3e" * 20
+    try:
+        resp = api_client.post(
+            f"/api/protocols/{proto.id}/monitoring",
+            json={"address": addr, "chain": "ethereum", "contract_type": "regular"},
+        )
+        assert resp.status_code == 200
+
+        mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
+        assert mc.enrollment_block == head  # floor set → pre-add history is suppressed
+        assert mc.last_scanned_block == head  # start from now, not block 0
+    finally:
+        db_session.query(MonitoredContract).filter(MonitoredContract.address == addr).delete()
+        db_session.query(Protocol).filter(Protocol.id == proto.id).delete()
+        db_session.commit()

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -121,16 +122,17 @@ def test_rpc_batch_request_transport_error_wraps_in_sanitized_runtime_error(monk
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch, caplog):
+def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
     """Driving ``main()`` with ``--rpc-url=<Alchemy URL>`` must not log the raw URL."""
     import importlib
+    import logging
 
     pm = importlib.import_module("workers.protocol_monitor")
 
     monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--rpc-url", _ALCHEMY])
 
     # Stub out signal handlers (they call sys.exit on SIGTERM in real prod) and
-    # the watcher entry point so main() returns immediately after logging.
+    # the loop entry points so no real scan/poll/TVL work runs.
     monkeypatch.setattr(pm.signal, "signal", lambda *a, **kw: None)
 
     fake_unified = MagicMock()
@@ -140,14 +142,45 @@ def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch, caplog):
     fake_unified.run_scan_loop = MagicMock()
     monkeypatch.setitem(sys.modules, "services.monitoring.unified_watcher", fake_unified)
 
-    with caplog.at_level("INFO"):
-        pm.main()
+    fake_tvl = MagicMock()
+    fake_tvl.DEFAULT_TVL_INTERVAL = 60
+    fake_tvl.run_tvl_loop = MagicMock()
+    monkeypatch.setitem(sys.modules, "services.monitoring.tvl", fake_tvl)
 
-    combined = " ".join(rec.getMessage() for rec in caplog.records)
+    # Default mode builds a Supervisor and blocks in run_forever() forever. The
+    # sanitization contract lives in the startup log + how the loops are wired,
+    # not in the blocking loop itself, so drive each supervised loop once
+    # synchronously (stop event pre-set so nothing sleeps) and return.
+    def run_once(self):
+        stop = threading.Event()
+        stop.set()
+        for _name, target in self._loops:
+            target(stop)
+
+    monkeypatch.setattr(pm.Supervisor, "run_forever", run_once)
+
+    # Capture on the module logger directly rather than via caplog: main() calls
+    # configure_logging(), which clears the root handlers on its first
+    # per-process call and would drop caplog's handler when this test runs first.
+    records: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    pm.logger.addHandler(handler)
+    pm.logger.setLevel(logging.INFO)
+    try:
+        pm.main()
+    finally:
+        pm.logger.removeHandler(handler)
+
+    combined = " ".join(records)
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in combined
     # The host is preserved so operators can still see which provider is in use.
     assert "eth-mainnet.g.alchemy.com" in combined
-    # And the underlying run_*_loop received the unredacted URL (workers
+    # And the underlying run_scan_loop received the unredacted URL (workers
     # need the real key to make requests).
     fake_unified.run_scan_loop.assert_called_once()
     args, _kwargs = fake_unified.run_scan_loop.call_args

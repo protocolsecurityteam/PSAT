@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
@@ -70,7 +71,9 @@ class _RangeCappedFetcher:
     def __init__(self) -> None:
         self.requested_spans: list[int] = []
 
-    def fetch_logs(self, *, event_address: str, topics, from_block: int, to_block: int) -> list[FetchedEventLog]:
+    def fetch_logs(
+        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int
+    ) -> list[FetchedEventLog]:
         span = to_block - from_block + 1
         self.requested_spans.append(span)
         if span > _MAX_SAFE_SPAN:
@@ -220,7 +223,11 @@ class _OrderRecordingFetcher:
     def __init__(self) -> None:
         self.order: list[str] = []
 
-    def fetch_logs(self, *, event_address: str, topics, from_block: int, to_block: int) -> list[FetchedEventLog]:
+    def fetch_logs(
+        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int
+    ) -> list[FetchedEventLog]:
+        if not isinstance(event_address, str):
+            event_address = event_address[0]
         self.order.append(event_address.lower())
         return []
 

@@ -35,7 +35,8 @@ kill_timeout = 30
   release_command = "uv run --no-sync alembic upgrade head"
 
 # Each group scales independently. `fly scale count --process-group <name> N`.
-# monitor runs chain-scan singletons — DO NOT scale above 1.
+# monitor scan/poll passes are daemon-lease-gated singletons: scaling above 1
+# is safe (duplicates acquire nothing and skip) but wasteful — run 1.
 [processes]
   web     = "./start_web.sh"
   workers = "./start_workers.sh"
@@ -92,3 +93,10 @@ kill_timeout = 30
   processes = ["monitor"]
   size = "shared-cpu-1x"
   memory = "512mb"
+
+# The monitor VM must degrade-and-page, never permanently stop. With the
+# boot-reconcile OOM removed and heavy compute off this box, a crash-loop is
+# now a bug to alert on, not a reason to exhaust the fly retry budget.
+[[restart]]
+  policy = "always"
+  processes = ["monitor"]

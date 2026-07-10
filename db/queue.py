@@ -72,6 +72,10 @@ HEARTBEAT_AUDIT_SCOPE = "audit_scope_extraction"
 HEARTBEAT_PROTOCOL_SCANNER = "protocol_scanner"
 HEARTBEAT_PROTOCOL_POLLER = "protocol_poller"
 HEARTBEAT_PROTOCOL_TVL = "protocol_tvl"
+# The ops watchdog runs in the web app lifespan; its heartbeat row doubles as
+# the CAS-guarded store for alert dedupe/cooldown state (services/monitoring/
+# ops_alerts.py).
+HEARTBEAT_OPS_ALERTER = "ops_alerter"
 
 
 def record_heartbeat(process: str, *, status: str = "running", detail: dict[str, Any] | None = None) -> None:
@@ -97,6 +101,94 @@ def record_heartbeat(process: str, *, status: str = "running", detail: dict[str,
             session.commit()
     except Exception:
         logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
+
+
+# Default lifetime of a daemon-pass lease. Chosen (per design §2.4) to exceed
+# ~3× the worst scan window and the RPC client timeout, so a stalled getLogs
+# rarely outlives the lease and lets a competitor steal it mid-pass.
+DEFAULT_DAEMON_LEASE_TTL_S = int(os.getenv("PSAT_DAEMON_LEASE_TTL_S", "120"))
+
+
+def try_acquire_daemon_lease(
+    session: Session,
+    name: str,
+    holder: uuid.UUID,
+    ttl_seconds: int = DEFAULT_DAEMON_LEASE_TTL_S,
+) -> bool:
+    """Try to take (or extend) the named singleton daemon lease. Returns True on win.
+
+    One statement, no read-modify-write race: an ``INSERT ... ON CONFLICT (name)
+    DO UPDATE`` whose ``WHERE`` is the exclusivity guarantee — the update fires
+    (and ``RETURNING`` yields the row ⇒ win) only when the existing lease has
+    expired *or* is already held by this caller. A live lease held by someone
+    else fails the ``WHERE``, updates nothing, returns no row ⇒ lose.
+
+    Semantics:
+      * fresh name → inserted → win;
+      * expired lease → stolen by the new holder → win;
+      * live lease, different holder → lose;
+      * current holder re-acquiring → always wins and pushes ``expires_at``
+        forward. Renewal *is* re-acquisition (see ``renew_daemon_lease``).
+
+    Expiry is ``NOW() + ttl`` evaluated server-side (Postgres clock), exactly
+    like ``claim_job`` — so daemons on different hosts agree on the instant
+    regardless of local clock skew.
+
+    Commits internally, matching this module's convention (``claim_job`` /
+    ``heartbeat_job`` / ``record_heartbeat`` all commit). Callers are per-pass
+    daemon loops that also commit per window; a renewal here therefore flushes
+    the caller's in-flight window writes along with the lease bump — intended,
+    since the cursor advance and the lease renewal want to land together.
+    """
+    result = session.execute(
+        text(
+            """
+            INSERT INTO daemon_leases (name, holder, expires_at)
+            VALUES (:name, :holder, NOW() + (:ttl * INTERVAL '1 second'))
+            ON CONFLICT (name) DO UPDATE
+                SET holder = EXCLUDED.holder,
+                    expires_at = EXCLUDED.expires_at
+                WHERE daemon_leases.expires_at < NOW()
+                   OR daemon_leases.holder = EXCLUDED.holder
+            RETURNING name
+            """
+        ),
+        {"name": name, "holder": holder, "ttl": int(ttl_seconds)},
+    )
+    won = result.first() is not None
+    session.commit()
+    return won
+
+
+def renew_daemon_lease(
+    session: Session,
+    name: str,
+    holder: uuid.UUID,
+    ttl_seconds: int = DEFAULT_DAEMON_LEASE_TTL_S,
+) -> bool:
+    """Extend the caller's own lease past ``NOW() + ttl``. Returns True if held.
+
+    A thin alias for ``try_acquire_daemon_lease`` for readability at the
+    per-window/per-chunk renewal call sites — renewal is re-acquisition, and
+    the ``holder = EXCLUDED.holder`` branch of the upsert makes the current
+    holder's re-acquire always win. Returns False only if the lease was lost to
+    a competitor (expired and stolen) since the last renewal.
+    """
+    return try_acquire_daemon_lease(session, name, holder, ttl_seconds)
+
+
+def release_daemon_lease(session: Session, name: str, holder: uuid.UUID) -> None:
+    """Release the lease iff the caller still holds it. Wrong holder no-ops.
+
+    The ``holder`` guard means a daemon that already lost its lease to a
+    competitor can't delete the competitor's row on the way out. Commits
+    internally, like the acquire path.
+    """
+    session.execute(
+        text("DELETE FROM daemon_leases WHERE name = :name AND holder = :holder"),
+        {"name": name, "holder": holder},
+    )
+    session.commit()
 
 
 class LeaseLost(RuntimeError):

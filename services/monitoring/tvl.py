@@ -14,10 +14,11 @@ import logging
 import os
 import time
 from pathlib import Path
+from threading import Event
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -38,6 +39,9 @@ DEFAULT_TVL_INTERVAL = int(os.getenv("PROTOCOL_TVL_INTERVAL", "3600"))
 # Minimum seconds between snapshots for the same protocol.  Prevents
 # duplicate rows when the loop is retriggered quickly (restart, signal, etc.).
 MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
+# Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
+# Etherscan/DefiLlama fan-out (design §2.7).
+DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol"
 
 
@@ -338,9 +342,32 @@ def take_tvl_snapshot(
 
 
 def refresh_all_protocols(session: Session) -> int:
-    """Take TVL snapshots for all protocols. Returns count of snapshots."""
+    """Take TVL snapshots for the oldest-snapshot-first rotation slice.
+
+    Each tick refreshes at most ``PSAT_TVL_PROTOCOLS_PER_PASS`` protocols,
+    ordered by their most recent snapshot ascending — protocols that have
+    never been snapshotted sort first. ``take_tvl_snapshot``'s
+    ``MIN_SNAPSHOT_INTERVAL`` dedupe still short-circuits a protocol snapshotted
+    too recently, so the slice self-corrects if the rotation revisits one early.
+    Returns count of snapshots written.
+    """
     started = time.monotonic()
-    protocols = session.execute(select(Protocol)).scalars().all()
+    cap = int(os.getenv("PSAT_TVL_PROTOCOLS_PER_PASS", str(DEFAULT_TVL_PROTOCOLS_PER_PASS)))
+    latest_snapshot = (
+        select(TvlSnapshot.protocol_id, func.max(TvlSnapshot.timestamp).label("last_ts"))
+        .group_by(TvlSnapshot.protocol_id)
+        .subquery()
+    )
+    protocols = (
+        session.execute(
+            select(Protocol)
+            .outerjoin(latest_snapshot, Protocol.id == latest_snapshot.c.protocol_id)
+            .order_by(latest_snapshot.c.last_ts.asc().nullsfirst())
+            .limit(cap)
+        )
+        .scalars()
+        .all()
+    )
     count = 0
     failures = 0
     for protocol in protocols:
@@ -377,10 +404,16 @@ def refresh_all_protocols(session: Session) -> int:
 # ---------------------------------------------------------------------------
 
 
-def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
-    """Run the TVL tracking loop."""
+def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL, stop_event: Event | None = None) -> None:
+    """Run the TVL tracking loop.
+
+    ``stop_event`` (supplied by the thread supervisor) breaks the inter-pass
+    wait mid-interval on shutdown; omitting it keeps the original
+    blocking-forever behaviour.
+    """
+    stop_event = stop_event or Event()
     logger.info("Starting TVL tracker (interval=%ss)", interval)
-    while True:
+    while not stop_event.is_set():
         try:
             with SessionLocal() as session:
                 count = refresh_all_protocols(session)
@@ -395,4 +428,4 @@ def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL) -> None:
                 status="degraded",
                 detail={"partial": True, "note": "cycle_error", "exc_type": type(exc).__name__},
             )
-        time.sleep(interval)
+        stop_event.wait(interval)

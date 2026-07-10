@@ -1,46 +1,27 @@
 #!/bin/bash
-# `monitor` process group: the event scanner, state poller, and TVL
-# tracker, plus the enrollment reconciler. The reconciler converges
-# monitored_contracts on a cadence — notably the controller Safes /
-# Timelocks the per-job enrollment hint (enroll_controllers=False)
-# deliberately skips, and anything the one-shot boot reconcile missed
-# because it ran before the protocol existed. Without it controllers
-# never land in monitoring until a manual /re-enroll.
-# DO NOT scale above 1 — the scanner/poller race on scan state and
-# duplicate writes. (The reconciler only does idempotent upserts, so it
-# is safe as a co-process; the scanners are why this stays a singleton.)
+# `monitor` process group: one interpreter running the event scanner, state
+# poller, and TVL tracker as three supervised daemon threads
+# (workers/protocol_monitor.py default mode). A small in-process Supervisor
+# restarts any loop that dies with exponential backoff and an error heartbeat,
+# so one loop's death never touches its siblings or the process; a crash-loop
+# degrades and pages via fly `[[restart]] policy="always"` instead of
+# exhausting a retry budget and stopping the machine for good. SIGTERM joins all
+# threads within a bounded timeout and exits 0.
+#
+# The enrollment reconciler runs on the 16GB `workers` box instead — its
+# per-tick governance-view computation is the heavy compute this 512MB VM must
+# not carry.
+#
+# Scaling above 1 is safe but wasteful: scan/poll passes are gated by the
+# per-chain 'protocol_scanner:<chain>' / 'protocol_poller:<chain>' daemon
+# leases (db/queue.py), so a duplicate machine acquires nothing and skips its
+# passes. Independently on the scan path, the partial unique index on
+# monitored_events makes a duplicate insert a no-op. Extra machines burn RPC
+# for zero extra work — run 1.
 set -e
 
 cd "$(dirname "$0")"
 
 export PYTHONUNBUFFERED=1
 
-PIDS=()
-
-cleanup() {
-  local exit_code=$?
-  trap - EXIT INT TERM
-  if [ ${#PIDS[@]} -gt 0 ]; then
-    kill "${PIDS[@]}" 2>/dev/null || true
-    wait "${PIDS[@]}" 2>/dev/null || true
-  fi
-  exit $exit_code
-}
-
-trap cleanup EXIT INT TERM
-
-PY=(uv run --no-sync python)
-
-"${PY[@]}" -m workers.protocol_monitor &
-PIDS+=($!)
-"${PY[@]}" -m workers.protocol_monitor --poll &
-PIDS+=($!)
-"${PY[@]}" -m workers.protocol_monitor --tvl &
-PIDS+=($!)
-"${PY[@]}" -m workers.protocol_monitor --reconcile &
-PIDS+=($!)
-
-echo "Monitors started: ${PIDS[*]}"
-# Exit on first death — Fly restarts the machine and relaunches all
-# four. A silently-dead scanner is worse than a 30s restart.
-wait -n
+exec uv run --no-sync python -m workers.protocol_monitor

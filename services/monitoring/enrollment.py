@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from db.models import (
     Job,
     JobStatus,
     MonitoredContract,
+    MonitoringEnrollmentQueue,
     WatchedProxy,
 )
 from services.governance.control_graph_types import reconcile_control_graph_types
@@ -27,6 +28,36 @@ from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
+
+
+# Reason vocabulary for ``mark_enrollment_dirty`` — the write site that
+# enqueued the protocol. Kept as documentation; not enforced.
+ENROLLMENT_DIRTY_REASONS = frozenset(
+    {"policy_complete", "discovery_adoption", "audit_added", "manual", "sweep", "governance_rotation"}
+)
+
+
+def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str) -> None:
+    """Enqueue *protocol_id* for the enrollment reconciler drain.
+
+    One upsert: a fresh dirty row, or a bump of the existing row's
+    ``dirty_at`` to now() with the new ``reason``. The drainer
+    (``services.monitoring.reconciler.drain_enrollment_queue``) claims due
+    rows, so re-marking a protocol that is mid-build simply re-arms it —
+    the drain's ``dirty_at``-guarded delete keeps the re-dirtied row alive.
+
+    Does not commit; the caller commits so the mark lands atomically with
+    (or right after) the action that triggered it. Callers mark *after* the
+    triggering write commits, so a dirty row never references rolled-back work.
+    """
+    session.execute(
+        pg_insert(MonitoringEnrollmentQueue)
+        .values(protocol_id=protocol_id, reason=reason)
+        .on_conflict_do_update(
+            index_elements=["protocol_id"],
+            set_={"dirty_at": func.now(), "reason": reason},
+        )
+    )
 
 
 def maybe_enroll_protocol(
@@ -72,6 +103,31 @@ def maybe_enroll_protocol(
 
     if not completed:
         logger.debug("Protocol %s has no completed jobs, skipping enrollment", protocol_id)
+        return False
+
+    # Serialize concurrent fast-path enrollers of the SAME protocol. Two policy
+    # workers finishing sibling jobs both reach here and would enroll in
+    # parallel, deadlocking on monitored_contracts row locks and duplicating the
+    # whole build. The lock is transaction-scoped: it releases automatically when
+    # this transaction ends, and enroll_protocol_contracts is one transaction
+    # with a single commit, so it spans the entire enroll. Different protocols
+    # hash to different keys and never contend. Only the fast path is gated — the
+    # reconciler drain and manual re-enroll must never skip.
+    got_lock = session.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
+        {"pid": protocol_id},
+    ).scalar()
+    if not got_lock:
+        # A sibling holds the lock and is enrolling now. Mark dirty so the
+        # reconciler enrolls whatever the holder's contract snapshot missed
+        # (its snapshot can predate this job) within one drain tick — this is
+        # load-bearing, not belt-and-braces: the holder's dirty row may be
+        # drained and deleted before it sees this job's contract. This commit
+        # deviates from mark_enrollment_dirty's caller-commits convention so the
+        # dirty row lands before the skip returns.
+        mark_enrollment_dirty(session, protocol_id, "policy_complete")
+        session.commit()
+        logger.debug("Protocol %s enrollment already in progress; marked dirty for reconcile", protocol_id)
         return False
 
     # Fast-path hint: enroll contract rows immediately but skip the
@@ -129,11 +185,19 @@ def enroll_protocol_contracts(
         if calling_job and calling_job.address:
             analyzed_addrs.add(calling_job.address)
 
-    contracts = [
-        c
-        for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
-        if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
-    ]
+    # Sort by lowercased address so every enroller touches monitored_contracts
+    # rows in one global order. Two policy workers auto-enrolling the same
+    # protocol both run this function; without a shared acquisition order their
+    # per-row UPDATEs form an AB/BA cycle and deadlock. Sorted, the second
+    # enroller queues on the first conflicting row instead.
+    contracts = sorted(
+        (
+            c
+            for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
+            if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
+        ),
+        key=lambda c: c.address.lower(),
+    )
 
     if not contracts:
         logger.info("Protocol %s has no analyzed contracts, nothing to enroll", protocol_id)
@@ -210,7 +274,25 @@ def enroll_protocol_contracts(
             existing.contract_id = contract.id
             existing.contract_type = contract_type
             existing.monitoring_config = monitoring_config
-            existing.last_known_state = initial_state
+            # Merge, not replace: an observed value is the live truth and wins,
+            # so re-enrollment only fills keys the observation is missing. Two
+            # hygiene rules keep the merge from carrying junk forever, since the
+            # API serves last_known_state verbatim: a zero-address observation
+            # is dropped (the zero address is never a useful baseline; a real
+            # renounce re-observes silently), and a key that is neither seeded
+            # nor read by the current polling plan is pruned —
+            # except the canonical owner/admin/implementation keys, which the
+            # API and reanalysis expect whenever a value exists. The insert
+            # branch below still seeds wholesale (no observations exist yet).
+            allowed_keys = set(initial_state) | _polling_plan_fields(polling_plan) | _CANONICAL_STATE_KEYS
+            merged_state = dict(initial_state)
+            for key, value in (existing.last_known_state or {}).items():
+                if key not in allowed_keys:
+                    continue
+                if isinstance(value, str) and _is_zero_address(value):
+                    continue
+                merged_state[key] = value
+            existing.last_known_state = merged_state
             existing.needs_polling = needs_poll
             existing.is_active = True
             # Clear stale watched_proxy link when contract isn't an actual proxy shell
@@ -237,6 +319,7 @@ def enroll_protocol_contracts(
                     monitoring_config=monitoring_config,
                     last_known_state=initial_state,
                     last_scanned_block=current_block,
+                    enrollment_block=current_block,
                     needs_polling=needs_poll,
                     is_active=True,
                     enrollment_source="auto",
@@ -297,6 +380,13 @@ def enroll_protocol_contracts(
         .scalars()
         .all()
     }
+    # These is_active=False mutations have no intervening execute, so they flush
+    # as one UPDATE batch at commit. SQLAlchemy orders a same-table batch by
+    # primary key, so two concurrent stale passes acquire these row locks in one
+    # deterministic (PK) order regardless of query order — no sort needed here.
+    # Cross-phase overlap with the address-ordered contract loop above is rare;
+    # the caller's broad exception handling plus the dirty-queue drain retry
+    # cover it.
     stale = (
         session.execute(
             select(MonitoredContract).where(
@@ -441,6 +531,39 @@ _INITIAL_STATE_OWNER_IDS = frozenset({"owner", "_owner", "state_variable:owner",
 _INITIAL_STATE_ADMIN_IDS = frozenset({"admin", "state_variable:admin"})
 
 
+# Fields the API and reanalysis snapshot expect in last_known_state whenever a
+# value exists, independent of the polling plan — so the merge keeps them even
+# when a plan no longer projects them.
+_CANONICAL_STATE_KEYS = frozenset({"owner", "admin", "implementation"})
+
+
+def _polling_plan_fields(polling_plan: list[dict] | None) -> set[str]:
+    """The set of ``field`` names the current polling plan reads."""
+    if not polling_plan:
+        return set()
+    return {
+        entry["field"]
+        for entry in polling_plan
+        if isinstance(entry, dict) and isinstance(entry.get("field"), str) and entry["field"]
+    }
+
+
+def _is_zero_address(value: str | None) -> bool:
+    """True for the zero address in any hex form (``0x0``, the 40-zero
+    canonical form, or an un-prefixed run of zeros).
+
+    Callers use this to keep a zero value out of ``last_known_state``: the zero
+    address is never a meaningful comparison baseline, and a renounced value is
+    re-observed as ``0x0`` live with its first observation silent.
+    """
+    if not value:
+        return False
+    v = value.strip().lower()
+    if v.startswith("0x"):
+        v = v[2:]
+    return len(v) > 0 and set(v) == {"0"}
+
+
 def _candidate_controller_ids_for_field(field: str) -> tuple[str, ...]:
     """Controller_id forms the analyzer emits for a given state-var
     name. Mirrors ``_update_controller_value_rows`` in the watcher so
@@ -483,13 +606,16 @@ def _build_initial_state(
     """
     state: dict[str, Any] = {}
 
-    if contract.implementation:
+    if contract.implementation and not _is_zero_address(contract.implementation):
         state["implementation"] = contract.implementation
 
+    # A zero-address CV is never a useful comparison baseline (see
+    # _is_zero_address): dropping it here keeps owner/admin and every
+    # polling-plan field below out of the seed unless a real address exists.
     cv_by_id: dict[str, str] = {}
     for cv in controller_values:
         cid = (cv.controller_id or "").lower()
-        if cid and cv.value:
+        if cid and cv.value and not _is_zero_address(cv.value):
             cv_by_id.setdefault(cid, cv.value)
 
     # Pass 1: canonical owner/admin seeding from CV rows.
@@ -619,7 +745,10 @@ def _enroll_controller_addresses(
     controllers = controllers_for_protocol(session, protocol_id)
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).
-    for addr, monitored_type in controllers.items():
+    # Sorted by lowercased address: this loop takes progressive row locks via
+    # per-iteration SELECTs, so a concurrent drain and manual re-enroll that
+    # overlap here acquire them in one global order and can't deadlock.
+    for addr, monitored_type in sorted(controllers.items(), key=lambda kv: (kv[0] or "").lower()):
         if not addr or addr in enrolled_contract_addrs:
             continue
         existing = session.execute(
@@ -659,6 +788,7 @@ def _enroll_controller_addresses(
                     monitoring_config=config,
                     last_known_state={},
                     last_scanned_block=current_block,
+                    enrollment_block=current_block,
                     needs_polling=bool(polling_plan),
                     is_active=True,
                     enrollment_source="auto",

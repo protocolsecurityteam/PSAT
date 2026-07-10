@@ -115,6 +115,12 @@ PIDS+=($!)
 # discovered by the semantic predicate pipeline.
 "${PYTHON_CMD[@]}" -m workers.event_log_indexer &
 PIDS+=($!)
+# Enrollment reconciler drainer. Moved off the 512MB `monitor` VM: its
+# per-tick governance-view recompute is jobs-pipeline-weight and belongs
+# on this 16GB box. Its loop swallows exceptions, so the shared `wait -n`
+# fate here is process-death-only.
+"${PYTHON_CMD[@]}" -m workers.protocol_monitor --reconcile &
+PIDS+=($!)
 
 echo "All workers started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine so every worker

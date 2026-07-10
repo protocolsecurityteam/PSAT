@@ -504,6 +504,12 @@ class DiscoveryWorker(BaseWorker):
             parent_relationship=discovery_relationship,
         )
 
+        # Set when an *already-existing* contract row is adopted into a protocol
+        # below (structural or deployer-cascade). Such a row may already have a
+        # completed policy job, so no later trigger re-enrolls it — mark the
+        # protocol dirty after the commit so the reconciler picks it up.
+        adopted_pid: int | None = None
+
         if existing:
             existing.job_id = job.id
             existing.contract_name = contract_name
@@ -525,6 +531,7 @@ class DiscoveryWorker(BaseWorker):
             )
             if should_adopt:
                 existing.protocol_id = job.protocol_id
+                adopted_pid = job.protocol_id
                 # Audit trail: when ownership comes from the structural
                 # branch (no HIGH source in discovery_sources), record
                 # how it was earned so future readers can tell direct
@@ -545,6 +552,7 @@ class DiscoveryWorker(BaseWorker):
                 cascade_pid = _deployer_cascade_protocol_id(session, existing.deployer)
                 if cascade_pid:
                     existing.protocol_id = cascade_pid
+                    adopted_pid = cascade_pid
                     merged = list(existing.discovery_sources or [])
                     if "structural_adoption" not in merged:
                         merged.append("structural_adoption")
@@ -591,6 +599,12 @@ class DiscoveryWorker(BaseWorker):
             )
             session.add(contract)
         session.commit()
+
+        if adopted_pid is not None:
+            from services.monitoring.enrollment import mark_enrollment_dirty
+
+            mark_enrollment_dirty(session, adopted_pid, "discovery_adoption")
+            session.commit()
 
         if not job.name:
             job.name = f"{contract_name}_{address[2:10]}"

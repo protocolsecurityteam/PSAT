@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -10,10 +11,26 @@ from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
+from utils.rpc import rpc_request
 
 from . import deps
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def _current_head_block() -> int:
+    """Best-effort current head, used to seed a manually-added contract's scan
+    cursor and enrollment floor. Falls back to 0 on RPC failure — the same
+    degradation the enrollment path accepts (``enrollment.py``)."""
+    try:
+        return int(rpc_request(deps.DEFAULT_RPC_URL, "eth_blockNumber", []), 16)
+    except Exception as exc:
+        logger.warning(
+            "Could not read head block for monitoring upsert: %s", exc, extra={"exc_type": type(exc).__name__}
+        )
+        return 0
 
 
 def _monitored_contract_payload(c: MonitoredContract) -> dict[str, Any]:
@@ -75,6 +92,12 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
         ).scalar_one_or_none()
 
         if existing is None:
+            # Start watching from the current head, not block 0: this is a
+            # "monitor from now on" add, so scanning from 0 would replay years
+            # of history. enrollment_block records the same head as the floor
+            # below which the scanner records events as pre-watch history
+            # without notifying (consistent with the auto-enrollment inserts).
+            head_block = _current_head_block()
             existing = MonitoredContract(
                 address=request.address,
                 chain=request.chain,
@@ -83,7 +106,8 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
                 contract_type=request.contract_type,
                 monitoring_config=request.monitoring_config,
                 last_known_state={},
-                last_scanned_block=0,
+                last_scanned_block=head_block,
+                enrollment_block=head_block,
                 needs_polling=request.needs_polling,
                 is_active=request.is_active,
                 enrollment_source="surface_alert",

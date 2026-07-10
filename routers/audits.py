@@ -293,6 +293,14 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> dict[str, Any]
         session.add(ar)
         session.commit()
         session.refresh(ar)
+
+        # A new audit can adopt orphan contracts into this protocol; enqueue a
+        # reconcile so monitoring picks up any newly-owned addresses.
+        from services.monitoring.enrollment import mark_enrollment_dirty
+
+        mark_enrollment_dirty(session, protocol_row.id, "audit_added")
+        session.commit()
+
         deps.log_admin_mutation("add_audit", id=ar.id, company=company_name)
         return _audit_report_to_dict(ar)
 

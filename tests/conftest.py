@@ -42,8 +42,10 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
+    DaemonLease,
     IndexedEventCursor,
     IndexedEventLog,
+    Job,
     MonitoredContract,
     MonitoredEvent,
     Protocol,
@@ -607,8 +609,18 @@ def db_session():
             WatchedProxy,
             IndexedEventLog,
             IndexedEventCursor,
+            # A poll/scan value-change queues a re-analysis Job (discovery
+            # stage, queued). Left behind, it's claimable by an unrelated
+            # claim_job in another test on the same xdist worker. FK children
+            # are ON DELETE CASCADE and Job.protocol_id is SET NULL, so this
+            # is order-independent among the rows below.
+            Job,
             Contract,
             Protocol,
+            # Scanner/poller passes commit durable daemon_leases rows (with a
+            # live 120s TTL under a per-process holder). Clear them so warm-DB
+            # reruns don't couple lease state across unrelated passes.
+            DaemonLease,
         ]:
             session.query(model).delete()
         session.commit()

@@ -47,6 +47,10 @@ _KNOWN_PROCESSES = {
     "audit_scope_extraction",
     "event_log_indexer",
     "enrollment_reconciler",
+    "protocol_scanner",
+    "protocol_poller",
+    "protocol_tvl",
+    "ops_alerter",
 }
 
 
@@ -286,11 +290,16 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
     stop = Event()
     beats: list[tuple[str, dict]] = []
 
-    def fake_reconcile(_session, _rpc, _chain):
-        stop.set()  # one pass only
-        return 7
+    # The loop now drives the dirty-queue drain (+ K-sweep enqueue) rather than a
+    # walk-all reconcile; the drain stub ends the loop after one tick.
+    monkeypatch.setattr(reconciler, "sweep_enqueue_stale", lambda session, *a, **k: [])
 
-    monkeypatch.setattr(reconciler, "reconcile_enrollments", fake_reconcile)
+    def fake_drain(_rpc, _chain, **kw):
+        stop.set()  # one pass only
+        return {"drained": 7, "failed": 0}
+
+    monkeypatch.setattr(reconciler, "drain_enrollment_queue", fake_drain)
+    monkeypatch.setattr(reconciler, "_queue_depth", lambda session: 3)
     monkeypatch.setattr(reconciler, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(reconciler, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
 
@@ -300,7 +309,7 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
     process, kw = beats[0]
     assert process == HEARTBEAT_ENROLLMENT_RECONCILER
     assert kw["status"] == "running"
-    assert kw["detail"] == {"protocols_reconciled_last_pass": 7}
+    assert kw["detail"] == {"drained": 7, "failures": 0, "queue_depth": 3}
 
 
 def test_event_indexer_loop_records_heartbeat(monkeypatch):

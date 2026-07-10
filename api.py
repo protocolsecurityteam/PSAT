@@ -7,11 +7,12 @@ The endpoint handlers live in ``routers/*``; aggregation logic lives in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,7 +66,20 @@ async def lifespan(app: FastAPI):
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-    yield
+
+    # Ops watchdog: web is the only fly-health-checked, auto-started group, so it
+    # is where the process that watches the monitoring daemons for silence lives.
+    from services.monitoring.ops_alerts import run_ops_alerter_loop
+
+    ops_stop = asyncio.Event()
+    ops_task = asyncio.create_task(run_ops_alerter_loop(ops_stop))
+    try:
+        yield
+    finally:
+        ops_stop.set()
+        ops_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await ops_task
 
 
 _raw_origins = os.environ.get("PSAT_SITE_ORIGIN", "")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from utils.rpc import rpc_request
@@ -32,6 +32,15 @@ class FetchedEventLog:
     transaction_index: int
     topics: list[str]
     data_words: list[str]
+    # Emitting contract, lowercased — how a multi-address caller attributes a
+    # log to the cohort member that emitted it. Empty for logs a caller
+    # constructed without one (single-address callers already know the address).
+    address: str = ""
+    # The untouched RPC log dict, so a caller that runs the raw-dict decode
+    # pipeline (services/monitoring/event_topics.parse_any_log) gets its input
+    # from the same bisecting fetch — excluded from equality (dicts are unhashable
+    # and the decoded fields above already carry identity).
+    raw: dict[str, Any] | None = field(default=None, compare=False)
 
 
 class RpcEventLogFetcher:
@@ -49,7 +58,7 @@ class RpcEventLogFetcher:
     def fetch_logs(
         self,
         *,
-        event_address: str,
+        event_address: str | Sequence[str],
         topics: Sequence[str],
         from_block: int,
         to_block: int,
@@ -59,18 +68,31 @@ class RpcEventLogFetcher:
         Multiple topic0 values fold into one request (`"topics": [[t1, t2]]`
         is OR semantics) so same-address cursors don't each rescan the same
         range — the request, not the range, is what the upstream budget meters.
+
+        ``event_address`` may be a single address (existing per-cursor callers)
+        or a list — a multi-address filter serves a whole cohort of monitored
+        contracts in one request. Per-emitter attribution is on each result's
+        ``.address``. Both shapes share this one bisect-on-reject implementation.
         """
+        if isinstance(event_address, str):
+            address_filter: str | list[str] = event_address
+        else:
+            address_filter = list(event_address)
         topic_list = [str(t).lower() for t in topics]
         out: list[FetchedEventLog] = []
         start = from_block
         while start <= to_block:
             end = min(to_block, start + self.max_block_range - 1)
-            out.extend(self._fetch_range(event_address, topic_list, start, end))
+            out.extend(self._fetch_range(address_filter, topic_list, start, end))
             start = end + 1
         return out
 
     def _fetch_range(
-        self, event_address: str, topics: list[str], from_block: int, to_block: int
+        self,
+        event_address: str | list[str],
+        topics: list[str],
+        from_block: int,
+        to_block: int,
     ) -> list[FetchedEventLog]:
         params = [
             {
@@ -150,6 +172,7 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         transaction_index = _hex_int(raw.get("transactionIndex"))
     except (TypeError, ValueError):
         return None
+    emitter = raw.get("address")
     return FetchedEventLog(
         tx_hash=tx_hash,
         log_index=log_index,
@@ -158,6 +181,8 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         transaction_index=transaction_index,
         topics=[str(t).lower() for t in topics],
         data_words=_split_data_words(raw.get("data")),
+        address=emitter.lower() if isinstance(emitter, str) else "",
+        raw=raw,
     )
 
 

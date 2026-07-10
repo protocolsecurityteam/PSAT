@@ -73,6 +73,13 @@ PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff8
 ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
 
+@pytest.fixture(autouse=True)
+def _disable_scan_confirmation_depth(monkeypatch):
+    # These anvil chains are only a handful of blocks long; the production
+    # 12-block confirmation clamp would hide every just-emitted event.
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+
+
 # ---------------------------------------------------------------------------
 # Helpers (copied from test_proxy_watcher_anvil.py)
 # ---------------------------------------------------------------------------
@@ -1488,7 +1495,6 @@ def test_notify_protocol_events_sends_discord(anvil_env, test_db):
 
     # ProtocolSubscription table already exists via Base.metadata.create_all
     from db.models import Protocol, ProtocolSubscription
-    from services.monitoring.notifier import notify_protocol_events
     from services.monitoring.unified_watcher import scan_for_events
 
     addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
@@ -1516,13 +1522,13 @@ def test_notify_protocol_events_sends_discord(anvil_env, test_db):
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
-    events = scan_for_events(test_db, rpc_url)
-    assert len(events) >= 1
-
-    # Mock Discord POST and call notifier
+    # scan_for_events now delivers the Discord notification per window as part
+    # of the scan itself, so patch the wire before scanning and assert the
+    # embed from that scan-triggered post.
     with patch("services.monitoring.notifier.requests.post") as mock_post:
         mock_post.return_value = MagicMock(ok=True)
-        notify_protocol_events(test_db, events)
+        events = scan_for_events(test_db, rpc_url)
+        assert len(events) >= 1
 
         assert mock_post.call_count == 1
         call_kwargs = mock_post.call_args
@@ -1538,7 +1544,6 @@ def test_notify_event_filter_restricts_types(anvil_env, test_db):
     from unittest.mock import MagicMock, patch
 
     from db.models import Protocol, ProtocolSubscription
-    from services.monitoring.notifier import notify_protocol_events
     from services.monitoring.unified_watcher import scan_for_events
 
     # ProtocolSubscription table already exists via Base.metadata.create_all
@@ -1572,12 +1577,12 @@ def test_notify_event_filter_restricts_types(anvil_env, test_db):
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
-    events = scan_for_events(test_db, rpc_url)
-    assert len(events) >= 2  # both detected in DB
-
+    # scan_for_events now delivers notifications per window as part of the scan
+    # itself; patch the wire before scanning and assert the filtered post.
     with patch("services.monitoring.notifier.requests.post") as mock_post:
         mock_post.return_value = MagicMock(ok=True)
-        notify_protocol_events(test_db, events)
+        events = scan_for_events(test_db, rpc_url)
+        assert len(events) >= 2  # both detected in DB
 
         # Only the "paused" event should trigger a Discord notification
         assert mock_post.call_count == 1

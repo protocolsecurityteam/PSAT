@@ -343,6 +343,11 @@ class Protocol(Base):
     # so different spellings ("ether fi" vs "etherfi") collapse to one row.
     canonical_slug: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Set to NOW() each time the enrollment reconciler successfully drains this
+    # protocol. The K-per-tick slow sweep enqueues the least-recently-reconciled
+    # protocols (NULLS FIRST) so drift from unknown write sites still converges.
+    last_enrollment_reconcile_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     audit_reports: Mapped[list["AuditReport"]] = relationship(
         "AuditReport", backref="protocol", cascade="all, delete-orphan"
     )
@@ -839,7 +844,16 @@ class MonitoredContract(Base):
     last_known_state: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
-    last_scanned_block: Mapped[int] = mapped_column(Integer, default=0)
+    last_scanned_block: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Stable block at which monitoring began for this contract — seeded once at
+    # enrollment and never advanced (unlike last_scanned_block, which tracks the
+    # scan frontier). The scanner treats an event below this floor as
+    # pre-enrollment history: recorded, but never notified or reanalyzed. NULL
+    # (legacy rows the backfill couldn't stamp) disables the floor — notify.
+    enrollment_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Poller rotation cursor: NULLS FIRST selection stamps this at chunk-commit
+    # time so never-polled and least-recently-polled contracts rotate first.
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     needs_polling: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     enrollment_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -868,6 +882,11 @@ class MonitoredEvent(Base):
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     block_number: Mapped[int] = mapped_column(Integer, nullable=False)
     tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    # On-chain log index — the scan path populates it so identity is
+    # (contract, tx_hash, log_index, event_type). NULL for poll-path
+    # ``state_changed_poll`` rows (tx_hash='' / block 0), which are outside the
+    # partial identity index below by design (design §2.4 Layer 2).
+    log_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     data: Mapped[dict[str, Any] | None] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -877,6 +896,15 @@ class MonitoredEvent(Base):
         Index("ix_monitored_events_contract_id", "monitored_contract_id"),
         Index("ix_monitored_events_event_type", "event_type"),
         Index("ix_monitored_events_detected_at", "detected_at"),
+        Index(
+            "uq_monitored_events_identity",
+            "monitored_contract_id",
+            "tx_hash",
+            "log_index",
+            "event_type",
+            unique=True,
+            postgresql_where=text("log_index IS NOT NULL"),
+        ),
     )
 
 
@@ -1045,6 +1073,49 @@ class WorkerHeartbeat(Base):
     beat_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class DaemonLease(Base):
+    """A named, TTL'd singleton lease for a background daemon pass.
+
+    One row per logical lease name (e.g. ``'protocol_scanner:ethereum'``).
+    The holder writes its ``holder`` uuid and an ``expires_at`` in the
+    future; a competitor can only take the row over once ``expires_at`` has
+    passed. Unlike a pg advisory lock this survives per-window commits and
+    is safe under Neon/pgbouncer transaction pooling (which breaks
+    session-scoped advisory locks). See ``db.queue.try_acquire_daemon_lease``.
+    """
+
+    __tablename__ = "daemon_leases"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MonitoringEnrollmentQueue(Base):
+    """Dirty-flag queue driving the enrollment reconciler (design §2.3).
+
+    One row per protocol that needs its ``monitored_contracts`` (and
+    controllers) reconciled. Write sites call
+    ``services.monitoring.enrollment.mark_enrollment_dirty`` after a
+    protocol-changing action commits; the drainer in
+    ``services.monitoring.reconciler`` claims due rows with a lease
+    (``lease_id`` + ``lease_expires_at``, same pattern as ``db.queue.claim_job``),
+    runs the full ``enroll_protocol_contracts`` build in a fresh session,
+    then deletes the row it claimed. ``dirty_at`` doubles as the due-time
+    cursor: a failed drain pushes it forward exponentially so a poisoned
+    protocol cannot wedge the queue.
+    """
+
+    __tablename__ = "monitoring_enrollment_queue"
+
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), primary_key=True)
+    dirty_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    lease_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EtherscanCache(Base):

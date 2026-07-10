@@ -64,7 +64,13 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, A
         if protocol is None:
             raise HTTPException(status_code=404, detail="Protocol not found")
 
-        from services.monitoring.enrollment import enroll_protocol_contracts
+        from services.monitoring.enrollment import enroll_protocol_contracts, mark_enrollment_dirty
+
+        # Commit the dirty mark first so a raising synchronous enroll still leaves
+        # a queued row for the reconciler drain to self-heal. The synchronous run
+        # below stays as the urgent escape hatch for the common (success) case.
+        mark_enrollment_dirty(session, protocol_id, "manual")
+        session.commit()
 
         enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain)
         deps.log_admin_mutation("re_enroll", id=protocol_id, count=len(enrolled))
