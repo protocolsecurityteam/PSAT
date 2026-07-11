@@ -17,7 +17,7 @@ import { MinimizedAlertEditors } from "./MinimizedAlertEditors.jsx";
 import { MonitorAlertEditor } from "./MonitorAlertEditor.jsx";
 import { MonitorAlertFilters } from "./MonitorAlertFilters.jsx";
 
-export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine }) {
+export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine, selectedPrincipal }) {
   const protocolId = companyData?.protocol_id;
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
@@ -82,6 +82,20 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
     return (
       <section className="ps-principal-section">
         <div className="ps-inspector-empty">No protocol monitoring id is available.</div>
+      </section>
+    );
+  }
+
+  // Alerts attach to contracts, not principals. A principal selection carries
+  // no machine, so rather than silently showing the protocol-wide list as if
+  // nothing were selected, point the user at its contracts.
+  if (!selectedMachine && selectedPrincipal) {
+    const who = selectedPrincipal.label || shortAddr(selectedPrincipal.address);
+    return (
+      <section className="ps-principal-section">
+        <div className="ps-inspector-empty">
+          {who} selected — choose a contract to see its alerts.
+        </div>
       </section>
     );
   }

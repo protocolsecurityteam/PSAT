@@ -161,8 +161,9 @@ test.describe("Caller button navigation", () => {
     // Sidebar swaps to the principal detail.
     await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".ps-machine-address")).toContainText(SAFE_ADDR.slice(0, 6));
-    // Focus follows the navigation target.
-    await expect(page).toHaveURL(new RegExp(`focus=${SAFE_ADDR}`));
+    // Selection follows the navigation target — a safe persists as ?sel=&view=principal.
+    await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));
+    await expect(page).toHaveURL(/view=principal/);
   });
 
   test("single timelock caller button navigates to the timelock principal detail", async ({ page }) => {
@@ -185,10 +186,11 @@ test.describe("Caller button navigation", () => {
     const conBtn = portFor(page, "setOwner").locator(".ps-caller-btn");
     await expect(conBtn).toHaveCount(1);
     await expect(conBtn).toContainText("Contract");
-    // Clicking is a no-op here (the contract isn't an in-scope node), but it
-    // must not throw — the focus param stays on the previously-selected node.
+    // Clicking navigates to the contract target; the entity index spans all
+    // machines so it no longer silently no-ops. It must not throw — a selection
+    // param is written (?sel=).
     await conBtn.click();
-    await expect(page).toHaveURL(/focus=/);
+    await expect(page).toHaveURL(/sel=/);
   });
 
   test("a multi-caller function renders one button per caller, each navigating directly", async ({ page }) => {
@@ -206,7 +208,7 @@ test.describe("Caller button navigation", () => {
     // The timelock button navigates straight to the timelock — no intermediate
     // "first principal + tour" hop.
     await mixedPort.locator(".ps-caller-btn", { hasText: "Timelock" }).click();
-    await expect(page).toHaveURL(new RegExp(`focus=${TL_ADDR}`));
+    await expect(page).toHaveURL(new RegExp(`sel=${TL_ADDR}`));
   });
 
   test("clicking the function name opens the guard inspector (not navigation)", async ({ page }) => {
@@ -242,13 +244,13 @@ test.describe("URL focus parameter", () => {
     await goToSurface(page);
     await openVaultDetail(page);
 
-    // URL should have focus on the vault contract
-    await expect(page).toHaveURL(new RegExp(`focus=${VAULT_ADDR}`));
+    // URL should select the vault contract
+    await expect(page).toHaveURL(new RegExp(`sel=${VAULT_ADDR}`));
 
     // Click the safe caller button to navigate to the safe principal
     await portFor(page, "setSafe").locator(".ps-caller-btn").click();
 
-    // URL focus should now point to the safe address, not the vault
-    await expect(page).toHaveURL(new RegExp(`focus=${SAFE_ADDR}`));
+    // URL selection should now point to the safe address, not the vault
+    await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));
   });
 });

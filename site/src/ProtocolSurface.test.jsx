@@ -386,14 +386,18 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     await clickSidebarTab("Detail");
     expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
 
-    // Agent: context is the company, not any contract the safe controls.
+    // Agent (M2): context is now the SELECTED SAFE — its own short address
+    // shows as meta — NOT a contract it controls (the original leak lit up
+    // controls[0]). The regression invariant survives: no controlled-contract
+    // name appears in the Agent context. "no contract selected" also still
+    // holds: a safe is a principal, not a contract.
     await clickSidebarTab("Agent");
     const value = await waitFor(() => {
       const el = document.querySelector(".agent-context-value");
       expect(el).toBeTruthy();
       return el;
     });
-    expect(document.querySelector(".agent-context-meta")).not.toBeInTheDocument();
+    expect(document.querySelector(".agent-context-meta")).toBeInTheDocument();
     for (const name of CONTROLLED_NAMES) {
       expect(value.textContent).not.toContain(name);
     }
@@ -408,11 +412,18 @@ describe("ProtocolSurface — stage-1 selection model", () => {
       document.querySelector(".ps-audits-contract-card"),
     ).not.toBeInTheDocument();
 
-    // Upgrades: the global proxy list, not a single-contract timeline.
+    // Upgrades (M2): a principal is contract-only by nature, so the tab shows
+    // an explicit "pick a contract" hint. The original point of this assertion
+    // survives — no leaked contract: neither the global proxy list (M1-interim
+    // behavior) nor a single-contract timeline renders.
     await clickSidebarTab("Upgrades");
     await waitFor(() => {
-      expect(document.querySelector(".ps-upgrades-global-hint")).toBeTruthy();
+      expect(
+        screen.getByText(/choose a contract to see its upgrade timeline/i),
+      ).toBeInTheDocument();
     });
+    expect(document.querySelector(".ps-upgrades-global-hint")).toBeNull();
+    expect(document.querySelector(".ps-upgrades-sidebar-body")).toBeNull();
     expectNoCrash();
   });
 
@@ -543,6 +554,141 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     // Functions arrive → the same selected card fills in (not a stale snapshot).
     releaseFunctions();
     expect(await screen.findByText("upgrade")).toBeInTheDocument();
+    expectNoCrash();
+  });
+});
+
+// M2 (stages 2 + 3): per-tab principal awareness + URL ?sel=&view=. Authored to
+// SELECTION_FILTERING_DIAGNOSIS.md "M2 asserts". The URL tests render
+// NON-embedded (embedded skips URL writes), so each resets window.location.
+describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
+  const SAFE = RICH_ADDRESSES.SAFE;
+  const VAULT = RICH_ADDRESSES.VAULT;
+
+  beforeEach(() => {
+    installApiMocks();
+    window.history.replaceState({}, "", "/company/etherfi/surface");
+  });
+
+  function url() {
+    return new URL(window.location.href);
+  }
+
+  // --- Monitor tab (stage 2): principal hint + focus-preview must not select ---
+
+  it("shows a 'pick a contract' hint in Monitor when a principal is selected", async () => {
+    window.localStorage.setItem("psat_admin_key", "test-key");
+    renderSurface(); // admin
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+
+    await clickSidebarTab("Monitor");
+    expect(
+      await screen.findByText(/choose a contract to see its alerts/i),
+    ).toBeInTheDocument();
+    // Not the contract-focused view.
+    expect(screen.queryByText(/^Contract alerts$/)).not.toBeInTheDocument();
+    expectNoCrash();
+  });
+
+  it("does not treat a search focus-preview as a Monitor selection", async () => {
+    window.localStorage.setItem("psat_admin_key", "test-key");
+    renderSurface(); // admin
+    const user = userEvent.setup();
+    await clickSidebarTab("Monitor");
+
+    // Browse to the Vault contract via the search arrows — a focus preview,
+    // never a commit. Pre-M2, Monitoring's private focusedAddress fallback
+    // turned this into a contract selection ("Contract alerts").
+    await user.type(searchInput(), "Vault");
+    await user.keyboard("{ArrowDown}");
+
+    await waitFor(() => {
+      expect(screen.getByText(/^Monitor alerts$/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/^Contract alerts$/)).not.toBeInTheDocument();
+    expectNoCrash();
+  });
+
+  // --- URL ?sel=&view= (stage 3) ---
+
+  it("writes ?sel=&view=principal when a safe is committed", async () => {
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+    ); // NON-embedded → URL writes enabled
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(url().searchParams.get("sel")?.toLowerCase()).toBe(SAFE.toLowerCase());
+    });
+    expect(url().searchParams.get("view")).toBe("principal");
+    // Interim ?focus is retired.
+    expect(url().searchParams.get("focus")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("writes ?sel=&view=contract when a contract is committed", async () => {
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+    );
+    const user = userEvent.setup();
+    await user.type(searchInput(), "Vault");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(url().searchParams.get("sel")?.toLowerCase()).toBe(VAULT.toLowerCase());
+    });
+    expect(url().searchParams.get("view")).toBe("contract");
+    expectNoCrash();
+  });
+
+  it("a focus-preview never writes the URL", async () => {
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+    );
+    const user = userEvent.setup();
+    await user.type(searchInput(), "Vault");
+    await user.keyboard("{ArrowDown}"); // preview only
+
+    // The preview does not commit — no ?sel is written.
+    await waitFor(() => {
+      expect(document.querySelector(".ps-search-preview")).toBeTruthy();
+    });
+    expect(url().searchParams.get("sel")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("restores a safe from ?sel=&view=principal on mount (view preserved)", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      `/company/etherfi/surface?sel=${SAFE}&view=principal`,
+    );
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+    ); // non-admin → Detail
+    // PrincipalDetail markers prove the safe (a principal) was restored.
+    expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
+    expect(url().searchParams.get("view")).toBe("principal");
+    expectNoCrash();
+  });
+
+  it("resolves a legacy ?focus= link and normalizes it to ?sel=&view=", async () => {
+    window.history.replaceState({}, "", `/company/etherfi/surface?focus=${VAULT}`);
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+    ); // non-admin → Detail
+    // The Vault contract card renders (ContractMachine shows its functions).
+    expect(await screen.findByText("upgrade")).toBeInTheDocument();
+    // Legacy param translated: ?focus dropped, ?sel/?view written.
+    await waitFor(() => {
+      expect(url().searchParams.get("sel")?.toLowerCase()).toBe(VAULT.toLowerCase());
+    });
+    expect(url().searchParams.get("view")).toBe("contract");
+    expect(url().searchParams.get("focus")).toBeNull();
     expectNoCrash();
   });
 });

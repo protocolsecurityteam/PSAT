@@ -78,11 +78,43 @@ function SelectedContractAuditCoverage({ machine, coverageData, onPickAudit }) {
   );
 }
 
-export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, loading, error, machines, selectedMachine }) {
+// A principal (safe/timelock/EOA) has no bytecode of its own, so audit coverage
+// is meaningless for it — audits attach to the contracts it controls. Show an
+// honest hint pointing at the controlled set instead of pretending nothing is
+// selected (which read as the leaked-contract card under the old model).
+// Deliberately NOT `.ps-audits-contract-card`: that class is the
+// selected-contract coverage card, whose absence is the regression invariant
+// for a principal selection.
+function SelectedPrincipalAuditHint({ principal }) {
+  if (!principal) return null;
+  const count = (principal.controls || []).length;
+  const typeWord =
+    principal.type === "timelock" ? "Timelock" : principal.type === "safe" ? "Safe" : "Principal";
+  const name = principal.label || shortAddr(principal.address);
+  return (
+    <section className="ps-principal-section">
+      <div className="ps-audits-panel-hint">
+        {typeWord} {name} selected — audits apply to contracts. Pick one of its {count} controlled
+        contract{count === 1 ? "" : "s"} to see its coverage.
+      </div>
+    </section>
+  );
+}
+
+export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, loading, error, machines, selectedMachine, selectedPrincipal }) {
   const [readingAudit, setReadingAudit] = useState(null);
   if (loading) return <section className="ps-principal-section"><div className="ps-inspector-empty">Loading audits…</div></section>;
   if (error) return <section className="ps-principal-section"><div className="ps-inspector-empty">Failed: {error}</div></section>;
-  if (!coverageData) return null;
+  if (!coverageData) {
+    // Coverage hasn't resolved. A selected principal still gets its honest
+    // hint (it doesn't depend on coverageData); a contract selection has
+    // nothing to show until coverage arrives.
+    return selectedPrincipal ? (
+      <section className="ps-audits-panel">
+        <SelectedPrincipalAuditHint principal={selectedPrincipal} />
+      </section>
+    ) : null;
+  }
 
   // Resolve lowercase addresses → { name, address } using the machines map
   // so covered contracts are legible instead of just raw hex.
@@ -142,11 +174,15 @@ export function AuditsListPanel({ coverageData, activeAuditId, onPickAudit, load
   return (
     <>
       <section className="ps-audits-panel">
-        <SelectedContractAuditCoverage
-          machine={selectedMachine}
-          coverageData={coverageData}
-          onPickAudit={onPickAudit}
-        />
+        {selectedPrincipal ? (
+          <SelectedPrincipalAuditHint principal={selectedPrincipal} />
+        ) : (
+          <SelectedContractAuditCoverage
+            machine={selectedMachine}
+            coverageData={coverageData}
+            onPickAudit={onPickAudit}
+          />
+        )}
         <div className="ps-audits-panel-hdr">Verified audits ({entries.length})</div>
 
         {activeEntry && (

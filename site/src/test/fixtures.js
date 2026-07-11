@@ -134,6 +134,10 @@ function principal(address, resolvedType, details = {}, label = null) {
 }
 
 export const ETHERFI_COMPANY_RICH = {
+  // Monitoring id — present so the Surface Monitor tab reaches its real
+  // render path (contract alerts / global list / principal hint) instead of
+  // the "no monitoring id" early return.
+  protocol_id: 1,
   contracts: [
     {
       address: VAULT_ADDR,

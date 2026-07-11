@@ -65,14 +65,28 @@ export default function ProtocolSurface({
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
   const [searchMode, setSearchMode] = useState("all");
-  // Single URL writer replacing the three divergent inline history writers.
-  // Called imperatively from the two committing wrappers (select + radar);
-  // focus previews (search browsing / contract pager) never write the URL.
-  const syncUrl = useCallback(({ focus: focusAddr = null, radar: radarSig = null } = {}) => {
+  // Single URL writer. Persists a committed selection as ?sel=<addr>&view=
+  // <contract|principal> (principal selections are now shareable/restorable),
+  // plus the radar deep-link's ?score=1&fn=<sig>. Called imperatively ONLY from
+  // the committing wrappers (select + radar) and the mount restore's URL
+  // normalization — never from a focus preview (search browsing / contract
+  // pager) and never on plain render. Because it fires only after a user commit
+  // (which can only happen after the machines-gated mount restore has run and
+  // read the params), it cannot race the restore; no separate write gate is
+  // needed beyond the per-restore refs below. Legacy ?focus is dropped on every
+  // write so old-style params don't linger next to ?sel.
+  const syncUrl = useCallback(({ sel = null, view = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
     const url = new URL(window.location.href);
-    if (focusAddr) url.searchParams.set("focus", focusAddr);
-    else url.searchParams.delete("focus");
+    if (sel) {
+      url.searchParams.set("sel", sel);
+      if (view) url.searchParams.set("view", view);
+      else url.searchParams.delete("view");
+    } else {
+      url.searchParams.delete("sel");
+      url.searchParams.delete("view");
+    }
+    url.searchParams.delete("focus");
     if (radarSig) {
       url.searchParams.set("score", "1");
       if (radarSig.signature) url.searchParams.set("fn", radarSig.signature);
@@ -312,23 +326,35 @@ export default function ProtocolSurface({
     focusPreview,
   } = useSurfaceSelection({ entityIndex, machines, companyName });
 
-  // Restore focus from URL on initial data load
-  const restoredFocus = useRef(false);
+  // Restore a persisted selection from the URL on initial data load. Reads the
+  // new ?sel=&view= pair, falling back to the legacy ?focus= param so old links
+  // still resolve. The reducer owns view resolution: ?view wins when present,
+  // else the entity's facet default. A radar deep-link (?score) is left to the
+  // radar-restore effect below. Runs once, gated on machines so the entity
+  // index can resolve the address; this read happens before any user commit can
+  // fire the URL writer, so the writer never clobbers these params first.
+  const restoredSelection = useRef(false);
   useEffect(() => {
-    if (embedded || restoredFocus.current || !machines.length) return;
+    if (embedded || restoredSelection.current || !machines.length) return;
     const params = new URLSearchParams(window.location.search);
-    const urlFocus = params.get("focus");
     if (params.get("score")) return;
-    if (urlFocus) {
-      restoredFocus.current = true;
-      // Only commit a selection when the address is a real entity; a garbage
-      // ?focus= param becomes a camera preview, never a synthesized junk card.
-      if (entityIndex.has(urlFocus.toLowerCase())) {
-        select(urlFocus);
-        syncUrl({ focus: urlFocus });
-      } else {
-        focusPreview(urlFocus);
-      }
+    const addr = params.get("sel") || params.get("focus");
+    if (!addr) return;
+    restoredSelection.current = true;
+    const lc = addr.toLowerCase();
+    const entity = entityIndex.get(lc);
+    if (entity) {
+      // ?view wins when present; else match the reducer's facet default so a
+      // legacy ?focus link normalizes to the same view a fresh select would.
+      const view =
+        params.get("view") ||
+        (entity.machine && !entity.principal ? "contract" : "principal");
+      select(addr, { view });
+      syncUrl({ sel: addr, view });
+    } else {
+      // A garbage/off-index address becomes a camera preview, never a
+      // synthesized junk selection card.
+      focusPreview(addr);
     }
   }, [embedded, machines, entityIndex, select, focusPreview, syncUrl]);
 
@@ -342,14 +368,16 @@ export default function ProtocolSurface({
   }, []);
 
   const handleSelectMachine = useCallback((machine) => {
+    // Any committed selection transition drops the agent-emitted green-ring
+    // overlay — clearing belongs to the transition, not just the deselect, so a
+    // stale highlight set can't outrank the new selection's dimming.
+    setAgentHighlights(null);
     if (machine) {
       select(machine.address, { view: "contract" });
-      syncUrl({ focus: machine.address });
+      syncUrl({ sel: machine.address, view: "contract" });
     } else {
-      // Pane click / deselect — full clear. Drop any agent-emitted green-ring
-      // overlay too, otherwise it lingers as a stale "focused" address.
+      // Pane click / deselect — full clear.
       select(null);
-      setAgentHighlights(null);
       syncUrl({});
     }
   }, [select, syncUrl]);
@@ -370,15 +398,16 @@ export default function ProtocolSurface({
       return next;
     });
     setSidebarMode("detail");
+    setAgentHighlights(null);
     radar(machine.address, fnView?.key || null);
-    syncUrl({ focus: machine.address, radar: { signature: fnView?.signature } });
+    syncUrl({ sel: machine.address, view: "contract", radar: { signature: fnView?.signature } });
   }, [allMachines, radar, syncUrl]);
 
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredExampleSelection.current || !allMachines.length) return;
     const params = new URLSearchParams(window.location.search);
-    const focus = params.get("focus");
+    const focus = params.get("sel") || params.get("focus");
     const fn = params.get("fn");
     let target = null;
     if (focus && params.get("score")) {
@@ -413,8 +442,9 @@ export default function ProtocolSurface({
     if (!principal) return;
     // opts.focus === false selects without moving the camera (controller-row
     // clicks just want the highlight, not a pan/zoom to the principal's node).
+    setAgentHighlights(null);
     select(principal.address, { view: "principal", focus: opts?.focus });
-    if (opts?.focus !== false) syncUrl({ focus: principal.address });
+    if (opts?.focus !== false) syncUrl({ sel: principal.address, view: "principal" });
   }, [select, syncUrl]);
 
   const visiblePrincipals = useMemo(() => {
@@ -431,9 +461,10 @@ export default function ProtocolSurface({
     // all machines. `hint` lets resolveEntity synthesize a principal card for
     // off-index targets (e.g. other_callers chips) in one canonical place.
     setSidebarMode("detail");
+    setAgentHighlights(null);
     const view = target.type === "contract" ? "contract" : "principal";
     select(target.address, { view, hint: view === "principal" ? target : undefined });
-    syncUrl({ focus: target.address });
+    syncUrl({ sel: target.address, view });
   }, [select, syncUrl]);
 
   const totals = useMemo(() => {
@@ -574,9 +605,10 @@ export default function ProtocolSurface({
         onPreview={(item) => { if (item) focusPreview(item.address); }}
         onCommit={(item) => {
           if (!item) return;
+          setAgentHighlights(null);
           const view = item.kind === "principal" ? "principal" : "contract";
           select(item.address, { view });
-          syncUrl({ focus: item.address });
+          syncUrl({ sel: item.address, view });
         }}
       />
       </div>
@@ -623,22 +655,21 @@ export default function ProtocolSurface({
               error={coverageError}
               machines={machines}
               selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
             />
           )}
           {isAdmin && sidebarMode === "monitoring" && (
             <SurfaceMonitoringPanel
               companyData={companyData}
               machines={allMachines}
-              selectedMachine={
-                selectedMachine ||
-                allMachines.find((m) => m.address?.toLowerCase() === focusedAddress?.toLowerCase()) ||
-                null
-              }
+              selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
             />
           )}
           {sidebarMode === "upgrades" && (
             <UpgradesSidebarPanel
               machine={selectedMachine}
+              principal={selectedPrincipal}
               companyName={companyName}
               machines={machines}
               onSelect={handleSelectMachine}
@@ -683,6 +714,7 @@ export default function ProtocolSurface({
             <AgentPanel
               companyName={companyName}
               selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
               onHighlight={setHighlightedAddresses}
               onFocusAddress={(addr) => {
                 // Route through the same selection handlers a canvas

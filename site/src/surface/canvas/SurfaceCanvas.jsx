@@ -289,7 +289,11 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
         const inAudit = hiActive && highlightedAddresses.has(nid);
-        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
+        // The selected node is never dimmed by a highlight overlay — a
+        // selection must always outrank a highlight set (agent highlights are
+        // cleared on selection, but an audit overlay can legitimately coexist,
+        // and the thing the user clicked must stay visible).
+        const dimmed = hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
         const focused = foc && nid === foc;
         // Merge — don't replace — n.style. Group containers carry
         // ELK-computed width/height in n.style and we'd otherwise blow
