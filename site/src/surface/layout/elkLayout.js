@@ -421,8 +421,8 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
   // Controllers accordion (see buildGroupControllers / GroupNode), which lists
   // the exact functions each can call per contract instead of an illegible
   // dot in a rail. A co-controller spanning several groups appears in each.
-  // The permissionless long tail (machine.other_callers) is not rendered on the
-  // canvas; it's listed in the contract detail sidebar instead.
+  // The permissionless long tail (machine.other_callers) is not rendered at
+  // all; the per-function caller buttons in the detail lanes cover it.
 
   const edges = [];
   for (const [, group] of byName) {

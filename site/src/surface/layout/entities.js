@@ -27,8 +27,9 @@ export function buildEntityIndex(allMachines = [], principals = []) {
 
 // Resolve an address to an entity. Index hit wins. Otherwise this is the ONE
 // place a minimal principal shape is synthesized (replaces the old inline
-// navigateToPrincipal fallback) — for navigate targets like `other_callers`
-// chips whose address isn't a first-class machine/principal. `hint` carries
+// navigateToPrincipal fallback) — for navigate targets like per-function
+// caller buttons whose address isn't a first-class machine/principal. `hint`
+// carries
 // { type, label, details } from the navigate target; `type` defaults to
 // 'unknown' (PrincipalDetail falls back to TYPE_META.unknown). `controls` is
 // derived from the machines that name this address as owner.

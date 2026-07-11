@@ -487,7 +487,8 @@ export default function ProtocolSurface({
     // Surface the navigation result in the Detail panel. Contract targets no
     // longer no-op when role-filtered off the canvas — the entity index spans
     // all machines. `hint` lets resolveEntity synthesize a principal card for
-    // off-index targets (e.g. other_callers chips) in one canonical place.
+    // off-index targets (e.g. per-function caller buttons) in one canonical
+    // place.
     setSidebarMode("detail");
     setAgentHighlights(null);
     const view = target.type === "contract" ? "contract" : "principal";

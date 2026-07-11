@@ -74,40 +74,6 @@ export function ContractMachine({
         )}
       </header>
 
-      {machine.other_callers && machine.other_callers.length > 0 && (
-        <div className="ps-machine-callers">
-          <div className="ps-machine-callers-label">
-            Other authorized callers ({machine.other_callers.length})
-          </div>
-          <div className="ps-machine-callers-list">
-            {machine.other_callers.map((c) => (
-              <button
-                key={c.address}
-                type="button"
-                className="ps-machine-caller"
-                title={`${c.address}${
-                  c.functions && c.functions.length ? ` — ${c.functions.join(", ")}` : ""
-                }`}
-                onClick={() => onNavigate({ type: c.type || "eoa", address: c.address, label: c.label })}
-              >
-                <span className="ps-machine-caller-head">
-                  <span className="ps-machine-caller-type">{c.type || "eoa"}</span>
-                  {c.label && c.label !== c.type ? c.label : shortAddr(c.address)}
-                </span>
-                {(c.capabilities?.length || c.functions?.length) ? (
-                  <span className="ps-machine-caller-caps">
-                    {c.capabilities && c.capabilities.length
-                      ? c.capabilities.join(", ")
-                      : c.functions.slice(0, 3).join(", ") +
-                        (c.functions.length > 3 ? ` +${c.functions.length - 3}` : "")}
-                  </span>
-                ) : null}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div className="ps-machine-tabs">
         {MACHINE_TABS.map((t) => (
           <button

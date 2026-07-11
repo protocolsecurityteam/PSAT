@@ -170,15 +170,14 @@ test.describe("Surface co-controllers", () => {
     ).toBeVisible();
   });
 
-  test("lists permissionless callers in the contract detail sidebar", async ({ page }) => {
+  test("renders no aggregate caller list for the permissionless long tail", async ({ page }) => {
     await goToSurface(page);
 
-    // Selecting the contract opens its detail and lists every lower-privilege
-    // caller with the function each can actually call (not a generic
-    // "controlled").
+    // The fixture's Vault carries other_callers, but neither the canvas badge
+    // nor the sidebar "Other authorized callers" list exists anymore — the
+    // per-function caller buttons in the detail lanes are the only surface.
     await page.locator(".react-flow__node", { hasText: "Vault" }).first().click();
-    await expect(page.locator(".ps-machine-caller").first()).toBeVisible({ timeout: 5000 });
-    expect(await page.locator(".ps-machine-caller").count()).toBe(3);
-    await expect(page.locator(".ps-machine-caller-caps", { hasText: "createBid" }).first()).toBeVisible();
+    await expect(page.locator(".ps-machine-name", { hasText: "Vault" })).toBeVisible();
+    await expect(page.locator(".ps-machine-caller, .ps-machine-callers, .ps-node-callers")).toHaveCount(0);
   });
 });
