@@ -1,21 +1,3 @@
-.pre-wrap {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.code-block {
-  background: #111827;
-  color: #f8fafc;
-  border-radius: 18px;
-  padding: 16px;
-  overflow: auto;
-}
-
-.code-block.small {
-  font-size: 12px;
-  max-height: 260px;
-}
-
 .empty {
   color: #94a3b8;
 }

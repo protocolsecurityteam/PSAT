@@ -122,7 +122,6 @@ describe("AddressesModal", () => {
       <AddressesModal
         companyName="etherfi"
         onClose={() => {}}
-        onSelectContract={() => {}}
       />,
     );
     await waitFor(() => {

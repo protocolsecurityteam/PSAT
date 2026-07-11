@@ -18,7 +18,6 @@ import {
   lanePriority,
   toneForFunction,
 } from "./surface/lane.js";
-import { functionEffectLine } from "./graph.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { ETHERFI_COMPANY_RICH } from "./test/fixtures.js";
 
@@ -245,18 +244,6 @@ describe("lane.js consumers prefer claims over legacy effect_labels", () => {
     expect(lanePriority({ effect_labels: [], claims: [claim("flow.out"), claim("ownership.transfer")] })).toBe(2);
     // claim-less path unchanged.
     expect(lanePriority({ effect_labels: ["timelock_operation"] })).toBe(4);
-  });
-});
-
-describe("graph functionEffectLine", () => {
-  it("renders claim sentences + tier when claims are present", () => {
-    expect(functionEffectLine({ effect_labels: ["hook_update"], claims: [claim("ownership.transfer")] }))
-      .toBe("changes owner · standard");
-  });
-
-  it("falls back to the legacy effect_labels join when claims are absent", () => {
-    expect(functionEffectLine({ effect_labels: ["ownership_transfer", "pause_toggle"] }))
-      .toBe("ownership_transfer · pause_toggle");
   });
 });
 

@@ -2,8 +2,7 @@
  * Dependency graph visualization — builds, lays out, and renders dependency
  * graphs produced by the PSAT dependency pipeline.
  *
- * Reuses helpers from graph.js (shortenAddress, wrapText, escapeHtml) and
- * follows the same SVG rendering patterns used by the permission graph.
+ * Reuses shortenAddress + wrapText from graph.js for its SVG rendering.
  */
 
 import { shortenAddress, wrapText } from "./graph.js";
@@ -386,7 +385,6 @@ export function computeEdgeGeometry(layout) {
 
 /**
  * Generate static SVG markup for a positioned dependency node.
- * Mirrors the pattern of svgNodeMarkup() in graph.js.
  */
 export function svgDependencyNodeMarkup(node) {
   const isRect = node.shape === "rect";

@@ -165,61 +165,6 @@
   transform: translateX(4px);
 }
 
-/* Standalone analyses table — match the same look */
-.home-protocol-section .panel {
-  background: transparent;
-  border: 1px solid var(--line-strong);
-  border-radius: 0;
-  padding: 22px;
-}
-.home-protocol-section .panel h3 {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--bone-faint);
-  margin: 0 0 16px;
-}
-.home-protocol-section .runs-table-header {
-  display: flex;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line-strong);
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--bone-faint);
-}
-.home-protocol-section .runs-table-row {
-  display: flex;
-  padding: 14px;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--line-soft);
-  border-radius: 0;
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-  color: var(--bone);
-  transition: background 140ms ease;
-}
-.home-protocol-section .runs-table-row:hover {
-  background: rgba(255, 107, 107, 0.04);
-}
-.home-protocol-section .runs-cell-name {
-  font-family: "Fraunces", Georgia, serif;
-  font-style: italic;
-  font-size: 15px;
-  color: var(--bone);
-}
-.home-protocol-section .runs-cell-addr {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12px;
-  color: var(--bone-faint);
-}
-
 .home-protocol-section .empty {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 13px;
