@@ -8,7 +8,7 @@ import {
   MetaBadge,
 } from "../../auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
-import { shortAddr } from "../format.js";
+import { principalLabel, shortAddr } from "../format.js";
 
 function SelectedContractAuditCoverage({ machine, coverageData, onPickAudit }) {
   if (!machine || !coverageData) return null;
@@ -90,7 +90,7 @@ function SelectedPrincipalAuditHint({ principal }) {
   const count = (principal.controls || []).length;
   const typeWord =
     principal.type === "timelock" ? "Timelock" : principal.type === "safe" ? "Safe" : "Principal";
-  const name = principal.label || shortAddr(principal.address);
+  const name = principalLabel(principal.label, principal.type, principal.address);
   return (
     <section className="ps-principal-section">
       <div className="ps-audits-panel-hint">

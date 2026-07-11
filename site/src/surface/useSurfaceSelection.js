@@ -40,8 +40,7 @@ function reducer(state, action) {
         selection: { address, view: action.view, hint: action.hint ?? null },
         guardKey: null,
         radar: null,
-        // focus:false selects without moving the camera.
-        focus: action.focus === false ? state.focus : bumpFocus(state, address),
+        focus: bumpFocus(state, address),
       };
     }
     case "guard": {
@@ -124,7 +123,7 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName } 
     }
     const lc = address.toLowerCase();
     const view = opts.view || defaultView(indexRef.current?.get(lc));
-    dispatch({ type: "select", address: lc, view, hint: opts.hint, focus: opts.focus });
+    dispatch({ type: "select", address: lc, view, hint: opts.hint });
   }, []);
 
   const guard = useCallback((key) => dispatch({ type: "guard", key }), []);

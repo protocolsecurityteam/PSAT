@@ -123,8 +123,11 @@ test.describe("Surface co-controllers", () => {
     expect(await page.locator(".ps-ctrl-detail").count()).toBe(0);
   });
 
-  test("clicking a controller highlights the contracts it governs without zooming the camera", async ({ page }) => {
+  test("clicking a controller commits it — row marked, governed contracts chipped, camera pans, URL updated", async ({ page }) => {
     await goToSurface(page);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const transformBefore = await viewport.evaluate((n) => n.style.transform);
 
     // Click the co-controller row → it reads as selected, and VAULT (the
     // contract it governs) gets an on-card capability chip, mirroring a click
@@ -133,12 +136,17 @@ test.describe("Surface co-controllers", () => {
     await expect(page.locator(".ps-ctrl-row--co.ps-ctrl-row--selected")).toBeVisible();
     await expect(page.locator(".ps-node-chip--out", { hasText: "pause" }).first()).toBeVisible();
 
-    // The primary controller IS a group node, so selecting it used to pan/zoom
-    // the camera to it. Clicking its row highlights (selects) without moving
-    // the camera — no focus param is written to the URL.
+    // Row clicks are full commits: the camera pans to the controller's
+    // aggregation and the selection is written to the URL.
+    await expect(page).toHaveURL(new RegExp(`sel=${GUARDIAN}`));
+    await expect
+      .poll(async () => viewport.evaluate((n) => n.style.transform))
+      .not.toBe(transformBefore);
+
+    // Same for the primary controller's row (its aggregation IS the group).
     await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
     await expect(page.locator(".ps-ctrl-row--primary.ps-ctrl-row--selected")).toBeVisible();
-    await expect(page).not.toHaveURL(/focus=/);
+    await expect(page).toHaveURL(new RegExp(`sel=${GOV_SAFE}`));
   });
 
   test("expanding a controller row reveals the exact functions it can call", async ({ page }) => {
@@ -162,17 +170,13 @@ test.describe("Surface co-controllers", () => {
     ).toBeVisible();
   });
 
-  test("aggregates permissionless callers into a '+N callers' affordance + sidebar list", async ({ page }) => {
+  test("lists permissionless callers in the contract detail sidebar", async ({ page }) => {
     await goToSurface(page);
 
-    // The long tail is a single per-contract affordance, not a node each.
-    const callers = page.locator(".ps-node-callers");
-    await expect(callers).toBeVisible();
-    await expect(callers).toContainText("+3 callers");
-
-    // Clicking it opens the contract detail and lists every caller with the
-    // function each can actually call (not a generic "controlled").
-    await callers.click();
+    // Selecting the contract opens its detail and lists every lower-privilege
+    // caller with the function each can actually call (not a generic
+    // "controlled").
+    await page.locator(".react-flow__node", { hasText: "Vault" }).first().click();
     await expect(page.locator(".ps-machine-caller").first()).toBeVisible({ timeout: 5000 });
     expect(await page.locator(".ps-machine-caller").count()).toBe(3);
     await expect(page.locator(".ps-machine-caller-caps", { hasText: "createBid" }).first()).toBeVisible();

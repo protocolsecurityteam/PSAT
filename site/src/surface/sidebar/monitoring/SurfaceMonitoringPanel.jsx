@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api } from "../../../api/client.js";
-import { shortAddr } from "../../format.js";
+import { principalLabel, shortAddr } from "../../format.js";
 import { AlertsTable } from "./AlertsTable.jsx";
 import { FocusedContractAlerts } from "./FocusedContractAlerts.jsx";
 import {
@@ -90,7 +90,7 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine,
   // no machine, so rather than silently showing the protocol-wide list as if
   // nothing were selected, point the user at its contracts.
   if (!selectedMachine && selectedPrincipal) {
-    const who = selectedPrincipal.label || shortAddr(selectedPrincipal.address);
+    const who = principalLabel(selectedPrincipal.label, selectedPrincipal.type, selectedPrincipal.address);
     return (
       <section className="ps-principal-section">
         <div className="ps-inspector-empty">

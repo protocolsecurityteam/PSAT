@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api } from "../../api/client.js";
 import { UpgradesPanel } from "../inspector/UpgradesPanel.jsx";
-import { shortAddr } from "../format.js";
+import { principalLabel, shortAddr } from "../format.js";
 
 // Sidebar Upgrades tab. States:
 //   - Principal selected (safe/timelock/EOA): upgrades are per-contract, so a
@@ -75,7 +75,7 @@ export function UpgradesSidebarPanel({ machine, principal, companyName, machines
   }, [machine?.job_id, machine?.is_proxy]);
 
   if (!machine && principal) {
-    const who = principal.label || shortAddr(principal.address);
+    const who = principalLabel(principal.label, principal.type, principal.address);
     return (
       <section className="ps-principal-section">
         <div className="ps-inspector-empty">

@@ -399,16 +399,11 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
     const pos = fallbackPositions[i] || { x: 0, y: 0 };
     contractPositions.set(m.address?.toLowerCase(), pos);
     const groupAddr = contractToGroup.get(m.address?.toLowerCase());
-    // Permissionless / lower-privilege callers (server-computed
-    // machine.other_callers = [{address, type, label}, …]): FP-authorized
-    // callers that aren't the primary owner or a guardian. Rendered in
-    // aggregate as the card's "+N callers" affordance so none is invisible,
-    // without minting a node (or edge) per bidder.
     const node = {
       id: m.address,
       type: "contract",
       position: pos,
-      data: { machine: m, otherCallers: m.other_callers || [] },
+      data: { machine: m },
     };
     if (groupAddr) {
       // The principal's original-cased address is what we used as the
@@ -426,8 +421,8 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
   // Controllers accordion (see buildGroupControllers / GroupNode), which lists
   // the exact functions each can call per contract instead of an illegible
   // dot in a rail. A co-controller spanning several groups appears in each.
-  // The permissionless long tail still renders as a per-contract "+N callers"
-  // affordance (machine.other_callers), not a node per caller.
+  // The permissionless long tail (machine.other_callers) is not rendered on the
+  // canvas; it's listed in the contract detail sidebar instead.
 
   const edges = [];
   for (const [, group] of byName) {

@@ -820,28 +820,8 @@
   font-weight: 600;
 }
 
-/* Permissionless / lower-privilege callers, aggregated per contract: a
-   "+N callers" affordance so an authorized caller is never silently invisible,
-   without a node or edge per bidder. Muted (vs the amber guardian accent) to
-   read as "many low-privilege callers", and clickable to inspect the list. */
-.ps-node-callers {
-  margin-top: 4px;
-  align-self: flex-start;
-  font-size: 8px;
-  font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(148, 163, 184, 0.12);
-  color: #94a3b8;
-  border: 1px dashed rgba(148, 163, 184, 0.4);
-  cursor: pointer;
-}
-
-.ps-node-callers:hover {
-  background: rgba(148, 163, 184, 0.25);
-}
-
-/* The "+N callers" list expanded in the contract detail sidebar. */
+/* The list of lower-privilege authorized callers, shown in the contract
+   detail sidebar. */
 .ps-machine-callers {
   padding: 8px 12px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
