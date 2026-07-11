@@ -305,7 +305,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           style,
           data: {
             ...n.data,
-            selected: n.id === selectedAddress,
+            selected: nid === sel,
             focused,
             selectionChip: selectionChips.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,

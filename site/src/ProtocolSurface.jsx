@@ -12,6 +12,8 @@ import { formatUsd, isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
+import { buildEntityIndex } from "./surface/layout/entities.js";
+import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
 import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
@@ -60,41 +62,24 @@ export default function ProtocolSurface({
     return {};
   }, [initialFunctions, locallyFetched, companyData, initialData]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
-  const [selectedGuard, setSelectedGuard] = useState(null);
-  const [selectedMachine, setSelectedMachine] = useState(null);
-  const [selectedPrincipal, setSelectedPrincipal] = useState(null);
-  const [radarExampleSelection, setRadarExampleSelection] = useState(null);
-  const [suppressSearchFocus, setSuppressSearchFocus] = useState(() => (
-    !embedded && Boolean(
-      new URLSearchParams(window.location.search).get("score")
-        || new URLSearchParams(window.location.search).get("scoreAxis")
-        || sessionStorage.getItem("psat:surfaceRadarExample"),
-    )
-  ));
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
   const [searchMode, setSearchMode] = useState("all");
-  const [focusAddress, setFocusAddress] = useState(null);
-  const [focusedAddress, setFocusedAddress] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("focus") || null;
-  });
-  const focusKeyRef = useRef(0);
-  const triggerFocus = useCallback((addr) => {
-    focusKeyRef.current += 1;
-    setFocusAddress({ address: addr, key: focusKeyRef.current });
-    setFocusedAddress(addr || null);
+  // Single URL writer replacing the three divergent inline history writers.
+  // Called imperatively from the two committing wrappers (select + radar);
+  // focus previews (search browsing / contract pager) never write the URL.
+  const syncUrl = useCallback(({ focus: focusAddr = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
-    // Sync focus address to URL
     const url = new URL(window.location.href);
-    if (addr) {
-      url.searchParams.set("focus", addr);
-      url.searchParams.delete("fn");
-      url.searchParams.delete("score");
+    if (focusAddr) url.searchParams.set("focus", focusAddr);
+    else url.searchParams.delete("focus");
+    if (radarSig) {
+      url.searchParams.set("score", "1");
+      if (radarSig.signature) url.searchParams.set("fn", radarSig.signature);
+      else url.searchParams.delete("fn");
     } else {
-      url.searchParams.delete("focus");
-      url.searchParams.delete("fn");
       url.searchParams.delete("score");
+      url.searchParams.delete("fn");
     }
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
@@ -213,8 +198,6 @@ export default function ProtocolSurface({
   useEffect(() => {
     if (!companyName) return undefined;
     setError(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
     let cancelled = false;
 
     const haveCompanyData = Boolean(initialData);
@@ -306,6 +289,29 @@ export default function ProtocolSurface({
     [allMachines, enabledRoles]
   );
 
+  // Address-keyed entity index over ALL machines + ALL principals (no
+  // visibility filtering). Selection state stores addresses only and resolves
+  // entities through this index per render, so denormalized snapshots can
+  // never go stale and role-filtered-off targets still resolve.
+  const entityIndex = useMemo(
+    () => buildEntityIndex(allMachines, companyData?.principals || []),
+    [allMachines, companyData]
+  );
+
+  const {
+    selection,
+    radarSelection,
+    focus,
+    selectedMachine,
+    selectedPrincipal,
+    selectedGuard,
+    focusedAddress,
+    select,
+    guard,
+    radar,
+    focusPreview,
+  } = useSurfaceSelection({ entityIndex, machines, companyName });
+
   // Restore focus from URL on initial data load
   const restoredFocus = useRef(false);
   useEffect(() => {
@@ -315,16 +321,16 @@ export default function ProtocolSurface({
     if (params.get("score")) return;
     if (urlFocus) {
       restoredFocus.current = true;
-      const machine = machines.find((m) => m.address?.toLowerCase() === urlFocus.toLowerCase());
-      if (machine) {
-        setSelectedMachine(machine);
-        setSelectedPrincipal(null);
-        setSelectedGuard(null);
-        setRadarExampleSelection(null);
+      // Only commit a selection when the address is a real entity; a garbage
+      // ?focus= param becomes a camera preview, never a synthesized junk card.
+      if (entityIndex.has(urlFocus.toLowerCase())) {
+        select(urlFocus);
+        syncUrl({ focus: urlFocus });
+      } else {
+        focusPreview(urlFocus);
       }
-      triggerFocus(urlFocus);
     }
-  }, [embedded, machines, triggerFocus]);
+  }, [embedded, machines, entityIndex, select, focusPreview, syncUrl]);
 
   const handleToggleRole = useCallback((role) => {
     setEnabledRoles((prev) => {
@@ -336,21 +342,19 @@ export default function ProtocolSurface({
   }, []);
 
   const handleSelectMachine = useCallback((machine) => {
-    setSelectedMachine(machine);
-    setSelectedPrincipal(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
-    triggerFocus(machine?.address || null);
-    // Clear any agent-emitted green-ring overlay when selection moves —
-    // otherwise pane clicks (which call this with null) leave the
-    // previous agent-highlighted address visually "focused".
-    if (!machine) setAgentHighlights(null);
-  }, [triggerFocus]);
+    if (machine) {
+      select(machine.address, { view: "contract" });
+      syncUrl({ focus: machine.address });
+    } else {
+      // Pane click / deselect — full clear. Drop any agent-emitted green-ring
+      // overlay too, otherwise it lingers as a stale "focused" address.
+      select(null);
+      setAgentHighlights(null);
+      syncUrl({});
+    }
+  }, [select, syncUrl]);
 
-  const handleSelectGuard = useCallback((fnView) => {
-    setSelectedGuard(fnView);
-    setRadarExampleSelection(null);
-  }, []);
+  const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
   const handleRadarExampleClick = useCallback((example) => {
     const targetAddress = example?.contractAddress?.toLowerCase();
@@ -366,22 +370,9 @@ export default function ProtocolSurface({
       return next;
     });
     setSidebarMode("detail");
-    setSelectedMachine(machine);
-    setSelectedPrincipal(null);
-    setSelectedGuard(fnView || null);
-    setRadarExampleSelection({
-      contractAddress: machine.address,
-      functionKey: fnView?.key || null,
-    });
-    setSuppressSearchFocus(false);
-    triggerFocus(machine.address);
-    const url = new URL(window.location.href);
-    url.searchParams.set("focus", machine.address);
-    url.searchParams.set("score", "1");
-    if (fnView?.signature) url.searchParams.set("fn", fnView.signature);
-    else url.searchParams.delete("fn");
-    window.history.replaceState({}, "", url.toString());
-  }, [allMachines, triggerFocus]);
+    radar(machine.address, fnView?.key || null);
+    syncUrl({ focus: machine.address, radar: { signature: fnView?.signature } });
+  }, [allMachines, radar, syncUrl]);
 
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
@@ -420,14 +411,11 @@ export default function ProtocolSurface({
   // badge, just driven from the node itself.
   const handleSelectPrincipal = useCallback((principal, opts) => {
     if (!principal) return;
-    setSelectedPrincipal(principal);
-    setSelectedMachine(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
     // opts.focus === false selects without moving the camera (controller-row
     // clicks just want the highlight, not a pan/zoom to the principal's node).
-    if (principal.address && opts?.focus !== false) triggerFocus(principal.address);
-  }, [triggerFocus]);
+    select(principal.address, { view: "principal", focus: opts?.focus });
+    if (opts?.focus !== false) syncUrl({ focus: principal.address });
+  }, [select, syncUrl]);
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
@@ -437,42 +425,16 @@ export default function ProtocolSurface({
     );
   }, [machines, companyData]);
 
-  const navigateToPrincipal = useCallback((target) => {
-    let principal = visiblePrincipals.find((p) => p.address?.toLowerCase() === target.address?.toLowerCase());
-    if (!principal) {
-      principal = {
-        address: target.address,
-        type: target.type,
-        label: target.label || target.type,
-        details: target.details || {},
-        controls: machines
-          .filter((m) => m.owner?.toLowerCase() === target.address?.toLowerCase())
-          .map((m) => m.address),
-      };
-    }
-    setSelectedPrincipal(principal);
-    setSelectedMachine(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
-    triggerFocus(target.address);
-  }, [machines, visiblePrincipals, triggerFocus]);
-
   const handleNavigate = useCallback((target) => {
-    // Surface the navigation result in the Detail panel.
+    // Surface the navigation result in the Detail panel. Contract targets no
+    // longer no-op when role-filtered off the canvas — the entity index spans
+    // all machines. `hint` lets resolveEntity synthesize a principal card for
+    // off-index targets (e.g. other_callers chips) in one canonical place.
     setSidebarMode("detail");
-    if (target.type === "contract") {
-      const machine = machines.find((m) => m.address?.toLowerCase() === target.address?.toLowerCase());
-      if (machine) {
-        setSelectedMachine(machine);
-        setSelectedPrincipal(null);
-        setSelectedGuard(null);
-        setRadarExampleSelection(null);
-        triggerFocus(machine.address);
-      }
-    } else {
-      navigateToPrincipal(target);
-    }
-  }, [machines, navigateToPrincipal, triggerFocus]);
+    const view = target.type === "contract" ? "contract" : "principal";
+    select(target.address, { view, hint: view === "principal" ? target : undefined });
+    syncUrl({ focus: target.address });
+  }, [select, syncUrl]);
 
   const totals = useMemo(() => {
     return machines.reduce(
@@ -489,7 +451,7 @@ export default function ProtocolSurface({
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
-  const radarExampleFlyout = sidebarMode === "detail" && radarExampleSelection && selectedMachine && !selectedPrincipal ? (
+  const radarExampleFlyout = sidebarMode === "detail" && radarSelection && selectedMachine && !selectedPrincipal ? (
     <div className="ps-sidebar-flyout-content">
       <ContractMachine
         key={`${selectedMachine.address}:radar`}
@@ -497,8 +459,8 @@ export default function ProtocolSurface({
         onSelectGuard={handleSelectGuard}
         onNavigate={handleNavigate}
         companyName={companyName}
-        highlightedFunctionKey={radarExampleSelection.functionKey}
-        highlightedContract={!radarExampleSelection.functionKey}
+        highlightedFunctionKey={radarSelection.functionKey}
+        highlightedContract={!radarSelection.functionKey}
         onOpenDependencyGraph={setDependencyGraphMachine}
       />
       <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
@@ -609,31 +571,12 @@ export default function ProtocolSurface({
         principals={visiblePrincipals}
         mode={searchMode}
         setMode={setSearchMode}
-        onFocus={(item) => {
-          if (suppressSearchFocus || radarExampleSelection) return;
-          if (!item) {
-            setSelectedMachine(null); setSelectedPrincipal(null);
-            setRadarExampleSelection(null);
-            setFocusedAddress(null);
-            const url = new URL(window.location.href);
-            url.searchParams.delete("focus");
-            window.history.replaceState({}, "", url.toString());
-            return;
-          }
-          if (item.kind === "principal" && item.principal) {
-            setSelectedPrincipal(item.principal);
-            setSelectedMachine(item.machine);
-            setSelectedGuard(null);
-            setRadarExampleSelection(null);
-            // Focus on the principal node or its first controlled contract
-            triggerFocus(item.address || item.machine?.address);
-          } else if (item.machine) {
-            setSelectedMachine(item.machine);
-            setSelectedPrincipal(null);
-            setSelectedGuard(null);
-            setRadarExampleSelection(null);
-            triggerFocus(item.machine.address);
-          }
+        onPreview={(item) => { if (item) focusPreview(item.address); }}
+        onCommit={(item) => {
+          if (!item) return;
+          const view = item.kind === "principal" ? "principal" : "contract";
+          select(item.address, { view });
+          syncUrl({ focus: item.address });
         }}
       />
       </div>
@@ -644,8 +587,8 @@ export default function ProtocolSurface({
             machines={machines}
             fundFlows={companyData?.fund_flows}
             principals={visiblePrincipals}
-            selectedAddress={selectedMachine?.address || selectedPrincipal?.address}
-            focusAddress={focusAddress}
+            selectedAddress={selection?.address}
+            focusAddress={focus}
             focusedAddress={focusedAddress}
             highlightedAddresses={highlightedAddresses}
             onSelectMachine={(m) => {
@@ -703,7 +646,7 @@ export default function ProtocolSurface({
               onCache={cacheUpgradeHistory}
             />
           )}
-          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarExampleSelection) && (
+          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
             <DetailEmptyState
               companyName={companyName}
               companyData={companyDataWithFunctions}
@@ -717,23 +660,23 @@ export default function ProtocolSurface({
               principal={selectedPrincipal}
               machines={machines}
               onNavigate={handleNavigate}
-              onFocusContract={(addr) => triggerFocus(addr)}
+              onFocusContract={(addr) => focusPreview(addr)}
               addressLabels={addressLabels}
               refreshAddressLabels={refreshAddressLabels}
             />
           )}
-          {sidebarMode === "detail" && selectedMachine && !selectedPrincipal && !radarExampleSelection && (
+          {sidebarMode === "detail" && selectedMachine && !selectedPrincipal && !radarSelection && (
             <ContractMachine
               key={selectedMachine.address}
               machine={selectedMachine}
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
               companyName={companyName}
-              highlightedFunctionKey={radarExampleSelection?.functionKey}
+              highlightedFunctionKey={radarSelection?.functionKey}
               onOpenDependencyGraph={setDependencyGraphMachine}
             />
           )}
-          {sidebarMode === "detail" && !selectedPrincipal && !radarExampleSelection && (
+          {sidebarMode === "detail" && !selectedPrincipal && !radarSelection && (
             <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
           )}
           {isAdmin && sidebarMode === "agent" && (
@@ -766,7 +709,7 @@ export default function ProtocolSurface({
                 // function-level authority over — and write that set
                 // into highlightedAddresses. The canvas's existing
                 // audit-overlay dim path then dims everything else.
-                triggerFocus(addr);
+                focusPreview(addr);
                 api(
                   `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}`,
                 )

@@ -56,6 +56,46 @@ function renderSurface() {
   );
 }
 
+// --- Stage-1 selection-refactor helpers (commit-on-Enter model) ---
+// The safe principal + the contracts it controls, derived from the fixture so
+// assertions stay structural (per SELECTION_FILTERING_DIAGNOSIS.md M1: assert
+// "Agent context ≠ any controlled-contract name", not against a pinned name).
+const SAFE_PRINCIPAL = ETHERFI_COMPANY_RICH.principals.find((p) => p.type === "safe");
+const CONTROLLED_NAMES = SAFE_PRINCIPAL.controls
+  .map((addr) =>
+    ETHERFI_COMPANY_RICH.contracts.find(
+      (c) => c.address.toLowerCase() === addr.toLowerCase(),
+    )?.name,
+  )
+  .filter(Boolean);
+
+function searchInput() {
+  const el = document.querySelector(".ps-search-input");
+  expect(el).toBeTruthy();
+  return el;
+}
+
+async function selectSearchMode(user, label) {
+  // Scope to the top-left search-modes bar: DetailEmptyState's radar also
+  // renders a "Safes" score-axis button that would otherwise collide.
+  const bar = await waitFor(() => {
+    const el = document.querySelector(".ps-search-modes");
+    expect(el).toBeTruthy();
+    return el;
+  });
+  const pill = await within(bar).findByRole("button", { name: new RegExp(label, "i") });
+  await user.click(pill);
+}
+
+// Post-refactor interaction model: typing/browsing never commit a selection;
+// only Enter in the search input (or clicking the preview card) commits the
+// current preview. This helper drives the Enter path.
+async function commitViaEnter(user) {
+  const input = searchInput();
+  await user.click(input);
+  await user.keyboard("{Enter}");
+}
+
 async function clickSidebarTab(label) {
   const user = userEvent.setup();
   // Scope to the sidebar tab bar: in Detail mode the DetailEmptyState radar
@@ -266,5 +306,243 @@ describe("rich fixture", () => {
     expect(types).toEqual(
       expect.arrayContaining(["safe", "timelock", "eoa", "contract"]),
     );
+  });
+
+  it("carries top-level governance principals (safe + timelock)", () => {
+    const types = (ETHERFI_COMPANY_RICH.principals || []).map((p) => p.type);
+    expect(types).toEqual(expect.arrayContaining(["safe", "timelock"]));
+    // The safe controls two contracts that both exist as machines — the exact
+    // condition that made the original bug leak controls[0] into every tab.
+    expect(CONTROLLED_NAMES.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// Stage-1 selection-refactor behavior, authored to
+// SELECTION_FILTERING_DIAGNOSIS.md ("Stage 1 concrete design" + M1 asserts).
+// These drive the RENDERED UI through the commit-on-Enter model and are
+// expected RED until the Wave B integration lands (single keys-only selection,
+// SearchNavigator onPreview/onCommit, no smuggled machine on principal results).
+describe("ProtocolSurface — stage-1 selection model", () => {
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  // (a) Typing refilters the results/preview only — it must NOT commit a
+  // selection into any tab. Agent context stays company-level; Detail stays in
+  // its empty state.
+  it("typing in the search box does not change any tab's selection", async () => {
+    window.localStorage.setItem("psat_admin_key", "test-key");
+    renderSurface(); // admin → default Agent tab
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await user.type(searchInput(), "Multi"); // matches the "Multisig" safe
+
+    // Agent context must remain the company, never a controlled contract.
+    const value = await waitFor(() => {
+      const el = document.querySelector(".agent-context-value");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(document.querySelector(".agent-context-meta")).not.toBeInTheDocument();
+    for (const name of CONTROLLED_NAMES) {
+      expect(value.textContent).not.toContain(name);
+    }
+
+    // Detail tab stays in the empty state — no PrincipalDetail card.
+    await clickSidebarTab("Detail");
+    await waitFor(() => {
+      expect(
+        document.querySelector(".ps-detail-empty, .protocol-radar, .empty"),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByText(/2\/3 threshold/i)).not.toBeInTheDocument();
+    expectNoCrash();
+  });
+
+  // (b) Enter commits the previewed safe: Detail shows its PrincipalDetail card.
+  it("pressing Enter commits the safe and Detail shows its PrincipalDetail card", async () => {
+    renderSurface(); // non-admin → default Detail tab
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+
+    // PrincipalDetail-only markers (distinct from the search preview's
+    // "2/3 signers"): the threshold badge and the Signers section.
+    expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Signers \(3\)/i)).toBeInTheDocument();
+    expectNoCrash();
+  });
+
+  // (c) THE regression test: after committing a safe, no contract is selected in
+  // the Agent, Audits, or Upgrades tabs (the original leak lit up controls[0]).
+  it("committing a safe leaves Agent/Audits/Upgrades with no contract selected", async () => {
+    window.localStorage.setItem("psat_admin_key", "test-key");
+    renderSurface(); // admin → default Agent tab
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+
+    // Gate: the safe actually committed (Detail shows its PrincipalDetail).
+    await clickSidebarTab("Detail");
+    expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
+
+    // Agent: context is the company, not any contract the safe controls.
+    await clickSidebarTab("Agent");
+    const value = await waitFor(() => {
+      const el = document.querySelector(".agent-context-value");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(document.querySelector(".agent-context-meta")).not.toBeInTheDocument();
+    for (const name of CONTROLLED_NAMES) {
+      expect(value.textContent).not.toContain(name);
+    }
+
+    // Audits: no selected-contract coverage card.
+    await clickSidebarTab("Audits");
+    await waitFor(() => {
+      const text = document.body.textContent || "";
+      expect(/Verified audits|No audits|Trail of Bits/i.test(text)).toBe(true);
+    });
+    expect(
+      document.querySelector(".ps-audits-contract-card"),
+    ).not.toBeInTheDocument();
+
+    // Upgrades: the global proxy list, not a single-contract timeline.
+    await clickSidebarTab("Upgrades");
+    await waitFor(() => {
+      expect(document.querySelector(".ps-upgrades-global-hint")).toBeTruthy();
+    });
+    expectNoCrash();
+  });
+
+  // (d) Stale-guard bug (SELECTION_FILTERING_DIAGNOSIS.md M1 assertion #4):
+  // select a contract → open a guard in the InspectorCard → select a DIFFERENT
+  // entity → the InspectorCard must clear. Pre-refactor, guard-clearing was
+  // hand-assembled at each of the seven transition call sites and one of them
+  // forgot it; post-refactor the reducer owns the invariant (any entity/
+  // selection change clears guardKey), so guardFromKey — which resolves a guard
+  // purely from its key's contract prefix, independent of the live selection —
+  // returns null and the InspectorCard unmounts.
+  //
+  // In the commit-on-Enter model, typing never mutates the selection, so the
+  // old "type until results go empty" deselect path no longer exists; the
+  // spec's scenario is a commit to a different entity. Two DIFFERENT contracts
+  // (Vault → LiquidityPool) keep the assertion meaningful: LiquidityPool's own
+  // InspectorCard renders with selected=null only if the Vault guard key was
+  // actually cleared — a leaked key would still resolve to the Vault guard.
+  it("selecting a different contract clears an open guard", async () => {
+    renderSurface(); // non-admin → default Detail tab
+    const user = userEvent.setup();
+
+    // Select the Vault contract via the default "All" search mode so
+    // ContractMachine renders with guard ports.
+    await user.type(searchInput(), "Vault");
+    await commitViaEnter(user);
+    const port = await waitFor(() => {
+      const el = document.querySelector(".ps-port-copy");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    await user.click(port);
+    expect(await screen.findByText(/Guard Inspector/i)).toBeInTheDocument();
+
+    // Commit a different contract. The entity change must clear the open guard.
+    await user.clear(searchInput());
+    await user.type(searchInput(), "Liquid"); // matches "LiquidityPool"
+    await commitViaEnter(user);
+    await waitFor(() => {
+      expect(document.querySelector(".ps-inspector")).not.toBeInTheDocument();
+    });
+    expectNoCrash();
+  });
+
+  // (e) Changing the company clears the current selection (the reducer clears on
+  // companyName change; today only guard/radar reset, not the entity).
+  it("changing the company clears the current selection", async () => {
+    const { rerender } = renderSurface();
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+    expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
+
+    rerender(
+      <ProtocolSurface
+        companyName="etherfi-v2"
+        initialData={ETHERFI_COMPANY_RICH}
+        embedded
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.queryByText(/2\/3 threshold/i)).not.toBeInTheDocument();
+    });
+    expectNoCrash();
+  });
+
+  // (f) Staleness-by-snapshot: select a contract BEFORE /functions resolves;
+  // when functions arrive the sidebar card must fill in with lanes (keys-only
+  // selection derives the machine per render — no permanent empty lanes).
+  it("fills a selected contract's lanes when /functions resolves after selection", async () => {
+    const VAULT = RICH_ADDRESSES.VAULT;
+    // Contracts with NO inline `functions` key force ProtocolSurface down the
+    // non-embedded /functions fetch path; we hold that response until after the
+    // contract is selected to reproduce the stale-snapshot window.
+    const bareData = {
+      contracts: [
+        {
+          address: VAULT,
+          name: "Vault",
+          risk_level: "low",
+          is_proxy: true,
+          proxy_type: "ERC1967",
+          upgrade_count: 2,
+          controllers: {},
+          job_id: "vault-job",
+        },
+      ],
+      ownership_hierarchy: [],
+      all_addresses_count: 1,
+    };
+    let releaseFunctions;
+    const functionsGate = new Promise((resolve) => {
+      releaseFunctions = resolve;
+    });
+    setFetchHandler(
+      (url) => /\/functions$/.test(url.pathname),
+      async () => {
+        await functionsGate;
+        return {
+          functions: {
+            [VAULT]: [
+              {
+                function: "upgrade",
+                selector: "0xupgrade0",
+                abi_signature: "upgrade",
+                effect_labels: ["upgrade"],
+                action_summary: "upgrade action",
+              },
+            ],
+          },
+        };
+      },
+    );
+
+    render(<ProtocolSurface companyName="etherfi" initialData={bareData} />); // non-embedded, non-admin → Detail
+    const user = userEvent.setup();
+    // Vault is the only result in the default "All" mode — commit it directly
+    // (no typing, so we don't lean on today's browse-is-select, which would
+    // re-select the fresh machine on every results change and mask staleness).
+    await commitViaEnter(user);
+
+    // The card is up but has no function lanes yet.
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine")).toBeTruthy();
+    });
+    expect(screen.queryByText("upgrade")).not.toBeInTheDocument();
+
+    // Functions arrive → the same selected card fills in (not a stale snapshot).
+    releaseFunctions();
+    expect(await screen.findByText("upgrade")).toBeInTheDocument();
+    expectNoCrash();
   });
 });

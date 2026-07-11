@@ -4,41 +4,30 @@ import { formatDelay, formatUsd, shortAddr } from "../../format.js";
 import { buildSearchResults } from "../../layout/search.js";
 import { SORT_OPTIONS } from "../../meta.js";
 
-export function SearchNavigator({ machines, principals, onFocus, mode, setMode }) {
+export function SearchNavigator({ machines, principals, onPreview, onCommit, mode, setMode }) {
   const [sortKey, setSortKey] = useState("value");
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
-  const [hasInteracted, setHasInteracted] = useState(false);
 
   const results = useMemo(
     () => buildSearchResults(machines, principals, mode, sortKey, query),
     [machines, principals, mode, sortKey, query]
   );
 
-  // Reset index when results change
+  // Reset index when results change. Typing/re-sorting only refilters the
+  // preview — it never previews or commits a selection.
   useEffect(() => { setIndex(0); }, [results.length, mode, sortKey, query]);
 
-  // Notify parent when the user drives the navigator. The initial preview
-  // should not become a selected/focused contract by itself.
-  useEffect(() => {
-    if (!hasInteracted) return;
-    if (results.length > 0 && results[index]) {
-      onFocus(results[index]);
-    } else {
-      onFocus(null);
-    }
-  }, [hasInteracted, index, results]);
-
-  const prev = () => {
-    setHasInteracted(true);
-    setIndex((i) => (i > 0 ? i - 1 : results.length - 1));
+  const move = (target) => {
+    if (results.length === 0) return;
+    setIndex(target);
+    if (results[target]) onPreview(results[target]);
   };
-  const next = () => {
-    setHasInteracted(true);
-    setIndex((i) => (i < results.length - 1 ? i + 1 : 0));
-  };
+  const prev = () => move(index > 0 ? index - 1 : results.length - 1);
+  const next = () => move(index < results.length - 1 ? index + 1 : 0);
 
   const current = results[index];
+  const commit = () => { if (current) onCommit(current); };
 
   return (
     <div className="ps-search-nav">
@@ -49,19 +38,18 @@ export function SearchNavigator({ machines, principals, onFocus, mode, setMode }
         <input
           type="text"
           value={query}
-          onChange={(e) => {
-            setHasInteracted(true);
-            setQuery(e.target.value);
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); prev(); }
+            else if (e.key === "ArrowDown") { e.preventDefault(); next(); }
           }}
           placeholder="Search... (e.g. 'min value 3M')"
           className="ps-search-input"
         />
         <select
           value={sortKey}
-          onChange={(e) => {
-            setHasInteracted(true);
-            setSortKey(e.target.value);
-          }}
+          onChange={(e) => setSortKey(e.target.value)}
           className="ps-search-sort"
         >
           {SORT_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
@@ -75,13 +63,20 @@ export function SearchNavigator({ machines, principals, onFocus, mode, setMode }
         </div>
       </div>
       {current && (
-        <div className="ps-search-preview">
+        <div
+          className="ps-search-preview"
+          role="button"
+          tabIndex={0}
+          title="Select (Enter)"
+          onClick={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }}
+        >
           <span className="ps-search-preview-name">{current.name || shortAddr(current.address)}</span>
           <span className="ps-search-preview-type">{current.type}</span>
           <span className="ps-search-preview-addr">{shortAddr(current.address)}</span>
           {current.value > 0 && <span className="ps-search-preview-value">{formatUsd(current.value)}</span>}
           {current.kind === "principal" && current.type === "safe" && current.signers > 0 && (
-            <span className="ps-search-preview-meta">{current.signers}/{current.principal?.details?.owners?.length || "?"} signers</span>
+            <span className="ps-search-preview-meta">{current.signers}/{current.ownersCount || "?"} signers</span>
           )}
           {current.kind === "principal" && current.type === "timelock" && current.delay > 0 && (
             <span className="ps-search-preview-meta">{formatDelay(current.delay)} delay</span>
@@ -92,6 +87,7 @@ export function SearchNavigator({ machines, principals, onFocus, mode, setMode }
           {current.kind === "contract" && (
             <span className="ps-search-preview-meta">{current.functions} fns</span>
           )}
+          <span className="ps-search-preview-hint">↵ select</span>
         </div>
       )}
     </div>

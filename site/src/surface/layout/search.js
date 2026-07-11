@@ -22,12 +22,9 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         type: p.type,
         value: totalValue,
         signers,
+        ownersCount: p.details?.owners?.length || 0,
         delay,
         functions: controlled.length,
-        controlledMachines,
-        // Select the first controlled contract when navigating to this principal
-        machine: controlledMachines[0] || null,
-        principal: p,
       });
     }
     // Timelock contracts (control-graph type=timelock) aren't principals, but
@@ -48,10 +45,9 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
           type: "timelock",
           value: m.total_usd || 0,
           signers: 0,
+          ownersCount: 0,
           delay: m.timelockDelay || 0,
           functions: m.totalFunctions || 0,
-          machine: m,
-          principal: null,
         });
       }
     }
@@ -68,10 +64,9 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         type: ownerPrincipal?.type || "unknown",
         value: m.total_usd || 0,
         signers: ownerPrincipal?.details?.threshold || 0,
+        ownersCount: ownerPrincipal?.details?.owners?.length || 0,
         delay: 0,
         functions: m.totalFunctions || 0,
-        machine: m,
-        principal: ownerPrincipal,
       });
     }
     if (mode === "funds") items = items.filter((i) => i.value > 0);
