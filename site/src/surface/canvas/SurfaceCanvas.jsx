@@ -97,7 +97,21 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
 
   useEffect(() => {
     if (!initNodes.length) return;
-    const sel = selectedAddress?.toLowerCase();
+    const selLc = selectedAddress?.toLowerCase();
+    const focLc = focusedAddress?.toLowerCase();
+    // Relatedness anchor: while the camera previews a browsed entity (search
+    // ▲/▼ fires focusPreview), highlight around IT exactly as a selection
+    // would — dim, chips, accordion row marker — so the user can tell which
+    // principal the preview is about. Committing only changes which entity
+    // the sidebar/agent/URL see; the selection RING stays commit-only
+    // (selLc). Focus addresses that resolve to neither a node nor a known
+    // principal (stale ?focus= URLs) fall back to the committed selection
+    // instead of dimming the whole canvas around nothing.
+    const focusResolves = focLc && (
+      initNodes.some((n) => n.id?.toLowerCase() === focLc) ||
+      (principals || []).some((p) => p.address?.toLowerCase() === focLc)
+    );
+    const sel = focusResolves ? focLc : selLc;
     // Find all nodes connected to the selected node AND, in the same
     // pass, the per-contract chip data. Owner-grouping moves the
     // principal→contract relationship from an edge into the
@@ -227,18 +241,23 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         if (nid === sel && pid) connectedNodes.add(pid);
       }
 
-      // Co-controller selection: the selected principal may hold authority on
-      // contracts it isn't the primary owner of (principal.co_controls). On
-      // select we light up those contracts — and their containing groups, so a
-      // highlighted child isn't dimmed along with its box — and chip them with
-      // what the controller can do. This is the same dim+chip highlight a
-      // primary gets for its own children. We deliberately draw NO edges: the
-      // cross-group dashed lines read as the fanout spaghetti the owner-
-      // grouping removed, and the highlight alone conveys the reach.
-      const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
-      if (coControls.length) {
+      // Controller reach: the selected principal may hold authority on
+      // contracts outside its own group — co_controls always, and plain
+      // controls when it owns no group box (a node-less safe/EOA whose owned
+      // contracts live under other primaries). Light those contracts — and
+      // their containing groups, so a highlighted child isn't dimmed along
+      // with its box — and chip them with what the controller can do. This is
+      // the same dim+chip highlight a primary gets for its own children. We
+      // deliberately draw NO edges: the cross-group dashed lines read as the
+      // fanout spaghetti the owner-grouping removed, and the highlight alone
+      // conveys the reach.
+      const reach = [
+        ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
+        ...(Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : []),
+      ];
+      if (reach.length) {
         const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
-        for (const c of coControls) {
+        for (const c of reach) {
           const t = c?.toLowerCase();
           const tn = t && nodeByAddr.get(t);
           if (!tn) continue;
@@ -309,7 +328,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           style,
           data: {
             ...n.data,
-            selected: nid === sel,
+            selected: nid === selLc,
             focused,
             selectionChip: selectionChips.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
