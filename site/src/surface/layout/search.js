@@ -1,5 +1,7 @@
 // Filter + sort the machines/principals list for SearchNavigator. Pure.
 
+import { principalLabel } from "../format.js";
+
 export function buildSearchResults(machines, principals, mode, sortKey, query) {
   let items = [];
 
@@ -18,7 +20,7 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
       items.push({
         kind: "principal",
         address: p.address,
-        name: p.label || "",
+        name: principalLabel(p.label, p.type, p.address),
         type: p.type,
         value: totalValue,
         signers,

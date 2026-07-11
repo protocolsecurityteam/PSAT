@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import AddressLabelInline from "../../AddressLabelInline.jsx";
 import { api } from "../../api/client.js";
-import { formatDelay, formatEventAgo, formatUsd, shortAddr } from "../format.js";
+import { formatDelay, formatEventAgo, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { EVENT_ACCENTS, EVENT_LABELS, TYPE_META } from "../meta.js";
 
 export function PrincipalDetail({ principal, machines, onNavigate, onFocusContract, addressLabels, refreshAddressLabels }) {
@@ -55,7 +55,7 @@ export function PrincipalDetail({ principal, machines, onNavigate, onFocusContra
     <article className="ps-machine" style={{ borderLeft: `2px solid ${type.accent}` }}>
       <header className="ps-machine-header">
         <div className="ps-machine-name">
-          {addressLabels?.get(principal.address?.toLowerCase()) || principal.label || shortAddr(principal.address)}
+          {addressLabels?.get(principal.address?.toLowerCase()) || principalLabel(principal.label, principal.type, principal.address)}
         </div>
         <div className="ps-machine-address">{principal.address}</div>
         {/* Only EOAs and Safes are "just an address" — add the inline label

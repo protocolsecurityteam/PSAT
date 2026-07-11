@@ -12,7 +12,8 @@ import { formatUsd, isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
-import { buildEntityIndex } from "./surface/layout/entities.js";
+import { assignGroups } from "./surface/layout/elkLayout.js";
+import { buildEntityIndex, nodelessPrincipalHighlight } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
@@ -175,30 +176,22 @@ export default function ProtocolSurface({
   // Plain state so AgentPanel can replace it via setHighlightedAddresses.
   const [agentHighlights, setAgentHighlights] = useState(null);
 
-  // Highlighted addresses on the canvas: union of agent highlights (Agent
-  // tab) with the audit-coverage set (Audits tab). Either source can drive
-  // the green ring. Lowercased Set so the canvas comparison is O(1); null
-  // when neither source is active so the canvas falls back to selection-
-  // dimming.
-  const highlightedAddresses = useMemo(() => {
-    const fromAudit = (() => {
-      if (activeAuditId == null || !coverageData) return null;
-      const out = new Set();
-      for (const entry of coverageData.coverage || []) {
-        const addr = (entry.address || "").toLowerCase();
-        if (!addr) continue;
-        if ((entry.audits || []).some((a) => a.audit_id === activeAuditId && isBytecodeVerifiedAudit(a))) {
-          out.add(addr);
-        }
+  // Audit-coverage highlight set (Audits tab): the contracts a picked audit
+  // bytecode-verifiably covers. Merged with agent + selection highlights into
+  // highlightedAddresses below (defined after the selection/visibility derives
+  // it also depends on).
+  const auditHighlights = useMemo(() => {
+    if (activeAuditId == null || !coverageData) return null;
+    const out = new Set();
+    for (const entry of coverageData.coverage || []) {
+      const addr = (entry.address || "").toLowerCase();
+      if (!addr) continue;
+      if ((entry.audits || []).some((a) => a.audit_id === activeAuditId && isBytecodeVerifiedAudit(a))) {
+        out.add(addr);
       }
-      return out;
-    })();
-    if (!fromAudit && !agentHighlights) return null;
-    const merged = new Set();
-    if (fromAudit) for (const a of fromAudit) merged.add(a);
-    if (agentHighlights) for (const a of agentHighlights) merged.add(a);
-    return merged.size ? merged : null;
-  }, [activeAuditId, coverageData, agentHighlights]);
+    }
+    return out.size ? out : null;
+  }, [activeAuditId, coverageData]);
 
   const setHighlightedAddresses = setAgentHighlights;
   const [enabledRoles, setEnabledRoles] = useState(() => {
@@ -454,6 +447,69 @@ export default function ProtocolSurface({
       (p.controls || []).some((a) => visibleAddrs.has(a.toLowerCase()))
     );
   }, [machines, companyData]);
+
+  // Addresses that own a node on the canvas: every visible contract card plus
+  // every principal materialized as a group box (primary owner of a visible
+  // contract). Used to tell a group-backed principal (keeps its ring/focus)
+  // from a node-less co-controller (needs the touch-set highlight below).
+  const canvasNodeAddrs = useMemo(() => {
+    const set = new Set(machines.map((m) => m.address?.toLowerCase()).filter(Boolean));
+    const { groupedPrincipals } = assignGroups(machines, visiblePrincipals);
+    for (const a of groupedPrincipals) set.add(a);
+    return set;
+  }, [machines, visiblePrincipals]);
+
+  // Node-less co-controller highlight. A selected principal that owns no canvas
+  // node (a co-controller safe that isn't the primary owner of any visible
+  // contract) matches no node, so the canvas would dim nothing — a silent
+  // no-op. Derive its touch set (the contracts it can call/govern, from data
+  // already on the principal) and drive the SAME green-ring dim path the agent
+  // and audit overlays use, so the canvas dims everything outside its reach.
+  // Group-backed principals return null → the canvas keeps its ring/focus.
+  //
+  // Kept OUT of the agentHighlights state slot deliberately: a committed
+  // selection clears agentHighlights, which would wipe this the instant it is
+  // set. Deriving it from the live selection makes it immune to that transition.
+  const selectionHighlights = useMemo(
+    () => nodelessPrincipalHighlight(selectedPrincipal, canvasNodeAddrs),
+    [selectedPrincipal, canvasNodeAddrs],
+  );
+
+  // Highlighted addresses on the canvas: union of agent highlights (Agent tab),
+  // the audit-coverage set (Audits tab), and the node-less-principal touch set.
+  // Any source drives the green ring + dim. Lowercased Set for O(1) canvas
+  // comparison; null when no source is active so the canvas falls back to
+  // selection dimming.
+  const highlightedAddresses = useMemo(() => {
+    if (!auditHighlights && !agentHighlights && !selectionHighlights) return null;
+    const merged = new Set();
+    if (auditHighlights) for (const a of auditHighlights) merged.add(a);
+    if (agentHighlights) for (const a of agentHighlights) merged.add(a);
+    if (selectionHighlights) for (const a of selectionHighlights) merged.add(a);
+    return merged.size ? merged : null;
+  }, [auditHighlights, agentHighlights, selectionHighlights]);
+
+  // Role-toggle reconciliation. Toggling a role off removes its contracts (and
+  // any principal whose whole touch set was those contracts) from the visible
+  // set — but the selection still points at the now-hidden address, stranding a
+  // sidebar card for a node that no longer exists. Reconcile ONLY on a roles
+  // change (not on any visibility change) so a deliberate navigate to a
+  // role-filtered-off contract still selects it. Keyed on enabledRoles; machines
+  // /visiblePrincipals are already the post-toggle sets when this runs.
+  const prevRolesRef = useRef(enabledRoles);
+  useEffect(() => {
+    if (prevRolesRef.current === enabledRoles) return;
+    prevRolesRef.current = enabledRoles;
+    const addr = selection?.address;
+    if (!addr) return;
+    const stillVisible =
+      machines.some((m) => m.address?.toLowerCase() === addr) ||
+      visiblePrincipals.some((p) => p.address?.toLowerCase() === addr);
+    if (!stillVisible) {
+      select(null);
+      syncUrl({});
+    }
+  }, [enabledRoles, machines, visiblePrincipals, selection, select, syncUrl]);
 
   const handleNavigate = useCallback((target) => {
     // Surface the navigation result in the Detail panel. Contract targets no

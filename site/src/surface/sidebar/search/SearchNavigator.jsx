@@ -73,7 +73,11 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
         >
           <span className="ps-search-preview-name">{current.name || shortAddr(current.address)}</span>
           <span className="ps-search-preview-type">{current.type}</span>
-          <span className="ps-search-preview-addr">{shortAddr(current.address)}</span>
+          {/* When the display name already fell back to the short address
+              (a label-less principal), don't repeat it in the addr slot. */}
+          {current.name !== shortAddr(current.address) && (
+            <span className="ps-search-preview-addr">{shortAddr(current.address)}</span>
+          )}
           {current.value > 0 && <span className="ps-search-preview-value">{formatUsd(current.value)}</span>}
           {current.kind === "principal" && current.type === "safe" && current.signers > 0 && (
             <span className="ps-search-preview-meta">{current.signers}/{current.ownersCount || "?"} signers</span>

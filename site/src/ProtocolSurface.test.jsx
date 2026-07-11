@@ -692,3 +692,96 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     expectNoCrash();
   });
 });
+
+// M3 (stage 4) polish: role-toggle reconciliation + label cosmetics. The
+// node-less touch-set highlight derivation is unit-tested at the helper level
+// (surface/layout/entities.test.js) since its only observable effect is the
+// canvas dim overlay, which ELK doesn't lay out in jsdom.
+describe("ProtocolSurface — M3 polish", () => {
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  // Role-toggle reconciliation: hiding the selected contract's role must clear
+  // the selection so no sidebar card is stranded for a node that's gone. The
+  // fixture's contracts fall in the "utility" role bucket, toggled via the
+  // Utilities chip.
+  it("clears the selection when a role toggle hides the selected contract", async () => {
+    renderSurface(); // non-admin → Detail
+    const user = userEvent.setup();
+
+    // Commit the Vault contract → its ContractMachine card mounts.
+    await user.type(searchInput(), "Vault");
+    await commitViaEnter(user);
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine")).toBeTruthy();
+    });
+
+    // Toggle the role that contains Vault off — it leaves the visible set.
+    const roleBar = document.querySelector(".ps-role-bar");
+    const utilities = await within(roleBar).findByRole("button", { name: /Utilities/i });
+    await user.click(utilities);
+
+    // The stranded card is reconciled away; Detail returns to its empty state.
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine")).toBeNull();
+    });
+    expectNoCrash();
+  });
+
+  // Reconciliation must fire ONLY when the SELECTED entity is hidden — toggling
+  // an unrelated role leaves the selection alone (it doesn't blindly clear on
+  // every roles change).
+  it("keeps the selection when an unrelated role is toggled", async () => {
+    renderSurface();
+    const user = userEvent.setup();
+
+    // Commit Vault (a "utility"-bucket contract).
+    await user.type(searchInput(), "Vault");
+    await commitViaEnter(user);
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine")).toBeTruthy();
+    });
+
+    // Toggle a role Vault is NOT in — its card must survive.
+    const roleBar = document.querySelector(".ps-role-bar");
+    const governance = await within(roleBar).findByRole("button", { name: /Governance/i });
+    await user.click(governance);
+
+    // Give the reconciliation effect a chance to (wrongly) fire, then assert
+    // the card is still there.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(document.querySelector(".ps-machine")).toBeTruthy();
+    expectNoCrash();
+  });
+
+  // Label cosmetics: a principal whose label is the bare type token ("safe")
+  // must not render "safe safe" — the display name falls back to the address.
+  it("does not render a bare-type label as the principal name", async () => {
+    const bareLabelData = {
+      ...ETHERFI_COMPANY_RICH,
+      principals: [
+        {
+          ...SAFE_PRINCIPAL,
+          label: "safe", // server emitted the bare type token
+        },
+      ],
+    };
+    render(
+      <ProtocolSurface companyName="etherfi" initialData={bareLabelData} embedded />,
+    );
+    const user = userEvent.setup();
+    await selectSearchMode(user, "Safes");
+    await commitViaEnter(user);
+
+    const name = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    // Renders the short address, never the duplicated "safe".
+    expect(name.textContent).not.toBe("safe");
+    expect(name.textContent).toMatch(/^0x[0-9a-fA-F]{4}\.\./);
+    expectNoCrash();
+  });
+});

@@ -6,6 +6,17 @@ export function shortAddr(address) {
   return address.slice(0, 6) + ".." + address.slice(-4);
 }
 
+// Display name for a principal. The server label is sometimes just the bare
+// type token (e.g. label "safe" on a type "safe" principal), which renders as
+// "safe safe" beside the type badge. When the label adds nothing over the
+// type, fall back to the short address. Shared by the search preview and
+// PrincipalDetail so the fallback can't drift between them.
+export function principalLabel(label, type, address) {
+  const l = String(label || "").trim();
+  if (l && l.toLowerCase() !== String(type || "").trim().toLowerCase()) return l;
+  return shortAddr(address);
+}
+
 export function formatDelay(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value) || value <= 0) return "";
