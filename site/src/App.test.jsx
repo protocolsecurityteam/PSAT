@@ -1,9 +1,8 @@
 // Top-level App router smoke tests. Each case sets a target URL,
 // renders <App />, and asserts a stable landmark for that route renders
-// without throwing. The goal is regression coverage for the upcoming
-// App.jsx file split — if any internal page (PipelineDashboard,
-// ProtocolMonitoringPage, CompanyOverview, the per-tab renderers)
-// breaks during the split, one of these will fail.
+// without throwing. The goal is regression coverage — if any internal
+// page (PipelineDashboard, ProtocolMonitoringPage, CompanyOverview)
+// breaks, one of these will fail.
 //
 // Each test also asserts the ErrorBoundary fallback ("Something went
 // wrong") is NOT showing, so a thrown render error is caught even when
@@ -23,10 +22,7 @@ import {
   ANALYSIS_LIST,
   ETHERFI_COMPANY,
   COVERAGE_FIXTURE,
-  ANALYSIS_DETAIL,
 } from "./test/fixtures.js";
-
-const ETHERFI_ADDR = "0x1111111111111111111111111111111111111111";
 
 function navigateTo(path) {
   window.history.replaceState({}, "", path);
@@ -41,10 +37,6 @@ function expectNoCrash() {
 
 function installDefaultApiMocks() {
   setFetchHandler(/^\/api\/analyses$/, () => ANALYSIS_LIST);
-  setFetchHandler(
-    (url) => /^\/api\/analyses\//.test(url.pathname),
-    () => ANALYSIS_DETAIL,
-  );
   setFetchHandler(/^\/api\/jobs/, () => []);
   setFetchHandler(/^\/api\/stats/, () => ({}));
   setFetchHandler(/^\/api\/audits\/pipeline$/, () => ({ groups: [], recent_completed: [] }));
@@ -131,29 +123,6 @@ describe("App router smoke tests", () => {
         /no contracts/i.test(text);
       expect(matched).toBe(true);
     });
-    expectNoCrash();
-  });
-
-  it.each([
-    ["summary", "Summary"],
-    ["permissions", "Permissions"],
-    ["principals", "Principals"],
-    ["graph", "Graph"],
-    ["dependencies", "Dependencies"],
-    ["upgrades", "Upgrades"],
-    ["raw", "Raw JSON"],
-  ])("renders the address page tab %s", async (tab, label) => {
-    navigateTo(`/address/${ETHERFI_ADDR}/${tab}`);
-    render(<App />);
-    // The tab buttons render only after loadAnalysis() resolves and
-    // selectedDetail is populated — so finding the active tab proves
-    // the API mock was wired and the address branch picked up the URL.
-    const activeTab = await waitFor(() => {
-      const el = document.querySelector(".tab.active");
-      expect(el).toBeInTheDocument();
-      return el;
-    });
-    expect(activeTab).toHaveTextContent(label);
     expectNoCrash();
   });
 });

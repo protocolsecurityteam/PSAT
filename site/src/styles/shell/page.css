@@ -29,8 +29,7 @@
 .submit-card,
 .card,
 .graph-panel,
-.detail-panel,
-.stat-card {
+.detail-panel {
   background: linear-gradient(180deg, rgba(20, 26, 36, 0.95), rgba(15, 20, 28, 0.92));
   backdrop-filter: blur(16px);
   border: 1px solid var(--panel-border);
@@ -46,8 +45,7 @@
   padding: 22px;
 }
 
-.card,
-.stat-card {
+.card {
   padding: 20px;
 }
 

@@ -6,16 +6,7 @@ import React from "react";
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-import { StatCard } from "./StatCard.jsx";
 import { GuardGlyph } from "./GuardGlyph.jsx";
-
-describe("StatCard", () => {
-  it("renders label + value", () => {
-    render(<StatCard label="Risk" value="low" />);
-    expect(screen.getByText("Risk")).toBeInTheDocument();
-    expect(screen.getByText("low")).toBeInTheDocument();
-  });
-});
 
 describe("GuardGlyph", () => {
   it.each(["unknown", "safe", "timelock", "eoa", "contract", "proxy_admin", "open"])(

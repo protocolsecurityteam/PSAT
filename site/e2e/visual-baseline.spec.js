@@ -76,26 +76,6 @@ const COVERAGE = {
   ],
 };
 
-const ANALYSIS_DETAIL = {
-  job_id: "a",
-  company: "etherfi",
-  run_name: "Weeth",
-  contract_name: "Weeth",
-  address: ETHERFI_ADDR,
-  contract_id: 1,
-  source_verified: true,
-  is_proxy: true,
-  proxy_type: "ERC1967",
-  upgrade_count: 0,
-  risk_level: "low",
-  controllers: { owner: "0xMultiSig" },
-  functions: [],
-  upgrade_history: { proxies: {}, total_upgrades: 0 },
-  effective_permissions: { functions: [] },
-  principal_labels: { principals: [] },
-  contract_analysis: { summary: { control_model: "timelock", standards: [] }, subject: { name: "Weeth" } },
-};
-
 // Mocked API + animation-killer style. Animations and transitions are
 // disabled so snapshots don't flake on hover/focus mid-render.
 async function setupPage(page) {
@@ -135,12 +115,6 @@ async function setupPage(page) {
   );
   await page.route(matchApi("/api/analyses"), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ANALYSES) }),
-  );
-  await page.route(matchApi(`/api/analyses/${ETHERFI_ADDR}`), (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ANALYSIS_DETAIL) }),
-  );
-  await page.route(matchApi("/api/analyses/a"), (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ANALYSIS_DETAIL) }),
   );
   await page.route(matchApi(/^\/api\/company\/[^/]+\/audit_coverage$/), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(COVERAGE) }),
@@ -214,26 +188,5 @@ test.describe("visual baselines", () => {
     await page.locator(".top-nav").waitFor({ state: "visible" });
     await page.waitForTimeout(400);
     await expect(page).toHaveScreenshot("pipeline-dashboard.png", SCREENSHOT_OPTS);
-  });
-
-  test("address detail — summary tab", async ({ page }) => {
-    await page.goto(`/address/${ETHERFI_ADDR}/summary`, { waitUntil: "domcontentloaded" });
-    await page.locator(".tab.active").waitFor({ state: "visible" });
-    await expect(page).toHaveScreenshot("address-summary.png", SCREENSHOT_OPTS);
-  });
-
-  test("address detail — upgrades tab", async ({ page }) => {
-    await page.goto(`/address/${ETHERFI_ADDR}/upgrades`, { waitUntil: "domcontentloaded" });
-    await page.locator(".tab.active").waitFor({ state: "visible" });
-    await page.waitForTimeout(400);
-    await expect(page).toHaveScreenshot("address-upgrades.png", SCREENSHOT_OPTS);
-  });
-
-  test("address detail — graph tab", async ({ page }) => {
-    await page.goto(`/address/${ETHERFI_ADDR}/graph`, { waitUntil: "domcontentloaded" });
-    await page.locator(".tab.active").waitFor({ state: "visible" });
-    // GraphTab does its own pan/zoom + fit-to-view animation pass.
-    await page.waitForTimeout(800);
-    await expect(page).toHaveScreenshot("address-graph.png", SCREENSHOT_OPTS);
   });
 });

@@ -1,5 +1,4 @@
-.stack,
-.subsection {
+.stack {
   display: grid;
   gap: 12px;
 }
@@ -7,52 +6,6 @@
 .mono {
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 12px;
-}
-
-.meta-stack {
-  text-align: right;
-  display: grid;
-  gap: 6px;
-  color: #94a3b8;
-}
-
-.tabs {
-  display: flex;
-  gap: 10px;
-  margin-top: 18px;
-  margin-bottom: 18px;
-  flex-wrap: wrap;
-}
-
-.tab {
-  background: rgba(148, 163, 184, 0.06);
-  color: #cbd5e1;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  box-shadow: none;
-}
-
-.tab.active {
-  background: linear-gradient(180deg, #34e4cc, #14b8a6);
-  color: #06110f;
-  box-shadow: 0 8px 24px rgba(20, 184, 166, 0.18);
-}
-
-.summary-grid,
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
-}
-
-.card-grid {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-}
-
-.stat {
-  font-size: 30px;
-  font-weight: 800;
-  margin-top: 8px;
-  font-family: "Space Grotesk", "Instrument Sans", system-ui, sans-serif;
 }
 
 .kv-grid {
@@ -64,10 +17,6 @@
   display: flex;
   justify-content: space-between;
   gap: 16px;
-}
-
-.kv-grid.compact .kv-row {
-  font-size: 14px;
 }
 
 .key {

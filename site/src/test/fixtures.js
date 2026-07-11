@@ -82,23 +82,6 @@ export const COVERAGE_FIXTURE = {
   ],
 };
 
-export const ANALYSIS_DETAIL = {
-  job_id: "a",
-  company: "etherfi",
-  run_name: "Weeth",
-  contract_name: "Weeth",
-  address: "0x1111111111111111111111111111111111111111",
-  contract_id: 1,
-  source_verified: true,
-  is_proxy: true,
-  proxy_type: "ERC1967",
-  upgrade_count: 2,
-  risk_level: "low",
-  controllers: { owner: "0xMultiSig" },
-  functions: [],
-  upgrade_history: { proxies: {}, total_upgrades: 0 },
-};
-
 export const PIPELINE_FIXTURE = {
   groups: [],
   recent_completed: [],

@@ -507,9 +507,6 @@
   .home-protocol-row { padding: 16px 12px; gap: 12px; }
   .home-protocol-row-name { font-size: 19px; }
   .home-protocol-row-count { font-size: 10px; letter-spacing: 0.14em; }
-  .home-protocol-section .runs-table-row { flex-direction: column; gap: 4px; align-items: flex-start; }
-  .home-protocol-section .runs-cell-name { flex: none !important; }
-  .home-protocol-section .runs-cell-addr { flex: none !important; font-size: 11px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

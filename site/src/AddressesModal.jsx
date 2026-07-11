@@ -32,7 +32,7 @@ function parseAddressList(raw) {
   return [...seen];
 }
 
-export default function AddressesModal({ companyName, onClose, onSelectContract }) {
+export default function AddressesModal({ companyName, onClose }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -261,13 +261,6 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
     }
   };
 
-  const handleRowClick = (row) => {
-    if (!onSelectContract) return;
-    if (row._compareStatus === "missing") return;
-    onSelectContract(row);
-    onClose?.();
-  };
-
   return (
     <div className="ps-audit-modal-backdrop" onClick={onClose}>
       <div
@@ -430,13 +423,11 @@ export default function AddressesModal({ companyName, onClose, onSelectContract 
                     <tr
                       key={`${r.chain || "?"}-${r.address}`}
                       className={[
-                        onSelectContract && !isMissing ? "ps-addresses-modal-row--clickable" : "",
                         isMissing ? "ps-addresses-modal-row--missing" : "",
                         r._compareStatus === "matched" ? "ps-addresses-modal-row--matched" : "",
                       ]
                         .filter(Boolean)
                         .join(" ")}
-                      onClick={() => handleRowClick(r)}
                     >
                       <td className="ps-addresses-modal-rank">
                         {rank ?? <span style={{ opacity: 0.4 }}>—</span>}

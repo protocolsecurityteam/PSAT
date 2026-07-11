@@ -204,10 +204,6 @@
   background: rgba(45, 212, 191, 0.04);
 }
 
-.ps-addresses-modal-row--clickable {
-  cursor: pointer;
-}
-
 .ps-addresses-modal-table td {
   padding: 9px 14px;
   vertical-align: middle;

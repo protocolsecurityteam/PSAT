@@ -9,8 +9,7 @@ import { shortAddr } from "../format.js";
 //     Click a row → focus that proxy on canvas (parent handles selection).
 //   - Machine selected (proxy): lazy-fetch the analysis blob for that contract
 //     (the per-contract upgrade_history isn't included in /api/company/{name},
-//     so we go via /api/analyses/{job_id}) and render the existing
-//     UpgradesPanel — same layout as the standalone /address/<addr>/upgrades page.
+//     so we go via /api/analyses/{job_id}) and render the UpgradesPanel.
 export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect, cache, onCache }) {
   const [history, setHistory] = useState(null);
   const [deps, setDeps] = useState({});

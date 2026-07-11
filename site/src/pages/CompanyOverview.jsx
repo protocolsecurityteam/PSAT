@@ -12,7 +12,7 @@ const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
 const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
 
-export default function CompanyOverview({ companyName, onSelectContract, onNavigateToSurface }) {
+export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -261,13 +261,6 @@ export default function CompanyOverview({ companyName, onSelectContract, onNavig
           <AddressesModal
             companyName={companyName}
             onClose={() => setAddressesModalOpen(false)}
-            onSelectContract={(row) => {
-              // Only jump into the job view for addresses that were actually
-              // analyzed; discovered-only rows don't have a job_id. Pass the
-              // matching Contract job_id up to the App-level loader.
-              const full = contracts.find((c) => c.address?.toLowerCase() === row.address?.toLowerCase());
-              if (full?.job_id) onSelectContract(full.job_id);
-            }}
           />
         </Suspense>
       )}

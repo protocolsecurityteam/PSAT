@@ -1,22 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { displayName, proxyDisplayName } from "./displayName.js";
-
-describe("displayName", () => {
-  it("prefers explicit display_name", () => {
-    expect(displayName({ display_name: "Foo", contract_name: "Bar" })).toBe("Foo");
-  });
-
-  it("collapses generic proxy contract_name to run_name", () => {
-    expect(displayName({ contract_name: "UUPSProxy", run_name: "LiquidityPool" })).toBe("LiquidityPool");
-  });
-
-  it("falls back to contract_name then run_name", () => {
-    expect(displayName({ contract_name: "Vault" })).toBe("Vault");
-    expect(displayName({ run_name: "Vault" })).toBe("Vault");
-    expect(displayName({})).toBe("");
-  });
-});
+import { proxyDisplayName } from "./displayName.js";
 
 describe("proxyDisplayName", () => {
   it("leads with the implementation name and tucks the template into 'via'", () => {
