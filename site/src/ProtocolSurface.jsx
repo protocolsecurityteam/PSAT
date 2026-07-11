@@ -12,8 +12,7 @@ import { formatUsd, isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
-import { assignGroups } from "./surface/layout/elkLayout.js";
-import { buildEntityIndex, nodelessPrincipalHighlight } from "./surface/layout/entities.js";
+import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
@@ -448,46 +447,21 @@ export default function ProtocolSurface({
     );
   }, [machines, companyData]);
 
-  // Addresses that own a node on the canvas: every visible contract card plus
-  // every principal materialized as a group box (primary owner of a visible
-  // contract). Used to tell a group-backed principal (keeps its ring/focus)
-  // from a node-less co-controller (needs the touch-set highlight below).
-  const canvasNodeAddrs = useMemo(() => {
-    const set = new Set(machines.map((m) => m.address?.toLowerCase()).filter(Boolean));
-    const { groupedPrincipals } = assignGroups(machines, visiblePrincipals);
-    for (const a of groupedPrincipals) set.add(a);
-    return set;
-  }, [machines, visiblePrincipals]);
-
-  // Node-less co-controller highlight. A selected principal that owns no canvas
-  // node (a co-controller safe that isn't the primary owner of any visible
-  // contract) matches no node, so the canvas would dim nothing — a silent
-  // no-op. Derive its touch set (the contracts it can call/govern, from data
-  // already on the principal) and drive the SAME green-ring dim path the agent
-  // and audit overlays use, so the canvas dims everything outside its reach.
-  // Group-backed principals return null → the canvas keeps its ring/focus.
-  //
-  // Kept OUT of the agentHighlights state slot deliberately: a committed
-  // selection clears agentHighlights, which would wipe this the instant it is
-  // set. Deriving it from the live selection makes it immune to that transition.
-  const selectionHighlights = useMemo(
-    () => nodelessPrincipalHighlight(selectedPrincipal, canvasNodeAddrs),
-    [selectedPrincipal, canvasNodeAddrs],
-  );
-
-  // Highlighted addresses on the canvas: union of agent highlights (Agent tab),
-  // the audit-coverage set (Audits tab), and the node-less-principal touch set.
-  // Any source drives the green ring + dim. Lowercased Set for O(1) canvas
-  // comparison; null when no source is active so the canvas falls back to
-  // selection dimming.
+  // Highlighted addresses on the canvas: union of agent highlights (Agent tab)
+  // and the audit-coverage set (Audits tab). Either source drives the green
+  // ring + dim. Lowercased Set for O(1) canvas comparison; null when no source
+  // is active so the canvas falls back to selection dimming. A selected
+  // principal's reach is NOT routed through here — the canvas's own selection
+  // path lights co_controls with the normal relatedness dim + chips, and the
+  // green overlay treatment is reserved for agent/audit sets (owner decision
+  // 2026-07-11).
   const highlightedAddresses = useMemo(() => {
-    if (!auditHighlights && !agentHighlights && !selectionHighlights) return null;
+    if (!auditHighlights && !agentHighlights) return null;
     const merged = new Set();
     if (auditHighlights) for (const a of auditHighlights) merged.add(a);
     if (agentHighlights) for (const a of agentHighlights) merged.add(a);
-    if (selectionHighlights) for (const a of selectionHighlights) merged.add(a);
     return merged.size ? merged : null;
-  }, [auditHighlights, agentHighlights, selectionHighlights]);
+  }, [auditHighlights, agentHighlights]);
 
   // Role-toggle reconciliation. Toggling a role off removes its contracts (and
   // any principal whose whole touch set was those contracts) from the visible
