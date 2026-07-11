@@ -430,13 +430,11 @@ export default function ProtocolSurface({
   // (opens the detail panel with signers / delay / controlled contracts)
   // and focuses it — same behaviour as clicking a single-principal guard
   // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal, opts) => {
+  const handleSelectPrincipal = useCallback((principal) => {
     if (!principal) return;
-    // opts.focus === false selects without moving the camera (controller-row
-    // clicks just want the highlight, not a pan/zoom to the principal's node).
     setAgentHighlights(null);
-    select(principal.address, { view: "principal", focus: opts?.focus });
-    if (opts?.focus !== false) syncUrl({ sel: principal.address, view: "principal" });
+    select(principal.address, { view: "principal" });
+    syncUrl({ sel: principal.address, view: "principal" });
   }, [select, syncUrl]);
 
   const visiblePrincipals = useMemo(() => {
@@ -662,9 +660,9 @@ export default function ProtocolSurface({
               if (m && sidebarMode !== "detail") setSidebarMode("detail");
               handleSelectMachine(m);
             }}
-            onSelectPrincipal={(p, opts) => {
+            onSelectPrincipal={(p) => {
               if (p && sidebarMode !== "detail") setSidebarMode("detail");
-              handleSelectPrincipal(p, opts);
+              handleSelectPrincipal(p);
             }}
           />
         </ReactFlowProvider>

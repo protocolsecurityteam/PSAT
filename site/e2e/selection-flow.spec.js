@@ -211,8 +211,16 @@ test.describe("Surface selection — full flow", () => {
     await pickMode(page, "Safes");
     const input = page.locator(".ps-search-input");
     await input.click();
+    const viewport = page.locator(".react-flow__viewport");
+    const transformBefore = await viewport.evaluate((n) => n.style.transform);
     await input.press("ArrowDown"); // move from GovSafe to CO_SAFE
     await input.press("Enter");
+
+    // The camera pans to the safe's touch set even though it has no node of
+    // its own (FocusOnNode falls back to the touched nodes' bounding box).
+    await expect
+      .poll(async () => viewport.evaluate((n) => n.style.transform))
+      .not.toBe(transformBefore);
 
     // Its touch set is POOL — POOL stays bright, VAULT (untouched) dims.
     const pool = page.locator(`.react-flow__node[data-id="${POOL}"]`);

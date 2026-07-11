@@ -81,15 +81,15 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   }, []);
 
   // Clicking a controller row selects that principal so the existing logic
-  // highlights the contracts it governs (dims everything else + chips them) and
-  // opens its sidebar. Looks the full principal up from the list so the sidebar
-  // gets every field. focus:false keeps the camera put — selecting the primary
-  // would otherwise pan/zoom to its (large) group node, which the user reads as
-  // an unwanted zoom-in; we only want the highlight.
+  // highlights the contracts it governs (dims everything else + chips them),
+  // opens its sidebar, and pans the camera to its aggregation — FocusOnNode
+  // fits the principal's own group, or the group(s) holding its touch set
+  // when it owns no node. Looks the full principal up from the list so the
+  // sidebar gets every field.
   const selectController = useCallback((addr) => {
     const lc = addr?.toLowerCase();
     const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
-    if (p && onSelectPrincipal) onSelectPrincipal(p, { focus: false });
+    if (p && onSelectPrincipal) onSelectPrincipal(p);
   }, [principals, onSelectPrincipal]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -395,7 +395,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       >
         <Background color="#1e293b" gap={24} size={1} />
         <Controls showInteractive={false} />
-        <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} />
+        <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} principals={principals} />
         {selectedAddress && (
           <Panel position="top-center">
             <SelectionLegend />
