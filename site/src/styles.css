@@ -13,7 +13,6 @@
 @import "./styles/shell/audit-pipeline.css";
 @import "./styles/shell/utility.css";
 @import "./styles/shell/graph-svg.css";
-@import "./styles/components/upgrade-timeline.css";
 @import "./styles/components/protocol-graph.css";
 @import "./styles/components/agent-sidebar.css";
 @import "./styles/components/principals-sidebar.css";
