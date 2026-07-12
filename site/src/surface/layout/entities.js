@@ -39,6 +39,11 @@ export function resolveEntity(index, address, { machines = [], hint = null } = {
   const hit = index?.get(lc);
   if (hit) return hit;
 
+  // A role-id pseudo address is never a real entity — buildEntityIndex already
+  // excludes them from the index, so synthesizing one here would be the only
+  // path back to a bogus principal card. Guard it for symmetry.
+  if (isRoleIdAddress(lc)) return null;
+
   const type = hint?.type || "unknown";
   const principal = {
     address: lc,

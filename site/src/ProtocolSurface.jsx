@@ -7,7 +7,7 @@ import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
-import { formatUsd, isRoleIdAddress } from "./surface/format.js";
+import { isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
@@ -96,7 +96,6 @@ export default function ProtocolSurface({
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
   const [error, setError] = useState(null);
-  const [headerCollapsed, setHeaderCollapsed] = useState(true);
   const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
 
   // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
@@ -535,18 +534,6 @@ export default function ProtocolSurface({
     syncUrl({ sel: target.address });
   }, [select, syncUrl]);
 
-  const totals = useMemo(() => {
-    return machines.reduce(
-      (acc, machine) => {
-        acc.contracts += 1;
-        acc.functions += machine.totalFunctions;
-        if (machine.total_usd) { acc.withBalance += 1; acc.totalUsd += machine.total_usd; }
-        return acc;
-      },
-      { contracts: 0, functions: 0, withBalance: 0, totalUsd: 0 }
-    );
-  }, [machines]);
-
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
@@ -572,92 +559,6 @@ export default function ProtocolSurface({
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
-      {/* Overview strip (contracts / functions / with-funds) removed by
-          request. The role filter toolbar below occupies this slot now. */}
-      {false && (
-      <div className={`ps-surface-overlay ${headerCollapsed ? "ps-surface-overlay-collapsed" : ""}`}>
-        <button
-          className="ps-surface-overlay-toggle"
-          onClick={() => setHeaderCollapsed(!headerCollapsed)}
-          title={headerCollapsed ? "Expand" : "Minimize"}
-        >
-          {headerCollapsed ? "\u25BC" : "\u25B2"}
-        </button>
-        {!headerCollapsed && (
-          <div className="ps-surface-header">
-            <div>
-              <div className="ps-surface-eyebrow">Protocol Surface</div>
-              <h2 className="ps-surface-title">{companyName}</h2>
-              <p className="ps-surface-copy">
-                Each contract shows control paths, operations, inflows, and outflows. Click any guard badge to inspect access control.
-              </p>
-            </div>
-            <div className="ps-surface-stats">
-              <div className="ps-surface-stat">
-                <span>{totals.contracts}</span>
-                <label>contracts</label>
-              </div>
-              <div className="ps-surface-stat">
-                <span>{totals.functions}</span>
-                <label>functions</label>
-              </div>
-              {totals.withBalance > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{totals.withBalance}</span>
-                  <label>with funds</label>
-                </div>
-              )}
-              {totals.totalUsd > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{formatUsd(totals.totalUsd)}</span>
-                  <label>tracked value</label>
-                </div>
-              )}
-              {companyData?.tvl?.defillama_tvl && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#8b5cf6" }}>{formatUsd(companyData.tvl.defillama_tvl)}</span>
-                  <label>protocol TVL</label>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-        {headerCollapsed && (
-          <div className="ps-surface-header-mini">
-            <span className="ps-surface-eyebrow" style={{ margin: 0 }}>{companyName}</span>
-            <div className="ps-surface-stats">
-              <div className="ps-surface-stat">
-                <span>{totals.contracts}</span>
-                <label>contracts</label>
-              </div>
-              <div className="ps-surface-stat">
-                <span>{totals.functions}</span>
-                <label>functions</label>
-              </div>
-              {totals.withBalance > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{totals.withBalance}</span>
-                  <label>with funds</label>
-                </div>
-              )}
-              {totals.totalUsd > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{formatUsd(totals.totalUsd)}</span>
-                  <label>tracked value</label>
-                </div>
-              )}
-              {companyData?.tvl?.defillama_tvl && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#8b5cf6" }}>{formatUsd(companyData.tvl.defillama_tvl)}</span>
-                  <label>protocol TVL</label>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-      )}
-
       {/* Unified filter panel — top-left. Search + sort + browse nav, then the
           Type filter and Role visibility rows (injected as children), then the
           browse preview. Replaces the old bottom-left role bar + top-left
@@ -667,7 +568,6 @@ export default function ProtocolSurface({
           machines={machines}
           principals={visiblePrincipals}
           mode={searchMode}
-          setMode={setSearchMode}
           onPreview={handleSearchPreview}
           onCommit={(item) => {
             if (!item) return;

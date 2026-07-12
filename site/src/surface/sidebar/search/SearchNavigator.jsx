@@ -8,7 +8,7 @@ import { SORT_OPTIONS } from "../../meta.js";
 // filter rows the caller injects as `children` (Type + Roles), then the browse
 // preview (rendered only while a result is in focus). Owns the search/sort/
 // browse state; the injected rows own their own state.
-export function SearchNavigator({ machines, principals, onPreview, onCommit, mode, setMode, children }) {
+export function SearchNavigator({ machines, principals, onPreview, onCommit, mode, children }) {
   const [sortKey, setSortKey] = useState("value");
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
