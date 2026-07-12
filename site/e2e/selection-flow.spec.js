@@ -303,12 +303,12 @@ test.describe("Surface selection — full flow", () => {
     await expect(page.locator(".ps-node-selected")).toHaveCount(0);
     expect(page.url()).not.toContain("sel=");
 
-    // A controller-row selection opens the row's function list; deselecting
-    // must collapse it rather than leave an orphaned open list.
+    // A controller-row click selects that controller (its group reads as
+    // selected); Escape clears the selection.
     await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
-    await expect(page.locator(".ps-ctrl-row--open")).toHaveCount(1);
+    await expect(page.locator(".ps-ctrl-row--primary.ps-ctrl-row--selected")).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(page.locator(".ps-ctrl-row--open")).toHaveCount(0);
+    await expect(page.locator(".ps-ctrl-row--selected")).toHaveCount(0);
     await expect(page.locator(".ps-group-selected")).toHaveCount(0);
   });
 

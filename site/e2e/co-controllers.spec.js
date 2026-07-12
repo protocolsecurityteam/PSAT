@@ -149,25 +149,21 @@ test.describe("Surface co-controllers", () => {
     await expect(page).toHaveURL(new RegExp(`sel=${GOV_SAFE}`));
   });
 
-  test("expanding a controller row reveals the exact functions it can call", async ({ page }) => {
+  test("a row click selects the controller without an in-row function dropdown", async ({ page }) => {
     await goToSurface(page);
 
+    // The row no longer expands — the sidebar card's Governs tab is the source
+    // of truth for the exact functions. Clicking a row only selects it, and no
+    // in-flow function detail ever renders on the canvas.
     await page.locator(".ps-ctrl-row--co .ps-ctrl-head").click();
+    await expect(page.locator(".ps-ctrl-row--co.ps-ctrl-row--selected")).toBeVisible();
+    expect(await page.locator(".ps-ctrl-detail").count()).toBe(0);
 
-    // The detail overlay lists VAULT and the function the co-controller can
-    // actually invoke on it.
-    const detail = page.locator(".ps-ctrl-row--co .ps-ctrl-detail");
-    await expect(detail).toBeVisible();
-    await expect(detail).toContainText("Vault");
-    await expect(detail.locator(".ps-ctrl-fnchip", { hasText: "pauseContract" })).toBeVisible();
-
-    // Exclusive expansion: opening the primary closes the co row.
+    // Clicking the primary row moves the selection there; still no dropdown.
     await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
-    await expect(page.locator(".ps-ctrl-row--co .ps-ctrl-detail")).toHaveCount(0);
-    await expect(page.locator(".ps-ctrl-row--primary .ps-ctrl-detail")).toBeVisible();
-    await expect(
-      page.locator(".ps-ctrl-row--primary .ps-ctrl-fnchip", { hasText: "transferOwnership" }),
-    ).toBeVisible();
+    await expect(page.locator(".ps-ctrl-row--primary.ps-ctrl-row--selected")).toBeVisible();
+    await expect(page.locator(".ps-ctrl-row--co.ps-ctrl-row--selected")).toHaveCount(0);
+    expect(await page.locator(".ps-ctrl-detail").count()).toBe(0);
   });
 
   test("renders no aggregate caller list for the permissionless long tail", async ({ page }) => {

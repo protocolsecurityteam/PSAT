@@ -13,7 +13,7 @@ import { buildMachines } from "./buildMachines.js";
 import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
-import { aggregateEdges, assignGroups, buildGraphLayout, estimateDetailHeight, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
+import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
 
 const functionData = Object.fromEntries(
   ETHERFI_COMPANY_RICH.contracts.map((c) => [c.address, c.functions || []]),
@@ -283,7 +283,7 @@ describe("buildGraphLayout", () => {
     expect(group.data.headerHeight).toBe(groupHeaderHeight(controllers.length));
   });
 
-  it("grows a group's reserved header height when one of its controller rows is expanded", () => {
+  it("reserves each group's measured band height verbatim so cards start below it", () => {
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,
       type: p.resolved_type,
@@ -301,24 +301,17 @@ describe("buildGraphLayout", () => {
     const nControllers = 1; // primary only (no co-controllers here)
     const collapsed = groupHeaderHeight(nControllers);
 
-    // No expansion → collapsed reservation.
+    // No measurement yet → the constant estimate is reserved.
     const base = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals);
     expect(base.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(collapsed);
 
-    // Expanded with no measured height yet → collapsed + estimate.
-    const expanded = { groupId: safe.address, idx: 0 };
-    const estimated = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {});
-    const openRow = estimated.nodes.find((n) => n.id === safe.address).data.controllers[0];
-    expect(estimated.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(
-      collapsed + estimateDetailHeight(openRow.governs.length),
-    );
-
-    // Once GroupNode reports the measured band height for this open-row state,
-    // it's reserved verbatim, and layoutGroupInterior starts the first card
-    // below the grown band.
+    // Once GroupNode reports the measured band height for the group (e.g. a
+    // capability summary wrapped to several lines), it's reserved verbatim,
+    // keyed by the group id, and layoutGroupInterior starts the first card
+    // below the reserved band.
     const grownHeader = 540;
-    const measured = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, expanded, {
-      [`${safe.address}:0`]: grownHeader,
+    const measured = buildGraphLayout(machines, ETHERFI_COMPANY_RICH.fund_flows, principals, {
+      [safe.address]: grownHeader,
     });
     expect(measured.nodes.find((n) => n.id === safe.address).data.headerHeight).toBe(grownHeader);
     const kids = measured.groupChildren.get(safe.address.toLowerCase());

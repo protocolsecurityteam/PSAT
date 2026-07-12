@@ -52,45 +52,30 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
-  // Which controller row (if any) is expanded, and the measured header-band
-  // height per (group, open-row) state (keyed "groupId:idx" / "groupId:c").
-  // Both feed elkLayout so the open row's group grows its header band and ELK
-  // re-packs the canvas to make room — the group extends rather than
-  // overlapping cards/neighbours. GroupNode reports the real band height via
-  // onMeasureBand; we only re-store (and thus re-layout) when it actually
-  // changes, so it converges.
-  const [expanded, setExpanded] = useState(null);
+  // Measured header-band height per group (keyed by group id). It feeds
+  // elkLayout so each group reserves exactly the space its colored bar +
+  // Controllers accordion render, and ELK packs the canvas to fit — a row
+  // whose capability summary wraps to several lines grows the band rather than
+  // clipping. GroupNode reports the real band height via onMeasureBand; we only
+  // re-store (and thus re-layout) when it actually changes, so it converges.
   const [bandHeights, setBandHeights] = useState({});
 
   // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
-    elkLayout(machines, fundFlows, principals, expanded, bandHeights).then(({ nodes: n, edges: e }) => {
+    elkLayout(machines, fundFlows, principals, bandHeights).then(({ nodes: n, edges: e }) => {
       if (!cancelled) {
         setInitNodes(n);
         setInitEdges(e);
       }
     });
     return () => { cancelled = true; };
-  }, [machines, fundFlows, principals, expanded, bandHeights]);
+  }, [machines, fundFlows, principals, bandHeights]);
 
-  const toggleController = useCallback((groupId, idx) => {
-    setExpanded((cur) => (cur && cur.groupId === groupId && cur.idx === idx ? null : { groupId, idx }));
-  }, []);
-
-  // Deselecting collapses any open Controllers row. The function list opens
-  // from the same row click that selects the controller, so a full clear
-  // (Esc, pane click, the deselect button, role-toggle reconcile) takes the
-  // open detail with it instead of leaving an orphaned list.
-  useEffect(() => {
-    if (!selectedAddress) setExpanded(null);
-  }, [selectedAddress]);
-
-  const measureBand = useCallback((groupId, idx, height) => {
+  const measureBand = useCallback((groupId, height) => {
     setBandHeights((cur) => {
-      const key = `${groupId}:${idx ?? "c"}`;
-      if (Math.abs((cur[key] || 0) - height) <= 1) return cur;
-      return { ...cur, [key]: height };
+      if (Math.abs((cur[groupId] || 0) - height) <= 1) return cur;
+      return { ...cur, [groupId]: height };
     });
   }, []);
 
@@ -425,19 +410,16 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
             onSelect: n.data.principal
               ? () => onSelectPrincipal && onSelectPrincipal(n.data.principal)
               : () => onSelectMachine(n.data.machine),
-            // Controllers-accordion wiring for group nodes: which row is open
-            // (so GroupNode renders its detail), which controller is currently
-            // selected (so the row reads as active), plus the toggle / select /
-            // measure callbacks that drive expansion, highlighting, and the
-            // grow-on-expand re-layout.
+            // Controllers-accordion wiring for group nodes: which controller is
+            // currently selected (so the row reads as active) or browse-focused,
+            // plus the select / measure callbacks that drive highlighting and
+            // the band-height reservation.
             ...(n.type === "group"
               ? {
-                  expandedIdx: expanded && expanded.groupId === n.id ? expanded.idx : null,
                   selectedControllerAddr: sel || null,
                   focusedControllerAddr: browseLc,
-                  onToggleController: (idx) => toggleController(n.id, idx),
                   onSelectController: (addr) => selectController(addr),
-                  onMeasureBand: (idx, h) => measureBand(n.id, idx, h),
+                  onMeasureBand: (h) => measureBand(n.id, h),
                 }
               : null),
           },
@@ -481,7 +463,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, expanded, toggleController, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">
