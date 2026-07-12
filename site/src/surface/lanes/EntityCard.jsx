@@ -20,7 +20,7 @@ export function EntityCard({
   principal = null,
   onSelectGuard,
   onNavigate,
-  onFocusContract,
+  onPreview,
   highlightedFunctionKey,
   highlightedContract = false,
   onOpenDependencyGraph,
@@ -222,6 +222,7 @@ export function EntityCard({
             items={machine.lanes.top}
             onSelect={onSelectGuard}
             onNavigate={onNavigate}
+            onPreview={onPreview}
             highlightedFunctionKey={highlightedFunctionKey}
           />
           {machine.lanes.ops.length > 0 && (
@@ -229,6 +230,7 @@ export function EntityCard({
               items={machine.lanes.ops}
               onSelect={onSelectGuard}
               onNavigate={onNavigate}
+              onPreview={onPreview}
               highlightedFunctionKey={highlightedFunctionKey}
             />
           )}
@@ -241,6 +243,7 @@ export function EntityCard({
           items={machine.lanes.left}
           onSelect={onSelectGuard}
           onNavigate={onNavigate}
+          onPreview={onPreview}
           highlightedFunctionKey={highlightedFunctionKey}
         />
       )}
@@ -251,6 +254,7 @@ export function EntityCard({
           items={machine.lanes.right}
           onSelect={onSelectGuard}
           onNavigate={onNavigate}
+          onPreview={onPreview}
           highlightedFunctionKey={highlightedFunctionKey}
         />
       )}
@@ -259,7 +263,8 @@ export function EntityCard({
         <GovernsTab
           canCallRows={canCallRows}
           pathRows={pathRows}
-          onFocusContract={onFocusContract}
+          onPreview={onPreview}
+          onNavigate={onNavigate}
         />
       )}
     </article>

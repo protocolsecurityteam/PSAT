@@ -156,7 +156,8 @@ test.describe("Caller button navigation", () => {
     // A single caller renders no "callable by" header.
     await expect(safePort.locator(".ps-callers-label")).toHaveCount(0);
 
-    await safeBtn.click();
+    // The button body previews; the arrow commits the navigation.
+    await safeBtn.locator(".ps-goto-arrow").click();
 
     // Sidebar swaps to the principal detail.
     await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
@@ -174,7 +175,7 @@ test.describe("Caller button navigation", () => {
     const tlBtn = portFor(page, "setTimelock").locator(".ps-caller-btn");
     await expect(tlBtn).toHaveCount(1);
     await expect(tlBtn).toContainText("Timelock");
-    await tlBtn.click();
+    await tlBtn.locator(".ps-goto-arrow").click();
 
     await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".ps-machine-address")).toContainText(TL_ADDR.slice(0, 6));
@@ -187,10 +188,10 @@ test.describe("Caller button navigation", () => {
     const conBtn = portFor(page, "setOwner").locator(".ps-caller-btn");
     await expect(conBtn).toHaveCount(1);
     await expect(conBtn).toContainText("Contract");
-    // Clicking navigates to the contract target; the entity index spans all
+    // The arrow navigates to the contract target; the entity index spans all
     // machines so it no longer silently no-ops. It must not throw — a selection
     // param is written (?sel=).
-    await conBtn.click();
+    await conBtn.locator(".ps-goto-arrow").click();
     await expect(page).toHaveURL(/sel=/);
   });
 
@@ -206,9 +207,9 @@ test.describe("Caller button navigation", () => {
     await expect(mixedBtns.filter({ hasText: "Safe" })).toHaveCount(1);
     await expect(mixedBtns.filter({ hasText: "Timelock" })).toHaveCount(1);
 
-    // The timelock button navigates straight to the timelock — no intermediate
-    // "first principal + tour" hop.
-    await mixedPort.locator(".ps-caller-btn", { hasText: "Timelock" }).click();
+    // The timelock button's arrow navigates straight to the timelock — no
+    // intermediate "first principal + tour" hop.
+    await mixedPort.locator(".ps-caller-btn", { hasText: "Timelock" }).locator(".ps-goto-arrow").click();
     await expect(page).toHaveURL(new RegExp(`sel=${TL_ADDR}`));
   });
 
@@ -254,8 +255,8 @@ test.describe("URL focus parameter", () => {
     // URL should select the vault contract
     await expect(page).toHaveURL(new RegExp(`sel=${VAULT_ADDR}`));
 
-    // Click the safe caller button to navigate to the safe principal
-    await portFor(page, "setSafe").locator(".ps-caller-btn").click();
+    // Click the safe caller button's arrow to navigate to the safe principal
+    await portFor(page, "setSafe").locator(".ps-caller-btn .ps-goto-arrow").click();
 
     // URL selection should now point to the safe address, not the vault
     await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));

@@ -1,15 +1,16 @@
 import { useState } from "react";
 
 import { fnChipClass, formatUsd, shortAddr } from "../format.js";
+import { GotoArrow } from "../GotoArrow.jsx";
 
 // One shared row for both Governs sections. Collapsed content is identical
 // everywhere: contract name (+ proxy/impl tag), short address, USD value when
-// known. Clicking the row head focuses/previews the contract on the canvas
-// (gold marker + pan) — no navigation, no selection change. A right-aligned
-// ghost "N fns" button appears only when the row carries function data (every
-// Can Call row does; governance-path rows are reachability-only and never do)
-// and expands to the full function-chip list.
-function GovernsRow({ row, onFocusContract }) {
+// known. Clicking the row head previews the contract on the canvas (gold marker
+// + pan) — no selection change; the trailing arrow commits to its card. A ghost
+// "N fns" button appears only when the row carries function data (every Can Call
+// row does; governance-path rows are reachability-only and never do) and expands
+// to the full function-chip list.
+function GovernsRow({ row, onPreview, onNavigate }) {
   const [open, setOpen] = useState(false);
   const label = row.name || shortAddr(row.address);
   const functions = Array.isArray(row.functions) ? row.functions : [];
@@ -21,11 +22,11 @@ function GovernsRow({ row, onFocusContract }) {
         className="ps-governs-head"
         role="button"
         tabIndex={0}
-        onClick={() => onFocusContract && onFocusContract(row.address)}
+        onClick={() => onPreview && onPreview(row.address)}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            onFocusContract && onFocusContract(row.address);
+            onPreview && onPreview(row.address);
           }
         }}
       >
@@ -49,6 +50,9 @@ function GovernsRow({ row, onFocusContract }) {
             <span className="ps-governs-caret">{open ? "▾" : "▸"}</span>
           </button>
         ) : null}
+        {onNavigate && (
+          <GotoArrow onCommit={() => onNavigate({ type: "contract", address: row.address, label })} label={`Go to ${label}`} />
+        )}
       </div>
       {open && functions.length > 0 && (
         <div className="ps-ctrl-fns">
@@ -70,9 +74,9 @@ function GovernsRow({ row, onFocusContract }) {
 //   2. Appears in governance path for — the (transitive) reachability set.
 //      Reachability-only, so rows carry no function list (no expand button).
 //
-// Both lists are pre-deduped and proxy/impl-tagged by the card. Every row
-// click focuses the contract on the canvas.
-export function GovernsTab({ canCallRows, pathRows, onFocusContract }) {
+// Both lists are pre-deduped and proxy/impl-tagged by the card. Every row body
+// previews the contract on the canvas; its arrow commits to the contract's card.
+export function GovernsTab({ canCallRows, pathRows, onPreview, onNavigate }) {
   if (!canCallRows.length && !pathRows.length) {
     return <div className="ps-lane-empty">Governs nothing</div>;
   }
@@ -87,7 +91,7 @@ export function GovernsTab({ canCallRows, pathRows, onFocusContract }) {
             </span>
           </div>
           {canCallRows.map((row) => (
-            <GovernsRow key={row.address} row={row} onFocusContract={onFocusContract} />
+            <GovernsRow key={row.address} row={row} onPreview={onPreview} onNavigate={onNavigate} />
           ))}
         </section>
       )}
@@ -100,7 +104,7 @@ export function GovernsTab({ canCallRows, pathRows, onFocusContract }) {
             </span>
           </div>
           {pathRows.map((row) => (
-            <GovernsRow key={row.address} row={row} onFocusContract={onFocusContract} />
+            <GovernsRow key={row.address} row={row} onPreview={onPreview} onNavigate={onNavigate} />
           ))}
         </section>
       )}

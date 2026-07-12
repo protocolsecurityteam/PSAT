@@ -1,4 +1,5 @@
 import { formatDelay, shortAddr } from "../format.js";
+import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
 
 // Empty-callers copy keyed by the guard's open-path shape, so a one-shot or a
@@ -44,7 +45,44 @@ function principalDetail(principal) {
   return "Controller path";
 }
 
-export function InspectorCard({ selected, onNavigate }) {
+// One shared principal reference card for both inspector blocks (Direct Callers
+// and Indirect Control Path). Body previews the principal on the canvas; the
+// arrow commits to its card — the same peek/commit split as lane caller buttons
+// and Governs rows. `indirect` swaps the origin line (governance path vs.
+// direct-caller origins) and dims the card.
+function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }) {
+  const type = TYPE_META[principal.resolvedType] || TYPE_META.unknown;
+  const detail = principalDetail(principal);
+  const target = { type: principal.resolvedType, address: principal.address, label: detail, details: principal.details };
+  return (
+    <div
+      className={`ps-principal-card ps-principal-clickable${indirect ? " ps-principal-indirect" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => onPreview && onPreview(principal.address)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onPreview && onPreview(principal.address);
+        }
+      }}
+    >
+      <div className="ps-principal-top">
+        <span className="ps-principal-type" style={{ "--principal-accent": type.accent }}>{type.label}</span>
+        <span className="ps-principal-address">{shortAddr(principal.address)}</span>
+        {onNavigate && <GotoArrow onCommit={() => onNavigate(target)} label={`Go to ${type.label} ${shortAddr(principal.address)}`} />}
+      </div>
+      <div className="ps-principal-meta">{detail}</div>
+      <div className="ps-principal-origin">
+        {indirect
+          ? `via ${principal.path.slice(0, -1).map((p) => shortAddr(p.address)).join(" → ")}`
+          : principal.origins.join(" · ")}
+      </div>
+    </div>
+  );
+}
+
+export function InspectorCard({ selected, onNavigate, onPreview }) {
   if (!selected) {
     return null;
   }
@@ -85,24 +123,14 @@ export function InspectorCard({ selected, onNavigate }) {
         </div>
         {selected.principals.length ? (
           <div className="ps-principal-list">
-            {selected.principals.map((principal) => {
-              const type = TYPE_META[principal.resolvedType] || TYPE_META.unknown;
-              return (
-                <div
-                  key={principal.address}
-                  className="ps-principal-card ps-principal-clickable"
-                  onClick={() => onNavigate && onNavigate({ type: principal.resolvedType, address: principal.address, label: principalDetail(principal), details: principal.details })}
-                >
-                  <div className="ps-principal-top">
-                    <span className="ps-principal-type" style={{ "--principal-accent": type.accent }}>{type.label}</span>
-                    <span className="ps-principal-address">{shortAddr(principal.address)}</span>
-                    <span className="ps-principal-goto">→</span>
-                  </div>
-                  <div className="ps-principal-meta">{principalDetail(principal)}</div>
-                  <div className="ps-principal-origin">{principal.origins.join(" · ")}</div>
-                </div>
-              );
-            })}
+            {selected.principals.map((principal) => (
+              <PrincipalRefCard
+                key={principal.address}
+                principal={principal}
+                onPreview={onPreview}
+                onNavigate={onNavigate}
+              />
+            ))}
           </div>
         ) : (
           <p className="ps-inspector-empty">{emptyCallerText(selected)}</p>
@@ -118,29 +146,15 @@ export function InspectorCard({ selected, onNavigate }) {
             </span>
           </div>
           <div className="ps-principal-list">
-            {selected.indirectPrincipals.map((principal) => {
-              const type = TYPE_META[principal.resolvedType] || TYPE_META.unknown;
-              return (
-                <div
-                  key={principal.address}
-                  className="ps-principal-card ps-principal-clickable ps-principal-indirect"
-                  onClick={() => onNavigate && onNavigate({ type: principal.resolvedType, address: principal.address, label: principalDetail(principal), details: principal.details })}
-                >
-                  <div className="ps-principal-top">
-                    <span className="ps-principal-type" style={{ "--principal-accent": type.accent }}>{type.label}</span>
-                    <span className="ps-principal-address">{shortAddr(principal.address)}</span>
-                    <span className="ps-principal-goto">→</span>
-                  </div>
-                  <div className="ps-principal-meta">{principalDetail(principal)}</div>
-                  <div className="ps-principal-origin">
-                    via {principal.path
-                      .slice(0, -1)
-                      .map((p) => shortAddr(p.address))
-                      .join(" → ")}
-                  </div>
-                </div>
-              );
-            })}
+            {selected.indirectPrincipals.map((principal) => (
+              <PrincipalRefCard
+                key={principal.address}
+                principal={principal}
+                indirect
+                onPreview={onPreview}
+                onNavigate={onNavigate}
+              />
+            ))}
           </div>
         </div>
       )}

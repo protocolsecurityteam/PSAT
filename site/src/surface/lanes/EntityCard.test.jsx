@@ -41,7 +41,7 @@ describe("EntityCard Governs tab", () => {
       { contractAddress: POOL, contractName: "LiquidityPool", functions: ["upgradeTo", "pause"] },
     ]);
     const { getByText, container } = render(
-      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onFocusContract={vi.fn()} governsIndex={idx} />,
+      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onPreview={vi.fn()} governsIndex={idx} />,
     );
     const tab = getByText("Governs").closest("button");
     expect(within(tab).getByText("1")).toBeInTheDocument();
@@ -56,23 +56,27 @@ describe("EntityCard Governs tab", () => {
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(2);
   });
 
-  it("focuses the governed contract on the canvas when the row is clicked (no navigation)", () => {
-    const onFocusContract = vi.fn();
+  it("previews the governed contract on a row-body click and commits only via the arrow", () => {
+    const onPreview = vi.fn();
     const onNavigate = vi.fn();
     const idx = governsWith([{ contractAddress: POOL, contractName: "LiquidityPool", functions: ["pause"] }]);
-    const { getByText } = render(
+    const { getByText, container } = render(
       <EntityCard
         machine={machine()}
         onSelectGuard={vi.fn()}
         onNavigate={onNavigate}
-        onFocusContract={onFocusContract}
+        onPreview={onPreview}
         governsIndex={idx}
       />,
     );
     fireEvent.click(getByText("Governs").closest("button"));
+    // Body click = peek only.
     fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
-    expect(onFocusContract).toHaveBeenCalledWith(POOL);
+    expect(onPreview).toHaveBeenCalledWith(POOL);
     expect(onNavigate).not.toHaveBeenCalled();
+    // The trailing arrow is the commit affordance.
+    fireEvent.click(container.querySelector(".ps-goto-arrow"));
+    expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ address: POOL, type: "contract" }));
   });
 
   it("shows no capability summary — the collapsed row is name/value only, functions behind the expand button", () => {
@@ -84,7 +88,7 @@ describe("EntityCard Governs tab", () => {
       controls_detail: [{ address: POOL, functions: ["upgradeTo"], capabilities: ["upgrade"] }],
     };
     const { getByText, container } = render(
-      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onFocusContract={vi.fn()} governsIndex={idx} principal={principal} />,
+      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onPreview={vi.fn()} governsIndex={idx} principal={principal} />,
     );
     fireEvent.click(getByText("Governs").closest("button"));
     // No capability-word summary is rendered anywhere on the row.
@@ -97,14 +101,14 @@ describe("EntityCard Governs tab", () => {
   });
 
   it("gives governance-path rows no expand button (reachability only, no function data)", () => {
-    const onFocusContract = vi.fn();
+    const onPreview = vi.fn();
     const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 }, controls: [POOL] };
     const machines = [{ address: POOL, name: "LiquidityPool" }];
     const { getByText, container } = render(
       <EntityCard
         machine={machine()}
         onSelectGuard={vi.fn()}
-        onFocusContract={onFocusContract}
+        onPreview={onPreview}
         governsIndex={new Map()}
         principal={principal}
         machines={machines}
@@ -116,7 +120,7 @@ describe("EntityCard Governs tab", () => {
     // Path rows carry no function list → no expand button, but still focus on click.
     expect(container.querySelector(".ps-governs-expand")).toBeNull();
     fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
-    expect(onFocusContract).toHaveBeenCalledWith(POOL);
+    expect(onPreview).toHaveBeenCalledWith(POOL);
   });
 });
 

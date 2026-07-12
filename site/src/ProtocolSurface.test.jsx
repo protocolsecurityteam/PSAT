@@ -903,8 +903,9 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
     render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-embedded → URL writes
     const user = userEvent.setup();
 
-    // Open the governed contract, then click its upgradeTo caller button — the
-    // caller is GovTimelock, typed "timelock".
+    // Open the governed contract, then commit to its upgradeTo caller via the
+    // caller button's arrow — the caller is GovTimelock, typed "timelock". The
+    // button body only previews now; the arrow is the commit affordance.
     await user.type(searchInput(), "GovernedPool");
     await commitViaEnter(user);
     const pool = await waitFor(() => {
@@ -912,9 +913,9 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
       expect(el).toBeTruthy();
       return el;
     });
-    const callerBtn = pool.querySelector(".ps-caller-btn");
-    expect(callerBtn).toBeTruthy();
-    await user.click(callerBtn);
+    const callerArrow = pool.querySelector(".ps-caller-btn .ps-goto-arrow");
+    expect(callerArrow).toBeTruthy();
+    await user.click(callerArrow);
 
     // The machine-only authority's CONTRACT card renders — not a stranded empty
     // sidebar (DetailEmptyState).

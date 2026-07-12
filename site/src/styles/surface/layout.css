@@ -1011,13 +1011,41 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
-.ps-principal-goto {
-  color: #475569;
-  font-size: 11px;
+/* Shared "go to" commit arrow — the one control that commits an in-card entity
+   reference (lane caller buttons, Governs rows, Guard Inspector principal
+   cards); the reference body only previews. Neutral-gray ghost that brightens on
+   hover; zeroes the global forms.css button chrome (teal gradient + drop shadow
+   + hover lift), same pattern as .ps-governs-expand / .ps-selection-clear.
+   margin-left:auto pins it to the row's right edge. */
+.ps-goto-arrow {
+  flex-shrink: 0;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 100ms ease;
 }
 
-.ps-principal-clickable:hover .ps-principal-goto {
+.ps-goto-arrow:hover {
+  color: #cbd5e1;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+/* Hovering the reference body hints its arrow is the commit target. */
+.ps-principal-clickable:hover .ps-goto-arrow,
+.ps-caller-btn:hover .ps-goto-arrow,
+.ps-governs-head:hover .ps-goto-arrow {
   color: #94a3b8;
 }
 

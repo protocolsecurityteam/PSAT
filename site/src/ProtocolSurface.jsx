@@ -557,7 +557,7 @@ export default function ProtocolSurface({
         machine={selectedMachine}
         onSelectGuard={handleSelectGuard}
         onNavigate={handleNavigate}
-        onFocusContract={(addr) => focusPreview(addr)}
+        onPreview={(addr) => focusPreview(addr)}
         highlightedFunctionKey={radarSelection.functionKey}
         highlightedContract={!radarSelection.functionKey}
         onOpenDependencyGraph={setDependencyGraphMachine}
@@ -566,7 +566,7 @@ export default function ProtocolSurface({
         machines={machines}
         principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
       />
-      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
+      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
     </div>
   ) : null;
 
@@ -772,7 +772,7 @@ export default function ProtocolSurface({
               }
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
-              onFocusContract={(addr) => focusPreview(addr)}
+              onPreview={(addr) => focusPreview(addr)}
               onOpenDependencyGraph={setDependencyGraphMachine}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
@@ -781,7 +781,7 @@ export default function ProtocolSurface({
             />
           )}
           {sidebarMode === "detail" && selectedMachine && !radarSelection && (
-            <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
+            <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
           )}
           {isAdmin && sidebarMode === "agent" && (
             <AgentPanel
