@@ -100,7 +100,7 @@ const EOA_ADDR = "0xcccc000000000000000000000000000000000ccc";
 const VAULT_ADDR = "0x1111111111111111111111111111111111111111";
 const POOL_ADDR = "0x2222222222222222222222222222222222222222";
 // Safe signer addresses — real /api/company puts full 40-hex owners in
-// principal.details.owners; PrincipalDetail renders one row each + the
+// principal.details.owners; the entity card renders one row each + the
 // "threshold/owners" badge, so the count is load-bearing (2/3).
 const OWNER_1 = "0xd111000000000000000000000000000000000111";
 const OWNER_2 = "0xd222000000000000000000000000000000000222";
@@ -189,7 +189,7 @@ export const ETHERFI_COMPANY_RICH = {
   // (company_overview.py builds `principals` with type/label/details/controls
   // /primary_for/co_controls/controls_detail). ProtocolSurface reads
   // companyData.principals directly (visiblePrincipals filter → SearchNavigator
-  // + PrincipalDetail + SurfaceCanvas), so these fields drive the safe/timelock
+  // + EntityCard + SurfaceCanvas), so these fields drive the safe/timelock
   // search-and-select flow the stage-1 tests exercise.
   principals: [
     {

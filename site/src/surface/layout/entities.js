@@ -31,7 +31,7 @@ export function buildEntityIndex(allMachines = [], principals = []) {
 // caller buttons whose address isn't a first-class machine/principal. `hint`
 // carries
 // { type, label, details } from the navigate target; `type` defaults to
-// 'unknown' (PrincipalDetail falls back to TYPE_META.unknown). `controls` is
+// 'unknown' (the entity card falls back to TYPE_META.unknown). `controls` is
 // derived from the machines that name this address as owner.
 export function resolveEntity(index, address, { machines = [], hint = null } = {}) {
   if (!address) return null;

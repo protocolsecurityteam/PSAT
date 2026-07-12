@@ -5,7 +5,6 @@ import "@xyflow/react/dist/style.css";
 import { isBytecodeVerifiedAudit } from "./auditCoverage.js";
 import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
-import { listAddressLabels } from "./api/addressLabels.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
 import { formatUsd, isRoleIdAddress } from "./surface/format.js";
@@ -13,16 +12,16 @@ import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
+import { buildControlAdjacency } from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
-import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
+import { EntityCard } from "./surface/lanes/EntityCard.jsx";
 import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
 import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
-import { PrincipalDetail } from "./surface/sidebar/PrincipalDetail.jsx";
 import { RoleFilterBar } from "./surface/sidebar/RoleFilterBar.jsx";
 import { SidebarTabs } from "./surface/sidebar/SidebarTabs.jsx";
 import { UpgradesSidebarPanel } from "./surface/sidebar/UpgradesSidebarPanel.jsx";
@@ -137,21 +136,6 @@ export default function ProtocolSurface({
   // and everything else dims on the canvas.
   const [activeAuditId, setActiveAuditId] = useState(null);
 
-  // Admin-curated address → name map. Fetched once; edits are optimistic
-  // against the local copy and persisted via the admin-gated PUT/DELETE.
-  const [addressLabels, setAddressLabels] = useState(new Map());
-  const refreshAddressLabels = useCallback(() => {
-    listAddressLabels()
-      .then((d) => {
-        const m = new Map();
-        for (const [addr, info] of Object.entries(d?.labels || {})) {
-          m.set(String(addr).toLowerCase(), info.name);
-        }
-        setAddressLabels(m);
-      })
-      .catch(() => { /* labels are best-effort — keep whatever we had */ });
-  }, []);
-  useEffect(() => { refreshAddressLabels(); }, [refreshAddressLabels]);
   useEffect(() => {
     if (!companyName) return undefined;
     if (initialCoverage) {
@@ -301,6 +285,14 @@ export default function ProtocolSurface({
   const governsIndex = useMemo(
     () => buildGovernsIndex(allMachines, functionData),
     [allMachines, functionData]
+  );
+
+  // Control-relation adjacency over fund_flows — the entity card walks it to
+  // build the "governance path for" list of a machine-only authority (one with
+  // no principal.controls to read). Built once, never per-render inside the card.
+  const controlAdjacency = useMemo(
+    () => buildControlAdjacency(companyData?.fund_flows || []),
+    [companyData]
   );
 
   // Principal facet by address — lets a dual-facet contract card render its
@@ -560,16 +552,18 @@ export default function ProtocolSurface({
 
   const radarExampleFlyout = sidebarMode === "detail" && radarSelection && selectedMachine && !selectedPrincipal ? (
     <div className="ps-sidebar-flyout-content">
-      <ContractMachine
+      <EntityCard
         key={`${selectedMachine.address}:radar`}
         machine={selectedMachine}
         onSelectGuard={handleSelectGuard}
         onNavigate={handleNavigate}
-        companyName={companyName}
+        onFocusContract={(addr) => focusPreview(addr)}
         highlightedFunctionKey={radarSelection.functionKey}
         highlightedContract={!radarSelection.functionKey}
         onOpenDependencyGraph={setDependencyGraphMachine}
         governsIndex={governsIndex}
+        controlAdjacency={controlAdjacency}
+        machines={machines}
         principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
       />
       <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
@@ -754,6 +748,11 @@ export default function ProtocolSurface({
               onCache={cacheUpgradeHistory}
             />
           )}
+          {/* One universal card for every selection. selectedMachine and
+              selectedPrincipal are mutually exclusive (the selection invariant),
+              so the Detail panel is: something selected → the card; nothing →
+              the empty state. Radar mode renders the card in the flyout, so the
+              main panel falls back to the empty state behind it. */}
           {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
             <DetailEmptyState
               companyName={companyName}
@@ -762,32 +761,26 @@ export default function ProtocolSurface({
               onExampleClick={handleRadarExampleClick}
             />
           )}
-          {sidebarMode === "detail" && selectedPrincipal && (
-            <PrincipalDetail
-              key={selectedPrincipal.address}
-              principal={selectedPrincipal}
-              machines={machines}
-              onNavigate={handleNavigate}
-              onFocusContract={(addr) => focusPreview(addr)}
-              addressLabels={addressLabels}
-              refreshAddressLabels={refreshAddressLabels}
-            />
-          )}
-          {sidebarMode === "detail" && selectedMachine && !selectedPrincipal && !radarSelection && (
-            <ContractMachine
-              key={selectedMachine.address}
+          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && !radarSelection && (
+            <EntityCard
+              key={selectedMachine ? selectedMachine.address : selectedPrincipal.address}
               machine={selectedMachine}
+              principal={
+                selectedMachine
+                  ? principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null
+                  : selectedPrincipal
+              }
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
-              companyName={companyName}
-              highlightedFunctionKey={radarSelection?.functionKey}
+              onFocusContract={(addr) => focusPreview(addr)}
               onOpenDependencyGraph={setDependencyGraphMachine}
               governsIndex={governsIndex}
-              principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
+              controlAdjacency={controlAdjacency}
+              machines={machines}
               initialTab={selection?.hint?.tab}
             />
           )}
-          {sidebarMode === "detail" && !selectedPrincipal && !radarSelection && (
+          {sidebarMode === "detail" && selectedMachine && !radarSelection && (
             <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
           )}
           {isAdmin && sidebarMode === "agent" && (

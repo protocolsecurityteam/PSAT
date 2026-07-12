@@ -2,10 +2,10 @@
 // sidebar mode (Detail / Agent / Audits / Monitor / Upgrades), tab
 // switching, search interaction, machine selection, and the dependency
 // graph modal. Goal is regression coverage for the upcoming
-// ProtocolSurface.jsx file split — every sub-tree about to be extracted
+// ProtocolSurface.jsx file split — every sub-tree
 // (SurfaceMonitoringPanel, AuditsListPanel, UpgradesSidebarPanel,
-// PrincipalDetail, InspectorCard, DependencyGraphModal, SearchNavigator,
-// ContractMachine) has a behavioral assertion here.
+// EntityCard, InspectorCard, DependencyGraphModal, SearchNavigator)
+// has a behavioral assertion here.
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
@@ -348,7 +348,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
       expect(value.textContent).not.toContain(name);
     }
 
-    // Detail tab stays in the empty state — no PrincipalDetail card.
+    // Detail tab stays in the empty state — no entity card.
     await clickSidebarTab("Detail");
     await waitFor(() => {
       expect(
@@ -359,17 +359,25 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     expectNoCrash();
   });
 
-  // (b) Enter commits the previewed safe: Detail shows its PrincipalDetail card.
-  it("pressing Enter commits the safe and Detail shows its PrincipalDetail card", async () => {
+  // (b) Enter commits the previewed safe: Detail shows the universal entity
+  // card in its principal-only shape (identity badges + signers + auto-open
+  // Governs tab, no contract-facet tabs).
+  it("pressing Enter commits the safe and Detail shows its entity card", async () => {
     renderSurface(); // non-admin → default Detail tab
     const user = userEvent.setup();
     await selectSearchMode(user, "Safes");
     await commitViaEnter(user);
 
-    // PrincipalDetail-only markers (distinct from the search preview's
+    // Principal identity markers (distinct from the search preview's
     // "2/3 signers"): the threshold badge and the Signers section.
     expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
     expect(await screen.findByText(/Signers \(3\)/i)).toBeInTheDocument();
+    // Principal-only → Governs is the sole, auto-opened tab; the Multisig safe
+    // governs the Vault, so its Can Call section renders without a tab click.
+    const tabBar = document.querySelector(".ps-machine-tabs");
+    expect(within(tabBar).queryByRole("button", { name: /^Control/ })).toBeNull();
+    expect(within(tabBar).getByRole("button", { name: /^Governs/ })).toBeInTheDocument();
+    expect(await screen.findByText(/Can Call \(\d+\)/i)).toBeInTheDocument();
     expectNoCrash();
   });
 
@@ -382,7 +390,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     await selectSearchMode(user, "Safes");
     await commitViaEnter(user);
 
-    // Gate: the safe actually committed (Detail shows its PrincipalDetail).
+    // Gate: the safe actually committed (Detail shows its entity card).
     await clickSidebarTab("Detail");
     expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
 
@@ -447,7 +455,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     const user = userEvent.setup();
 
     // Select the Vault contract via the default "All" search mode so
-    // ContractMachine renders with guard ports.
+    // the contract card renders with guard ports.
     await user.type(searchInput(), "Vault");
     await commitViaEnter(user);
     const port = await waitFor(() => {
@@ -698,7 +706,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     ); // non-admin → Detail
-    // The safe is a principal-only entity, so PrincipalDetail renders — the
+    // The safe is a principal-only entity, so the principal-shaped card renders — the
     // legacy view happens to match, but it's the facet, not the param, deciding.
     expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
     // The stale view param is dropped on the restore's URL normalization.
@@ -714,7 +722,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     ); // non-admin → Detail
-    // The Vault contract card renders (ContractMachine shows its functions).
+    // The Vault contract card renders (EntityCard shows its functions).
     expect(await screen.findByText("upgrade")).toBeInTheDocument();
     // Legacy param translated: ?focus dropped, ?sel written, no view axis.
     await waitFor(() => {
@@ -743,7 +751,7 @@ describe("ProtocolSurface — M3 polish", () => {
     renderSurface(); // non-admin → Detail
     const user = userEvent.setup();
 
-    // Commit the Vault contract → its ContractMachine card mounts.
+    // Commit the Vault contract → its contract card mounts.
     await user.type(searchInput(), "Vault");
     await commitViaEnter(user);
     await waitFor(() => {

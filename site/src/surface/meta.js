@@ -133,45 +133,6 @@ export const MACHINE_TABS = [
   { key: "balances", label: "Balances" },
 ];
 
-// Pretty event-type label for the activity section. Falls back to the
-// raw underscore-separated form if we get an event_type the watcher
-// emits but the UI hasn't taught itself about yet.
-export const EVENT_LABELS = {
-  signer_added: "Signer added",
-  signer_removed: "Signer removed",
-  threshold_changed: "Threshold changed",
-  safe_tx_executed: "Tx executed",
-  safe_tx_failed: "Tx failed",
-  safe_module_executed: "Module call",
-  safe_module_failed: "Module call failed",
-  timelock_scheduled: "Queued",
-  timelock_executed: "Executed",
-  delay_changed: "Delay changed",
-  ownership_transferred: "Owner transferred",
-  paused: "Paused",
-  unpaused: "Unpaused",
-  role_granted: "Role granted",
-  role_revoked: "Role revoked",
-};
-
-export const EVENT_ACCENTS = {
-  signer_added: "#3b82f6",
-  signer_removed: "#3b82f6",
-  threshold_changed: "#f59e0b",
-  safe_tx_executed: "#22c55e",
-  safe_tx_failed: "#ef4444",
-  safe_module_executed: "#22c55e",
-  safe_module_failed: "#ef4444",
-  timelock_scheduled: "#3b82f6",
-  timelock_executed: "#f59e0b",
-  delay_changed: "#f59e0b",
-  ownership_transferred: "#ef4444",
-  paused: "#ef4444",
-  unpaused: "#ef4444",
-  role_granted: "#f59e0b",
-  role_revoked: "#f59e0b",
-};
-
 export const ROLE_META = {
   value_handler: { label: "Value Handlers", color: "#6a9e94", defaultOn: true },
   token:         { label: "Tokens",         color: "#6a8a9e", defaultOn: true },

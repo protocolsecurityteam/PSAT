@@ -10,7 +10,7 @@ export function shortAddr(address) {
 // type token (e.g. label "safe" on a type "safe" principal), which renders as
 // "safe safe" beside the type badge. When the label adds nothing over the
 // type, fall back to the short address. Shared by the search preview and
-// PrincipalDetail so the fallback can't drift between them.
+// the entity card so the fallback can't drift between them.
 export function principalLabel(label, type, address) {
   const l = String(label || "").trim();
   if (l && l.toLowerCase() !== String(type || "").trim().toLowerCase()) return l;
@@ -85,18 +85,6 @@ export function formatUsd(value) {
   if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
   if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
   return `$${value.toFixed(2)}`;
-}
-
-export function formatEventAgo(detectedAt) {
-  if (!detectedAt) return null;
-  const d = new Date(detectedAt);
-  if (Number.isNaN(d.getTime())) return null;
-  const seconds = Math.max(0, (Date.now() - d.getTime()) / 1000);
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  if (seconds < 30 * 86400) return `${Math.floor(seconds / 86400)}d ago`;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 export function dedupeShas(list) {

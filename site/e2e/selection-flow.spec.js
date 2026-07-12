@@ -152,7 +152,7 @@ test.describe("Surface selection — full flow", () => {
     await pickMode(page, "Safes");
     await commitSearch(page); // highest-value safe = GovSafe (controls Vault + Pool)
 
-    // Detail: the safe's PrincipalDetail card, with signers + threshold.
+    // Detail: the safe's entity card, with signers + threshold.
     await openTab(page, "Detail");
     await expect(page.locator(".ps-machine-address")).toContainText(GOV_SAFE.slice(0, 6));
     await expect(page.getByText(/4\/7 threshold/i)).toBeVisible();

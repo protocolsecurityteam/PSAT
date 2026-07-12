@@ -881,17 +881,6 @@
   font-weight: 600;
 }
 
-/* Verified capabilities on a "Can Call" row in the principal sidebar. */
-.ps-principal-cancall-caps {
-  margin-left: auto;
-  margin-right: 6px;
-  font-size: 10px;
-  color: #d99a4e;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .ps-node-role {
   margin-top: 2px;
   font-size: 9px;
@@ -1046,34 +1035,6 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 4px;
-}
-
-/* Recent activity rows on safe/timelock principals — most-recent-first
- * list of MonitoredEvent rows. Tight rendering: event-type badge +
- * relative time + block + truncated tx hash on a single line each. */
-.ps-activity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ps-activity-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: #94a3b8;
-  padding: 3px 0;
-}
-.ps-activity-ago {
-  color: #cbd5e1;
-}
-.ps-activity-block,
-.ps-activity-tx {
-  color: #64748b;
-}
-.ps-activity-tx {
-  font-size: 10px;
 }
 
 .ps-principal-signer {
@@ -1476,30 +1437,15 @@
   text-transform: uppercase;
 }
 
-/* Dual-facet principal strip under the contract-card header. */
-.ps-machine-principal-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.ps-machine-principal-meta {
-  font-size: 10px;
-  color: #94a3b8;
-  font-weight: 600;
-}
-
-/* Governs tab: one row per governed contract, mirroring the Controllers
-   accordion open-row detail (name + capability tags + function chips). */
+/* Governs tab "Can Call" rows: one collapsible row per governed contract.
+   Collapsed shows name + capability summary + a view (→) link; expanded drops
+   the full function chip list below. Stacked because the sidebar column is too
+   narrow to share a row with the chips the way the wide accordion detail can. */
 .ps-governs {
   display: flex;
   flex-direction: column;
 }
 
-/* Stacked (name on its own line, chips full-width below) — the sidebar column
-   is too narrow to share a row with the function chips the way the wide
-   accordion detail can. */
 .ps-governs-row {
   display: flex;
   flex-direction: column;
@@ -1512,41 +1458,83 @@
   border-top: none;
 }
 
-.ps-governs-name {
-  align-self: flex-start;
+.ps-governs-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* The row's collapse control fills the head; the → link sits at its end. Both
+   zero the global button chrome (teal gradient + shadow + hover lift). */
+.ps-governs-toggle,
+.ps-governs-goto {
   background: none;
   border: none;
   box-shadow: none;
   padding: 0;
   margin: 0;
-  font-size: 11px;
-  font-weight: 700;
-  color: #cbd5e1;
   cursor: pointer;
+}
+
+.ps-governs-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   text-align: left;
 }
 
-.ps-governs-name:hover {
-  color: #e2e8f0;
+.ps-governs-toggle:hover,
+.ps-governs-goto:hover {
   transform: none;
   box-shadow: none;
 }
 
-.ps-governs-caps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.ps-governs-caret {
+  color: #64748b;
+  font-size: 9px;
+  flex-shrink: 0;
+  transition: transform 150ms ease;
 }
 
-.ps-governs-cap {
-  font-size: 9px;
+.ps-governs-caret-open {
+  transform: rotate(90deg);
+}
+
+.ps-governs-name {
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: rgba(217, 154, 78, 0.16);
+  color: #cbd5e1;
+}
+
+.ps-governs-toggle:hover .ps-governs-name {
+  color: #e2e8f0;
+}
+
+.ps-governs-tag {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.ps-governs-summary {
+  margin-left: auto;
+  font-size: 10px;
   color: #d99a4e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ps-governs-goto {
+  color: #475569;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ps-governs-goto:hover {
+  color: #94a3b8;
 }
 
 .ps-lane {
