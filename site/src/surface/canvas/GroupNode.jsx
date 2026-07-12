@@ -1,22 +1,12 @@
 import { useLayoutEffect, useRef } from "react";
 import { Handle, Position } from "@xyflow/react";
 
-import { formatUsd, principalBadge, shortAddr } from "../format.js";
+import { fnChipClass, formatUsd, principalBadge, shortAddr } from "../format.js";
 import { PRINCIPAL_COLORS } from "../meta.js";
 
 // Co-controller accent (amber). The primary row uses the group's own
 // principal color so a timelock-owned group reads timelock, not teal.
 const CO_ACCENT = "#d99a4e";
-
-// Light category tint for a function chip — upgrade/ownership, pause, and
-// fund movements get a hint of color so the dangerous powers pop out of a
-// long list. Everything else stays neutral. Polish, not load-bearing.
-function fnChipClass(fn) {
-  if (/upgrade|transferownership|renounceownership|setowner|changeadmin/i.test(fn)) return "ps-ctrl-fnchip--upgrade";
-  if (/pause/i.test(fn)) return "ps-ctrl-fnchip--pause";
-  if (/recover|withdraw|sweep|sendto|fund|claim|seize/i.test(fn)) return "ps-ctrl-fnchip--fund";
-  return "";
-}
 
 // One accordion row: a controller's badge + full capability summary (every
 // tag, comma-separated like the rest of the app — never truncated), expanding

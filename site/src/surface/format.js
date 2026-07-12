@@ -49,6 +49,18 @@ export function functionName(signature) {
   return String(signature || "?").split("(")[0] || "?";
 }
 
+// Light category tint for a function chip — upgrade/ownership, pause, and
+// fund movements get a hint of color so the dangerous powers pop out of a
+// long list. Everything else stays neutral. Polish, not load-bearing. Shared
+// by the Controllers accordion and the contract card's Governs tab so the
+// chips never drift apart.
+export function fnChipClass(fn) {
+  if (/upgrade|transferownership|renounceownership|setowner|changeadmin/i.test(fn)) return "ps-ctrl-fnchip--upgrade";
+  if (/pause/i.test(fn)) return "ps-ctrl-fnchip--pause";
+  if (/recover|withdraw|sweep|sendto|fund|claim|seize/i.test(fn)) return "ps-ctrl-fnchip--fund";
+  return "";
+}
+
 export function isRoleConstant(name) {
   return /^[A-Z][A-Z0-9_]+$/.test(name);
 }

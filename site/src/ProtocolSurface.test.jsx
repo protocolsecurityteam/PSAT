@@ -468,6 +468,32 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     expectNoCrash();
   });
 
+  it("shows a Governs tab on a contract that has authority over others", async () => {
+    // The fixture's Vault contract is the direct_owner of a LiquidityPool
+    // function, so its card exposes the authority-OUT Governs tab.
+    renderSurface();
+    const user = userEvent.setup();
+    await user.type(searchInput(), "Vault");
+    await commitViaEnter(user);
+
+    const tabBar = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-tabs");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    const governsTab = within(tabBar).getByRole("button", { name: /^Governs/ });
+    await user.click(governsTab);
+    // Scope to the Governs panel — the canvas also renders a "LiquidityPool"
+    // node label.
+    const row = await waitFor(() => {
+      const el = document.querySelector(".ps-governs-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(row).toHaveTextContent("LiquidityPool");
+    expectNoCrash();
+  });
+
   // (e) Changing the company clears the current selection (the reducer clears on
   // companyName change; today only guard/radar reset, not the entity).
   it("changing the company clears the current selection", async () => {

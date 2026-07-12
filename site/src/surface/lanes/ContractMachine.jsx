@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { formatUsd, shortAddr } from "../format.js";
+import { formatDelay, formatUsd, principalBadge, shortAddr } from "../format.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META } from "../meta.js";
 import { BalanceTable } from "./BalanceTable.jsx";
+import { GovernsTab } from "./GovernsTab.jsx";
 import { LaneColumn } from "./LaneColumn.jsx";
 import { OpsLane } from "./OpsLane.jsx";
 
@@ -15,6 +16,8 @@ export function ContractMachine({
   highlightedFunctionKey,
   highlightedContract = false,
   onOpenDependencyGraph,
+  governsIndex,
+  principal = null,
 }) {
   const [activeTab, setActiveTab] = useState("control");
   const usdLabel = formatUsd(machine.total_usd);
@@ -27,12 +30,34 @@ export function ContractMachine({
     if (highlightedFunction) setActiveTab(tabForLane(highlightedFunction.lane));
   }, [highlightedFunction]);
 
+  const governsRows = useMemo(
+    () => governsIndex?.get((machine.address || "").toLowerCase()) || [],
+    [governsIndex, machine.address],
+  );
+  // Capability tags for governed contracts, when this entity also has a
+  // server-side principal facet (controls_detail carries the high-level
+  // capability vocabulary; the client-side inversion has only effect labels).
+  const capabilitiesByContract = useMemo(() => {
+    const map = new Map();
+    for (const detail of principal?.controls_detail || []) {
+      const addr = (detail?.address || "").toLowerCase();
+      const caps = Array.isArray(detail?.capabilities) ? detail.capabilities : [];
+      if (addr && caps.length) map.set(addr, caps);
+    }
+    return map;
+  }, [principal]);
+
   const tabCounts = {
     control: machine.lanes.top.length + machine.lanes.ops.length,
     inflows: machine.lanes.left.length,
     outflows: machine.lanes.right.length,
     balances: machine.balances?.length || 0,
+    governs: governsRows.length,
   };
+
+  const owners = Array.isArray(principal?.details?.owners) ? principal.details.owners : [];
+  const threshold = principal?.details?.threshold;
+  const delay = principal?.details?.delay;
 
   return (
     <article
@@ -61,6 +86,21 @@ export function ContractMachine({
           <span className="ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
           {usdLabel && <span className="ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
         </div>
+        {/* Dual-facet contracts (an analyzed timelock/safe the server also
+            emits as a principal): fold the principal metadata PrincipalDetail
+            showed into a compact strip. Everything else about it is covered by
+            the Governs tab. */}
+        {principal && (
+          <div className="ps-machine-principal-strip">
+            <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{principalBadge(principal)}</span>
+            {principal.type === "safe" && threshold ? (
+              <span className="ps-machine-principal-meta">{threshold}/{owners.length || "?"} signers</span>
+            ) : null}
+            {principal.type === "timelock" && delay > 0 ? (
+              <span className="ps-machine-principal-meta">{formatDelay(delay)} delay</span>
+            ) : null}
+          </div>
+        )}
         {onOpenDependencyGraph && (
           <div className="ps-machine-actions">
             <button
@@ -85,6 +125,15 @@ export function ContractMachine({
             {tabCounts[t.key] > 0 && <span className="ps-machine-tab-count">{tabCounts[t.key]}</span>}
           </button>
         ))}
+        {tabCounts.governs > 0 && (
+          <button
+            className={`ps-machine-tab${activeTab === "governs" ? " active" : ""}`}
+            onClick={() => setActiveTab("governs")}
+          >
+            Governs
+            <span className="ps-machine-tab-count">{tabCounts.governs}</span>
+          </button>
+        )}
       </div>
 
       {activeTab === "control" && (
@@ -129,6 +178,13 @@ export function ContractMachine({
       )}
       {activeTab === "balances" && (
         <BalanceTable machine={machine} />
+      )}
+      {activeTab === "governs" && (
+        <GovernsTab
+          rows={governsRows}
+          capabilitiesByContract={capabilitiesByContract}
+          onNavigate={onNavigate}
+        />
       )}
     </article>
   );

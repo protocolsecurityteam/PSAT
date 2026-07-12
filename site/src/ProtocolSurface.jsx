@@ -12,6 +12,7 @@ import { formatUsd, isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
+import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
@@ -295,6 +296,26 @@ export default function ProtocolSurface({
     [allMachines, enabledRoles]
   );
 
+  // Authority-OUT index for the contract card's Governs tab: authority address
+  // → the contracts + functions it can call. Built once over ALL machines /
+  // functions (visibility-agnostic, like the entity index) so a role-filtered
+  // target still resolves. Memoized here — never per-render inside the card.
+  const governsIndex = useMemo(
+    () => buildGovernsIndex(allMachines, functionData),
+    [allMachines, functionData]
+  );
+
+  // Principal facet by address — lets a dual-facet contract card render its
+  // principal strip + capability tags. Most contracts have no entry (null).
+  const principalsByAddress = useMemo(() => {
+    const map = new Map();
+    for (const p of companyData?.principals || []) {
+      const addr = (p.address || "").toLowerCase();
+      if (addr) map.set(addr, p);
+    }
+    return map;
+  }, [companyData]);
+
   // Address-keyed entity index over ALL machines + ALL principals (no
   // visibility filtering). Selection state stores addresses only and resolves
   // entities through this index per render, so denormalized snapshots can
@@ -553,6 +574,8 @@ export default function ProtocolSurface({
         highlightedFunctionKey={radarSelection.functionKey}
         highlightedContract={!radarSelection.functionKey}
         onOpenDependencyGraph={setDependencyGraphMachine}
+        governsIndex={governsIndex}
+        principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
       />
       <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
     </div>
@@ -765,6 +788,8 @@ export default function ProtocolSurface({
               companyName={companyName}
               highlightedFunctionKey={radarSelection?.functionKey}
               onOpenDependencyGraph={setDependencyGraphMachine}
+              governsIndex={governsIndex}
+              principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
             />
           )}
           {sidebarMode === "detail" && !selectedPrincipal && !radarSelection && (
