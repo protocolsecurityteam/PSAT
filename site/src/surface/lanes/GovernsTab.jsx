@@ -2,33 +2,80 @@ import { useState } from "react";
 
 import { fnChipClass, formatUsd, shortAddr } from "../format.js";
 
+// One shared row for both Governs sections. Collapsed content is identical
+// everywhere: contract name (+ proxy/impl tag), short address, USD value when
+// known. Clicking the row head focuses/previews the contract on the canvas
+// (gold marker + pan) — no navigation, no selection change. A right-aligned
+// ghost "N fns" button appears only when the row carries function data (every
+// Can Call row does; governance-path rows are reachability-only and never do)
+// and expands to the full function-chip list.
+function GovernsRow({ row, onFocusContract }) {
+  const [open, setOpen] = useState(false);
+  const label = row.name || shortAddr(row.address);
+  const functions = Array.isArray(row.functions) ? row.functions : [];
+  const usd = formatUsd(row.total_usd);
+
+  return (
+    <div className="ps-governs-row">
+      <div
+        className="ps-governs-head"
+        role="button"
+        tabIndex={0}
+        onClick={() => onFocusContract && onFocusContract(row.address)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onFocusContract && onFocusContract(row.address);
+          }
+        }}
+      >
+        <span className="ps-governs-name">
+          {label}
+          {row.tag ? <span className="ps-governs-tag"> ({row.tag})</span> : null}
+        </span>
+        <span className="ps-governs-addr">{shortAddr(row.address)}</span>
+        {usd ? <span className="ps-governs-value">{usd}</span> : null}
+        {functions.length > 0 ? (
+          <button
+            type="button"
+            className="ps-governs-expand"
+            aria-expanded={open}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((v) => !v);
+            }}
+          >
+            {functions.length} fns
+            <span className="ps-governs-caret">{open ? "▾" : "▸"}</span>
+          </button>
+        ) : null}
+      </div>
+      {open && functions.length > 0 && (
+        <div className="ps-ctrl-fns">
+          {functions.map((fn) => (
+            <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The Governs tab of the universal entity card: "authority OUT" — what this
-// entity can do TO other contracts. Two sections mirror the old PrincipalDetail:
+// entity can do TO other contracts. Two sections share one row shape:
 //
 //   1. Can Call — one row per governed contract (client-inverted from every
 //      contract's per-function authority, so it resolves for machine-only
-//      authorities too). Collapsed by default; expands to the full function
-//      list. Capability tags come from the server when the entity also has a
-//      principal facet (controls_detail); otherwise the row shows a count.
-//   2. Appears in governance path for — the (transitive) reachability set, with
-//      a pager + focus-on-click, kept from PrincipalDetail.
+//      authorities too). Rows carry the concrete function list, expandable.
+//   2. Appears in governance path for — the (transitive) reachability set.
+//      Reachability-only, so rows carry no function list (no expand button).
 //
-// Both lists are pre-deduped and proxy/impl-tagged by the card.
-export function GovernsTab({ canCallRows, capabilitiesByContract, pathRows, onNavigate, onFocusContract }) {
-  const [expanded, setExpanded] = useState(() => new Set());
-  const [focusIdx, setFocusIdx] = useState(0);
-
+// Both lists are pre-deduped and proxy/impl-tagged by the card. Every row
+// click focuses the contract on the canvas.
+export function GovernsTab({ canCallRows, pathRows, onFocusContract }) {
   if (!canCallRows.length && !pathRows.length) {
     return <div className="ps-lane-empty">Governs nothing</div>;
   }
-
-  const toggle = (address) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(address)) next.delete(address);
-      else next.add(address);
-      return next;
-    });
 
   return (
     <div className="ps-governs">
@@ -39,91 +86,21 @@ export function GovernsTab({ canCallRows, capabilitiesByContract, pathRows, onNa
               Can Call ({canCallRows.length})
             </span>
           </div>
-          {canCallRows.map((row) => {
-            const caps = capabilitiesByContract.get(row.address) || [];
-            const isOpen = expanded.has(row.address);
-            const label = row.name || shortAddr(row.address);
-            return (
-              <div className="ps-governs-row" key={row.address}>
-                <div className="ps-governs-head">
-                  <button
-                    type="button"
-                    className="ps-governs-toggle"
-                    aria-expanded={isOpen}
-                    onClick={() => toggle(row.address)}
-                  >
-                    <span className={`ps-governs-caret${isOpen ? " ps-governs-caret-open" : ""}`}>▸</span>
-                    <span className="ps-governs-name">
-                      {label}
-                      {row.tag ? <span className="ps-governs-tag"> ({row.tag})</span> : null}
-                    </span>
-                    <span className="ps-governs-summary">
-                      {caps.length ? caps.join(", ") : `${row.functions.length} fn`}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="ps-governs-goto"
-                    title={`View ${label}`}
-                    onClick={() => onNavigate && onNavigate({ type: "contract", address: row.address })}
-                  >
-                    →
-                  </button>
-                </div>
-                {isOpen && (
-                  <div className="ps-ctrl-fns">
-                    {row.functions.map((fn) => (
-                      <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {canCallRows.map((row) => (
+            <GovernsRow key={row.address} row={row} onFocusContract={onFocusContract} />
+          ))}
         </section>
       )}
 
       {pathRows.length > 0 && (
         <section className="ps-principal-section">
-          <div className="ps-principal-section-hdr" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            {/* Reachability over the control graph — does not, on its own, imply
-                direct call rights on these contracts' privileged functions. */}
+          <div className="ps-principal-section-hdr">
             <span title="Computed from the recursive control graph — does not imply direct call rights on these contracts' privileged functions">
               Appears In Governance Path For ({pathRows.length})
             </span>
-            {pathRows.length > 1 && (
-              <div className="ps-search-arrows" style={{ marginLeft: 8 }}>
-                <button onClick={() => {
-                  const prev = (focusIdx - 1 + pathRows.length) % pathRows.length;
-                  setFocusIdx(prev);
-                  onFocusContract && onFocusContract(pathRows[prev].address);
-                }}>◀</button>
-                <span className="ps-search-counter">{focusIdx + 1} / {pathRows.length}</span>
-                <button onClick={() => {
-                  const next = (focusIdx + 1) % pathRows.length;
-                  setFocusIdx(next);
-                  onFocusContract && onFocusContract(pathRows[next].address);
-                }}>▶</button>
-              </div>
-            )}
           </div>
-          {pathRows.map((row, i) => (
-            <div
-              key={row.address}
-              className={`ps-principal-controlled ps-principal-clickable${i === focusIdx ? " ps-principal-focused" : ""}`}
-              onClick={() => {
-                setFocusIdx(i);
-                onFocusContract && onFocusContract(row.address);
-              }}
-            >
-              <span className="ps-principal-controlled-name">
-                {row.name || shortAddr(row.address)}
-                {row.tag ? <span className="ps-governs-tag"> ({row.tag})</span> : null}
-              </span>
-              <span className="ps-principal-controlled-addr">{shortAddr(row.address)}</span>
-              {row.total_usd ? <span className="ps-search-preview-value">{formatUsd(row.total_usd)}</span> : null}
-              <span className="ps-principal-goto">→</span>
-            </div>
+          {pathRows.map((row) => (
+            <GovernsRow key={row.address} row={row} onFocusContract={onFocusContract} />
           ))}
         </section>
       )}

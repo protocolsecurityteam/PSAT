@@ -36,36 +36,46 @@ describe("EntityCard Governs tab", () => {
     expect(getByText("Governs nothing")).toBeInTheDocument();
   });
 
-  it("shows the Governs tab count and one collapsible row per governed contract", () => {
+  it("shows the Governs tab count and an expand button revealing every function", () => {
     const idx = governsWith([
       { contractAddress: POOL, contractName: "LiquidityPool", functions: ["upgradeTo", "pause"] },
     ]);
     const { getByText, container } = render(
-      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onNavigate={vi.fn()} governsIndex={idx} />,
+      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onFocusContract={vi.fn()} governsIndex={idx} />,
     );
     const tab = getByText("Governs").closest("button");
     expect(within(tab).getByText("1")).toBeInTheDocument();
     fireEvent.click(tab);
-    // Row is present but collapsed by default — no function chips yet.
+    // Row is present but collapsed by default — name/value only, no chips.
     expect(getByText("LiquidityPool")).toBeInTheDocument();
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(0);
-    // Expanding the row reveals every function.
-    fireEvent.click(getByText("LiquidityPool").closest("button"));
+    // The expand button carries the function count; clicking it reveals them.
+    const expand = container.querySelector(".ps-governs-expand");
+    expect(expand).toHaveTextContent("2 fns");
+    fireEvent.click(expand);
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(2);
   });
 
-  it("navigates to the governed contract via the view (→) link", () => {
+  it("focuses the governed contract on the canvas when the row is clicked (no navigation)", () => {
+    const onFocusContract = vi.fn();
     const onNavigate = vi.fn();
     const idx = governsWith([{ contractAddress: POOL, contractName: "LiquidityPool", functions: ["pause"] }]);
-    const { getByText, container } = render(
-      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onNavigate={onNavigate} governsIndex={idx} />,
+    const { getByText } = render(
+      <EntityCard
+        machine={machine()}
+        onSelectGuard={vi.fn()}
+        onNavigate={onNavigate}
+        onFocusContract={onFocusContract}
+        governsIndex={idx}
+      />,
     );
     fireEvent.click(getByText("Governs").closest("button"));
-    fireEvent.click(container.querySelector(".ps-governs-goto"));
-    expect(onNavigate).toHaveBeenCalledWith({ type: "contract", address: POOL });
+    fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
+    expect(onFocusContract).toHaveBeenCalledWith(POOL);
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 
-  it("shows the capability summary for a governed contract when a principal facet is present", () => {
+  it("shows no capability summary — the collapsed row is name/value only, functions behind the expand button", () => {
     const idx = governsWith([{ contractAddress: POOL, contractName: "LiquidityPool", functions: ["upgradeTo"] }]);
     const principal = {
       address: TIMELOCK,
@@ -74,10 +84,39 @@ describe("EntityCard Governs tab", () => {
       controls_detail: [{ address: POOL, functions: ["upgradeTo"], capabilities: ["upgrade"] }],
     };
     const { getByText, container } = render(
-      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onNavigate={vi.fn()} governsIndex={idx} principal={principal} />,
+      <EntityCard machine={machine()} onSelectGuard={vi.fn()} onFocusContract={vi.fn()} governsIndex={idx} principal={principal} />,
     );
     fireEvent.click(getByText("Governs").closest("button"));
-    expect(container.querySelector(".ps-governs-summary")).toHaveTextContent("upgrade");
+    // No capability-word summary is rendered anywhere on the row.
+    expect(container.querySelector(".ps-governs-summary")).toBeNull();
+    const expand = container.querySelector(".ps-governs-expand");
+    expect(expand).toHaveTextContent("1 fns");
+    expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(0);
+    fireEvent.click(expand);
+    expect(getByText("upgradeTo")).toBeInTheDocument();
+  });
+
+  it("gives governance-path rows no expand button (reachability only, no function data)", () => {
+    const onFocusContract = vi.fn();
+    const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 }, controls: [POOL] };
+    const machines = [{ address: POOL, name: "LiquidityPool" }];
+    const { getByText, container } = render(
+      <EntityCard
+        machine={machine()}
+        onSelectGuard={vi.fn()}
+        onFocusContract={onFocusContract}
+        governsIndex={new Map()}
+        principal={principal}
+        machines={machines}
+      />,
+    );
+    fireEvent.click(getByText("Governs").closest("button"));
+    expect(getByText("Appears In Governance Path For (1)")).toBeInTheDocument();
+    expect(getByText("LiquidityPool")).toBeInTheDocument();
+    // Path rows carry no function list → no expand button, but still focus on click.
+    expect(container.querySelector(".ps-governs-expand")).toBeNull();
+    fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
+    expect(onFocusContract).toHaveBeenCalledWith(POOL);
   });
 });
 

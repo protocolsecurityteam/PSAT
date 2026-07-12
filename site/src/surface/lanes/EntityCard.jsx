@@ -44,12 +44,16 @@ export function EntityCard({
   // Can Call rows (authority OUT): client-inverted governed set, deduped and
   // proxy/impl-tagged. Works for machine-only authorities (not just principals).
   const canCallRows = useMemo(() => {
-    const rows = (governsIndex?.get(address) || []).map((row) => ({
-      address: row.contractAddress,
-      name: row.contractName,
-      is_proxy: Boolean(machineByAddr.get(row.contractAddress)?.is_proxy),
-      functions: row.functions,
-    }));
+    const rows = (governsIndex?.get(address) || []).map((row) => {
+      const m = machineByAddr.get(row.contractAddress);
+      return {
+        address: row.contractAddress,
+        name: row.contractName,
+        is_proxy: Boolean(m?.is_proxy),
+        total_usd: m?.total_usd || 0,
+        functions: row.functions,
+      };
+    });
     return dedupeAndTagRows(rows);
   }, [governsIndex, address, machineByAddr]);
 
@@ -68,19 +72,6 @@ export function EntityCard({
     }
     return dedupeAndTagRows(rows);
   }, [principal, address, controlAdjacency, machineByAddr]);
-
-  // Capability tags per governed contract, when a server-side principal facet
-  // exists (controls_detail carries the high-level capability vocabulary the
-  // client-side inversion lacks).
-  const capabilitiesByContract = useMemo(() => {
-    const map = new Map();
-    for (const detail of principal?.controls_detail || []) {
-      const addr = (detail?.address || "").toLowerCase();
-      const caps = Array.isArray(detail?.capabilities) ? detail.capabilities : [];
-      if (addr && caps.length) map.set(addr, caps);
-    }
-    return map;
-  }, [principal]);
 
   const highlightedFunction = useMemo(
     () => (isMachine ? machineFunctions(machine).find((fnView) => fnView.key === highlightedFunctionKey) || null : null),
@@ -267,9 +258,7 @@ export function EntityCard({
       {activeTab === "governs" && (
         <GovernsTab
           canCallRows={canCallRows}
-          capabilitiesByContract={capabilitiesByContract}
           pathRows={pathRows}
-          onNavigate={onNavigate}
           onFocusContract={onFocusContract}
         />
       )}

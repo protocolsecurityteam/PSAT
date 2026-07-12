@@ -1045,31 +1045,6 @@
   word-break: break-all;
 }
 
-.ps-principal-controlled {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
-}
-
-.ps-principal-controlled-name {
-  font-size: 11px;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.ps-principal-controlled-addr {
-  font-size: 10px;
-  color: #475569;
-  font-family: "JetBrains Mono", monospace;
-}
-
-.ps-principal-focused {
-  background: rgba(255, 255, 255, 0.06);
-  border-left: 2px solid #94a3b8;
-}
-
 /* Role filter bar */
 /* Search Navigator */
 .ps-search-nav {
@@ -1353,12 +1328,17 @@
   margin: 10px 0 0;
 }
 
+/* Zero the global forms.css button chrome: the teal drop shadow reads as a
+   glow bubble under each tab, and its 12px radius + hover translateY fight the
+   flat underlined-tab look (same leak the .ps-selection-clear comment names). */
 .ps-machine-tab {
   flex: 1;
   min-width: 0;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
   color: #64748b;
   font-size: 10px;
   font-weight: 600;
@@ -1374,6 +1354,8 @@
 
 .ps-machine-tab:hover {
   color: #94a3b8;
+  box-shadow: none;
+  transform: none;
 }
 
 .ps-machine-tab.active {
@@ -1437,10 +1419,12 @@
   text-transform: uppercase;
 }
 
-/* Governs tab "Can Call" rows: one collapsible row per governed contract.
-   Collapsed shows name + capability summary + a view (→) link; expanded drops
-   the full function chip list below. Stacked because the sidebar column is too
-   narrow to share a row with the chips the way the wide accordion detail can. */
+/* Governs tab rows: one shared shape for both sections ("Can Call" and
+   "Appears in governance path for"). Collapsed head shows name (+ proxy/impl
+   tag), short address, and USD value when known; the whole head is a click
+   target that focuses the contract on the canvas. Can Call rows also carry a
+   right-aligned ghost "N fns" button that expands the function chip list below;
+   reachability-only path rows have no function data, so no button. */
 .ps-governs {
   display: flex;
   flex-direction: column;
@@ -1450,7 +1434,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 7px 0;
+  padding: 3px 0;
   border-top: 1px solid rgba(148, 163, 184, 0.06);
 }
 
@@ -1462,53 +1446,24 @@
   display: flex;
   align-items: baseline;
   gap: 6px;
-}
-
-/* The row's collapse control fills the head; the → link sits at its end. Both
-   zero the global button chrome (teal gradient + shadow + hover lift). */
-.ps-governs-toggle,
-.ps-governs-goto {
-  background: none;
-  border: none;
-  box-shadow: none;
-  padding: 0;
-  margin: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
   cursor: pointer;
+  transition: background 100ms ease;
 }
 
-.ps-governs-toggle {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  text-align: left;
-}
-
-.ps-governs-toggle:hover,
-.ps-governs-goto:hover {
-  transform: none;
-  box-shadow: none;
-}
-
-.ps-governs-caret {
-  color: #64748b;
-  font-size: 9px;
-  flex-shrink: 0;
-  transition: transform 150ms ease;
-}
-
-.ps-governs-caret-open {
-  transform: rotate(90deg);
+.ps-governs-head:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .ps-governs-name {
   font-size: 11px;
   font-weight: 700;
   color: #cbd5e1;
+  flex-shrink: 0;
 }
 
-.ps-governs-toggle:hover .ps-governs-name {
+.ps-governs-head:hover .ps-governs-name {
   color: #e2e8f0;
 }
 
@@ -1517,24 +1472,51 @@
   font-weight: 600;
 }
 
-.ps-governs-summary {
-  margin-left: auto;
-  font-size: 10px;
-  color: #d99a4e;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ps-governs-addr {
+  flex: 1 1 auto;
   min-width: 0;
-}
-
-.ps-governs-goto {
+  font-size: 10px;
   color: #475569;
-  font-size: 11px;
-  flex-shrink: 0;
+  font-family: "JetBrains Mono", monospace;
 }
 
-.ps-governs-goto:hover {
+.ps-governs-value {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #f59e0b;
+}
+
+/* Ghost expand button — neutral-gray like .ps-selection-clear; zero the global
+   forms.css button chrome (teal gradient + drop shadow + hover lift). */
+.ps-governs-expand {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  padding: 0 2px;
+  margin: 0;
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.ps-governs-expand:hover {
   color: #94a3b8;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.ps-governs-caret {
+  font-size: 8px;
 }
 
 .ps-lane {
