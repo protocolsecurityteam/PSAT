@@ -23,7 +23,13 @@ export function ContractNode({ data }) {
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >
-      {chip?.out && (
+      {/* Browse-fallback note (gold, above the card): who the browsed
+          off-graph principal is and what it can call here. Takes the --out
+          slot, so the selection's own out-chip yields while it's shown. */}
+      {data.browseChip && (
+        <div className="ps-node-chip ps-node-chip--browse">{data.browseChip}</div>
+      )}
+      {chip?.out && !data.browseChip && (
         <div className="ps-node-chip ps-node-chip--out">{chip.out}</div>
       )}
       {chip?.in && (

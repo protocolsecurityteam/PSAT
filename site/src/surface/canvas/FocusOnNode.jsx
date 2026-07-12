@@ -45,20 +45,29 @@ export function FocusOnNode({ address, focusKey, principals }) {
       let rect = rectFor(address);
       if (!rect) {
         // Node-less principal (a co-controller safe/EOA that owns no group
-        // box): zoom as if its aggregation were clicked — fit the group
-        // box(es) holding its touched contracts (headers included), not the
-        // raw contract rects, so the framing matches a group-header focus.
+        // box). Two framings:
+        //   - listed in some group's Controllers accordion → fit the group
+        //     box(es) holding its touched contracts (headers included), so
+        //     its gold-marked row is in frame, matching a group-header focus.
+        //   - footprint-less (no node, no row anywhere) → zoom to the touched
+        //     contract cards themselves, exactly like browsing a contract —
+        //     that's where the gold dots + off-graph chip land.
         const lc = address.toLowerCase();
         const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
+        const hasRow = getNodes().some(
+          (n) =>
+            n.type === "group" &&
+            (n.data?.controllers || []).some((c) => c.address?.toLowerCase() === lc),
+        );
         const targets = new Map();
         for (const a of [...(p?.controls || []), ...(p?.co_controls || [])]) {
           const addrLc = String(a).toLowerCase();
           const node = getNodes().find((n) => n.id?.toLowerCase() === addrLc);
           if (!node) continue;
-          const ownerId = node.parentId || node.id;
-          if (!targets.has(ownerId)) {
-            const r = rectFor(ownerId);
-            if (r) targets.set(ownerId, r);
+          const targetId = hasRow ? node.parentId || node.id : node.id;
+          if (!targets.has(targetId)) {
+            const r = rectFor(targetId);
+            if (r) targets.set(targetId, r);
           }
         }
         const rects = [...targets.values()];

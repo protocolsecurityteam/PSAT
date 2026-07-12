@@ -802,6 +802,21 @@
   color: #dbeafe;
 }
 
+/* Browse-fallback chip: gold like the other browse markers. Names the
+   off-graph principal being browsed and what it can call on this card.
+   The JS already budgets the text (~55 chars of function names, then
+   "+N more"); the max-width + ellipsis is a safety net so no data shape
+   can stretch the chip past ~1.5 card widths. */
+.ps-node-chip--browse {
+  bottom: calc(100% + 4px);
+  background: #2b2208;
+  color: #f2cf6b;
+  border: 1px solid #d4a017;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ps-node-caps {
   display: flex;
   flex-wrap: wrap;

@@ -8,6 +8,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 
+import { principalBadge } from "../format.js";
 import { elkLayout } from "../layout/elkLayout.js";
 import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
@@ -302,6 +303,65 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     // Suppressed while it matches the committed selection so the committed
     // node keeps just the selected ring.
     const browseLc = foc && foc !== selLc ? foc : null;
+    // Footprint-less fallback: an "authorized caller" principal (plain
+    // `controls`, no `co_controls`) owns no node and appears in no group's
+    // accordion — there is nothing of ITSELF to mark. Fall back to dotting
+    // the contracts it touches (the set FocusOnNode zooms to), each with a
+    // gold chip naming the browsed principal, saying it isn't drawn on the
+    // graph, and listing what it can call here (controls_detail).
+    // Strictly a fallback: any real footprint (node or row) suppresses it,
+    // so a browsed co-controller still marks its row, never its reach.
+    let browseFallback = null;
+    let browseChips = null;
+    if (browseLc) {
+      const hasNode = initNodes.some((n) => n.id?.toLowerCase() === browseLc);
+      const hasRow =
+        !hasNode &&
+        initNodes.some(
+          (n) =>
+            n.type === "group" &&
+            (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc),
+        );
+      if (!hasNode && !hasRow) {
+        const bp = (principals || []).find((p) => p.address?.toLowerCase() === browseLc);
+        const touched = [...(bp?.controls || []), ...(bp?.co_controls || [])]
+          .map((a) => String(a).toLowerCase());
+        if (touched.length) {
+          browseFallback = new Set(touched);
+          browseChips = new Map();
+          const detailByAddr = new Map();
+          for (const d of bp?.controls_detail || []) {
+            if (d?.address) detailByAddr.set(d.address.toLowerCase(), d);
+          }
+          // Identity is the badge only — the search preview card is already
+          // naming the browsed principal (with address) while this chip is
+          // visible, so repeating the address just stretches the line.
+          const who = principalBadge(bp);
+          for (const t of browseFallback) {
+            const d = detailByAddr.get(t);
+            const fns = d?.functions || [];
+            let what;
+            if (fns.length) {
+              // Greedy name budget keeps the chip glanceable: names up to
+              // ~55 chars then "+N more"; if even the first name blows the
+              // budget, degrade to a count. The full list is one commit
+              // (Enter) away in the principal's sidebar card.
+              const names = [];
+              for (const f of fns) {
+                if ([...names, f].join(", ").length > 55) break;
+                names.push(f);
+              }
+              what = names.length
+                ? `calls ${names.join(", ")}${fns.length > names.length ? ` +${fns.length - names.length} more` : ""}`
+                : `calls ${fns.length} function${fns.length === 1 ? "" : "s"}`;
+            } else {
+              what = (d?.capabilities || []).join(", ") || "has authority";
+            }
+            browseChips.set(t, `${who} (not on graph) · ${what}`);
+          }
+        }
+      }
+    }
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
@@ -315,7 +375,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         // the committed selection (or the active highlight set). A group
         // whose accordion lists the browsed principal counts too: that row is
         // the entity's only canvas footprint when it owns no node of its own.
-        const isFoc = foc && nid === foc;
+        const isFoc = (foc && nid === foc) || (browseFallback != null && browseFallback.has(nid));
         const hasBrowsedRow =
           browseLc &&
           n.type === "group" &&
@@ -342,6 +402,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
             selected: nid === selLc,
             focused,
             selectionChip: selectionChips.get(nid) || null,
+            browseChip: browseChips?.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
             // principal AND group nodes both carry .principal. A click on
             // a group's header (the only pointer-events-active region)

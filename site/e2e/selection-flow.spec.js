@@ -260,6 +260,31 @@ test.describe("Surface selection — full flow", () => {
     expect(page.url()).not.toContain("sel=");
   });
 
+  test("browsing a footprint-less principal falls back to dotting its touch set", async ({ page }) => {
+    await goToSurface(page);
+
+    // CO_SAFE has no node and no accordion row (its co-controlled POOL sits
+    // in no group), so the browse marker falls back to its touched contracts.
+    await pickMode(page, "Safes");
+    const input = page.locator(".ps-search-input");
+    await input.click();
+    await input.press("ArrowDown"); // preview CO_SAFE — never committed
+
+    const pool = page.locator(`.react-flow__node[data-id="${POOL}"]`);
+    await expect(pool.locator(".ps-node")).toHaveClass(/ps-node-focused/);
+    // The gold chip explains the marker: who the off-graph principal is and
+    // what it can call on this contract.
+    const chip = pool.locator(".ps-node-chip--browse");
+    await expect(chip).toContainText("not on graph");
+    await expect(chip).toContainText("setOracle");
+    // Still a preview, not a selection: no dim, no selected ring, no URL.
+    await expect
+      .poll(async () => Number(await pool.evaluate((n) => Number(n.style.opacity) || 1)))
+      .toBe(1);
+    await expect(page.locator(".ps-node-selected")).toHaveCount(0);
+    expect(page.url()).not.toContain("sel=");
+  });
+
   test("the search preview never duplicates the type as the label ('safe safe')", async ({ page }) => {
     await goToSurface(page);
 
