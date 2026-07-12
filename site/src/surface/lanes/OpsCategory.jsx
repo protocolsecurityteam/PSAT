@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { FunctionPort } from "./FunctionPort.jsx";
 
-export function OpsCategory({ category, onSelect, onNavigate, highlightedFunctionKey }) {
+export function OpsCategory({ category, onSelect, onNavigate, onPreview, highlightedFunctionKey }) {
   const [expanded, setExpanded] = useState(false);
   const containsHighlight = category.items.some((fnView) => fnView.key === highlightedFunctionKey);
   useEffect(() => {
@@ -28,6 +28,7 @@ export function OpsCategory({ category, onSelect, onNavigate, highlightedFunctio
               orientation="ops"
               onSelect={onSelect}
               onNavigate={onNavigate}
+              onPreview={onPreview}
               highlighted={fnView.key === highlightedFunctionKey}
             />
           ))}

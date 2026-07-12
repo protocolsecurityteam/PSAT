@@ -143,54 +143,71 @@
 }
 
 /* Floating toolbar overlay (role filter) */
-.ps-surface-toolbar-overlay {
-  position: absolute;
-  bottom: 16px;
-  left: 16px;
-  z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  padding: 8px 12px;
-}
-
-/* Search mode pills in the top-left slot (All / Safes / EOAs / Timelocks /
-   Has Funds). This is the slot vacated by the removed overview strip. */
-.ps-search-modes-overlay {
+/* Unified filter panel — top-left. One glass box replacing the former three
+   overlays (bottom-left role bar + top-left search-modes + search cluster).
+   Stacked rows: search/sort/nav · Type · Roles · preview (preview shows only
+   while browsing). overflow:hidden is a hard guarantee that no control — e.g.
+   the "↵ select" hint — can ever render outside the rounded box; box-sizing
+   keeps the fixed width honest so the padding is inside it. */
+.ps-filter-overlay {
   position: absolute;
   top: 16px;
   left: 16px;
   z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
+  width: 540px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: rgba(17, 22, 32, 0.92);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 10px;
-  padding: 6px 8px;
+  padding: 9px 10px;
 }
 
-.ps-search-modes-overlay .ps-search-modes {
+.ps-filter-bar {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
 }
 
-/* Floating search overlay */
-.ps-surface-search-overlay {
-  /* Stacked directly below .ps-search-modes-overlay so the whole search
-     cluster (modes + input + preview) lives in the top-left corner.
-     The top-right stays free for future overlays (fullscreen toggle, etc.). */
-  position: absolute;
-  top: 62px;
-  left: 16px;
-  z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  padding: 8px 12px;
-  max-width: calc(100% - 32px);
-  max-width: 380px;
+/* A labeled filter row: a fixed-width gutter so the Type and Roles chip strips
+   align on the same left edge; the strip wraps within the box, never past it. */
+.ps-filter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ps-filter-gutter {
+  flex: 0 0 42px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.ps-filter-row .ps-search-modes,
+.ps-filter-row .ps-role-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  padding: 0;
+}
+
+/* Every <button> in the panel (Type pills, Role chips, browse arrows) inherits
+   the global forms.css button chrome — a teal box-shadow glow + hover lift.
+   Zero it panel-wide so the filters read flat, not glowing. */
+.ps-filter-overlay button {
+  box-shadow: none;
+}
+
+.ps-filter-overlay button:hover {
+  box-shadow: none;
+  transform: none;
 }
 
 .ps-surface-header {
@@ -569,8 +586,14 @@
   border-color: rgba(148, 163, 184, 0.35);
 }
 
+/* Committed selection: solid gold + soft glow. Same color family as the
+   browse marker so both read as "attention here", but solid-vs-dotted keeps
+   selected and browsing unambiguous (and the audit ring stays green).
+   !important for the same reason as ps-node-focused: the role accent is an
+   inline borderLeftColor that would otherwise win on the left edge. */
 .ps-node-selected {
-  border-color: rgba(148, 163, 184, 0.5);
+  border: 2px solid #d4a017 !important;
+  box-shadow: 0 0 18px rgba(212, 160, 23, 0.3);
 }
 
 .ps-node-focused {
@@ -744,6 +767,46 @@
   flex-shrink: 0;
 }
 
+/* Deselect button in the legend: quiet ghost style in neutral grays,
+   brightening on hover. The kbd chip names the shortcut. Explicitly zeroes
+   the global button chrome from shell/forms.css — its teal drop shadow
+   (the "blue hue"), bold weight, and hover lift all leak through any button
+   that doesn't override them. */
+.ps-selection-clear {
+  margin-top: 2px;
+  padding: 3px 6px;
+  background: transparent;
+  border: 1px solid #3f3f46;
+  border-radius: 3px;
+  color: #a1a1aa;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: none;
+}
+
+.ps-selection-clear kbd {
+  font: inherit;
+  font-size: 9px;
+  text-transform: uppercase;
+  padding: 0 4px;
+  border: 1px solid #52525b;
+  border-radius: 3px;
+  background: #1c1c21;
+  color: #d4d4d8;
+}
+
+.ps-selection-clear:hover {
+  border-color: #71717a;
+  color: #e4e4e7;
+  transform: none;
+}
+
 .ps-selection-legend-swatch--out {
   background: #78350f;
 }
@@ -796,6 +859,21 @@
   color: #dbeafe;
 }
 
+/* Browse-fallback chip: gold like the other browse markers. Names the
+   off-graph principal being browsed and what it can call on this card.
+   The JS already budgets the text (~55 chars of function names, then
+   "+N more"); the max-width + ellipsis is a safety net so no data shape
+   can stretch the chip past ~1.5 card widths. */
+.ps-node-chip--browse {
+  bottom: calc(100% + 4px);
+  background: #2b2208;
+  color: #f2cf6b;
+  border: 1px solid #d4a017;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ps-node-caps {
   display: flex;
   flex-wrap: wrap;
@@ -818,95 +896,6 @@
   font-size: 9px;
   color: #6a8a9e;
   font-weight: 600;
-}
-
-/* Permissionless / lower-privilege callers, aggregated per contract: a
-   "+N callers" affordance so an authorized caller is never silently invisible,
-   without a node or edge per bidder. Muted (vs the amber guardian accent) to
-   read as "many low-privilege callers", and clickable to inspect the list. */
-.ps-node-callers {
-  margin-top: 4px;
-  align-self: flex-start;
-  font-size: 8px;
-  font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(148, 163, 184, 0.12);
-  color: #94a3b8;
-  border: 1px dashed rgba(148, 163, 184, 0.4);
-  cursor: pointer;
-}
-
-.ps-node-callers:hover {
-  background: rgba(148, 163, 184, 0.25);
-}
-
-/* The "+N callers" list expanded in the contract detail sidebar. */
-.ps-machine-callers {
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-}
-
-.ps-machine-callers-label {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #94a3b8;
-  margin-bottom: 6px;
-}
-
-.ps-machine-callers-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.ps-machine-caller {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  font-size: 11px;
-  padding: 3px 7px;
-  border-radius: 4px;
-  background: rgba(148, 163, 184, 0.1);
-  color: #c7d2e0;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  cursor: pointer;
-}
-
-.ps-machine-caller:hover {
-  background: rgba(148, 163, 184, 0.22);
-}
-
-.ps-machine-caller-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.ps-machine-caller-type {
-  font-size: 8px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: #8b92a8;
-}
-
-.ps-machine-caller-caps {
-  font-size: 9px;
-  color: #8b9bb0;
-}
-
-/* Verified capabilities on a "Can Call" row in the principal sidebar. */
-.ps-principal-cancall-caps {
-  margin-left: auto;
-  margin-right: 6px;
-  font-size: 10px;
-  color: #d99a4e;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .ps-node-role {
@@ -1039,13 +1028,41 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
-.ps-principal-goto {
-  color: #475569;
-  font-size: 11px;
+/* Shared "go to" commit arrow — the one control that commits an in-card entity
+   reference (lane caller buttons, Governs rows, Guard Inspector principal
+   cards); the reference body only previews. Neutral-gray ghost that brightens on
+   hover; zeroes the global forms.css button chrome (teal gradient + drop shadow
+   + hover lift), same pattern as .ps-governs-expand / .ps-selection-clear.
+   margin-left:auto pins it to the row's right edge. */
+.ps-goto-arrow {
+  flex-shrink: 0;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 100ms ease;
 }
 
-.ps-principal-clickable:hover .ps-principal-goto {
+.ps-goto-arrow:hover {
+  color: #cbd5e1;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+/* Hovering the reference body hints its arrow is the commit target. */
+.ps-principal-clickable:hover .ps-goto-arrow,
+.ps-caller-btn:hover .ps-goto-arrow,
+.ps-governs-head:hover .ps-goto-arrow {
   color: #94a3b8;
 }
 
@@ -1065,34 +1082,6 @@
   margin-bottom: 4px;
 }
 
-/* Recent activity rows on safe/timelock principals — most-recent-first
- * list of MonitoredEvent rows. Tight rendering: event-type badge +
- * relative time + block + truncated tx hash on a single line each. */
-.ps-activity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ps-activity-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: #94a3b8;
-  padding: 3px 0;
-}
-.ps-activity-ago {
-  color: #cbd5e1;
-}
-.ps-activity-block,
-.ps-activity-tx {
-  color: #64748b;
-}
-.ps-activity-tx {
-  font-size: 10px;
-}
-
 .ps-principal-signer {
   font-size: 10px;
   font-family: "JetBrains Mono", monospace;
@@ -1101,39 +1090,8 @@
   word-break: break-all;
 }
 
-.ps-principal-controlled {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
-}
-
-.ps-principal-controlled-name {
-  font-size: 11px;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.ps-principal-controlled-addr {
-  font-size: 10px;
-  color: #475569;
-  font-family: "JetBrains Mono", monospace;
-}
-
-.ps-principal-focused {
-  background: rgba(255, 255, 255, 0.06);
-  border-left: 2px solid #94a3b8;
-}
-
 /* Role filter bar */
 /* Search Navigator */
-.ps-search-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 0;
-}
 
 .ps-search-modes {
   display: flex;
@@ -1181,13 +1139,32 @@
   gap: 6px;
 }
 
+/* Search field wraps the input so a leading 🔍 glyph can sit inside it. */
+.ps-search-field {
+  position: relative;
+  display: flex;
+  flex: 1 1 160px;
+  min-width: 130px;
+}
+
+.ps-search-field-ic {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: #64748b;
+  pointer-events: none;
+}
+
 .ps-search-input {
-  flex: 1;
-  max-width: 240px;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 5px;
-  padding: 4px 8px;
+  padding: 4px 8px 4px 26px;
   color: #e2e8f0;
   font-size: 11px;
   outline: none;
@@ -1198,6 +1175,8 @@
 }
 
 .ps-search-sort {
+  flex: 0 0 auto;
+  max-width: 110px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 5px;
@@ -1248,19 +1227,45 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 5px;
   border: 1px solid rgba(148, 163, 184, 0.08);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+/* The entity info truncates so the pinned "↵ select" hint is always inside the
+   box; the hint never shrinks and stays on the right. */
+.ps-search-preview-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.ps-search-preview:hover,
+.ps-search-preview:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(148, 163, 184, 0.25);
+  outline: none;
 }
 
 .ps-search-preview-name {
   font-size: 11px;
   font-weight: 600;
   color: #e2e8f0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ps-search-preview-type {
+  flex-shrink: 0;
   font-size: 9px;
   font-weight: 600;
   color: #64748b;
@@ -1269,6 +1274,7 @@
 }
 
 .ps-search-preview-addr {
+  flex-shrink: 0;
   font-size: 10px;
   color: #475569;
   font-family: "JetBrains Mono", monospace;
@@ -1283,6 +1289,19 @@
 .ps-search-preview-meta {
   font-size: 10px;
   color: #64748b;
+}
+
+.ps-search-preview-hint {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 600;
+  color: #94a3b8;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(148, 163, 184, 0.08);
+  white-space: nowrap;
 }
 
 .ps-role-bar {
@@ -1386,27 +1405,34 @@
   margin: 10px 0 0;
 }
 
+/* Zero the global forms.css button chrome: the teal drop shadow reads as a
+   glow bubble under each tab, and its 12px radius + hover translateY fight the
+   flat underlined-tab look (same leak the .ps-selection-clear comment names). */
 .ps-machine-tab {
   flex: 1;
   min-width: 0;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
   color: #64748b;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 8px 3px 6px;
+  letter-spacing: 0.01em;
+  padding: 8px 2px 6px;
   cursor: pointer;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   transition: color 120ms ease, border-color 120ms ease;
 }
 
 .ps-machine-tab:hover {
   color: #94a3b8;
+  box-shadow: none;
+  transform: none;
 }
 
 .ps-machine-tab.active {
@@ -1414,19 +1440,21 @@
   border-bottom-color: #e2e8f0;
 }
 
+/* Count as a compact superscript-style number, not a filled pill: at five
+   tabs a padded pill both overflows the ~300px bar and butts against the next
+   tab's label ("25Inflows"). An unfilled raised digit keeps the glance-count
+   while giving each tab real whitespace on both sides. */
 .ps-machine-tab-count {
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
   color: #475569;
-  background: rgba(148, 163, 184, 0.1);
-  padding: 1px 5px;
-  border-radius: 8px;
+  line-height: 1;
+  vertical-align: super;
   font-variant-numeric: tabular-nums;
 }
 
 .ps-machine-tab.active .ps-machine-tab-count {
   color: #94a3b8;
-  background: rgba(148, 163, 184, 0.15);
 }
 
 .ps-machine-name {
@@ -1466,6 +1494,122 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* Governs tab rows: one shared shape for both sections ("Can Call" and
+   "Appears in governance path for"). Collapsed head shows name (+ proxy/impl
+   tag), short address, and USD value when known; the whole head is a click
+   target that focuses the contract on the canvas. Can Call rows also carry a
+   right-aligned ghost "N fns" button that expands the function chip list below;
+   reachability-only path rows have no function data, so no button. */
+.ps-governs {
+  display: flex;
+  flex-direction: column;
+}
+
+.ps-governs-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 3px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.06);
+}
+
+.ps-governs-row:first-child {
+  border-top: none;
+}
+
+.ps-governs-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.ps-governs-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Row typography matches the Control tab (.ps-port-name 12px / 11px body /
+   10px mono subs) so the Governs tab reads at the same size as the others. */
+.ps-governs-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5e1;
+  flex-shrink: 0;
+}
+
+.ps-governs-head:hover .ps-governs-name {
+  color: #e2e8f0;
+}
+
+.ps-governs-tag {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.ps-governs-addr {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10px;
+  color: #475569;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.ps-governs-value {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #f59e0b;
+}
+
+/* Ghost expand button — neutral-gray like .ps-selection-clear; zero the global
+   forms.css button chrome (teal gradient + drop shadow + hover lift). */
+.ps-governs-expand {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  padding: 0 2px;
+  margin: 0;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.ps-governs-expand:hover {
+  color: #94a3b8;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.ps-governs-caret {
+  font-size: 9px;
+}
+
+/* The expanded function chips inherit the accordion's compact 9px sizing
+   (.ps-ctrl-fnchip is shared with the canvas group headers, which need it
+   small). In the sidebar card, size them like the Control tab's body text
+   so the dropdown is actually readable. Scoped so the canvas is untouched. */
+.ps-governs .ps-ctrl-fnchip {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.ps-governs .ps-ctrl-fns {
+  gap: 5px;
+  padding: 2px 6px 4px;
 }
 
 .ps-lane {
@@ -1902,13 +2046,6 @@
     right: 16px;
   }
 
-  .ps-surface-search-overlay {
-    right: 16px;
-    top: auto;
-    bottom: 60px;
-    max-width: calc(100vw - 32px);
-  }
-
   .ps-surface-header,
   .ps-machine-header {
     flex-direction: column;
@@ -1993,9 +2130,11 @@
     0 0 0 1px var(--principal-color, #94a3b8);
 }
 
+/* Browsed (not committed) group box: dotted gold, matching ps-node-focused —
+   solid gold is reserved for the committed selection. */
 .ps-group-focused {
   border-color: #d4a017 !important;
-  border-style: solid;
+  border-style: dotted;
 }
 
 /* Header band: an absolutely-positioned strip at the top of the group,
@@ -2127,6 +2266,17 @@
   box-shadow: inset 0 0 0 1px var(--ctrl-accent, #6a9e94);
 }
 
+/* Browsed controller (search ▲/▼ preview — no commit): gold marker matching
+   the node-level browse ring, distinct from --selected so a browsed row and
+   the committed one never read as the same state. */
+.ps-ctrl-row--focused {
+  background-color: rgba(212, 160, 23, 0.12);
+  /* Browse marker, not selection. CSS dotted at 1px reads as solid, so the
+     dashes are an inline-SVG rect with an explicit dash/gap (4 on, 7 off);
+     rx matches the row's 5px radius. Background layer → no layout shift. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='none' rx='5' stroke='%23d4a017' stroke-width='2' stroke-dasharray='4 7'/%3E%3C/svg%3E");
+}
+
 /* min-height (not a fixed height) so the row grows when the full capability
    summary wraps to more than one line — we never truncate the tags. */
 .ps-ctrl-head {
@@ -2142,13 +2292,6 @@
 
 .ps-ctrl-head:hover {
   background: rgba(255, 255, 255, 0.04);
-}
-
-.ps-ctrl-caret {
-  color: #64748b;
-  font-size: 9px;
-  width: 9px;
-  flex-shrink: 0;
 }
 
 .ps-ctrl-tag {
@@ -2208,38 +2351,9 @@
   flex-shrink: 0;
 }
 
-/* Expanded detail: rendered in-flow below the row head. It pushes the rows
-   below it down and grows the reserved header band — the layout re-packs the
-   canvas to make room, so the group extends rather than overlapping cards.
-   Its height is measured (GroupNode) and fed back so the reservation is
-   exact. */
-.ps-ctrl-detail {
-  padding: 4px 10px 9px 26px;
-  background: #10141b;
-  border-top: 1px solid rgba(148, 163, 184, 0.16);
-  pointer-events: auto;
-}
-
-.ps-ctrl-detail-line {
-  display: flex;
-  gap: 10px;
-  padding: 3px 0;
-  align-items: baseline;
-  border-top: 1px solid rgba(148, 163, 184, 0.06);
-}
-
-.ps-ctrl-detail-line:first-child {
-  border-top: none;
-}
-
-.ps-ctrl-cname {
-  font-size: 11px;
-  font-weight: 600;
-  color: #cbd5e1;
-  min-width: 150px;
-  flex-shrink: 0;
-}
-
+/* Shared with the sidebar GovernsTab's expandable function lists (see the
+   .ps-governs overrides above). The canvas Controllers accordion no longer
+   renders these directly. */
 .ps-ctrl-fns {
   display: flex;
   flex-wrap: wrap;

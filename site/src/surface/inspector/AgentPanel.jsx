@@ -54,7 +54,16 @@ function makeMarkdownComponents(onFocusAddress) {
   };
 }
 
-export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusAddress }) {
+// Friendly type word for a principal selection's header. Falls back to
+// "Principal" for anything without a dedicated word (proxy_admin, unknown, …).
+function principalTypeWord(type) {
+  if (type === "safe") return "Safe";
+  if (type === "timelock") return "Timelock";
+  if (type === "eoa") return "EOA";
+  return "Principal";
+}
+
+export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, onHighlight, onFocusAddress }) {
   // Messages are flat for the LLM (role/content), but the UI also
   // interleaves tool-call cards. Each "turn" is { role, content, toolCalls }
   // where toolCalls is an ordered list of { id, name, args, result?, error? }.
@@ -72,6 +81,25 @@ export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusA
   // scrolled up to read history, leave their position alone — otherwise
   // every streamed token yanks them back down.
   const stickToBottomRef = useRef(true);
+
+  // The selection the chat asks about. A principal selection (safe/timelock/
+  // EOA) carries no `machine`, so key off whichever facet is selected — the
+  // backend chat accepts either kind of address. Header + payload both derive
+  // from this so the LLM's context matches what the sidebar shows.
+  const selectedAddress = selectedPrincipal?.address || selectedMachine?.address || null;
+  let contextName = companyName;
+  let contextMeta = null;
+  if (selectedPrincipal) {
+    contextName = principalTypeWord(selectedPrincipal.type);
+    const short = selectedPrincipal.address ? `${selectedPrincipal.address.slice(0, 8)}…` : "";
+    const threshold = selectedPrincipal.details?.threshold;
+    const owners = selectedPrincipal.details?.owners?.length;
+    const thr = threshold && owners ? ` (${threshold}/${owners})` : threshold ? ` (${threshold})` : "";
+    contextMeta = `${short}${thr}`.trim() || null;
+  } else if (selectedMachine) {
+    contextName = selectedMachine.name || companyName;
+    contextMeta = selectedMachine.address ? `${selectedMachine.address.slice(0, 8)}…` : null;
+  }
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -103,11 +131,16 @@ export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusA
     if (abortRef.current) abortRef.current.abort();
   }
 
-  // Reset highlights when the panel switches contracts so the previous
-  // answer's mentions don't linger on the canvas.
+  // Reset highlights when the selected entity changes so the previous answer's
+  // mentions don't linger on the canvas. Keyed on the selected ADDRESS (machine
+  // or principal), not selectedMachine alone — a principal selection has no
+  // machine, so the old key never fired for safe→safe transitions. The parent
+  // also clears agent highlights on every committed selection (so the reset
+  // still happens while this panel is unmounted); this covers changes that land
+  // while the tab is open.
   useEffect(() => {
     if (onHighlight) onHighlight(new Set());
-  }, [selectedMachine?.address, onHighlight]);
+  }, [selectedAddress, onHighlight]);
 
   // Cancel any in-flight request when the panel unmounts.
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -157,7 +190,7 @@ export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusA
         {
           company: companyName,
           message: trimmed,
-          selected_address: selectedMachine?.address || null,
+          selected_address: selectedAddress,
           selected_chain: selectedMachine?.chain || null,
           history: llmHistory,
         },
@@ -236,9 +269,9 @@ export function AgentPanel({ companyName, selectedMachine, onHighlight, onFocusA
       <div className="agent-context">
         <span className="agent-context-label">Asking about</span>
         <span className="agent-context-value">
-          {selectedMachine?.name || companyName}
-          {selectedMachine && (
-            <span className="agent-context-meta"> · {selectedMachine.address?.slice(0, 8)}…</span>
+          {contextName}
+          {contextMeta && (
+            <span className="agent-context-meta"> · {contextMeta}</span>
           )}
         </span>
       </div>

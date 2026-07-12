@@ -85,6 +85,11 @@ async function goToSurface(page) {
   await page.goto("/company/xgtest/surface");
   await page.waitForSelector(".ps-surface", { timeout: 10000 });
   await page.waitForSelector(".react-flow__node-group", { timeout: 15000 });
+  // This 4-group fixture packs into the top-left, where the floating filter
+  // panel legitimately sits. This spec tests stub geometry/highlighting, not the
+  // panel, so make the panel click-transparent rather than pan around it (a real
+  // large graph wouldn't fully hide a node under the panel).
+  await page.addStyleTag({ content: ".ps-filter-overlay { pointer-events: none; }" });
 }
 
 const OUT_STUB = `.react-flow__edge[data-id="stub-out-${ALPHA}"]`; // Alpha is the source

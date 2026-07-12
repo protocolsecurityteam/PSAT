@@ -2,15 +2,18 @@ import { useEffect, useState } from "react";
 
 import { api } from "../../api/client.js";
 import { UpgradesPanel } from "../inspector/UpgradesPanel.jsx";
-import { shortAddr } from "../format.js";
+import { principalLabel, shortAddr } from "../format.js";
 
-// Sidebar Upgrades tab. Two states:
-//   - No machine selected: list proxies in this protocol with upgrade counts.
+// Sidebar Upgrades tab. States:
+//   - Principal selected (safe/timelock/EOA): upgrades are per-contract, so a
+//     principal can't have a timeline — show an explicit hint pointing at its
+//     contracts instead of silently falling back to the global list.
+//   - No selection: list proxies in this protocol with upgrade counts.
 //     Click a row → focus that proxy on canvas (parent handles selection).
 //   - Machine selected (proxy): lazy-fetch the analysis blob for that contract
 //     (the per-contract upgrade_history isn't included in /api/company/{name},
 //     so we go via /api/analyses/{job_id}) and render the UpgradesPanel.
-export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect, cache, onCache }) {
+export function UpgradesSidebarPanel({ machine, principal, companyName, machines, onSelect, cache, onCache }) {
   const [history, setHistory] = useState(null);
   const [deps, setDeps] = useState({});
   const [loading, setLoading] = useState(false);
@@ -70,6 +73,17 @@ export function UpgradesSidebarPanel({ machine, companyName, machines, onSelect,
     // effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine?.job_id, machine?.is_proxy]);
+
+  if (!machine && principal) {
+    const who = principalLabel(principal.label, principal.type, principal.address);
+    return (
+      <section className="ps-principal-section">
+        <div className="ps-inspector-empty">
+          {who} selected — choose a contract to see its upgrade timeline.
+        </div>
+      </section>
+    );
+  }
 
   if (!machine) {
     const proxies = (machines || []).filter((m) => m.is_proxy);

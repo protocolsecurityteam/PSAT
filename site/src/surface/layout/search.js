@@ -1,5 +1,8 @@
 // Filter + sort the machines/principals list for SearchNavigator. Pure.
 
+import { principalLabel } from "../format.js";
+import { ROLE_META } from "../meta.js";
+
 export function buildSearchResults(machines, principals, mode, sortKey, query) {
   let items = [];
 
@@ -18,16 +21,13 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
       items.push({
         kind: "principal",
         address: p.address,
-        name: p.label || "",
+        name: principalLabel(p.label, p.type, p.address),
         type: p.type,
         value: totalValue,
         signers,
+        ownersCount: p.details?.owners?.length || 0,
         delay,
         functions: controlled.length,
-        controlledMachines,
-        // Select the first controlled contract when navigating to this principal
-        machine: controlledMachines[0] || null,
-        principal: p,
       });
     }
     // Timelock contracts (control-graph type=timelock) aren't principals, but
@@ -48,30 +48,28 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
           type: "timelock",
           value: m.total_usd || 0,
           signers: 0,
+          ownersCount: 0,
           delay: m.timelockDelay || 0,
           functions: m.totalFunctions || 0,
-          machine: m,
-          principal: null,
         });
       }
     }
   } else {
-    // Show contracts
+    // Show contracts, badged by their OWN role (the same classification the
+    // canvas node and entity card use) — not the type of whatever principal
+    // controls them, which read as a meaningless "unknown" whenever no owning
+    // principal happened to be in the visible set.
     for (const m of machines) {
-      const ownerPrincipal = principals.find((p) =>
-        (p.controls || []).some((a) => a.toLowerCase() === m.address?.toLowerCase())
-      );
       items.push({
         kind: "contract",
         address: m.address,
         name: m.name || "",
-        type: ownerPrincipal?.type || "unknown",
+        type: (ROLE_META[m.role] || ROLE_META.utility).singular,
         value: m.total_usd || 0,
-        signers: ownerPrincipal?.details?.threshold || 0,
+        signers: 0,
+        ownersCount: 0,
         delay: 0,
         functions: m.totalFunctions || 0,
-        machine: m,
-        principal: ownerPrincipal,
       });
     }
     if (mode === "funds") items = items.filter((i) => i.value > 0);

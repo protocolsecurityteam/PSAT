@@ -66,16 +66,23 @@ describe("FunctionPort", () => {
     expect(getByText("NONE")).toBeInTheDocument();
   });
 
-  it("calls onNavigate with the caller's {type,address,...} when a caller button is clicked", () => {
+  it("previews the caller on a button-body click and commits its {type,address,...} only via the arrow", () => {
     const onNavigate = vi.fn();
+    const onPreview = vi.fn();
     const principals = [
       caller({ address: "0xaaa", resolvedType: "safe", name: "Safe", sub: "2/3", label: "Treasury" }),
       caller({ address: "0xbbb", resolvedType: "timelock", name: "Timelock", sub: "2d" }),
     ];
     const { container } = render(
-      <FunctionPort fnView={fnViewWith(principals)} onSelect={vi.fn()} onNavigate={onNavigate} orientation="top" />,
+      <FunctionPort fnView={fnViewWith(principals)} onSelect={vi.fn()} onNavigate={onNavigate} onPreview={onPreview} orientation="top" />,
     );
-    fireEvent.click(container.querySelectorAll(".ps-caller-btn")[1]);
+    const btn = container.querySelectorAll(".ps-caller-btn")[1];
+    // Body click = peek only.
+    fireEvent.click(btn);
+    expect(onPreview).toHaveBeenCalledWith("0xbbb");
+    expect(onNavigate).not.toHaveBeenCalled();
+    // The trailing arrow is the commit affordance.
+    fireEvent.click(btn.querySelector(".ps-goto-arrow"));
     expect(onNavigate).toHaveBeenCalledTimes(1);
     expect(onNavigate).toHaveBeenCalledWith(
       expect.objectContaining({ type: "timelock", address: "0xbbb" }),

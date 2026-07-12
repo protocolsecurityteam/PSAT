@@ -1,6 +1,6 @@
 import { FunctionPort } from "./FunctionPort.jsx";
 
-export function LaneColumn({ title, laneKey, items, onSelect, onNavigate, highlightedFunctionKey }) {
+export function LaneColumn({ title, laneKey, items, onSelect, onNavigate, onPreview, highlightedFunctionKey }) {
   return (
     <section className={`ps-lane ps-lane-${laneKey}`}>
       <div className="ps-lane-header">
@@ -18,6 +18,7 @@ export function LaneColumn({ title, laneKey, items, onSelect, onNavigate, highli
               orientation={laneKey}
               onSelect={onSelect}
               onNavigate={onNavigate}
+              onPreview={onPreview}
               highlighted={fnView.key === highlightedFunctionKey}
             />
           ))

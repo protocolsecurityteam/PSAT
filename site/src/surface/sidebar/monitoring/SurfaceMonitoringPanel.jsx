@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { api } from "../../../api/client.js";
-import { shortAddr } from "../../format.js";
+import { principalLabel, shortAddr } from "../../format.js";
 import { AlertsTable } from "./AlertsTable.jsx";
 import { FocusedContractAlerts } from "./FocusedContractAlerts.jsx";
 import {
@@ -17,7 +17,7 @@ import { MinimizedAlertEditors } from "./MinimizedAlertEditors.jsx";
 import { MonitorAlertEditor } from "./MonitorAlertEditor.jsx";
 import { MonitorAlertFilters } from "./MonitorAlertFilters.jsx";
 
-export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine }) {
+export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine, selectedPrincipal }) {
   const protocolId = companyData?.protocol_id;
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
@@ -82,6 +82,20 @@ export function SurfaceMonitoringPanel({ companyData, machines, selectedMachine 
     return (
       <section className="ps-principal-section">
         <div className="ps-inspector-empty">No protocol monitoring id is available.</div>
+      </section>
+    );
+  }
+
+  // Alerts attach to contracts, not principals. A principal selection carries
+  // no machine, so rather than silently showing the protocol-wide list as if
+  // nothing were selected, point the user at its contracts.
+  if (!selectedMachine && selectedPrincipal) {
+    const who = principalLabel(selectedPrincipal.label, selectedPrincipal.type, selectedPrincipal.address);
+    return (
+      <section className="ps-principal-section">
+        <div className="ps-inspector-empty">
+          {who} selected — choose a contract to see its alerts.
+        </div>
       </section>
     );
   }

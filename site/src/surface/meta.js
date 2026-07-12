@@ -133,52 +133,17 @@ export const MACHINE_TABS = [
   { key: "balances", label: "Balances" },
 ];
 
-// Pretty event-type label for the activity section. Falls back to the
-// raw underscore-separated form if we get an event_type the watcher
-// emits but the UI hasn't taught itself about yet.
-export const EVENT_LABELS = {
-  signer_added: "Signer added",
-  signer_removed: "Signer removed",
-  threshold_changed: "Threshold changed",
-  safe_tx_executed: "Tx executed",
-  safe_tx_failed: "Tx failed",
-  safe_module_executed: "Module call",
-  safe_module_failed: "Module call failed",
-  timelock_scheduled: "Queued",
-  timelock_executed: "Executed",
-  delay_changed: "Delay changed",
-  ownership_transferred: "Owner transferred",
-  paused: "Paused",
-  unpaused: "Unpaused",
-  role_granted: "Role granted",
-  role_revoked: "Role revoked",
-};
-
-export const EVENT_ACCENTS = {
-  signer_added: "#3b82f6",
-  signer_removed: "#3b82f6",
-  threshold_changed: "#f59e0b",
-  safe_tx_executed: "#22c55e",
-  safe_tx_failed: "#ef4444",
-  safe_module_executed: "#22c55e",
-  safe_module_failed: "#ef4444",
-  timelock_scheduled: "#3b82f6",
-  timelock_executed: "#f59e0b",
-  delay_changed: "#f59e0b",
-  ownership_transferred: "#ef4444",
-  paused: "#ef4444",
-  unpaused: "#ef4444",
-  role_granted: "#f59e0b",
-  role_revoked: "#f59e0b",
-};
-
+// `label` is the plural category name (Roles filter chips, with counts);
+// `singular` names one entity (canvas node + card badges). Kept explicit rather
+// than derived so "Factories"→"Factory" / "Utilities"→"Utility" are correct
+// (a naive trailing-`s` strip yields "Factorie"/"Utilitie").
 export const ROLE_META = {
-  value_handler: { label: "Value Handlers", color: "#6a9e94", defaultOn: true },
-  token:         { label: "Tokens",         color: "#6a8a9e", defaultOn: true },
-  governance:    { label: "Governance",     color: "#8a6a9e", defaultOn: true },
-  bridge:        { label: "Bridges",        color: "#9e8a6a", defaultOn: true },
-  factory:       { label: "Factories",      color: "#6a9e8a", defaultOn: true },
-  utility:       { label: "Utilities",      color: "#7a7a7a", defaultOn: true },
+  value_handler: { label: "Value Handlers", singular: "Value Handler", color: "#6a9e94", defaultOn: true },
+  token:         { label: "Tokens",         singular: "Token",         color: "#6a8a9e", defaultOn: true },
+  governance:    { label: "Governance",     singular: "Governance",    color: "#8a6a9e", defaultOn: true },
+  bridge:        { label: "Bridges",        singular: "Bridge",        color: "#9e8a6a", defaultOn: true },
+  factory:       { label: "Factories",      singular: "Factory",       color: "#6a9e8a", defaultOn: true },
+  utility:       { label: "Utilities",      singular: "Utility",       color: "#7a7a7a", defaultOn: true },
 };
 export const ALL_ROLES = Object.keys(ROLE_META);
 
@@ -190,7 +155,8 @@ export const PRINCIPAL_COLORS = {
 };
 
 export const SEARCH_MODES = [
-  { key: "all", icon: "⊕", label: "All", accent: "#94a3b8" },
+  // Contracts-only — NOT a superset of the Safes/EOAs/Timelocks modes.
+  { key: "contracts", icon: "📄", label: "Contracts", accent: "#94a3b8" },
   { key: "safe", icon: "🔒", label: "Safes", accent: "#6a9e94" },
   { key: "eoa", icon: "👤", label: "EOAs", accent: "#a09870" },
   { key: "timelock", icon: "⏳", label: "Timelocks", accent: "#9a8a6e" },

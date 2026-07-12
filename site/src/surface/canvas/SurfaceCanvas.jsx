@@ -8,6 +8,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 
+import { principalBadge } from "../format.js";
 import { elkLayout } from "../layout/elkLayout.js";
 import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
@@ -27,7 +28,7 @@ const edgeTypes = { channeled: ChanneledStepEdge };
 // the edges represent any directed relationship (controls / calls /
 // sends value / owns / proxies-to); the chip text spells out which
 // specifically.
-function SelectionLegend() {
+function SelectionLegend({ onClear }) {
   return (
     <div className="ps-selection-legend">
       <div className="ps-selection-legend-row">
@@ -38,6 +39,11 @@ function SelectionLegend() {
         <span className="ps-selection-legend-swatch ps-selection-legend-swatch--in" />
         <span>this contract acts on selected</span>
       </div>
+      {/* Explicit deselect — the pane-click clear exists but is invisible;
+          this makes it discoverable and teaches the Esc shortcut. */}
+      <button className="ps-selection-clear" onClick={onClear} title="Clear selection (Esc)">
+        <kbd>esc</kbd> deselect
+      </button>
     </div>
   );
 }
@@ -46,50 +52,43 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
-  // Which controller row (if any) is expanded, and the measured header-band
-  // height per (group, open-row) state (keyed "groupId:idx" / "groupId:c").
-  // Both feed elkLayout so the open row's group grows its header band and ELK
-  // re-packs the canvas to make room — the group extends rather than
-  // overlapping cards/neighbours. GroupNode reports the real band height via
-  // onMeasureBand; we only re-store (and thus re-layout) when it actually
-  // changes, so it converges.
-  const [expanded, setExpanded] = useState(null);
+  // Measured header-band height per group (keyed by group id). It feeds
+  // elkLayout so each group reserves exactly the space its colored bar +
+  // Controllers accordion render, and ELK packs the canvas to fit — a row
+  // whose capability summary wraps to several lines grows the band rather than
+  // clipping. GroupNode reports the real band height via onMeasureBand; we only
+  // re-store (and thus re-layout) when it actually changes, so it converges.
   const [bandHeights, setBandHeights] = useState({});
 
   // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
-    elkLayout(machines, fundFlows, principals, expanded, bandHeights).then(({ nodes: n, edges: e }) => {
+    elkLayout(machines, fundFlows, principals, bandHeights).then(({ nodes: n, edges: e }) => {
       if (!cancelled) {
         setInitNodes(n);
         setInitEdges(e);
       }
     });
     return () => { cancelled = true; };
-  }, [machines, fundFlows, principals, expanded, bandHeights]);
+  }, [machines, fundFlows, principals, bandHeights]);
 
-  const toggleController = useCallback((groupId, idx) => {
-    setExpanded((cur) => (cur && cur.groupId === groupId && cur.idx === idx ? null : { groupId, idx }));
-  }, []);
-
-  const measureBand = useCallback((groupId, idx, height) => {
+  const measureBand = useCallback((groupId, height) => {
     setBandHeights((cur) => {
-      const key = `${groupId}:${idx ?? "c"}`;
-      if (Math.abs((cur[key] || 0) - height) <= 1) return cur;
-      return { ...cur, [key]: height };
+      if (Math.abs((cur[groupId] || 0) - height) <= 1) return cur;
+      return { ...cur, [groupId]: height };
     });
   }, []);
 
   // Clicking a controller row selects that principal so the existing logic
-  // highlights the contracts it governs (dims everything else + chips them) and
-  // opens its sidebar. Looks the full principal up from the list so the sidebar
-  // gets every field. focus:false keeps the camera put — selecting the primary
-  // would otherwise pan/zoom to its (large) group node, which the user reads as
-  // an unwanted zoom-in; we only want the highlight.
+  // highlights the contracts it governs (dims everything else + chips them),
+  // opens its sidebar, and pans the camera to its aggregation — FocusOnNode
+  // fits the principal's own group, or the group(s) holding its touch set
+  // when it owns no node. Looks the full principal up from the list so the
+  // sidebar gets every field.
   const selectController = useCallback((addr) => {
     const lc = addr?.toLowerCase();
     const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
-    if (p && onSelectPrincipal) onSelectPrincipal(p, { focus: false });
+    if (p && onSelectPrincipal) onSelectPrincipal(p);
   }, [principals, onSelectPrincipal]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -97,7 +96,12 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
 
   useEffect(() => {
     if (!initNodes.length) return;
-    const sel = selectedAddress?.toLowerCase();
+    const selLc = selectedAddress?.toLowerCase();
+    // Relatedness anchor: the COMMITTED selection only. A browse preview
+    // (search ▲/▼, contract pager) pans the camera and paints the gold
+    // focused ring — it never re-anchors the dim/chips, so the selected
+    // view stays put until the user commits a different entity.
+    const sel = selLc;
     // Find all nodes connected to the selected node AND, in the same
     // pass, the per-contract chip data. Owner-grouping moves the
     // principal→contract relationship from an edge into the
@@ -227,18 +231,23 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         if (nid === sel && pid) connectedNodes.add(pid);
       }
 
-      // Co-controller selection: the selected principal may hold authority on
-      // contracts it isn't the primary owner of (principal.co_controls). On
-      // select we light up those contracts — and their containing groups, so a
-      // highlighted child isn't dimmed along with its box — and chip them with
-      // what the controller can do. This is the same dim+chip highlight a
-      // primary gets for its own children. We deliberately draw NO edges: the
-      // cross-group dashed lines read as the fanout spaghetti the owner-
-      // grouping removed, and the highlight alone conveys the reach.
-      const coControls = Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : [];
-      if (coControls.length) {
+      // Controller reach: the selected principal may hold authority on
+      // contracts outside its own group — co_controls always, and plain
+      // controls when it owns no group box (a node-less safe/EOA whose owned
+      // contracts live under other primaries). Light those contracts — and
+      // their containing groups, so a highlighted child isn't dimmed along
+      // with its box — and chip them with what the controller can do. This is
+      // the same dim+chip highlight a primary gets for its own children. We
+      // deliberately draw NO edges: the cross-group dashed lines read as the
+      // fanout spaghetti the owner-grouping removed, and the highlight alone
+      // conveys the reach.
+      const reach = [
+        ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
+        ...(Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : []),
+      ];
+      if (reach.length) {
         const nodeByAddr = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n]));
-        for (const c of coControls) {
+        for (const c of reach) {
           const t = c?.toLowerCase();
           const tn = t && nodeByAddr.get(t);
           if (!tn) continue;
@@ -285,12 +294,95 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     const hiActive = highlightedAddresses && highlightedAddresses.size > 0;
 
     const foc = focusedAddress?.toLowerCase();
+    // Browse marker: gold treatment on the browsed ENTITY only — its group
+    // box or contract card when it owns a node, and its row(s) in the
+    // Controllers accordions otherwise (focusedControllerAddr below). Never
+    // the contracts it controls: that treatment belongs to an actual commit.
+    // Suppressed while it matches the committed selection so the committed
+    // node keeps just the selected ring.
+    const browseLc = foc && foc !== selLc ? foc : null;
+    // Footprint-less fallback: an "authorized caller" principal (plain
+    // `controls`, no `co_controls`) owns no node and appears in no group's
+    // accordion — there is nothing of ITSELF to mark. Fall back to dotting
+    // the contracts it touches (the set FocusOnNode zooms to), each with a
+    // gold chip naming the browsed principal, saying it isn't drawn on the
+    // graph, and listing what it can call here (controls_detail).
+    // Strictly a fallback: any real footprint (node or row) suppresses it,
+    // so a browsed co-controller still marks its row, never its reach.
+    let browseFallback = null;
+    let browseChips = null;
+    if (browseLc) {
+      const hasNode = initNodes.some((n) => n.id?.toLowerCase() === browseLc);
+      const hasRow =
+        !hasNode &&
+        initNodes.some(
+          (n) =>
+            n.type === "group" &&
+            (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc),
+        );
+      if (!hasNode && !hasRow) {
+        const bp = (principals || []).find((p) => p.address?.toLowerCase() === browseLc);
+        const touched = [...(bp?.controls || []), ...(bp?.co_controls || [])]
+          .map((a) => String(a).toLowerCase());
+        if (touched.length) {
+          browseFallback = new Set(touched);
+          browseChips = new Map();
+          const detailByAddr = new Map();
+          for (const d of bp?.controls_detail || []) {
+            if (d?.address) detailByAddr.set(d.address.toLowerCase(), d);
+          }
+          // Identity is the badge only — the search preview card is already
+          // naming the browsed principal (with address) while this chip is
+          // visible, so repeating the address just stretches the line.
+          const who = principalBadge(bp);
+          for (const t of browseFallback) {
+            const d = detailByAddr.get(t);
+            const fns = d?.functions || [];
+            let what;
+            if (fns.length) {
+              // Greedy name budget keeps the chip glanceable: names up to
+              // ~55 chars then "+N more"; if even the first name blows the
+              // budget, degrade to a count. The full list is one commit
+              // (Enter) away in the principal's sidebar card.
+              const names = [];
+              for (const f of fns) {
+                if ([...names, f].join(", ").length > 55) break;
+                names.push(f);
+              }
+              what = names.length
+                ? `calls ${names.join(", ")}${fns.length > names.length ? ` +${fns.length - names.length} more` : ""}`
+                : `calls ${fns.length} function${fns.length === 1 ? "" : "s"}`;
+            } else {
+              what = (d?.capabilities || []).join(", ") || "has authority";
+            }
+            browseChips.set(t, `${who} (not on graph) · ${what}`);
+          }
+        }
+      }
+    }
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
         const inAudit = hiActive && highlightedAddresses.has(nid);
-        const dimmed = hiActive ? !inAudit : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
-        const focused = foc && nid === foc;
+        // The selected node is never dimmed by a highlight overlay — a
+        // selection must always outrank a highlight set (agent highlights are
+        // cleared on selection, but an audit overlay can legitimately coexist,
+        // and the thing the user clicked must stay visible).
+        // Browse-marked nodes are exempt from every dim source — a preview
+        // you can't read is useless — but the dim itself stays anchored on
+        // the committed selection (or the active highlight set). A group
+        // whose accordion lists the browsed principal counts too: that row is
+        // the entity's only canvas footprint when it owns no node of its own.
+        const isFoc = (foc && nid === foc) || (browseFallback != null && browseFallback.has(nid));
+        const hasBrowsedRow =
+          browseLc &&
+          n.type === "group" &&
+          (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc);
+        const dimmed = !isFoc && !hasBrowsedRow &&
+          (hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid)));
+        // Gold dotted ring = "browsing this" only. The committed node keeps
+        // just the selected ring, so the two states read as different colors.
+        const focused = isFoc && nid !== selLc;
         // Merge — don't replace — n.style. Group containers carry
         // ELK-computed width/height in n.style and we'd otherwise blow
         // them away each time selection changes.
@@ -305,9 +397,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           style,
           data: {
             ...n.data,
-            selected: n.id === selectedAddress,
+            selected: nid === selLc,
             focused,
             selectionChip: selectionChips.get(nid) || null,
+            browseChip: browseChips?.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
             // principal AND group nodes both carry .principal. A click on
             // a group's header (the only pointer-events-active region)
@@ -317,18 +410,16 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
             onSelect: n.data.principal
               ? () => onSelectPrincipal && onSelectPrincipal(n.data.principal)
               : () => onSelectMachine(n.data.machine),
-            // Controllers-accordion wiring for group nodes: which row is open
-            // (so GroupNode renders its detail), which controller is currently
-            // selected (so the row reads as active), plus the toggle / select /
-            // measure callbacks that drive expansion, highlighting, and the
-            // grow-on-expand re-layout.
+            // Controllers-accordion wiring for group nodes: which controller is
+            // currently selected (so the row reads as active) or browse-focused,
+            // plus the select / measure callbacks that drive highlighting and
+            // the band-height reservation.
             ...(n.type === "group"
               ? {
-                  expandedIdx: expanded && expanded.groupId === n.id ? expanded.idx : null,
                   selectedControllerAddr: sel || null,
-                  onToggleController: (idx) => toggleController(n.id, idx),
+                  focusedControllerAddr: browseLc,
                   onSelectController: (addr) => selectController(addr),
-                  onMeasureBand: (idx, h) => measureBand(n.id, idx, h),
+                  onMeasureBand: (h) => measureBand(n.id, h),
                 }
               : null),
           },
@@ -372,7 +463,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, expanded, toggleController, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">
@@ -391,10 +482,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       >
         <Background color="#1e293b" gap={24} size={1} />
         <Controls showInteractive={false} />
-        <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} />
+        <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} principals={principals} />
         {selectedAddress && (
           <Panel position="top-center">
-            <SelectionLegend />
+            <SelectionLegend onClear={() => onSelectMachine(null)} />
           </Panel>
         )}
       </ReactFlow>

@@ -14,7 +14,7 @@ export function ContractNode({ data }) {
   const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
   const roleLabel = m.isTimelock
     ? "Timelock"
-    : (ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "");
+    : (ROLE_META[m.role] || ROLE_META.utility).singular;
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
   return (
@@ -23,7 +23,13 @@ export function ContractNode({ data }) {
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >
-      {chip?.out && (
+      {/* Browse-fallback note (gold, above the card): who the browsed
+          off-graph principal is and what it can call here. Takes the --out
+          slot, so the selection's own out-chip yields while it's shown. */}
+      {data.browseChip && (
+        <div className="ps-node-chip ps-node-chip--browse">{data.browseChip}</div>
+      )}
+      {chip?.out && !data.browseChip && (
         <div className="ps-node-chip ps-node-chip--out">{chip.out}</div>
       )}
       {chip?.in && (
@@ -45,21 +51,6 @@ export function ContractNode({ data }) {
       )}
       {m.standards && m.standards.length > 0 && (
         <div className="ps-node-standards">{m.standards.join(" · ")}</div>
-      )}
-      {data.otherCallers && data.otherCallers.length > 0 && (
-        <button
-          type="button"
-          className="ps-node-callers"
-          title={`${data.otherCallers.length} additional authorized caller(s) — click to inspect: ${data.otherCallers
-            .map((c) => `${c.type} ${c.address}`)
-            .join(", ")}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            data.onSelect?.();
-          }}
-        >
-          +{data.otherCallers.length} callers
-        </button>
       )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
       {/* Timelock marker. A timelock contract is owned by a Safe (passthrough),

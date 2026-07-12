@@ -5,21 +5,23 @@ import "@xyflow/react/dist/style.css";
 import { isBytecodeVerifiedAudit } from "./auditCoverage.js";
 import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
-import { listAddressLabels } from "./api/addressLabels.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
-import { formatUsd, isRoleIdAddress } from "./surface/format.js";
+import { isRoleIdAddress } from "./surface/format.js";
 import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
+import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
+import { buildControlAdjacency } from "./surface/layout/governancePath.js";
+import { buildEntityIndex } from "./surface/layout/entities.js";
+import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
-import { ContractMachine } from "./surface/lanes/ContractMachine.jsx";
+import { EntityCard } from "./surface/lanes/EntityCard.jsx";
 import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
 import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
-import { PrincipalDetail } from "./surface/sidebar/PrincipalDetail.jsx";
 import { RoleFilterBar } from "./surface/sidebar/RoleFilterBar.jsx";
 import { SidebarTabs } from "./surface/sidebar/SidebarTabs.jsx";
 import { UpgradesSidebarPanel } from "./surface/sidebar/UpgradesSidebarPanel.jsx";
@@ -60,46 +62,40 @@ export default function ProtocolSurface({
     return {};
   }, [initialFunctions, locallyFetched, companyData, initialData]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
-  const [selectedGuard, setSelectedGuard] = useState(null);
-  const [selectedMachine, setSelectedMachine] = useState(null);
-  const [selectedPrincipal, setSelectedPrincipal] = useState(null);
-  const [radarExampleSelection, setRadarExampleSelection] = useState(null);
-  const [suppressSearchFocus, setSuppressSearchFocus] = useState(() => (
-    !embedded && Boolean(
-      new URLSearchParams(window.location.search).get("score")
-        || new URLSearchParams(window.location.search).get("scoreAxis")
-        || sessionStorage.getItem("psat:surfaceRadarExample"),
-    )
-  ));
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
-  const [searchMode, setSearchMode] = useState("all");
-  const [focusAddress, setFocusAddress] = useState(null);
-  const [focusedAddress, setFocusedAddress] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("focus") || null;
-  });
-  const focusKeyRef = useRef(0);
-  const triggerFocus = useCallback((addr) => {
-    focusKeyRef.current += 1;
-    setFocusAddress({ address: addr, key: focusKeyRef.current });
-    setFocusedAddress(addr || null);
+  const [searchMode, setSearchMode] = useState("contracts");
+  // Single URL writer. Persists a committed selection as ?sel=<addr> — the
+  // address alone determines which card renders, so no view axis is stored.
+  // Also writes the radar deep-link's ?score=1&fn=<sig>. Called imperatively
+  // ONLY from the committing wrappers (select + radar) and the mount restore's
+  // URL normalization — never from a focus preview (search browsing / contract
+  // pager) and never on plain render. Because it fires only after a user commit
+  // (which can only happen after the machines-gated mount restore has run and
+  // read the params), it cannot race the restore; no separate write gate is
+  // needed beyond the per-restore refs below. Legacy ?focus and ?view are
+  // dropped on every write so old-style params don't linger next to ?sel.
+  const syncUrl = useCallback(({ sel = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
-    // Sync focus address to URL
     const url = new URL(window.location.href);
-    if (addr) {
-      url.searchParams.set("focus", addr);
-      url.searchParams.delete("fn");
-      url.searchParams.delete("score");
+    if (sel) {
+      url.searchParams.set("sel", sel);
     } else {
-      url.searchParams.delete("focus");
-      url.searchParams.delete("fn");
+      url.searchParams.delete("sel");
+    }
+    url.searchParams.delete("view");
+    url.searchParams.delete("focus");
+    if (radarSig) {
+      url.searchParams.set("score", "1");
+      if (radarSig.signature) url.searchParams.set("fn", radarSig.signature);
+      else url.searchParams.delete("fn");
+    } else {
       url.searchParams.delete("score");
+      url.searchParams.delete("fn");
     }
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
   const [error, setError] = useState(null);
-  const [headerCollapsed, setHeaderCollapsed] = useState(true);
   const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
 
   // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
@@ -139,21 +135,6 @@ export default function ProtocolSurface({
   // and everything else dims on the canvas.
   const [activeAuditId, setActiveAuditId] = useState(null);
 
-  // Admin-curated address → name map. Fetched once; edits are optimistic
-  // against the local copy and persisted via the admin-gated PUT/DELETE.
-  const [addressLabels, setAddressLabels] = useState(new Map());
-  const refreshAddressLabels = useCallback(() => {
-    listAddressLabels()
-      .then((d) => {
-        const m = new Map();
-        for (const [addr, info] of Object.entries(d?.labels || {})) {
-          m.set(String(addr).toLowerCase(), info.name);
-        }
-        setAddressLabels(m);
-      })
-      .catch(() => { /* labels are best-effort — keep whatever we had */ });
-  }, []);
-  useEffect(() => { refreshAddressLabels(); }, [refreshAddressLabels]);
   useEffect(() => {
     if (!companyName) return undefined;
     if (initialCoverage) {
@@ -176,30 +157,22 @@ export default function ProtocolSurface({
   // Plain state so AgentPanel can replace it via setHighlightedAddresses.
   const [agentHighlights, setAgentHighlights] = useState(null);
 
-  // Highlighted addresses on the canvas: union of agent highlights (Agent
-  // tab) with the audit-coverage set (Audits tab). Either source can drive
-  // the green ring. Lowercased Set so the canvas comparison is O(1); null
-  // when neither source is active so the canvas falls back to selection-
-  // dimming.
-  const highlightedAddresses = useMemo(() => {
-    const fromAudit = (() => {
-      if (activeAuditId == null || !coverageData) return null;
-      const out = new Set();
-      for (const entry of coverageData.coverage || []) {
-        const addr = (entry.address || "").toLowerCase();
-        if (!addr) continue;
-        if ((entry.audits || []).some((a) => a.audit_id === activeAuditId && isBytecodeVerifiedAudit(a))) {
-          out.add(addr);
-        }
+  // Audit-coverage highlight set (Audits tab): the contracts a picked audit
+  // bytecode-verifiably covers. Merged with agent + selection highlights into
+  // highlightedAddresses below (defined after the selection/visibility derives
+  // it also depends on).
+  const auditHighlights = useMemo(() => {
+    if (activeAuditId == null || !coverageData) return null;
+    const out = new Set();
+    for (const entry of coverageData.coverage || []) {
+      const addr = (entry.address || "").toLowerCase();
+      if (!addr) continue;
+      if ((entry.audits || []).some((a) => a.audit_id === activeAuditId && isBytecodeVerifiedAudit(a))) {
+        out.add(addr);
       }
-      return out;
-    })();
-    if (!fromAudit && !agentHighlights) return null;
-    const merged = new Set();
-    if (fromAudit) for (const a of fromAudit) merged.add(a);
-    if (agentHighlights) for (const a of agentHighlights) merged.add(a);
-    return merged.size ? merged : null;
-  }, [activeAuditId, coverageData, agentHighlights]);
+    }
+    return out.size ? out : null;
+  }, [activeAuditId, coverageData]);
 
   const setHighlightedAddresses = setAgentHighlights;
   const [enabledRoles, setEnabledRoles] = useState(() => {
@@ -213,8 +186,6 @@ export default function ProtocolSurface({
   useEffect(() => {
     if (!companyName) return undefined;
     setError(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
     let cancelled = false;
 
     const haveCompanyData = Boolean(initialData);
@@ -306,25 +277,83 @@ export default function ProtocolSurface({
     [allMachines, enabledRoles]
   );
 
-  // Restore focus from URL on initial data load
-  const restoredFocus = useRef(false);
-  useEffect(() => {
-    if (embedded || restoredFocus.current || !machines.length) return;
-    const params = new URLSearchParams(window.location.search);
-    const urlFocus = params.get("focus");
-    if (params.get("score")) return;
-    if (urlFocus) {
-      restoredFocus.current = true;
-      const machine = machines.find((m) => m.address?.toLowerCase() === urlFocus.toLowerCase());
-      if (machine) {
-        setSelectedMachine(machine);
-        setSelectedPrincipal(null);
-        setSelectedGuard(null);
-        setRadarExampleSelection(null);
-      }
-      triggerFocus(urlFocus);
+  // Authority-OUT index for the contract card's Governs tab: authority address
+  // → the contracts + functions it can call. Built once over ALL machines /
+  // functions (visibility-agnostic, like the entity index) so a role-filtered
+  // target still resolves. Memoized here — never per-render inside the card.
+  const governsIndex = useMemo(
+    () => buildGovernsIndex(allMachines, functionData),
+    [allMachines, functionData]
+  );
+
+  // Control-relation adjacency over fund_flows — the entity card walks it to
+  // build the "governance path for" list of a machine-only authority (one with
+  // no principal.controls to read). Built once, never per-render inside the card.
+  const controlAdjacency = useMemo(
+    () => buildControlAdjacency(companyData?.fund_flows || []),
+    [companyData]
+  );
+
+  // Principal facet by address — lets a dual-facet contract card render its
+  // principal strip + capability tags. Most contracts have no entry (null).
+  const principalsByAddress = useMemo(() => {
+    const map = new Map();
+    for (const p of companyData?.principals || []) {
+      const addr = (p.address || "").toLowerCase();
+      if (addr) map.set(addr, p);
     }
-  }, [embedded, machines, triggerFocus]);
+    return map;
+  }, [companyData]);
+
+  // Address-keyed entity index over ALL machines + ALL principals (no
+  // visibility filtering). Selection state stores addresses only and resolves
+  // entities through this index per render, so denormalized snapshots can
+  // never go stale and role-filtered-off targets still resolve.
+  const entityIndex = useMemo(
+    () => buildEntityIndex(allMachines, companyData?.principals || []),
+    [allMachines, companyData]
+  );
+
+  const {
+    selection,
+    radarSelection,
+    focus,
+    selectedMachine,
+    selectedPrincipal,
+    selectedGuard,
+    focusedAddress,
+    select,
+    guard,
+    radar,
+    focusPreview,
+  } = useSurfaceSelection({ entityIndex, machines, companyName });
+
+  // Restore a persisted selection from the URL on initial data load. Reads
+  // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
+  // A legacy ?view= is parsed and IGNORED — the address alone determines the
+  // card now, which also un-breaks old ?sel=<addr>&view=principal links whose
+  // stored view contradicted the entity's facets. A radar deep-link (?score) is
+  // left to the radar-restore effect below. Runs once, gated on machines so the
+  // entity index can resolve the address; this read happens before any user
+  // commit can fire the URL writer, so the writer never clobbers these params
+  // first.
+  const restoredSelection = useRef(false);
+  useEffect(() => {
+    if (embedded || restoredSelection.current || !machines.length) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("score")) return;
+    const addr = params.get("sel") || params.get("focus");
+    if (!addr) return;
+    restoredSelection.current = true;
+    if (entityIndex.get(addr.toLowerCase())) {
+      select(addr);
+      syncUrl({ sel: addr });
+    } else {
+      // A garbage/off-index address becomes a camera preview, never a
+      // synthesized junk selection card.
+      focusPreview(addr);
+    }
+  }, [embedded, machines, entityIndex, select, focusPreview, syncUrl]);
 
   const handleToggleRole = useCallback((role) => {
     setEnabledRoles((prev) => {
@@ -336,21 +365,43 @@ export default function ProtocolSurface({
   }, []);
 
   const handleSelectMachine = useCallback((machine) => {
-    setSelectedMachine(machine);
-    setSelectedPrincipal(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
-    triggerFocus(machine?.address || null);
-    // Clear any agent-emitted green-ring overlay when selection moves —
-    // otherwise pane clicks (which call this with null) leave the
-    // previous agent-highlighted address visually "focused".
-    if (!machine) setAgentHighlights(null);
-  }, [triggerFocus]);
+    // Any committed selection transition drops the agent-emitted green-ring
+    // overlay — clearing belongs to the transition, not just the deselect, so a
+    // stale highlight set can't outrank the new selection's dimming.
+    setAgentHighlights(null);
+    if (machine) {
+      select(machine.address);
+      syncUrl({ sel: machine.address });
+    } else {
+      // Pane click / deselect — full clear.
+      select(null);
+      syncUrl({});
+    }
+  }, [select, syncUrl]);
 
-  const handleSelectGuard = useCallback((fnView) => {
-    setSelectedGuard(fnView);
-    setRadarExampleSelection(null);
-  }, []);
+  // Escape clears the committed selection — the same full clear a pane click
+  // does, just discoverable from the keyboard. Ignored while a form field has
+  // focus so it never fights the search input's own key handling.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape" || !selection) return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      handleSelectMachine(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selection, handleSelectMachine]);
+
+  const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
   const handleRadarExampleClick = useCallback((example) => {
     const targetAddress = example?.contractAddress?.toLowerCase();
@@ -366,28 +417,16 @@ export default function ProtocolSurface({
       return next;
     });
     setSidebarMode("detail");
-    setSelectedMachine(machine);
-    setSelectedPrincipal(null);
-    setSelectedGuard(fnView || null);
-    setRadarExampleSelection({
-      contractAddress: machine.address,
-      functionKey: fnView?.key || null,
-    });
-    setSuppressSearchFocus(false);
-    triggerFocus(machine.address);
-    const url = new URL(window.location.href);
-    url.searchParams.set("focus", machine.address);
-    url.searchParams.set("score", "1");
-    if (fnView?.signature) url.searchParams.set("fn", fnView.signature);
-    else url.searchParams.delete("fn");
-    window.history.replaceState({}, "", url.toString());
-  }, [allMachines, triggerFocus]);
+    setAgentHighlights(null);
+    radar(machine.address, fnView?.key || null);
+    syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
+  }, [allMachines, radar, syncUrl]);
 
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredExampleSelection.current || !allMachines.length) return;
     const params = new URLSearchParams(window.location.search);
-    const focus = params.get("focus");
+    const focus = params.get("sel") || params.get("focus");
     const fn = params.get("fn");
     let target = null;
     if (focus && params.get("score")) {
@@ -418,16 +457,12 @@ export default function ProtocolSurface({
   // (opens the detail panel with signers / delay / controlled contracts)
   // and focuses it — same behaviour as clicking a single-principal guard
   // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal, opts) => {
+  const handleSelectPrincipal = useCallback((principal) => {
     if (!principal) return;
-    setSelectedPrincipal(principal);
-    setSelectedMachine(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
-    // opts.focus === false selects without moving the camera (controller-row
-    // clicks just want the highlight, not a pan/zoom to the principal's node).
-    if (principal.address && opts?.focus !== false) triggerFocus(principal.address);
-  }, [triggerFocus]);
+    setAgentHighlights(null);
+    select(principal.address);
+    syncUrl({ sel: principal.address });
+  }, [select, syncUrl]);
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
@@ -437,205 +472,119 @@ export default function ProtocolSurface({
     );
   }, [machines, companyData]);
 
-  const navigateToPrincipal = useCallback((target) => {
-    let principal = visiblePrincipals.find((p) => p.address?.toLowerCase() === target.address?.toLowerCase());
-    if (!principal) {
-      principal = {
-        address: target.address,
-        type: target.type,
-        label: target.label || target.type,
-        details: target.details || {},
-        controls: machines
-          .filter((m) => m.owner?.toLowerCase() === target.address?.toLowerCase())
-          .map((m) => m.address),
-      };
+  // Highlighted addresses on the canvas: union of agent highlights (Agent tab)
+  // and the audit-coverage set (Audits tab). Either source drives the green
+  // ring + dim. Lowercased Set for O(1) canvas comparison; null when no source
+  // is active so the canvas falls back to selection dimming. A selected
+  // principal's reach is NOT routed through here — the canvas's own selection
+  // path lights co_controls with the normal relatedness dim + chips, and the
+  // green overlay treatment is reserved for agent/audit sets (owner decision
+  // 2026-07-11).
+  const highlightedAddresses = useMemo(() => {
+    if (!auditHighlights && !agentHighlights) return null;
+    const merged = new Set();
+    if (auditHighlights) for (const a of auditHighlights) merged.add(a);
+    if (agentHighlights) for (const a of agentHighlights) merged.add(a);
+    return merged.size ? merged : null;
+  }, [auditHighlights, agentHighlights]);
+
+  // Role-toggle reconciliation. Toggling a role off removes its contracts (and
+  // any principal whose whole touch set was those contracts) from the visible
+  // set — but the selection still points at the now-hidden address, stranding a
+  // sidebar card for a node that no longer exists. Reconcile ONLY on a roles
+  // change (not on any visibility change) so a deliberate navigate to a
+  // role-filtered-off contract still selects it. Keyed on enabledRoles; machines
+  // /visiblePrincipals are already the post-toggle sets when this runs.
+  const prevRolesRef = useRef(enabledRoles);
+  useEffect(() => {
+    if (prevRolesRef.current === enabledRoles) return;
+    prevRolesRef.current = enabledRoles;
+    const addr = selection?.address;
+    if (!addr) return;
+    const stillVisible =
+      machines.some((m) => m.address?.toLowerCase() === addr) ||
+      visiblePrincipals.some((p) => p.address?.toLowerCase() === addr);
+    if (!stillVisible) {
+      select(null);
+      syncUrl({});
     }
-    setSelectedPrincipal(principal);
-    setSelectedMachine(null);
-    setSelectedGuard(null);
-    setRadarExampleSelection(null);
-    triggerFocus(target.address);
-  }, [machines, visiblePrincipals, triggerFocus]);
+  }, [enabledRoles, machines, visiblePrincipals, selection, select, syncUrl]);
+
+  // Search browse preview. Null (result set changed / emptied) clears the
+  // focus address so a stale gold ring can't outlive the browsing session —
+  // the committed selection is untouched either way. Stable identity:
+  // SearchNavigator's reset effect lists it as a dependency.
+  const handleSearchPreview = useCallback(
+    (item) => focusPreview(item ? item.address : null),
+    [focusPreview],
+  );
 
   const handleNavigate = useCallback((target) => {
-    // Surface the navigation result in the Detail panel.
+    // Surface the navigation result in the Detail panel. The card is chosen from
+    // the target's facets, not the caller's guessed type — a machine-only
+    // authority (e.g. an analyzed timelock the server never emits as a
+    // principal) opens its contract card instead of stranding an empty sidebar.
+    // The full target rides along as `hint`: resolveEntity reads its type to
+    // synthesize a principal card for off-index targets, and its `tab` pre-opens
+    // Governs (the "what does this authority control" question a caller-button
+    // navigate asks) when the target has one.
     setSidebarMode("detail");
-    if (target.type === "contract") {
-      const machine = machines.find((m) => m.address?.toLowerCase() === target.address?.toLowerCase());
-      if (machine) {
-        setSelectedMachine(machine);
-        setSelectedPrincipal(null);
-        setSelectedGuard(null);
-        setRadarExampleSelection(null);
-        triggerFocus(machine.address);
-      }
-    } else {
-      navigateToPrincipal(target);
-    }
-  }, [machines, navigateToPrincipal, triggerFocus]);
-
-  const totals = useMemo(() => {
-    return machines.reduce(
-      (acc, machine) => {
-        acc.contracts += 1;
-        acc.functions += machine.totalFunctions;
-        if (machine.total_usd) { acc.withBalance += 1; acc.totalUsd += machine.total_usd; }
-        return acc;
-      },
-      { contracts: 0, functions: 0, withBalance: 0, totalUsd: 0 }
-    );
-  }, [machines]);
+    setAgentHighlights(null);
+    select(target.address, { hint: { ...target, tab: "governs" } });
+    syncUrl({ sel: target.address });
+  }, [select, syncUrl]);
 
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
-  const radarExampleFlyout = sidebarMode === "detail" && radarExampleSelection && selectedMachine && !selectedPrincipal ? (
+  const radarExampleFlyout = sidebarMode === "detail" && radarSelection && selectedMachine && !selectedPrincipal ? (
     <div className="ps-sidebar-flyout-content">
-      <ContractMachine
+      <EntityCard
         key={`${selectedMachine.address}:radar`}
         machine={selectedMachine}
         onSelectGuard={handleSelectGuard}
         onNavigate={handleNavigate}
-        companyName={companyName}
-        highlightedFunctionKey={radarExampleSelection.functionKey}
-        highlightedContract={!radarExampleSelection.functionKey}
+        onPreview={(addr) => focusPreview(addr)}
+        highlightedFunctionKey={radarSelection.functionKey}
+        highlightedContract={!radarSelection.functionKey}
         onOpenDependencyGraph={setDependencyGraphMachine}
+        governsIndex={governsIndex}
+        controlAdjacency={controlAdjacency}
+        machines={machines}
+        principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
       />
-      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
+      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
     </div>
   ) : null;
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
-      {/* Overview strip (contracts / functions / with-funds) removed by
-          request. The role filter toolbar below occupies this slot now. */}
-      {false && (
-      <div className={`ps-surface-overlay ${headerCollapsed ? "ps-surface-overlay-collapsed" : ""}`}>
-        <button
-          className="ps-surface-overlay-toggle"
-          onClick={() => setHeaderCollapsed(!headerCollapsed)}
-          title={headerCollapsed ? "Expand" : "Minimize"}
-        >
-          {headerCollapsed ? "\u25BC" : "\u25B2"}
-        </button>
-        {!headerCollapsed && (
-          <div className="ps-surface-header">
-            <div>
-              <div className="ps-surface-eyebrow">Protocol Surface</div>
-              <h2 className="ps-surface-title">{companyName}</h2>
-              <p className="ps-surface-copy">
-                Each contract shows control paths, operations, inflows, and outflows. Click any guard badge to inspect access control.
-              </p>
-            </div>
-            <div className="ps-surface-stats">
-              <div className="ps-surface-stat">
-                <span>{totals.contracts}</span>
-                <label>contracts</label>
-              </div>
-              <div className="ps-surface-stat">
-                <span>{totals.functions}</span>
-                <label>functions</label>
-              </div>
-              {totals.withBalance > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{totals.withBalance}</span>
-                  <label>with funds</label>
-                </div>
-              )}
-              {totals.totalUsd > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{formatUsd(totals.totalUsd)}</span>
-                  <label>tracked value</label>
-                </div>
-              )}
-              {companyData?.tvl?.defillama_tvl && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#8b5cf6" }}>{formatUsd(companyData.tvl.defillama_tvl)}</span>
-                  <label>protocol TVL</label>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-        {headerCollapsed && (
-          <div className="ps-surface-header-mini">
-            <span className="ps-surface-eyebrow" style={{ margin: 0 }}>{companyName}</span>
-            <div className="ps-surface-stats">
-              <div className="ps-surface-stat">
-                <span>{totals.contracts}</span>
-                <label>contracts</label>
-              </div>
-              <div className="ps-surface-stat">
-                <span>{totals.functions}</span>
-                <label>functions</label>
-              </div>
-              {totals.withBalance > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{totals.withBalance}</span>
-                  <label>with funds</label>
-                </div>
-              )}
-              {totals.totalUsd > 0 && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#f59e0b" }}>{formatUsd(totals.totalUsd)}</span>
-                  <label>tracked value</label>
-                </div>
-              )}
-              {companyData?.tvl?.defillama_tvl && (
-                <div className="ps-surface-stat">
-                  <span style={{ color: "#8b5cf6" }}>{formatUsd(companyData.tvl.defillama_tvl)}</span>
-                  <label>protocol TVL</label>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-      )}
-
-      {/* Role filter bar — now in the top-left slot where the overview strip used to live */}
-      <div className="ps-surface-toolbar-overlay">
-        <RoleFilterBar machines={allMachines} enabledRoles={enabledRoles} onToggle={handleToggleRole} />
-      </div>
-
-      {/* Search mode pills — top-left slot (where the overview used to be) */}
-      <div className="ps-search-modes-overlay">
-        <SearchModesBar mode={searchMode} setMode={setSearchMode} />
-      </div>
-
-      <div className="ps-surface-search-overlay">
+      {/* Unified filter panel — top-left. Search + sort + browse nav, then the
+          Type filter and Role visibility rows (injected as children), then the
+          browse preview. Replaces the old bottom-left role bar + top-left
+          search-modes + search overlays. */}
+      <div className="ps-filter-overlay">
         <SearchNavigator
-        machines={machines}
-        principals={visiblePrincipals}
-        mode={searchMode}
-        setMode={setSearchMode}
-        onFocus={(item) => {
-          if (suppressSearchFocus || radarExampleSelection) return;
-          if (!item) {
-            setSelectedMachine(null); setSelectedPrincipal(null);
-            setRadarExampleSelection(null);
-            setFocusedAddress(null);
-            const url = new URL(window.location.href);
-            url.searchParams.delete("focus");
-            window.history.replaceState({}, "", url.toString());
-            return;
-          }
-          if (item.kind === "principal" && item.principal) {
-            setSelectedPrincipal(item.principal);
-            setSelectedMachine(item.machine);
-            setSelectedGuard(null);
-            setRadarExampleSelection(null);
-            // Focus on the principal node or its first controlled contract
-            triggerFocus(item.address || item.machine?.address);
-          } else if (item.machine) {
-            setSelectedMachine(item.machine);
-            setSelectedPrincipal(null);
-            setSelectedGuard(null);
-            setRadarExampleSelection(null);
-            triggerFocus(item.machine.address);
-          }
-        }}
-      />
+          machines={machines}
+          principals={visiblePrincipals}
+          mode={searchMode}
+          onPreview={handleSearchPreview}
+          onCommit={(item) => {
+            if (!item) return;
+            setAgentHighlights(null);
+            select(item.address);
+            syncUrl({ sel: item.address });
+          }}
+        >
+          <div className="ps-filter-row">
+            <span className="ps-filter-gutter">Type</span>
+            <SearchModesBar mode={searchMode} setMode={setSearchMode} />
+          </div>
+          <div className="ps-filter-row">
+            <span className="ps-filter-gutter">Roles</span>
+            <RoleFilterBar machines={allMachines} enabledRoles={enabledRoles} onToggle={handleToggleRole} />
+          </div>
+        </SearchNavigator>
       </div>
 
       <div className="ps-layout">
@@ -644,8 +593,8 @@ export default function ProtocolSurface({
             machines={machines}
             fundFlows={companyData?.fund_flows}
             principals={visiblePrincipals}
-            selectedAddress={selectedMachine?.address || selectedPrincipal?.address}
-            focusAddress={focusAddress}
+            selectedAddress={selection?.address}
+            focusAddress={focus}
             focusedAddress={focusedAddress}
             highlightedAddresses={highlightedAddresses}
             onSelectMachine={(m) => {
@@ -657,9 +606,9 @@ export default function ProtocolSurface({
               if (m && sidebarMode !== "detail") setSidebarMode("detail");
               handleSelectMachine(m);
             }}
-            onSelectPrincipal={(p, opts) => {
+            onSelectPrincipal={(p) => {
               if (p && sidebarMode !== "detail") setSidebarMode("detail");
-              handleSelectPrincipal(p, opts);
+              handleSelectPrincipal(p);
             }}
           />
         </ReactFlowProvider>
@@ -680,22 +629,21 @@ export default function ProtocolSurface({
               error={coverageError}
               machines={machines}
               selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
             />
           )}
           {isAdmin && sidebarMode === "monitoring" && (
             <SurfaceMonitoringPanel
               companyData={companyData}
               machines={allMachines}
-              selectedMachine={
-                selectedMachine ||
-                allMachines.find((m) => m.address?.toLowerCase() === focusedAddress?.toLowerCase()) ||
-                null
-              }
+              selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
             />
           )}
           {sidebarMode === "upgrades" && (
             <UpgradesSidebarPanel
               machine={selectedMachine}
+              principal={selectedPrincipal}
               companyName={companyName}
               machines={machines}
               onSelect={handleSelectMachine}
@@ -703,7 +651,12 @@ export default function ProtocolSurface({
               onCache={cacheUpgradeHistory}
             />
           )}
-          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarExampleSelection) && (
+          {/* One universal card for every selection. selectedMachine and
+              selectedPrincipal are mutually exclusive (the selection invariant),
+              so the Detail panel is: something selected → the card; nothing →
+              the empty state. Radar mode renders the card in the flyout, so the
+              main panel falls back to the empty state behind it. */}
+          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
             <DetailEmptyState
               companyName={companyName}
               companyData={companyDataWithFunctions}
@@ -711,35 +664,33 @@ export default function ProtocolSurface({
               onExampleClick={handleRadarExampleClick}
             />
           )}
-          {sidebarMode === "detail" && selectedPrincipal && (
-            <PrincipalDetail
-              key={selectedPrincipal.address}
-              principal={selectedPrincipal}
-              machines={machines}
-              onNavigate={handleNavigate}
-              onFocusContract={(addr) => triggerFocus(addr)}
-              addressLabels={addressLabels}
-              refreshAddressLabels={refreshAddressLabels}
-            />
-          )}
-          {sidebarMode === "detail" && selectedMachine && !selectedPrincipal && !radarExampleSelection && (
-            <ContractMachine
-              key={selectedMachine.address}
+          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && !radarSelection && (
+            <EntityCard
+              key={selectedMachine ? selectedMachine.address : selectedPrincipal.address}
               machine={selectedMachine}
+              principal={
+                selectedMachine
+                  ? principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null
+                  : selectedPrincipal
+              }
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
-              companyName={companyName}
-              highlightedFunctionKey={radarExampleSelection?.functionKey}
+              onPreview={(addr) => focusPreview(addr)}
               onOpenDependencyGraph={setDependencyGraphMachine}
+              governsIndex={governsIndex}
+              controlAdjacency={controlAdjacency}
+              machines={machines}
+              initialTab={selection?.hint?.tab}
             />
           )}
-          {sidebarMode === "detail" && !selectedPrincipal && !radarExampleSelection && (
-            <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} />
+          {sidebarMode === "detail" && selectedMachine && !radarSelection && (
+            <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
           )}
           {isAdmin && sidebarMode === "agent" && (
             <AgentPanel
               companyName={companyName}
               selectedMachine={selectedMachine}
+              selectedPrincipal={selectedPrincipal}
               onHighlight={setHighlightedAddresses}
               onFocusAddress={(addr) => {
                 // Route through the same selection handlers a canvas
@@ -766,7 +717,7 @@ export default function ProtocolSurface({
                 // function-level authority over — and write that set
                 // into highlightedAddresses. The canvas's existing
                 // audit-overlay dim path then dims everything else.
-                triggerFocus(addr);
+                focusPreview(addr);
                 api(
                   `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}`,
                 )

@@ -283,14 +283,13 @@ function buildGroupControllers(primary, kids, principalList, nameByAddr) {
   return controllers.concat(coRows);
 }
 
-// `expanded` ({ groupId, idx } | null) and `bandHeights` ({ "groupId:idx|c":
-// px }) drive the grow-on-expand behavior. GroupNode measures the rendered
-// header band (colored bar + accordion, including any open row's in-flow
-// detail and any wrapped capability summaries) and reports it per
-// (group, open-row) state; we reserve that exact height so ELK re-packs the
-// canvas to fit (rather than the content floating over / overlapping cards).
-// Until a state is measured we fall back to a constant estimate.
-export function buildGraphLayout(machines, fundFlows, principals, expanded = null, bandHeights = {}) {
+// `bandHeights` ({ groupId: px }) reserves each group's real header-band
+// height. GroupNode measures the rendered band (colored bar + Controllers
+// accordion, including any capability summary that wraps to several lines) and
+// reports it per group; we reserve that exact height so ELK packs the canvas
+// to fit (rather than a wrapped row overflowing / overlapping cards). Until a
+// group is measured we fall back to a constant estimate.
+export function buildGraphLayout(machines, fundFlows, principals, bandHeights = {}) {
   const sorted = [...machines].sort((a, b) => b.totalFunctions - a.totalFunctions);
   const principalList = principals || [];
   const principalByAddr = new Map();
@@ -362,20 +361,11 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
     // cards below it and GroupNode can pin the rendered band to the same
     // number. See buildGroupControllers / groupHeaderHeight.
     const controllers = buildGroupControllers(p, kids, principalList, nameByAddr);
-    // Reserve the measured band height for this group's current open-row state
-    // (collapsed = "c") so the band grows in-flow and the cards — and
-    // everything ELK packs below — shift down instead of being overlapped.
-    // Falls back to a constant estimate (+ the open row's detail) until
-    // GroupNode reports the real height.
-    const openIdx = expanded && expanded.groupId === p.address ? expanded.idx : null;
-    const measuredBand = bandHeights[`${p.address}:${openIdx ?? "c"}`];
-    let headerHeight;
-    if (measuredBand != null) {
-      headerHeight = measuredBand;
-    } else {
-      headerHeight = groupHeaderHeight(controllers.length);
-      if (openIdx != null && controllers[openIdx]) headerHeight += estimateDetailHeight(controllers[openIdx].governs.length);
-    }
+    // Reserve this group's measured band height so the cards — and everything
+    // ELK packs below — start below it instead of being overlapped. Falls back
+    // to a constant estimate until GroupNode reports the real height.
+    const measuredBand = bandHeights[p.address];
+    const headerHeight = measuredBand != null ? measuredBand : groupHeaderHeight(controllers.length);
     nodes.push({
       id: p.address,
       type: "group",
@@ -399,16 +389,11 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
     const pos = fallbackPositions[i] || { x: 0, y: 0 };
     contractPositions.set(m.address?.toLowerCase(), pos);
     const groupAddr = contractToGroup.get(m.address?.toLowerCase());
-    // Permissionless / lower-privilege callers (server-computed
-    // machine.other_callers = [{address, type, label}, …]): FP-authorized
-    // callers that aren't the primary owner or a guardian. Rendered in
-    // aggregate as the card's "+N callers" affordance so none is invisible,
-    // without minting a node (or edge) per bidder.
     const node = {
       id: m.address,
       type: "contract",
       position: pos,
-      data: { machine: m, otherCallers: m.other_callers || [] },
+      data: { machine: m },
     };
     if (groupAddr) {
       // The principal's original-cased address is what we used as the
@@ -426,8 +411,8 @@ export function buildGraphLayout(machines, fundFlows, principals, expanded = nul
   // Controllers accordion (see buildGroupControllers / GroupNode), which lists
   // the exact functions each can call per contract instead of an illegible
   // dot in a rail. A co-controller spanning several groups appears in each.
-  // The permissionless long tail still renders as a per-contract "+N callers"
-  // affordance (machine.other_callers), not a node per caller.
+  // The permissionless long tail (machine.other_callers) is not rendered at
+  // all; the per-function caller buttons in the detail lanes cover it.
 
   const edges = [];
   for (const [, group] of byName) {
@@ -817,14 +802,6 @@ export function groupHeaderHeight(numControllers) {
   return GROUP_HEADER_BAR_H + GROUP_ACC_LABEL_H + numControllers * GROUP_ACC_ROW_H + GROUP_ACC_PAD_BOTTOM;
 }
 
-// Initial guess at an expanded row's in-flow detail height, used only for the
-// first layout frame before GroupNode measures the real height and feeds it
-// back (see SurfaceCanvas onMeasureDetail). Assumes ~one wrapped line per
-// governed contract; the band clips any under-guess so the cards are never
-// overlapped while the measured value converges.
-export function estimateDetailHeight(governsCount) {
-  return 16 + governsCount * 26;
-}
 const GROUP_PADDING_TOP = groupHeaderHeight(1);
 const GROUP_PADDING_SIDE = 24;
 const GROUP_PADDING_BOTTOM = 24;
@@ -985,8 +962,8 @@ export function layoutGroupInterior(kids, machines, headerHeight = GROUP_PADDING
   return { positions, width: totalWidth, height: totalHeight };
 }
 
-export async function elkLayout(machines, fundFlows, principals, expanded = null, bandHeights = {}) {
-  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, expanded, bandHeights);
+export async function elkLayout(machines, fundFlows, principals, bandHeights = {}) {
+  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, bandHeights);
 
   // Split nodes into top-level vs grouped-children. ELK only sees the
   // top level now: each group is handed to it as a single sized box.
