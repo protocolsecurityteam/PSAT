@@ -129,7 +129,7 @@ export function EntityCard({
         <div className="ps-machine-badges">
           {isMachine && (
             <>
-              <span className="ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).label.replace(/s$/, "")}</span>
+              <span className="ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
               {/* Deposit-destination call-out for value_handler contracts that
                   actually hold funds — plain-language answer to "where does my
                   money go?" Gated on total_usd>0 so a pull-then-forward router

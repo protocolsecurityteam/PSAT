@@ -14,7 +14,7 @@ export function ContractNode({ data }) {
   const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
   const roleLabel = m.isTimelock
     ? "Timelock"
-    : (ROLE_META[m.role] || ROLE_META.utility).label.replace(/s$/, "");
+    : (ROLE_META[m.role] || ROLE_META.utility).singular;
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
   return (

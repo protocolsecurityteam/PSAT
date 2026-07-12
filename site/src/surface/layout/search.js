@@ -1,6 +1,7 @@
 // Filter + sort the machines/principals list for SearchNavigator. Pure.
 
 import { principalLabel } from "../format.js";
+import { ROLE_META } from "../meta.js";
 
 export function buildSearchResults(machines, principals, mode, sortKey, query) {
   let items = [];
@@ -54,19 +55,19 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
       }
     }
   } else {
-    // Show contracts
+    // Show contracts, badged by their OWN role (the same classification the
+    // canvas node and entity card use) — not the type of whatever principal
+    // controls them, which read as a meaningless "unknown" whenever no owning
+    // principal happened to be in the visible set.
     for (const m of machines) {
-      const ownerPrincipal = principals.find((p) =>
-        (p.controls || []).some((a) => a.toLowerCase() === m.address?.toLowerCase())
-      );
       items.push({
         kind: "contract",
         address: m.address,
         name: m.name || "",
-        type: ownerPrincipal?.type || "unknown",
+        type: (ROLE_META[m.role] || ROLE_META.utility).singular,
         value: m.total_usd || 0,
-        signers: ownerPrincipal?.details?.threshold || 0,
-        ownersCount: ownerPrincipal?.details?.owners?.length || 0,
+        signers: 0,
+        ownersCount: 0,
         delay: 0,
         functions: m.totalFunctions || 0,
       });

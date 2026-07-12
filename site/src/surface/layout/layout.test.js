@@ -101,21 +101,21 @@ describe("buildSearchResults", () => {
     expect(results.every((r) => r.kind === "principal" && r.type === "safe")).toBe(true);
   });
 
-  it("returns contracts when mode=all", () => {
-    const results = buildSearchResults(machines, principals, "all", "name", "");
+  it("returns contracts when mode=contracts", () => {
+    const results = buildSearchResults(machines, principals, "contracts", "name", "");
     expect(results.every((r) => r.kind === "contract")).toBe(true);
     expect(results.length).toBe(machines.length);
   });
 
   it("filters by query against name/address/type", () => {
-    const results = buildSearchResults(machines, principals, "all", "name", "Vault");
+    const results = buildSearchResults(machines, principals, "contracts", "name", "Vault");
     expect(results.length).toBe(1);
     expect(results[0].name).toBe("Vault");
   });
 
   it("supports `value > 1m` style numeric filters", () => {
     const machinesWithValue = machines.map((m) => ({ ...m, total_usd: m.address === RICH_ADDRESSES.VAULT ? 5_000_000 : 100 }));
-    const results = buildSearchResults(machinesWithValue, principals, "all", "value", "value > 1m");
+    const results = buildSearchResults(machinesWithValue, principals, "contracts", "value", "value > 1m");
     expect(results.every((r) => r.value >= 1_000_000)).toBe(true);
   });
 });

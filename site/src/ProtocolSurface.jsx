@@ -64,7 +64,7 @@ export default function ProtocolSurface({
   const [functionsLoading, setFunctionsLoading] = useState(false);
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
-  const [searchMode, setSearchMode] = useState("all");
+  const [searchMode, setSearchMode] = useState("contracts");
   // Single URL writer. Persists a committed selection as ?sel=<addr> — the
   // address alone determines which card renders, so no view axis is stored.
   // Also writes the radar deep-link's ?score=1&fn=<sig>. Called imperatively
