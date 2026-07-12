@@ -150,6 +150,20 @@ export function EntityCard({
               {machine.upgrade_count != null ? <span className="ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
               <span className="ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
               {usdLabel && <span className="ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
+              {/* Machine-facet timelock identity (canvas ContractNode's
+                  TIMELOCK marker uses the same fields). A machine-only
+                  timelock like EtherFiTimelock has no principals entry, so
+                  without this the node says TIMELOCK · 10D DELAY while the
+                  card says nothing. Skipped when a principal-facet timelock
+                  badge renders below, so dual-facet cards don't double-badge. */}
+              {machine.isTimelock && principal?.type !== "timelock" ? (
+                <>
+                  <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>Timelock</span>
+                  {machine.timelockDelay > 0 ? (
+                    <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{formatDelay(machine.timelockDelay)} delay</span>
+                  ) : null}
+                </>
+              ) : null}
             </>
           )}
           {/* Identity badges for the principal facet (type + threshold/delay).

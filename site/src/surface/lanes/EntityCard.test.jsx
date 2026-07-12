@@ -92,6 +92,38 @@ describe("EntityCard identity badges (dual facet)", () => {
     expect(getByText("10d delay")).toBeInTheDocument();
   });
 
+  it("renders the timelock + delay badges from the machine facet when no principal entry exists", () => {
+    // The EtherFiTimelock case: an analyzed timelock absent from principals —
+    // its identity lives on machine.isTimelock/timelockDelay (same fields the
+    // canvas node's TIMELOCK marker uses).
+    const { container, getByText } = render(
+      <EntityCard
+        machine={machine({ isTimelock: true, timelockDelay: 864000 })}
+        onSelectGuard={vi.fn()}
+        onNavigate={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const badges = container.querySelector(".ps-machine-badges");
+    expect(within(badges).getByText("Timelock")).toBeInTheDocument();
+    expect(getByText("10d delay")).toBeInTheDocument();
+  });
+
+  it("does not double-badge a dual-facet timelock (principal badge wins)", () => {
+    const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 } };
+    const { container } = render(
+      <EntityCard
+        machine={machine({ isTimelock: true, timelockDelay: 864000 })}
+        onSelectGuard={vi.fn()}
+        onNavigate={vi.fn()}
+        governsIndex={new Map()}
+        principal={principal}
+      />,
+    );
+    const badges = container.querySelector(".ps-machine-badges");
+    expect(within(badges).getAllByText(/delay/)).toHaveLength(1);
+  });
+
   it("renders the type + threshold badges for a dual-facet safe", () => {
     const principal = {
       address: TIMELOCK,
