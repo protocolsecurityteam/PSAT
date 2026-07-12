@@ -584,9 +584,10 @@ describe("ProtocolSurface — stage-1 selection model", () => {
   });
 });
 
-// M2 (stages 2 + 3): per-tab principal awareness + URL ?sel=&view=. Authored to
-// SELECTION_FILTERING_DIAGNOSIS.md "M2 asserts". The URL tests render
-// NON-embedded (embedded skips URL writes), so each resets window.location.
+// M2 (stages 2 + 3): per-tab principal awareness + URL ?sel=. After the
+// view-state collapse the address alone determines the card, so the URL carries
+// no view axis. The URL tests render NON-embedded (embedded skips URL writes),
+// so each resets window.location.
 describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
   const SAFE = RICH_ADDRESSES.SAFE;
   const VAULT = RICH_ADDRESSES.VAULT;
@@ -637,9 +638,9 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     expectNoCrash();
   });
 
-  // --- URL ?sel=&view= (stage 3) ---
+  // --- URL ?sel= (stage 3): address only, no view axis ---
 
-  it("writes ?sel=&view=principal when a safe is committed", async () => {
+  it("writes ?sel= (no view) when a safe is committed", async () => {
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     ); // NON-embedded → URL writes enabled
@@ -650,13 +651,14 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     await waitFor(() => {
       expect(url().searchParams.get("sel")?.toLowerCase()).toBe(SAFE.toLowerCase());
     });
-    expect(url().searchParams.get("view")).toBe("principal");
-    // Interim ?focus is retired.
+    // The address alone determines the card — no view is written, and the
+    // interim ?focus is retired.
+    expect(url().searchParams.get("view")).toBeNull();
     expect(url().searchParams.get("focus")).toBeNull();
     expectNoCrash();
   });
 
-  it("writes ?sel=&view=contract when a contract is committed", async () => {
+  it("writes ?sel= (no view) when a contract is committed", async () => {
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     );
@@ -667,7 +669,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     await waitFor(() => {
       expect(url().searchParams.get("sel")?.toLowerCase()).toBe(VAULT.toLowerCase());
     });
-    expect(url().searchParams.get("view")).toBe("contract");
+    expect(url().searchParams.get("view")).toBeNull();
     expectNoCrash();
   });
 
@@ -687,7 +689,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     expectNoCrash();
   });
 
-  it("restores a safe from ?sel=&view=principal on mount (view preserved)", async () => {
+  it("restores a safe from a legacy ?sel=&view=principal URL (view ignored)", async () => {
     window.history.replaceState(
       {},
       "",
@@ -696,24 +698,29 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     ); // non-admin → Detail
-    // PrincipalDetail markers prove the safe (a principal) was restored.
+    // The safe is a principal-only entity, so PrincipalDetail renders — the
+    // legacy view happens to match, but it's the facet, not the param, deciding.
     expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
-    expect(url().searchParams.get("view")).toBe("principal");
+    // The stale view param is dropped on the restore's URL normalization.
+    await waitFor(() => {
+      expect(url().searchParams.get("view")).toBeNull();
+    });
+    expect(url().searchParams.get("sel")?.toLowerCase()).toBe(SAFE.toLowerCase());
     expectNoCrash();
   });
 
-  it("resolves a legacy ?focus= link and normalizes it to ?sel=&view=", async () => {
+  it("resolves a legacy ?focus= link and normalizes it to ?sel= (no view)", async () => {
     window.history.replaceState({}, "", `/company/etherfi/surface?focus=${VAULT}`);
     render(
       <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
     ); // non-admin → Detail
     // The Vault contract card renders (ContractMachine shows its functions).
     expect(await screen.findByText("upgrade")).toBeInTheDocument();
-    // Legacy param translated: ?focus dropped, ?sel/?view written.
+    // Legacy param translated: ?focus dropped, ?sel written, no view axis.
     await waitFor(() => {
       expect(url().searchParams.get("sel")?.toLowerCase()).toBe(VAULT.toLowerCase());
     });
-    expect(url().searchParams.get("view")).toBe("contract");
+    expect(url().searchParams.get("view")).toBeNull();
     expect(url().searchParams.get("focus")).toBeNull();
     expectNoCrash();
   });
@@ -808,6 +815,137 @@ describe("ProtocolSurface — M3 polish", () => {
     // Renders the short address, never the duplicated "safe".
     expect(name.textContent).not.toBe("safe");
     expect(name.textContent).toMatch(/^0x[0-9a-fA-F]{4}\.\./);
+    expectNoCrash();
+  });
+});
+
+// Motivating bug (UNIFIED_ENTITY_CARD_REFACTOR.md): a machine-only authority —
+// an analyzed contract the server never emits as a principal, e.g.
+// EtherFiTimelock — is reached via a caller button that carries a non-contract
+// type ("timelock"). Pre-collapse that type became view=principal, but the
+// entity has no principal facet, so BOTH derived facets went null and the
+// sidebar rendered nothing. With no stored view the machine facet always wins.
+describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
+  const GOV = "0x9999999999999999999999999999999999999999";
+  const GPOOL = "0x8888888888888888888888888888888888888888";
+
+  function mkFn(name, effectLabels, owner) {
+    return {
+      function: name,
+      selector: `0x${name.slice(0, 8).padEnd(8, "0")}`,
+      abi_signature: name,
+      effect_labels: effectLabels,
+      action_summary: `${name} action`,
+      authority_public: false,
+      direct_owner: owner
+        ? { ...owner, label: null, source_contract: null, source_controller_id: null }
+        : null,
+      authority_roles: [],
+      controllers: [],
+      effect_targets: [],
+    };
+  }
+
+  // GovTimelock is analyzed (a machine) and governs GovernedPool.upgradeTo, but
+  // it is NOT in `principals` — so it has a machine facet and no principal one.
+  const FIXTURE = {
+    protocol_id: 2,
+    contracts: [
+      {
+        address: GOV,
+        name: "GovTimelock",
+        risk_level: "low",
+        is_proxy: false,
+        controllers: {},
+        job_id: "gov-job",
+        functions: [mkFn("schedule", ["config"], null)],
+      },
+      {
+        address: GPOOL,
+        name: "GovernedPool",
+        risk_level: "medium",
+        is_proxy: true,
+        proxy_type: "ERC1967",
+        upgrade_count: 1,
+        controllers: {},
+        job_id: "gpool-job",
+        functions: [
+          mkFn("upgradeTo", ["upgrade"], {
+            address: GOV,
+            resolved_type: "timelock",
+            details: { delay: 864000 },
+          }),
+        ],
+      },
+    ],
+    principals: [],
+    fund_flows: [],
+  };
+
+  function url() {
+    return new URL(window.location.href);
+  }
+
+  beforeEach(() => {
+    installApiMocks();
+    window.history.replaceState({}, "", "/company/etherfi/surface");
+  });
+
+  it("navigating via a timelock-typed caller opens the contract card with Governs pre-open", async () => {
+    render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-embedded → URL writes
+    const user = userEvent.setup();
+
+    // Open the governed contract, then click its upgradeTo caller button — the
+    // caller is GovTimelock, typed "timelock".
+    await user.type(searchInput(), "GovernedPool");
+    await commitViaEnter(user);
+    const pool = await waitFor(() => {
+      const el = document.querySelector(".ps-machine");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    const callerBtn = pool.querySelector(".ps-caller-btn");
+    expect(callerBtn).toBeTruthy();
+    await user.click(callerBtn);
+
+    // The machine-only authority's CONTRACT card renders — not a stranded empty
+    // sidebar (DetailEmptyState).
+    const machineName = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(machineName).toHaveTextContent("GovTimelock");
+
+    // Governs is pre-opened (its panel renders only when the tab is active), and
+    // lists the contract this authority governs.
+    const governsRow = await waitFor(() => {
+      const el = document.querySelector(".ps-governs-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(governsRow).toHaveTextContent("GovernedPool");
+
+    // URL persists the address only — no view axis.
+    await waitFor(() => {
+      expect(url().searchParams.get("sel")?.toLowerCase()).toBe(GOV.toLowerCase());
+    });
+    expect(url().searchParams.get("view")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("restores a machine-only authority from a legacy ?sel=&view=principal URL as its contract card", async () => {
+    window.history.replaceState({}, "", `/company/etherfi/surface?sel=${GOV}&view=principal`);
+    render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-admin → Detail
+
+    // The stale view=principal is ignored; the machine facet wins → contract
+    // card, not an empty sidebar.
+    const machineName = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(machineName).toHaveTextContent("GovTimelock");
     expectNoCrash();
   });
 });

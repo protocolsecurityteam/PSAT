@@ -161,9 +161,10 @@ test.describe("Caller button navigation", () => {
     // Sidebar swaps to the principal detail.
     await expect(page.locator(".ps-machine-name")).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".ps-machine-address")).toContainText(SAFE_ADDR.slice(0, 6));
-    // Selection follows the navigation target — a safe persists as ?sel=&view=principal.
+    // Selection follows the navigation target — the safe persists as ?sel=
+    // (address only; the card is chosen from the entity's facets, no view axis).
     await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));
-    await expect(page).toHaveURL(/view=principal/);
+    await expect(page).not.toHaveURL(/view=/);
   });
 
   test("single timelock caller button navigates to the timelock principal detail", async ({ page }) => {

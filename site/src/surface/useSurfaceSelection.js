@@ -37,7 +37,7 @@ function reducer(state, action) {
       // unconditionally (matches the old handleSelectMachine/Principal, which
       // cleared on every select, even a re-select of the same entity).
       return {
-        selection: { address, view: action.view, hint: action.hint ?? null },
+        selection: { address, hint: action.hint ?? null },
         guardKey: null,
         radar: null,
         focus: bumpFocus(state, address),
@@ -51,7 +51,7 @@ function reducer(state, action) {
       // Contract selection + radar flyout sub-mode; guardKey == the example fn.
       const address = action.address ? action.address.toLowerCase() : null;
       return {
-        selection: address ? { address, view: "contract", hint: null } : null,
+        selection: address ? { address, hint: null } : null,
         guardKey: action.functionKey ?? null,
         radar: { functionKey: action.functionKey ?? null },
         focus: address ? bumpFocus(state, address) : state.focus,
@@ -84,26 +84,12 @@ function guardFromKey(index, guardKey) {
   return machineFunctions(machine).find((fn) => fn.key === guardKey) || null;
 }
 
-// Facet-based default view: machine-only -> contract; both facets (timelocks)
-// or principal-only or not-in-index -> principal (the resolved timelock
-// product decision). Explicit view hints from click sites still win.
-function defaultView(entity) {
-  if (entity?.machine && !entity?.principal) return "contract";
-  return "principal";
-}
-
 // entityIndex: Map<addrLc, {address, machine|null, principal|null}> (built by
 //   buildEntityIndex). machines: the machine list resolveEntity uses to
 //   synthesize controls for off-index navigate targets. companyName: switching
 //   it clears ALL selection state.
 export function useSurfaceSelection({ entityIndex, machines = [], companyName } = {}) {
   const [state, dispatch] = useReducer(reducer, INITIAL);
-
-  // The select() default-view resolution needs the current index but must not
-  // rebuild the (stable) action creators when the index rebuilds — read it
-  // through a ref updated each render.
-  const indexRef = useRef(entityIndex);
-  indexRef.current = entityIndex;
 
   // Clear everything on a real company change. Skip the first mount so a
   // URL-restore select() (fired from a later, machines-gated effect) survives.
@@ -121,9 +107,7 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName } 
       dispatch({ type: "select", address: null });
       return;
     }
-    const lc = address.toLowerCase();
-    const view = opts.view || defaultView(indexRef.current?.get(lc));
-    dispatch({ type: "select", address: lc, view, hint: opts.hint });
+    dispatch({ type: "select", address: address.toLowerCase(), hint: opts.hint });
   }, []);
 
   const guard = useCallback((key) => dispatch({ type: "guard", key }), []);
@@ -144,9 +128,11 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName } 
     [entityIndex, machines, state.selection],
   );
 
-  const view = state.selection?.view || null;
-  const selectedMachine = view === "contract" ? selectedEntity?.machine ?? null : null;
-  const selectedPrincipal = view === "principal" ? selectedEntity?.principal ?? null : null;
+  // At most one facet is ever non-null: the machine card is strictly richer, so
+  // it wins whenever the entity has one; a principal card renders only for a
+  // principal-only entity. No stored view can contradict the entity's facets.
+  const selectedMachine = selectedEntity?.machine ?? null;
+  const selectedPrincipal = selectedEntity?.machine ? null : selectedEntity?.principal ?? null;
   const selectedGuard = useMemo(
     () => guardFromKey(entityIndex, state.guardKey),
     [entityIndex, state.guardKey],

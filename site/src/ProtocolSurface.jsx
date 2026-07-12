@@ -66,27 +66,25 @@ export default function ProtocolSurface({
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
   const [searchMode, setSearchMode] = useState("all");
-  // Single URL writer. Persists a committed selection as ?sel=<addr>&view=
-  // <contract|principal> (principal selections are now shareable/restorable),
-  // plus the radar deep-link's ?score=1&fn=<sig>. Called imperatively ONLY from
-  // the committing wrappers (select + radar) and the mount restore's URL
-  // normalization — never from a focus preview (search browsing / contract
+  // Single URL writer. Persists a committed selection as ?sel=<addr> — the
+  // address alone determines which card renders, so no view axis is stored.
+  // Also writes the radar deep-link's ?score=1&fn=<sig>. Called imperatively
+  // ONLY from the committing wrappers (select + radar) and the mount restore's
+  // URL normalization — never from a focus preview (search browsing / contract
   // pager) and never on plain render. Because it fires only after a user commit
   // (which can only happen after the machines-gated mount restore has run and
   // read the params), it cannot race the restore; no separate write gate is
-  // needed beyond the per-restore refs below. Legacy ?focus is dropped on every
-  // write so old-style params don't linger next to ?sel.
-  const syncUrl = useCallback(({ sel = null, view = null, radar: radarSig = null } = {}) => {
+  // needed beyond the per-restore refs below. Legacy ?focus and ?view are
+  // dropped on every write so old-style params don't linger next to ?sel.
+  const syncUrl = useCallback(({ sel = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
     const url = new URL(window.location.href);
     if (sel) {
       url.searchParams.set("sel", sel);
-      if (view) url.searchParams.set("view", view);
-      else url.searchParams.delete("view");
     } else {
       url.searchParams.delete("sel");
-      url.searchParams.delete("view");
     }
+    url.searchParams.delete("view");
     url.searchParams.delete("focus");
     if (radarSig) {
       url.searchParams.set("score", "1");
@@ -339,13 +337,15 @@ export default function ProtocolSurface({
     focusPreview,
   } = useSurfaceSelection({ entityIndex, machines, companyName });
 
-  // Restore a persisted selection from the URL on initial data load. Reads the
-  // new ?sel=&view= pair, falling back to the legacy ?focus= param so old links
-  // still resolve. The reducer owns view resolution: ?view wins when present,
-  // else the entity's facet default. A radar deep-link (?score) is left to the
-  // radar-restore effect below. Runs once, gated on machines so the entity
-  // index can resolve the address; this read happens before any user commit can
-  // fire the URL writer, so the writer never clobbers these params first.
+  // Restore a persisted selection from the URL on initial data load. Reads
+  // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
+  // A legacy ?view= is parsed and IGNORED — the address alone determines the
+  // card now, which also un-breaks old ?sel=<addr>&view=principal links whose
+  // stored view contradicted the entity's facets. A radar deep-link (?score) is
+  // left to the radar-restore effect below. Runs once, gated on machines so the
+  // entity index can resolve the address; this read happens before any user
+  // commit can fire the URL writer, so the writer never clobbers these params
+  // first.
   const restoredSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredSelection.current || !machines.length) return;
@@ -354,16 +354,9 @@ export default function ProtocolSurface({
     const addr = params.get("sel") || params.get("focus");
     if (!addr) return;
     restoredSelection.current = true;
-    const lc = addr.toLowerCase();
-    const entity = entityIndex.get(lc);
-    if (entity) {
-      // ?view wins when present; else match the reducer's facet default so a
-      // legacy ?focus link normalizes to the same view a fresh select would.
-      const view =
-        params.get("view") ||
-        (entity.machine && !entity.principal ? "contract" : "principal");
-      select(addr, { view });
-      syncUrl({ sel: addr, view });
+    if (entityIndex.get(addr.toLowerCase())) {
+      select(addr);
+      syncUrl({ sel: addr });
     } else {
       // A garbage/off-index address becomes a camera preview, never a
       // synthesized junk selection card.
@@ -386,8 +379,8 @@ export default function ProtocolSurface({
     // stale highlight set can't outrank the new selection's dimming.
     setAgentHighlights(null);
     if (machine) {
-      select(machine.address, { view: "contract" });
-      syncUrl({ sel: machine.address, view: "contract" });
+      select(machine.address);
+      syncUrl({ sel: machine.address });
     } else {
       // Pane click / deselect — full clear.
       select(null);
@@ -435,7 +428,7 @@ export default function ProtocolSurface({
     setSidebarMode("detail");
     setAgentHighlights(null);
     radar(machine.address, fnView?.key || null);
-    syncUrl({ sel: machine.address, view: "contract", radar: { signature: fnView?.signature } });
+    syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
   }, [allMachines, radar, syncUrl]);
 
   const restoredExampleSelection = useRef(false);
@@ -476,8 +469,8 @@ export default function ProtocolSurface({
   const handleSelectPrincipal = useCallback((principal) => {
     if (!principal) return;
     setAgentHighlights(null);
-    select(principal.address, { view: "principal" });
-    syncUrl({ sel: principal.address, view: "principal" });
+    select(principal.address);
+    syncUrl({ sel: principal.address });
   }, [select, syncUrl]);
 
   const visiblePrincipals = useMemo(() => {
@@ -528,7 +521,7 @@ export default function ProtocolSurface({
 
   // Search browse preview. Null (result set changed / emptied) clears the
   // focus address so a stale gold ring can't outlive the browsing session —
-  // the committed selection view is untouched either way. Stable identity:
+  // the committed selection is untouched either way. Stable identity:
   // SearchNavigator's reset effect lists it as a dependency.
   const handleSearchPreview = useCallback(
     (item) => focusPreview(item ? item.address : null),
@@ -536,16 +529,18 @@ export default function ProtocolSurface({
   );
 
   const handleNavigate = useCallback((target) => {
-    // Surface the navigation result in the Detail panel. Contract targets no
-    // longer no-op when role-filtered off the canvas — the entity index spans
-    // all machines. `hint` lets resolveEntity synthesize a principal card for
-    // off-index targets (e.g. per-function caller buttons) in one canonical
-    // place.
+    // Surface the navigation result in the Detail panel. The card is chosen from
+    // the target's facets, not the caller's guessed type — a machine-only
+    // authority (e.g. an analyzed timelock the server never emits as a
+    // principal) opens its contract card instead of stranding an empty sidebar.
+    // The full target rides along as `hint`: resolveEntity reads its type to
+    // synthesize a principal card for off-index targets, and its `tab` pre-opens
+    // Governs (the "what does this authority control" question a caller-button
+    // navigate asks) when the target has one.
     setSidebarMode("detail");
     setAgentHighlights(null);
-    const view = target.type === "contract" ? "contract" : "principal";
-    select(target.address, { view, hint: view === "principal" ? target : undefined });
-    syncUrl({ sel: target.address, view });
+    select(target.address, { hint: { ...target, tab: "governs" } });
+    syncUrl({ sel: target.address });
   }, [select, syncUrl]);
 
   const totals = useMemo(() => {
@@ -689,9 +684,8 @@ export default function ProtocolSurface({
         onCommit={(item) => {
           if (!item) return;
           setAgentHighlights(null);
-          const view = item.kind === "principal" ? "principal" : "contract";
-          select(item.address, { view });
-          syncUrl({ sel: item.address, view });
+          select(item.address);
+          syncUrl({ sel: item.address });
         }}
       />
       </div>
@@ -790,6 +784,7 @@ export default function ProtocolSurface({
               onOpenDependencyGraph={setDependencyGraphMachine}
               governsIndex={governsIndex}
               principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
+              initialTab={selection?.hint?.tab}
             />
           )}
           {sidebarMode === "detail" && !selectedPrincipal && !radarSelection && (

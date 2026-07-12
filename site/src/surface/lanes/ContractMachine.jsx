@@ -18,8 +18,17 @@ export function ContractMachine({
   onOpenDependencyGraph,
   governsIndex,
   principal = null,
+  initialTab = null,
 }) {
-  const [activeTab, setActiveTab] = useState("control");
+  const governsRows = useMemo(
+    () => governsIndex?.get((machine.address || "").toLowerCase()) || [],
+    [governsIndex, machine.address],
+  );
+  // A navigate can request the Governs tab pre-opened; honor it only when the
+  // card actually has a Governs tab (rows > 0), else fall back to the default.
+  const [activeTab, setActiveTab] = useState(() =>
+    initialTab === "governs" && governsRows.length ? "governs" : "control",
+  );
   const usdLabel = formatUsd(machine.total_usd);
   const highlightedFunction = useMemo(
     () => machineFunctions(machine).find((fnView) => fnView.key === highlightedFunctionKey) || null,
@@ -29,11 +38,6 @@ export function ContractMachine({
   useEffect(() => {
     if (highlightedFunction) setActiveTab(tabForLane(highlightedFunction.lane));
   }, [highlightedFunction]);
-
-  const governsRows = useMemo(
-    () => governsIndex?.get((machine.address || "").toLowerCase()) || [],
-    [governsIndex, machine.address],
-  );
   // Capability tags for governed contracts, when this entity also has a
   // server-side principal facet (controls_detail carries the high-level
   // capability vocabulary; the client-side inversion has only effect labels).

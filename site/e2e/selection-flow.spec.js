@@ -179,9 +179,10 @@ test.describe("Surface selection — full flow", () => {
     await openTab(page, "Monitor");
     await expect(page.getByText(/choose a contract to see its alerts/i)).toBeVisible();
 
-    // The URL persists the principal selection (shareable/restorable).
+    // The URL persists the principal selection (shareable/restorable) as the
+    // address only — no view axis.
     await expect(page).toHaveURL(new RegExp(`sel=${GOV_SAFE}`));
-    await expect(page).toHaveURL(/view=principal/);
+    await expect(page).not.toHaveURL(/view=/);
   });
 
   test("canvas-side selection of the same safe matches the search selection (Flow A === Flow B)", async ({ page }) => {
