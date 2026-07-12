@@ -658,30 +658,33 @@ export default function ProtocolSurface({
       </div>
       )}
 
-      {/* Role filter bar — now in the top-left slot where the overview strip used to live */}
-      <div className="ps-surface-toolbar-overlay">
-        <RoleFilterBar machines={allMachines} enabledRoles={enabledRoles} onToggle={handleToggleRole} />
-      </div>
-
-      {/* Search mode pills — top-left slot (where the overview used to be) */}
-      <div className="ps-search-modes-overlay">
-        <SearchModesBar mode={searchMode} setMode={setSearchMode} />
-      </div>
-
-      <div className="ps-surface-search-overlay">
+      {/* Unified filter panel — top-left. Search + sort + browse nav, then the
+          Type filter and Role visibility rows (injected as children), then the
+          browse preview. Replaces the old bottom-left role bar + top-left
+          search-modes + search overlays. */}
+      <div className="ps-filter-overlay">
         <SearchNavigator
-        machines={machines}
-        principals={visiblePrincipals}
-        mode={searchMode}
-        setMode={setSearchMode}
-        onPreview={handleSearchPreview}
-        onCommit={(item) => {
-          if (!item) return;
-          setAgentHighlights(null);
-          select(item.address);
-          syncUrl({ sel: item.address });
-        }}
-      />
+          machines={machines}
+          principals={visiblePrincipals}
+          mode={searchMode}
+          setMode={setSearchMode}
+          onPreview={handleSearchPreview}
+          onCommit={(item) => {
+            if (!item) return;
+            setAgentHighlights(null);
+            select(item.address);
+            syncUrl({ sel: item.address });
+          }}
+        >
+          <div className="ps-filter-row">
+            <span className="ps-filter-gutter">Type</span>
+            <SearchModesBar mode={searchMode} setMode={setSearchMode} />
+          </div>
+          <div className="ps-filter-row">
+            <span className="ps-filter-gutter">Roles</span>
+            <RoleFilterBar machines={allMachines} enabledRoles={enabledRoles} onToggle={handleToggleRole} />
+          </div>
+        </SearchNavigator>
       </div>
 
       <div className="ps-layout">

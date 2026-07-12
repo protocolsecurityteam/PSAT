@@ -143,54 +143,71 @@
 }
 
 /* Floating toolbar overlay (role filter) */
-.ps-surface-toolbar-overlay {
-  position: absolute;
-  bottom: 16px;
-  left: 16px;
-  z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  padding: 8px 12px;
-}
-
-/* Search mode pills in the top-left slot (All / Safes / EOAs / Timelocks /
-   Has Funds). This is the slot vacated by the removed overview strip. */
-.ps-search-modes-overlay {
+/* Unified filter panel — top-left. One glass box replacing the former three
+   overlays (bottom-left role bar + top-left search-modes + search cluster).
+   Stacked rows: search/sort/nav · Type · Roles · preview (preview shows only
+   while browsing). overflow:hidden is a hard guarantee that no control — e.g.
+   the "↵ select" hint — can ever render outside the rounded box; box-sizing
+   keeps the fixed width honest so the padding is inside it. */
+.ps-filter-overlay {
   position: absolute;
   top: 16px;
   left: 16px;
   z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
+  width: 540px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: rgba(17, 22, 32, 0.92);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 10px;
-  padding: 6px 8px;
+  padding: 9px 10px;
 }
 
-.ps-search-modes-overlay .ps-search-modes {
+.ps-filter-bar {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
 }
 
-/* Floating search overlay */
-.ps-surface-search-overlay {
-  /* Stacked directly below .ps-search-modes-overlay so the whole search
-     cluster (modes + input + preview) lives in the top-left corner.
-     The top-right stays free for future overlays (fullscreen toggle, etc.). */
-  position: absolute;
-  top: 62px;
-  left: 16px;
-  z-index: 20;
-  background: rgba(17, 22, 32, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  padding: 8px 12px;
-  max-width: calc(100% - 32px);
-  max-width: 380px;
+/* A labeled filter row: a fixed-width gutter so the Type and Roles chip strips
+   align on the same left edge; the strip wraps within the box, never past it. */
+.ps-filter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ps-filter-gutter {
+  flex: 0 0 42px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.ps-filter-row .ps-search-modes,
+.ps-filter-row .ps-role-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  padding: 0;
+}
+
+/* Every <button> in the panel (Type pills, Role chips, browse arrows) inherits
+   the global forms.css button chrome — a teal box-shadow glow + hover lift.
+   Zero it panel-wide so the filters read flat, not glowing. */
+.ps-filter-overlay button {
+  box-shadow: none;
+}
+
+.ps-filter-overlay button:hover {
+  box-shadow: none;
+  transform: none;
 }
 
 .ps-surface-header {
@@ -1075,12 +1092,6 @@
 
 /* Role filter bar */
 /* Search Navigator */
-.ps-search-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 0;
-}
 
 .ps-search-modes {
   display: flex;
@@ -1128,13 +1139,32 @@
   gap: 6px;
 }
 
-.ps-search-input {
+/* Search field wraps the input so a leading 🔍 glyph can sit inside it. */
+.ps-search-field {
+  position: relative;
+  display: flex;
   flex: 1 1 160px;
-  min-width: 140px;
+  min-width: 130px;
+}
+
+.ps-search-field-ic {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: #64748b;
+  pointer-events: none;
+}
+
+.ps-search-input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 5px;
-  padding: 4px 8px;
+  padding: 4px 8px 4px 26px;
   color: #e2e8f0;
   font-size: 11px;
   outline: none;
@@ -1197,12 +1227,24 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 5px;
   border: 1px solid rgba(148, 163, 184, 0.08);
   cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
+}
+
+/* The entity info truncates so the pinned "↵ select" hint is always inside the
+   box; the hint never shrinks and stays on the right. */
+.ps-search-preview-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .ps-search-preview:hover,
@@ -1216,9 +1258,14 @@
   font-size: 11px;
   font-weight: 600;
   color: #e2e8f0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ps-search-preview-type {
+  flex-shrink: 0;
   font-size: 9px;
   font-weight: 600;
   color: #64748b;
@@ -1227,6 +1274,7 @@
 }
 
 .ps-search-preview-addr {
+  flex-shrink: 0;
   font-size: 10px;
   color: #475569;
   font-family: "JetBrains Mono", monospace;
@@ -1244,6 +1292,7 @@
 }
 
 .ps-search-preview-hint {
+  flex-shrink: 0;
   margin-left: auto;
   font-size: 9px;
   font-weight: 600;
@@ -1995,13 +2044,6 @@
   .ps-surface-overlay {
     max-width: calc(100vw - 32px);
     right: 16px;
-  }
-
-  .ps-surface-search-overlay {
-    right: 16px;
-    top: auto;
-    bottom: 60px;
-    max-width: calc(100vw - 32px);
   }
 
   .ps-surface-header,
