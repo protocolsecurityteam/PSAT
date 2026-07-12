@@ -1456,8 +1456,10 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* Row typography matches the Control tab (.ps-port-name 12px / 11px body /
+   10px mono subs) so the Governs tab reads at the same size as the others. */
 .ps-governs-name {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: #cbd5e1;
   flex-shrink: 0;
@@ -1482,7 +1484,7 @@
 
 .ps-governs-value {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   color: #f59e0b;
 }
@@ -1501,7 +1503,7 @@
   padding: 0 2px;
   margin: 0;
   color: #64748b;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -1516,7 +1518,21 @@
 }
 
 .ps-governs-caret {
-  font-size: 8px;
+  font-size: 9px;
+}
+
+/* The expanded function chips inherit the accordion's compact 9px sizing
+   (.ps-ctrl-fnchip is shared with the canvas group headers, which need it
+   small). In the sidebar card, size them like the Control tab's body text
+   so the dropdown is actually readable. Scoped so the canvas is untouched. */
+.ps-governs .ps-ctrl-fnchip {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.ps-governs .ps-ctrl-fns {
+  gap: 5px;
+  padding: 2px 6px 4px;
 }
 
 .ps-lane {
