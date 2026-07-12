@@ -98,20 +98,11 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   useEffect(() => {
     if (!initNodes.length) return;
     const selLc = selectedAddress?.toLowerCase();
-    const focLc = focusedAddress?.toLowerCase();
-    // Relatedness anchor: while the camera previews a browsed entity (search
-    // ▲/▼ fires focusPreview), highlight around IT exactly as a selection
-    // would — dim, chips, accordion row marker — so the user can tell which
-    // principal the preview is about. Committing only changes which entity
-    // the sidebar/agent/URL see; the selection RING stays commit-only
-    // (selLc). Focus addresses that resolve to neither a node nor a known
-    // principal (stale ?focus= URLs) fall back to the committed selection
-    // instead of dimming the whole canvas around nothing.
-    const focusResolves = focLc && (
-      initNodes.some((n) => n.id?.toLowerCase() === focLc) ||
-      (principals || []).some((p) => p.address?.toLowerCase() === focLc)
-    );
-    const sel = focusResolves ? focLc : selLc;
+    // Relatedness anchor: the COMMITTED selection only. A browse preview
+    // (search ▲/▼, contract pager) pans the camera and paints the gold
+    // focused ring — it never re-anchors the dim/chips, so the selected
+    // view stays put until the user commits a different entity.
+    const sel = selLc;
     // Find all nodes connected to the selected node AND, in the same
     // pass, the per-contract chip data. Owner-grouping moves the
     // principal→contract relationship from an edge into the
@@ -304,6 +295,13 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     const hiActive = highlightedAddresses && highlightedAddresses.size > 0;
 
     const foc = focusedAddress?.toLowerCase();
+    // Browse marker: gold treatment on the browsed ENTITY only — its group
+    // box or contract card when it owns a node, and its row(s) in the
+    // Controllers accordions otherwise (focusedControllerAddr below). Never
+    // the contracts it controls: that treatment belongs to an actual commit.
+    // Suppressed while it matches the committed selection so the committed
+    // node keeps just the selected ring.
+    const browseLc = foc && foc !== selLc ? foc : null;
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
@@ -312,8 +310,21 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         // selection must always outrank a highlight set (agent highlights are
         // cleared on selection, but an audit overlay can legitimately coexist,
         // and the thing the user clicked must stay visible).
-        const dimmed = hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid));
-        const focused = foc && nid === foc;
+        // Browse-marked nodes are exempt from every dim source — a preview
+        // you can't read is useless — but the dim itself stays anchored on
+        // the committed selection (or the active highlight set). A group
+        // whose accordion lists the browsed principal counts too: that row is
+        // the entity's only canvas footprint when it owns no node of its own.
+        const isFoc = foc && nid === foc;
+        const hasBrowsedRow =
+          browseLc &&
+          n.type === "group" &&
+          (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc);
+        const dimmed = !isFoc && !hasBrowsedRow &&
+          (hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid)));
+        // Gold dotted ring = "browsing this" only. The committed node keeps
+        // just the selected ring, so the two states read as different colors.
+        const focused = isFoc && nid !== selLc;
         // Merge — don't replace — n.style. Group containers carry
         // ELK-computed width/height in n.style and we'd otherwise blow
         // them away each time selection changes.
@@ -349,6 +360,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
               ? {
                   expandedIdx: expanded && expanded.groupId === n.id ? expanded.idx : null,
                   selectedControllerAddr: sel || null,
+                  focusedControllerAddr: browseLc,
                   onToggleController: (idx) => toggleController(n.id, idx),
                   onSelectController: (addr) => selectController(addr),
                   onMeasureBand: (idx, h) => measureBand(n.id, idx, h),

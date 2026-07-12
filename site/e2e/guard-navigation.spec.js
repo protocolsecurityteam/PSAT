@@ -227,17 +227,23 @@ test.describe("Caller button navigation", () => {
 });
 
 test.describe("URL focus parameter", () => {
-  test("focus param in URL highlights node with gold border on load", async ({ page }) => {
+  test("legacy focus param in URL restores a committed selection", async ({ page }) => {
     await mockApi(page);
     await page.goto(`/company/testco/surface?focus=${VAULT_ADDR}`);
     await page.waitForSelector(".ps-node", { timeout: 10000 });
 
-    // Wait for focus to apply
+    // Wait for the restore to apply
     await page.waitForTimeout(500);
 
-    // The focused node should have the gold dotted border class
-    const focusedNode = page.locator(".ps-node-focused");
-    await expect(focusedNode).toBeVisible({ timeout: 5000 });
+    // A legacy ?focus link resolves to a full selection: the node gets the
+    // selected ring (the gold dotted ring is reserved for search browsing,
+    // which never applies to the committed node) and the URL normalizes to
+    // the ?sel form.
+    const selectedNode = page.locator(".ps-node-selected");
+    await expect(selectedNode).toBeVisible({ timeout: 5000 });
+    await expect(selectedNode.locator(".ps-node-name")).toHaveText("Vault");
+    await expect(page).toHaveURL(new RegExp(`sel=${VAULT_ADDR}`));
+    await expect(page.locator(".ps-node-focused")).toHaveCount(0);
   });
 
   test("navigating updates focus param to new target", async ({ page }) => {

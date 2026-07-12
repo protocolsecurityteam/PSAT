@@ -569,8 +569,14 @@
   border-color: rgba(148, 163, 184, 0.35);
 }
 
+/* Committed selection: solid gold + soft glow. Same color family as the
+   browse marker so both read as "attention here", but solid-vs-dotted keeps
+   selected and browsing unambiguous (and the audit ring stays green).
+   !important for the same reason as ps-node-focused: the role accent is an
+   inline borderLeftColor that would otherwise win on the left edge. */
 .ps-node-selected {
-  border-color: rgba(148, 163, 184, 0.5);
+  border: 2px solid #d4a017 !important;
+  box-shadow: 0 0 18px rgba(212, 160, 23, 0.3);
 }
 
 .ps-node-focused {
@@ -2070,6 +2076,14 @@
 .ps-ctrl-row--selected {
   background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 16%, transparent);
   box-shadow: inset 0 0 0 1px var(--ctrl-accent, #6a9e94);
+}
+
+/* Browsed controller (search ▲/▼ preview — no commit): gold marker matching
+   the node-level browse ring, distinct from --selected so a browsed row and
+   the committed one never read as the same state. */
+.ps-ctrl-row--focused {
+  background: rgba(212, 160, 23, 0.12);
+  box-shadow: inset 0 0 0 1px #d4a017;
 }
 
 /* min-height (not a fixed height) so the row grows when the full capability

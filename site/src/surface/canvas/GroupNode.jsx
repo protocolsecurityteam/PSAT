@@ -27,7 +27,7 @@ function fnChipClass(fn) {
 // and grows the reserved header band so the group extends rather than
 // overlapping its cards/neighbours (GroupNode measures the band; the layout
 // re-packs to fit).
-function ControllerRow({ controller, accent, open, selected, onToggle, onSelect }) {
+function ControllerRow({ controller, accent, open, selected, focused, onToggle, onSelect }) {
   const { isPrimary, label, address, capabilities, functions = [], governs } = controller;
   // Capability tags (all of them, comma-separated, never truncated). When a
   // controller's functions map to no high-level tag, fall back to function
@@ -40,7 +40,7 @@ function ControllerRow({ controller, accent, open, selected, onToggle, onSelect 
 
   return (
     <div
-      className={`ps-ctrl-row ps-ctrl-row--${isPrimary ? "primary" : "co"}${open ? " ps-ctrl-row--open" : ""}${selected ? " ps-ctrl-row--selected" : ""}`}
+      className={`ps-ctrl-row ps-ctrl-row--${isPrimary ? "primary" : "co"}${open ? " ps-ctrl-row--open" : ""}${selected ? " ps-ctrl-row--selected" : ""}${focused ? " ps-ctrl-row--focused" : ""}`}
       style={{ "--ctrl-accent": accent }}
     >
       <div
@@ -101,6 +101,7 @@ export function GroupNode({ data }) {
   // open at a time. Default all collapsed.
   const openIdx = data.expandedIdx ?? null;
   const selectedAddr = data.selectedControllerAddr || null;
+  const focusedAddr = data.focusedControllerAddr || null;
   const onMeasureBand = data.onMeasureBand;
 
   // Measure the real rendered band height (colored bar + accordion, including
@@ -179,6 +180,7 @@ export function GroupNode({ data }) {
                   accent={c.isPrimary ? color : CO_ACCENT}
                   open={openIdx === i}
                   selected={selectedAddr != null && c.address?.toLowerCase() === selectedAddr}
+                  focused={focusedAddr != null && c.address?.toLowerCase() === focusedAddr}
                   onToggle={() => data.onToggleController && data.onToggleController(i)}
                   onSelect={() => data.onSelectController && data.onSelectController(c.address)}
                 />

@@ -15,8 +15,10 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
   );
 
   // Reset index when results change. Typing/re-sorting only refilters the
-  // preview — it never previews or commits a selection.
-  useEffect(() => { setIndex(0); }, [results.length, mode, sortKey, query]);
+  // preview — it never previews or commits a selection. The null preview
+  // drops any lingering browse marker (gold ring) from the previous result
+  // set; the committed selection is unaffected.
+  useEffect(() => { setIndex(0); onPreview(null); }, [results.length, mode, sortKey, query, onPreview]);
 
   const move = (target) => {
     if (results.length === 0) return;

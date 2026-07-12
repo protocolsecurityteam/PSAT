@@ -234,6 +234,32 @@ test.describe("Surface selection — full flow", () => {
       .toBe(1);
   });
 
+  test("browsing a safe marks its entity — group box + controller row — not its contracts", async ({ page }) => {
+    await goToSurface(page);
+
+    // Browse (never commit) back around to GovSafe: two ArrowDowns wrap
+    // 0 → 1 (CO_SAFE) → 0 (GovSafe), and only a move() fires a preview.
+    await pickMode(page, "Safes");
+    const input = page.locator(".ps-search-input");
+    await input.click();
+    await input.press("ArrowDown");
+    await input.press("ArrowDown");
+
+    // The browsed principal's own footprint gets the gold browse marker: its
+    // group box and its row in the Controllers accordion.
+    await expect(page.locator(".ps-group-focused")).toHaveCount(1);
+    await expect(page.locator(".ps-ctrl-row--focused")).toHaveCount(1);
+    // Its CONTRACTS are untouched — no gold rings, no dim (that treatment is
+    // reserved for an actual commit), no selected ring, no URL write.
+    await expect(page.locator(".ps-node-focused")).toHaveCount(0);
+    const pool = page.locator(`.react-flow__node[data-id="${POOL}"]`);
+    await expect
+      .poll(async () => Number(await pool.evaluate((n) => Number(n.style.opacity) || 1)))
+      .toBe(1);
+    await expect(page.locator(".ps-node-selected")).toHaveCount(0);
+    expect(page.url()).not.toContain("sel=");
+  });
+
   test("the search preview never duplicates the type as the label ('safe safe')", async ({ page }) => {
     await goToSurface(page);
 

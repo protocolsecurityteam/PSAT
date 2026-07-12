@@ -483,6 +483,15 @@ export default function ProtocolSurface({
     }
   }, [enabledRoles, machines, visiblePrincipals, selection, select, syncUrl]);
 
+  // Search browse preview. Null (result set changed / emptied) clears the
+  // focus address so a stale gold ring can't outlive the browsing session —
+  // the committed selection view is untouched either way. Stable identity:
+  // SearchNavigator's reset effect lists it as a dependency.
+  const handleSearchPreview = useCallback(
+    (item) => focusPreview(item ? item.address : null),
+    [focusPreview],
+  );
+
   const handleNavigate = useCallback((target) => {
     // Surface the navigation result in the Detail panel. Contract targets no
     // longer no-op when role-filtered off the canvas — the entity index spans
@@ -631,7 +640,7 @@ export default function ProtocolSurface({
         principals={visiblePrincipals}
         mode={searchMode}
         setMode={setSearchMode}
-        onPreview={(item) => { if (item) focusPreview(item.address); }}
+        onPreview={handleSearchPreview}
         onCommit={(item) => {
           if (!item) return;
           setAgentHighlights(null);
