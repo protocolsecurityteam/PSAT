@@ -28,7 +28,7 @@ const edgeTypes = { channeled: ChanneledStepEdge };
 // the edges represent any directed relationship (controls / calls /
 // sends value / owns / proxies-to); the chip text spells out which
 // specifically.
-function SelectionLegend() {
+function SelectionLegend({ onClear }) {
   return (
     <div className="ps-selection-legend">
       <div className="ps-selection-legend-row">
@@ -39,6 +39,11 @@ function SelectionLegend() {
         <span className="ps-selection-legend-swatch ps-selection-legend-swatch--in" />
         <span>this contract acts on selected</span>
       </div>
+      {/* Explicit deselect — the pane-click clear exists but is invisible;
+          this makes it discoverable and teaches the Esc shortcut. */}
+      <button className="ps-selection-clear" onClick={onClear} title="Clear selection (Esc)">
+        <kbd>esc</kbd> deselect
+      </button>
     </div>
   );
 }
@@ -72,6 +77,14 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   const toggleController = useCallback((groupId, idx) => {
     setExpanded((cur) => (cur && cur.groupId === groupId && cur.idx === idx ? null : { groupId, idx }));
   }, []);
+
+  // Deselecting collapses any open Controllers row. The function list opens
+  // from the same row click that selects the controller, so a full clear
+  // (Esc, pane click, the deselect button, role-toggle reconcile) takes the
+  // open detail with it instead of leaving an orphaned list.
+  useEffect(() => {
+    if (!selectedAddress) setExpanded(null);
+  }, [selectedAddress]);
 
   const measureBand = useCallback((groupId, idx, height) => {
     setBandHeights((cur) => {
@@ -490,7 +503,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
         <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} principals={principals} />
         {selectedAddress && (
           <Panel position="top-center">
-            <SelectionLegend />
+            <SelectionLegend onClear={() => onSelectMachine(null)} />
           </Panel>
         )}
       </ReactFlow>

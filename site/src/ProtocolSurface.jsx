@@ -374,6 +374,28 @@ export default function ProtocolSurface({
     }
   }, [select, syncUrl]);
 
+  // Escape clears the committed selection — the same full clear a pane click
+  // does, just discoverable from the keyboard. Ignored while a form field has
+  // focus so it never fights the search input's own key handling.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape" || !selection) return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      handleSelectMachine(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selection, handleSelectMachine]);
+
   const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
   const handleRadarExampleClick = useCallback((example) => {

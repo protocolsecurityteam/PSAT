@@ -285,6 +285,32 @@ test.describe("Surface selection — full flow", () => {
     expect(page.url()).not.toContain("sel=");
   });
 
+  test("Escape and the legend deselect button both clear the selection", async ({ page }) => {
+    await goToSurface(page);
+
+    // Select a contract on the canvas, then clear with Escape.
+    await page.locator(".ps-node").first().click();
+    await expect(page.locator(".ps-node-selected")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ps-node-selected")).toHaveCount(0);
+    expect(page.url()).not.toContain("sel=");
+
+    // Re-select, then clear via the legend's "esc deselect" button.
+    await page.locator(".ps-node").first().click();
+    await expect(page.locator(".ps-node-selected")).toHaveCount(1);
+    await page.locator(".ps-selection-clear").click();
+    await expect(page.locator(".ps-node-selected")).toHaveCount(0);
+    expect(page.url()).not.toContain("sel=");
+
+    // A controller-row selection opens the row's function list; deselecting
+    // must collapse it rather than leave an orphaned open list.
+    await page.locator(".ps-ctrl-row--primary .ps-ctrl-head").click();
+    await expect(page.locator(".ps-ctrl-row--open")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ps-ctrl-row--open")).toHaveCount(0);
+    await expect(page.locator(".ps-group-selected")).toHaveCount(0);
+  });
+
   test("the search preview never duplicates the type as the label ('safe safe')", async ({ page }) => {
     await goToSurface(page);
 
