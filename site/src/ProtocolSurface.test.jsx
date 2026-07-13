@@ -1,10 +1,9 @@
 // State-variant + interaction tests for ProtocolSurface. Covers each
 // sidebar mode (Detail / Agent / Audits / Monitor / Upgrades), tab
-// switching, search interaction, machine selection, and the dependency
-// graph modal. Goal is regression coverage for the upcoming
-// ProtocolSurface.jsx file split — every sub-tree
-// (SurfaceMonitoringPanel, AuditsListPanel, UpgradesSidebarPanel,
-// EntityCard, InspectorCard, DependencyGraphModal, SearchNavigator)
+// switching, search interaction, and machine selection. Goal is
+// regression coverage for the upcoming ProtocolSurface.jsx file split —
+// every sub-tree (SurfaceMonitoringPanel, AuditsListPanel,
+// UpgradesSidebarPanel, EntityCard, InspectorCard, SearchNavigator)
 // has a behavioral assertion here.
 
 import React from "react";

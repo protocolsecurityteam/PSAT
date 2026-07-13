@@ -13,7 +13,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import ProtocolSurface from "./ProtocolSurface.jsx";
-import DependencyGraphTab from "./DependencyGraphTab.jsx";
 import AddressesModal from "./AddressesModal.jsx";
 import AuditsAdminModal from "./AuditsAdminModal.jsx";
 import AddressLabelInline from "./AddressLabelInline.jsx";
@@ -89,25 +88,6 @@ describe("ProtocolSurface", () => {
         /Loading surface/i.test(text);
       expect(ready).toBeTruthy();
     });
-    expectNoCrash();
-  });
-});
-
-describe("DependencyGraphTab", () => {
-  it("renders with empty data", () => {
-    render(<DependencyGraphTab data={null} runName="empty" />);
-    expectNoCrash();
-  });
-
-  it("renders with a small viz payload", () => {
-    const data = {
-      nodes: [
-        { id: "0xaaa", address: "0xaaa", label: "A" },
-        { id: "0xbbb", address: "0xbbb", label: "B" },
-      ],
-      edges: [{ source: "0xaaa", target: "0xbbb", type: "CALL" }],
-    };
-    render(<DependencyGraphTab data={data} runName="demo" />);
     expectNoCrash();
   });
 });

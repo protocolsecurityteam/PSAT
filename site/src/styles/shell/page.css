@@ -27,9 +27,7 @@
 
 .panel,
 .submit-card,
-.card,
-.graph-panel,
-.detail-panel {
+.card {
   background: linear-gradient(180deg, rgba(20, 26, 36, 0.95), rgba(15, 20, 28, 0.92));
   backdrop-filter: blur(16px);
   border: 1px solid var(--panel-border);
@@ -39,9 +37,7 @@
 }
 
 .panel,
-.submit-card,
-.detail-panel,
-.graph-panel {
+.submit-card {
   padding: 22px;
 }
 

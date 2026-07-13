@@ -17,7 +17,6 @@ import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { EntityCard } from "./surface/lanes/EntityCard.jsx";
-import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
@@ -96,7 +95,6 @@ export default function ProtocolSurface({
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
   const [error, setError] = useState(null);
-  const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
 
   // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
   // "upgrades". Agent and Monitor are admin-only, so non-admins open in
@@ -547,7 +545,6 @@ export default function ProtocolSurface({
         onPreview={(addr) => focusPreview(addr)}
         highlightedFunctionKey={radarSelection.functionKey}
         highlightedContract={!radarSelection.functionKey}
-        onOpenDependencyGraph={setDependencyGraphMachine}
         governsIndex={governsIndex}
         controlAdjacency={controlAdjacency}
         machines={machines}
@@ -676,7 +673,6 @@ export default function ProtocolSurface({
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
               onPreview={(addr) => focusPreview(addr)}
-              onOpenDependencyGraph={setDependencyGraphMachine}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}
@@ -738,10 +734,6 @@ export default function ProtocolSurface({
           )}
         </DraggableSidebar>
       </div>
-      <DependencyGraphModal
-        machine={dependencyGraphMachine}
-        onClose={() => setDependencyGraphMachine(null)}
-      />
     </div>
   );
 }
