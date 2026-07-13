@@ -522,13 +522,12 @@ export default function ProtocolSurface({
     // the target's facets, not the caller's guessed type — a machine-only
     // authority (e.g. an analyzed timelock the server never emits as a
     // principal) opens its contract card instead of stranding an empty sidebar.
-    // The full target rides along as `hint`: resolveEntity reads its type to
-    // synthesize a principal card for off-index targets, and its `tab` pre-opens
-    // Governs (the "what does this authority control" question a caller-button
-    // navigate asks) when the target has one.
+    // The full target rides along as `hint` so resolveEntity can read its type
+    // to synthesize a principal card for off-index targets. The card opens on
+    // its default tab — same as clicking the node on the canvas.
     setSidebarMode("detail");
     setAgentHighlights(null);
-    select(target.address, { hint: { ...target, tab: "governs" } });
+    select(target.address, { hint: { ...target } });
     syncUrl({ sel: target.address });
   }, [select, syncUrl]);
 
@@ -676,7 +675,6 @@ export default function ProtocolSurface({
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}
-              initialTab={selection?.hint?.tab}
             />
           )}
           {sidebarMode === "detail" && selectedMachine && !radarSelection && (

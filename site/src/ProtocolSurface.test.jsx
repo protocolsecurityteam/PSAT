@@ -898,7 +898,7 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
     window.history.replaceState({}, "", "/company/etherfi/surface");
   });
 
-  it("navigating via a timelock-typed caller opens the contract card with Governs pre-open", async () => {
+  it("navigating via a timelock-typed caller opens the contract card on its default tab", async () => {
     render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-embedded → URL writes
     const user = userEvent.setup();
 
@@ -925,10 +925,17 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
     });
     expect(machineName).toHaveTextContent("GovTimelock");
 
-    // Governs is pre-opened (its panel renders only when the tab is active), and
-    // lists the contract this authority governs.
+    // Opens on the default Control tab — same as a direct canvas click — so the
+    // Governs panel is NOT auto-opened.
+    const card = machineName.closest(".ps-machine");
+    const tabBar = card.querySelector(".ps-machine-tabs");
+    expect(within(tabBar).getByRole("button", { name: /^Control/ })).toHaveClass("active");
+    expect(card.querySelector(".ps-governs-name")).toBeNull();
+
+    // Governs is still one click away and lists the contract this authority governs.
+    await user.click(within(tabBar).getByRole("button", { name: /^Governs/ }));
     const governsRow = await waitFor(() => {
-      const el = document.querySelector(".ps-governs-name");
+      const el = card.querySelector(".ps-governs-name");
       expect(el).toBeTruthy();
       return el;
     });
