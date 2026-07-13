@@ -497,6 +497,25 @@ def api_client(monkeypatch, db_session):
     return TestClient(api_module.app)
 
 
+@pytest.fixture
+def spa_index(tmp_path, monkeypatch):
+    """Point the SPA router at a stand-in built ``dist/index.html``.
+
+    ``routers.spa`` serves the index only from the built ``site/dist`` — the
+    source-index fallback was removed so prod can never serve an unbuilt page.
+    The offline CI job runs no ``npm run build``, so tests asserting the SPA
+    HTML is served need a stand-in dist rather than the real (absent) one.
+    """
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text(
+        "<!doctype html><title>Run an address and inspect the control surface</title>",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("routers.spa.SITE_DIST_DIR", dist)
+    return dist
+
+
 def _can_connect() -> bool:
     if not DATABASE_URL:
         return False

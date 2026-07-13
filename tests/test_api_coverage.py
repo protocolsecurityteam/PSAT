@@ -1253,7 +1253,7 @@ def test_spa_fallback_api_prefix_returns_404():
     assert response.status_code == 404
 
 
-def test_spa_fallback_non_api_serves_html():
+def test_spa_fallback_non_api_serves_html(spa_index):
     """Non-API deep links serve the SPA index."""
     client = _make_client()
     response = client.get("/some/random/path")

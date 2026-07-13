@@ -202,14 +202,14 @@ def test_company_principal_lookup_promotes_delay_contract_to_timelock() -> None:
     assert lookup[timelock_addr]["details"]["delay"] == 864000
 
 
-def test_index_serves_html() -> None:
+def test_index_serves_html(spa_index) -> None:
     client = make_client()
     response = client.get("/")
     assert response.status_code == 200
     assert "Run an address and inspect the control surface" in response.text
 
 
-def test_spa_fallback_serves_html_for_deep_link() -> None:
+def test_spa_fallback_serves_html_for_deep_link(spa_index) -> None:
     client = make_client()
     response = client.get("/address/0x1234567890123456789012345678901234567890/graph")
     assert response.status_code == 200
