@@ -3,7 +3,13 @@ import { useState } from "react";
 import { isBytecodeVerifiedAudit } from "../../auditCoverage.js";
 import { formatAuditDate } from "../../auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
+import { GotoArrow } from "../GotoArrow.jsx";
 import { principalLabel, shortAddr } from "../format.js";
+
+// Sentinel activeAuditId value for the summary's "all proven contracts"
+// highlight. The picked-audit state is one radio: null (nothing), a numeric
+// audit_id (that audit's covered set), or ALL_PROVEN (every proven contract).
+const ALL_PROVEN = "all";
 
 // Proof-first audits panel. See site/prototypes/audit-panel/HANDOFF.md.
 //
@@ -114,25 +120,74 @@ function AuditRow({ audit, contracts, open, onToggle, onRead }) {
 function ProtocolAuditsView({
   auditEntries,
   provenContracts,
+  provenList,
   trackedContracts,
   activeAuditId,
   onPickAudit,
   onRead,
+  onPreview,
+  onNavigate,
 }) {
+  // The summary doubles as the whole-proven-set control: click it to ring every
+  // source-proven contract at once and list them (one meaning — "has a proof");
+  // click an audit row to narrow to that audit's set. Mutually exclusive.
+  const allActive = activeAuditId === ALL_PROVEN;
+  const canExpand = provenContracts > 0;
   return (
     <>
       <section className="ps-audits-summary">
         <div className="ps-audits-summary-eyebrow">Audit coverage</div>
-        <div className="ps-audits-summary-line">
-          <span className="ps-audits-dot" style={{ background: PROVEN }} />
-          <span className="ps-audits-summary-big">
-            {provenContracts} / {trackedContracts}
-          </span>{" "}
-          <span className="ps-audits-summary-rest">
-            contract{trackedContracts === 1 ? "" : "s"} have a source proof · {auditEntries.length}{" "}
-            audit{auditEntries.length === 1 ? "" : "s"}
+        <button
+          type="button"
+          className={`ps-audits-summary-btn ${allActive ? "active" : ""}`}
+          aria-expanded={canExpand ? allActive : undefined}
+          aria-disabled={!canExpand}
+          onClick={() => canExpand && onPickAudit(allActive ? null : ALL_PROVEN)}
+        >
+          <span className="ps-audits-summary-line">
+            <span className="ps-audits-dot" style={{ background: PROVEN }} />
+            <span className="ps-audits-summary-big">
+              {provenContracts} / {trackedContracts}
+            </span>{" "}
+            <span className="ps-audits-summary-rest">
+              contract{trackedContracts === 1 ? "" : "s"} have a source proof · {auditEntries.length}{" "}
+              audit{auditEntries.length === 1 ? "" : "s"}
+            </span>
           </span>
-        </div>
+          {canExpand && (
+            <span className="ps-audits-summary-caret">{allActive ? "▾" : "▸"}</span>
+          )}
+        </button>
+        {allActive && canExpand && (
+          <div className="ps-audits-covlist">
+            {provenList.map((c) => (
+              <div
+                key={c.address}
+                className="ps-audits-covrow"
+                role="button"
+                tabIndex={0}
+                onClick={() => onPreview?.(c.address)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onPreview?.(c.address);
+                  }
+                }}
+              >
+                <span className="ps-audits-covrow-name">{c.name}</span>
+                <span className="ps-audits-covrow-addr">{shortAddr(c.address)}</span>
+                {onNavigate && (
+                  <GotoArrow
+                    onCommit={() =>
+                      onNavigate({ type: "contract", address: c.address, label: c.name })
+                    }
+                    label={`Go to ${c.name}`}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="ps-audits-panel-hint">
@@ -259,6 +314,8 @@ export function AuditsListPanel({
   selectedMachine,
   selectedPrincipal,
   onClearSelection,
+  onPreview,
+  onNavigate,
 }) {
   const [readingAudit, setReadingAudit] = useState(null);
 
@@ -332,6 +389,13 @@ export function AuditsListPanel({
     return (y.audit.audit_id || 0) - (x.audit.audit_id || 0);
   });
 
+  // The proven-contract roster the summary dropdown lists (and the canvas rings
+  // when "all" is picked): one entry per distinct source-proven address, named
+  // from its on-canvas machine, sorted by name.
+  const provenList = [...provenAddrs]
+    .map((addr) => ({ address: addr, name: contractByAddr.get(addr)?.name || shortAddr(addr) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   const openRead = (audit) => {
     const bucket = byAudit.get(audit.audit_id);
     const coveredCount = new Set((bucket?.contracts || []).map((c) => c.address)).size;
@@ -342,10 +406,13 @@ export function AuditsListPanel({
     <ProtocolAuditsView
       auditEntries={auditEntries}
       provenContracts={provenAddrs.size}
+      provenList={provenList}
       trackedContracts={trackedContracts}
       activeAuditId={activeAuditId}
       onPickAudit={onPickAudit}
       onRead={openRead}
+      onPreview={onPreview}
+      onNavigate={onNavigate}
     />
   );
 

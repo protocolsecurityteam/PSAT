@@ -317,6 +317,88 @@
   vertical-align: middle;
 }
 
+/* The summary line doubles as the "ring every proven contract" control. */
+.ps-audits-summary-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 4px 5px;
+  margin: -4px -5px;
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ps-audits-summary-btn[aria-disabled="true"] {
+  cursor: default;
+}
+
+.ps-audits-summary-btn:not([aria-disabled="true"]):hover,
+.ps-audits-summary-btn.active {
+  background: rgba(74, 222, 128, 0.07);
+}
+
+.ps-audits-summary-caret {
+  flex: none;
+  margin-left: auto;
+  margin-top: 3px;
+  font-size: 10px;
+  color: #4ade80;
+}
+
+/* The proven-contract roster, disclosed under the summary when "all" is picked.
+   Rows mirror the Governs/Depends reference-row idiom: name + short address, the
+   body peeks the contract on the canvas, the → arrow commits to its card. */
+.ps-audits-covlist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(74, 222, 128, 0.16);
+}
+
+.ps-audits-covrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ps-audits-covrow:hover {
+  background: rgba(74, 222, 128, 0.06);
+}
+
+.ps-audits-covrow-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  font-size: 12px;
+  color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ps-audits-covrow-addr {
+  flex: none;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 9.5px;
+  color: #64748b;
+}
+
+.ps-audits-covrow:hover .ps-goto-arrow {
+  color: #94a3b8;
+}
+
 .ps-audits-summary-big {
   font-weight: 800;
   color: #e2e8f0;
