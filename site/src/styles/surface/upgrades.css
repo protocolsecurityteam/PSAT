@@ -261,6 +261,10 @@
   color: var(--muted);
 }
 
+/* ── Proof-first Audits panel ──────────────────────────────────────────────
+ * One verdict only ("Running audited code" — the deployed source hash-matches
+ * the reviewed commit). Colored dots, never emoji. No low-confidence or
+ * accusatory signals. See site/prototypes/audit-panel/HANDOFF.md. */
 .ps-audits-panel {
   padding: 12px;
   display: flex;
@@ -268,103 +272,361 @@
   gap: 10px;
 }
 
-.ps-audits-panel-hdr {
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: #cbd5e1;
-}
-
 .ps-audits-panel-hint {
   font-size: 11px;
   color: #64748b;
+  line-height: 1.4;
 }
 
-.ps-audits-contract-card {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(45, 212, 191, 0.18);
-  background: rgba(45, 212, 191, 0.06);
-  border-radius: 8px;
+.ps-audits-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
 }
 
-.ps-audits-contract-top,
-.ps-audits-contract-row-main {
+/* Proof-first summary: the one-glance "how audited is this protocol?" answer,
+   built only from cryptographic proofs. */
+.ps-audits-summary {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid rgba(74, 222, 128, 0.22);
+  background: rgba(74, 222, 128, 0.05);
+  border-radius: 10px;
 }
 
-.ps-audits-contract-top {
-  color: #e2e8f0;
-  font-size: 13px;
+.ps-audits-summary-eyebrow {
+  font-size: 9px;
   font-weight: 800;
-}
-
-.ps-audits-contract-addr {
-  color: #64748b;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 10px;
-  word-break: break-all;
-}
-
-.ps-audits-contract-note {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: #94a3b8;
-  font-size: 11px;
-  line-height: 1.35;
 }
 
-.ps-audits-contract-list {
-  display: grid;
-  gap: 6px;
+.ps-audits-summary-line {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #cbd5e1;
 }
 
-.ps-audits-contract-row {
-  display: grid;
-  gap: 4px;
-  width: 100%;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 18, 24, 0.72);
-  border-radius: 7px;
-  padding: 8px 9px;
+.ps-audits-summary-line .ps-audits-dot {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.ps-audits-summary-big {
+  font-weight: 800;
   color: #e2e8f0;
-  font: inherit;
+  white-space: nowrap;
+}
+
+.ps-audits-summary-rest {
+  color: #cbd5e1;
+}
+
+/* The single proven tier. */
+.ps-audits-tier {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(10, 13, 19, 0.5);
+  overflow: hidden;
+}
+
+.ps-audits-tier-hdr {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+}
+
+.ps-audits-tier-name {
+  font-weight: 800;
+  font-size: 12px;
+  color: #e2e8f0;
+}
+
+.ps-audits-tier-count {
+  margin-left: auto;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.ps-audits-tier-blurb {
+  padding: 0 12px 8px 33px;
+  font-size: 10px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.ps-audits-tier-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 10px;
+}
+
+/* Audit row — collapsed summary; expands to a per-contract breakdown. */
+.ps-audits-arow {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 9px;
+  background: #141a24;
+  overflow: hidden;
+}
+
+.ps-audits-arow.open {
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
+.ps-audits-arow-head {
+  display: flex;
+  align-items: stretch;
+}
+
+.ps-audits-arow-btn {
+  flex: 1;
+  min-width: 0;
   text-align: left;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   box-shadow: none;
 }
 
-.ps-audits-contract-row:hover {
-  border-color: rgba(45, 212, 191, 0.30);
-  background: rgba(15, 23, 42, 0.86);
+.ps-audits-arow-btn:hover {
+  background: #182031;
   transform: none;
 }
 
-.ps-audits-contract-row-main {
-  font-size: 12px;
-  font-weight: 750;
+.ps-audits-arow-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.ps-audits-contract-row-main span:last-child {
-  color: #64748b;
-  font-size: 10px;
+.ps-audits-arow-aud {
   font-weight: 700;
+  font-size: 12.5px;
+  color: #e2e8f0;
 }
 
-.ps-audits-contract-row-title {
-  color: #94a3b8;
+.ps-audits-arow-date {
+  font-size: 10px;
+  color: #64748b;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  white-space: nowrap;
+}
+
+.ps-audits-arow-title {
   font-size: 11px;
+  color: #cbd5e1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ps-audits-contract-badges {
+.ps-audits-arow-meta {
   display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.ps-audits-arow-cnt {
+  font-size: 10px;
+  color: #64748b;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+}
+
+.ps-audits-arow-caret {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+
+.ps-audits-arow.open .ps-audits-arow-caret {
+  transform: rotate(180deg);
+}
+
+.ps-audits-arow-read {
+  flex-shrink: 0;
+  background: rgba(45, 212, 191, 0.10);
+  border: 0;
+  border-left: 1px solid rgba(148, 163, 184, 0.14);
+  color: #2dd4bf;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0 12px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.ps-audits-arow-read:hover {
+  background: rgba(45, 212, 191, 0.20);
+  color: #a7f3d0;
+  transform: none;
+}
+
+/* Per-contract breakdown inside an expanded audit row (the honest unit —
+   the verdict lives on the audit × contract pair). */
+.ps-audits-cc-wrap {
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(8, 11, 17, 0.55);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ps-audits-cc-lead {
+  padding: 2px 4px 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.ps-audits-cc-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 7px;
+  background: #141a24;
+}
+
+.ps-audits-cc-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ps-audits-cc-name {
+  font-weight: 700;
+  font-size: 12px;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ps-audits-cc-addr {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 9.5px;
+  color: #64748b;
+}
+
+.ps-audits-cc-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-wrap: wrap;
+}
+
+/* The one verdict badge. */
+.ps-audits-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2.5px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.33);
+  background: rgba(74, 222, 128, 0.09);
+}
+
+.ps-audits-shabadge {
+  padding: 1.5px 6px;
+  border-radius: 5px;
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #2dd4bf;
+  background: rgba(45, 212, 191, 0.10);
+  border: 1px solid rgba(45, 212, 191, 0.30);
+}
+
+/* Contract-selected mode. */
+.ps-audits-back {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.ps-audits-back:hover {
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.08);
+  transform: none;
+}
+
+.ps-audits-contract-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 12px;
+  border: 1px solid rgba(45, 212, 191, 0.18);
+  background: rgba(45, 212, 191, 0.06);
+  border-radius: 9px;
+}
+
+.ps-audits-sc-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: #e2e8f0;
+}
+
+.ps-audits-sc-addr {
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 10px;
+  color: #64748b;
+  word-break: break-all;
+}
+
+.ps-audits-sc-count {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.ps-audits-cm-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 9px;
+  background: #141a24;
+  overflow: hidden;
+}
+
+.ps-audits-cm-main {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
   gap: 4px;
 }
 
@@ -1400,167 +1662,4 @@
   color: #5eead4;
 }
 
-.ps-audits-active-card {
-  background: rgba(34, 197, 94, 0.06);
-  border: 1px solid rgba(34, 197, 94, 0.28);
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ps-audits-active-hdr {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #4ade80;
-}
-
-.ps-audits-clear {
-  background: transparent;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  color: #94a3b8;
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 10px;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.ps-audits-clear:hover {
-  background: rgba(148, 163, 184, 0.08);
-  color: #e2e8f0;
-  transform: none;
-}
-
-.ps-audits-covered-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.ps-audits-covered-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  padding: 3px 0;
-}
-
-.ps-audits-covered-name {
-  color: #e2e8f0;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ps-audits-covered-addr {
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.ps-audits-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.ps-audits-row {
-  display: flex;
-  gap: 0;
-  background: #141a24;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 8px;
-  overflow: hidden;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.ps-audits-row:hover {
-  border-color: rgba(148, 163, 184, 0.30);
-}
-
-.ps-audits-row.active {
-  border-color: rgba(34, 197, 94, 0.55);
-  background: rgba(34, 197, 94, 0.05);
-}
-
-.ps-audits-row-main {
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  padding: 10px 12px;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-  box-shadow: none;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.ps-audits-row-main:hover { transform: none; }
-
-.ps-audits-row-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.ps-audits-row-auditor {
-  font-weight: 700;
-  color: #e2e8f0;
-  font-size: 13px;
-}
-
-.ps-audits-row-date {
-  font-size: 11px;
-  color: #64748b;
-  white-space: nowrap;
-  font-family: "JetBrains Mono", monospace;
-}
-
-.ps-audits-row-title {
-  font-size: 12px;
-  color: #cbd5e1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ps-audits-row-meta {
-  font-size: 10.5px;
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-}
-
-.ps-audits-row-read {
-  flex-shrink: 0;
-  background: rgba(45, 212, 191, 0.10);
-  border: 0;
-  border-left: 1px solid rgba(148, 163, 184, 0.14);
-  color: #2dd4bf;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 0 14px;
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.ps-audits-row-read:hover {
-  background: rgba(45, 212, 191, 0.20);
-  color: #a7f3d0;
-  transform: none;
-}
 

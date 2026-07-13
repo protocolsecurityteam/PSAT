@@ -626,6 +626,7 @@ export default function ProtocolSurface({
               machines={machines}
               selectedMachine={selectedMachine}
               selectedPrincipal={selectedPrincipal}
+              onClearSelection={() => handleSelectMachine(null)}
             />
           )}
           {isAdmin && sidebarMode === "monitoring" && (

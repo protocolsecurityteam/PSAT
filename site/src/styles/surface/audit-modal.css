@@ -18,6 +18,7 @@
   to { opacity: 1; }
 }
 
+/* Shared shell — the Addresses + admin modals reuse this big two-pane frame. */
 .ps-audit-modal {
   width: min(1100px, 100%);
   height: min(820px, 100%);
@@ -31,6 +32,14 @@
   color: #e2e8f0;
 }
 
+/* The proof-first read modal (Prototype C, C5) is a lighter, single-column
+   card: reviewed commits, declared scope, proxied PDF. */
+.ps-audit-modal--read {
+  width: min(560px, 94vw);
+  height: auto;
+  max-height: 88vh;
+}
+
 .ps-audit-modal-header {
   display: flex;
   align-items: flex-start;
@@ -38,6 +47,11 @@
   gap: 16px;
   padding: 18px 22px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+/* The read modal is a lighter card — a touch less header padding. */
+.ps-audit-modal--read .ps-audit-modal-header {
+  padding: 16px 18px;
 }
 
 .ps-audit-modal-header-left {
@@ -57,7 +71,7 @@
 
 .ps-audit-modal-title {
   font-family: "Space Grotesk", system-ui, sans-serif;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: #e2e8f0;
   letter-spacing: -0.02em;
@@ -67,54 +81,7 @@
   font-size: 11px;
   color: #64748b;
   font-family: "JetBrains Mono", monospace;
-  margin-top: 2px;
-}
-
-/* Audit-level commit chips — the SHA(s) the auditor reviewed */
-.ps-audit-modal-commits {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
-.ps-audit-modal-commits-label {
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #94a3b8;
-  margin-right: 2px;
-}
-
-.ps-audit-modal-commit-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(45, 212, 191, 0.35);
-  background: rgba(45, 212, 191, 0.08);
-  color: #5eead4;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-decoration: none;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-
-a.ps-audit-modal-commit-chip:hover {
-  background: rgba(45, 212, 191, 0.20);
-  border-color: rgba(45, 212, 191, 0.65);
-  color: #a7f3d0;
-}
-
-.ps-audit-modal-commit-more {
-  font-size: 10.5px;
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-  font-weight: 600;
+  margin-top: 3px;
 }
 
 .ps-audit-modal-actions {
@@ -146,6 +113,7 @@ a.ps-audit-modal-commit-chip:hover {
   transform: none;
 }
 
+/* Primary variant — used by the Addresses modal's compare toggle. */
 .ps-audit-modal-btn.primary {
   background: rgba(45, 212, 191, 0.14);
   border-color: rgba(45, 212, 191, 0.50);
@@ -157,183 +125,104 @@ a.ps-audit-modal-commit-chip:hover {
   color: #f0fdfa;
 }
 
-.ps-audit-modal-body {
-  display: flex;
+/* Read-modal body — single column of stacked sections. */
+.ps-audit-read-body {
   flex: 1;
   min-height: 0;
-}
-
-.ps-audit-modal-aside {
-  width: 220px;
-  flex-shrink: 0;
-  border-right: 1px solid rgba(148, 163, 184, 0.14);
-  padding: 14px 16px;
   overflow-y: auto;
-}
-
-.ps-audit-modal-aside-hdr {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #94a3b8;
-  margin-bottom: 10px;
-}
-
-.ps-audit-modal-aside-list {
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 18px;
 }
 
-.ps-audit-modal-aside-hint {
-  font-size: 10px;
-  color: #64748b;
-  font-style: italic;
+.ps-audit-read-sec-h {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
   margin-bottom: 8px;
 }
 
-.ps-audit-modal-aside-row {
+.ps-audit-read-commits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ps-audit-read-commit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.5);
+  color: #cbd5e1;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ps-audit-read-commit-lbl {
+  font-size: 8px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.ps-audit-read-scope-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: transparent;
-  border: 0;
-  text-align: left;
-  width: 100%;
-  color: inherit;
-  font: inherit;
-  transition: background 120ms ease, border-color 120ms ease;
-  box-shadow: none;
-}
-
-.ps-audit-modal-aside-row.clickable {
-  cursor: pointer;
-}
-
-.ps-audit-modal-aside-row.clickable:hover {
-  background: rgba(148, 163, 184, 0.08);
-  transform: none;
-}
-
-.ps-audit-modal-aside-row.active {
-  background: rgba(45, 212, 191, 0.12);
-  outline: 1px solid rgba(45, 212, 191, 0.45);
-}
-
-.ps-audit-modal-aside-row-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1;
-}
-
-.ps-audit-modal-aside-name {
+  padding: 6px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 7px;
+  background: #141a24;
   font-size: 12px;
-  font-weight: 700;
   color: #e2e8f0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.ps-audit-modal-aside-addr {
-  font-size: 10px;
-  font-family: "JetBrains Mono", monospace;
-  color: #64748b;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ps-audit-read-scope-row + .ps-audit-read-scope-row {
+  margin-top: 4px;
 }
 
-.ps-audit-modal-aside-page {
+.ps-audit-read-scope-tie {
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 700;
-  font-family: "JetBrains Mono", monospace;
-  color: #2dd4bf;
-  background: rgba(45, 212, 191, 0.10);
-  border: 1px solid rgba(45, 212, 191, 0.35);
-  border-radius: 999px;
-  padding: 2px 8px;
-  letter-spacing: 0.04em;
+  color: #4ade80;
 }
 
-.ps-audit-modal-aside-page.dim {
-  color: #475569;
-  background: transparent;
-  border-color: transparent;
-}
-
-.ps-audit-modal-aside-row.active .ps-audit-modal-aside-page {
-  color: #06110f;
-  background: #2dd4bf;
-  border-color: #2dd4bf;
-}
-
-.ps-audit-modal-aside-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-
-.ps-audit-modal-aside-sha {
-  font-family: "JetBrains Mono", monospace;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.10);
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  border-radius: 999px;
-  padding: 2px 7px;
-  text-decoration: none;
-  white-space: nowrap;
-  /* button form inherits the same look */
-  box-shadow: none;
-  cursor: pointer;
-}
-
-button.ps-audit-modal-aside-sha {
-  font: inherit;
-  font-family: "JetBrains Mono", monospace;
-  line-height: 1;
-}
-
-a.ps-audit-modal-aside-sha:hover,
-button.ps-audit-modal-aside-sha:hover {
-  background: rgba(245, 158, 11, 0.22);
-  border-color: rgba(245, 158, 11, 0.65);
-  color: #fcd34d;
-  transform: none;
-}
-
-.ps-audit-modal-text,
-.ps-audit-modal-doc {
-  flex: 1;
-  min-width: 0;
+.ps-audit-read-doc {
+  height: 320px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
   overflow: auto;
-  padding: 18px 22px;
+  background: #0a0e15;
   display: flex;
   flex-direction: column;
 }
 
-.ps-audit-modal-doc {
-  padding: 0;
-  background: #0a0e15;
-}
-
-.ps-audit-modal-iframe {
+.ps-audit-read-iframe {
   flex: 1;
   width: 100%;
   height: 100%;
-  min-height: 400px;
+  min-height: 0;
   border: 0;
   background: #ffffff;
+}
+
+.ps-audit-read-doc .ps-audit-modal-pre {
+  padding: 12px 14px;
+}
+
+.ps-audit-read-doc .ps-audit-modal-empty {
+  margin: auto;
 }
 
 .ps-audit-modal-empty {
@@ -352,10 +241,3 @@ button.ps-audit-modal-aside-sha:hover {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
-@media (max-width: 768px) {
-  .ps-audit-modal-body { flex-direction: column; }
-  .ps-audit-modal-aside { width: 100%; border-right: 0; border-bottom: 1px solid rgba(148, 163, 184, 0.14); }
-}
-
-

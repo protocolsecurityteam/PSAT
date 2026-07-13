@@ -22,6 +22,7 @@ const VERIFIED_AUDIT = {
   equivalence_status: "proven",
   proof_kind: "clean",
   bytecode_drift: false,
+  matched_commit_sha: "abc1234deadbeef",
 };
 
 const COVERAGE = {
@@ -70,20 +71,23 @@ describe("AuditsListPanel principal awareness", () => {
     // The absence of the selected-contract coverage card is the regression
     // invariant for a principal selection.
     expect(document.querySelector(".ps-audits-contract-card")).not.toBeInTheDocument();
-    expect(screen.queryByText(/bytecode match/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/source-proven audit/i)).not.toBeInTheDocument();
   });
 
-  it("renders the contract coverage card unchanged for a contract selection", () => {
+  it("renders the proof-first contract card for a contract selection", () => {
     renderPanel({ selectedMachine: MACHINES[0] });
 
-    // Coverage card present, hint absent.
-    expect(screen.getByText(/bytecode match/i)).toBeInTheDocument();
+    // The selected-contract card is present with the single proof-first
+    // verdict; the principal hint is absent.
+    expect(document.querySelector(".ps-audits-contract-card")).toBeInTheDocument();
+    expect(screen.getByText(/source-proven audit/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Running audited code/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/controlled contract/i)).not.toBeInTheDocument();
   });
 
   it("renders no selected card when nothing is selected", () => {
     renderPanel({});
+    expect(document.querySelector(".ps-audits-contract-card")).not.toBeInTheDocument();
     expect(screen.queryByText(/controlled contract/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/bytecode match/i)).not.toBeInTheDocument();
   });
 });
