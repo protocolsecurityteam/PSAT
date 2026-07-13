@@ -17,7 +17,6 @@ import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { EntityCard } from "./surface/lanes/EntityCard.jsx";
-import { DependencyGraphModal } from "./surface/modals/DependencyGraphModal.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
@@ -96,7 +95,6 @@ export default function ProtocolSurface({
     window.history.replaceState({}, "", url.toString());
   }, [embedded]);
   const [error, setError] = useState(null);
-  const [dependencyGraphMachine, setDependencyGraphMachine] = useState(null);
 
   // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
   // "upgrades". Agent and Monitor are admin-only, so non-admins open in
@@ -162,17 +160,27 @@ export default function ProtocolSurface({
   // highlightedAddresses below (defined after the selection/visibility derives
   // it also depends on).
   const auditHighlights = useMemo(() => {
-    if (activeAuditId == null || !coverageData) return null;
+    // The audit overlay is a function of the Audits tab being open: leaving the
+    // tab suppresses it, but activeAuditId is kept so returning re-lights the
+    // same pick (persist-on-return). `"all"` is the summary's whole-proven-set
+    // highlight; a numeric id is one audit's covered set. Both are one radio —
+    // see AuditsListPanel. A committed selection clears activeAuditId (below).
+    if (activeAuditId == null || !coverageData || sidebarMode !== "audits") return null;
+    const showAll = activeAuditId === "all";
     const out = new Set();
     for (const entry of coverageData.coverage || []) {
       const addr = (entry.address || "").toLowerCase();
       if (!addr) continue;
-      if ((entry.audits || []).some((a) => a.audit_id === activeAuditId && isBytecodeVerifiedAudit(a))) {
+      if (
+        (entry.audits || []).some(
+          (a) => isBytecodeVerifiedAudit(a) && (showAll || a.audit_id === activeAuditId),
+        )
+      ) {
         out.add(addr);
       }
     }
     return out.size ? out : null;
-  }, [activeAuditId, coverageData]);
+  }, [activeAuditId, coverageData, sidebarMode]);
 
   const setHighlightedAddresses = setAgentHighlights;
   const [enabledRoles, setEnabledRoles] = useState(() => {
@@ -365,10 +373,13 @@ export default function ProtocolSurface({
   }, []);
 
   const handleSelectMachine = useCallback((machine) => {
-    // Any committed selection transition drops the agent-emitted green-ring
-    // overlay — clearing belongs to the transition, not just the deselect, so a
-    // stale highlight set can't outrank the new selection's dimming.
+    // Any committed selection transition drops the overlay highlights — the
+    // agent green-ring set AND the picked-audit set. Clearing belongs to the
+    // transition, not just the deselect, so a stale highlight can't outrank the
+    // new selection's dimming. (A plain tab-switch keeps the audit pick so
+    // returning to Audits re-lights it; committing to an entity ends it.)
     setAgentHighlights(null);
+    setActiveAuditId(null);
     if (machine) {
       select(machine.address);
       syncUrl({ sel: machine.address });
@@ -418,6 +429,7 @@ export default function ProtocolSurface({
     });
     setSidebarMode("detail");
     setAgentHighlights(null);
+    setActiveAuditId(null);
     radar(machine.address, fnView?.key || null);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
   }, [allMachines, radar, syncUrl]);
@@ -460,6 +472,7 @@ export default function ProtocolSurface({
   const handleSelectPrincipal = useCallback((principal) => {
     if (!principal) return;
     setAgentHighlights(null);
+    setActiveAuditId(null);
     select(principal.address);
     syncUrl({ sel: principal.address });
   }, [select, syncUrl]);
@@ -524,13 +537,13 @@ export default function ProtocolSurface({
     // the target's facets, not the caller's guessed type — a machine-only
     // authority (e.g. an analyzed timelock the server never emits as a
     // principal) opens its contract card instead of stranding an empty sidebar.
-    // The full target rides along as `hint`: resolveEntity reads its type to
-    // synthesize a principal card for off-index targets, and its `tab` pre-opens
-    // Governs (the "what does this authority control" question a caller-button
-    // navigate asks) when the target has one.
+    // The full target rides along as `hint` so resolveEntity can read its type
+    // to synthesize a principal card for off-index targets. The card opens on
+    // its default tab — same as clicking the node on the canvas.
     setSidebarMode("detail");
     setAgentHighlights(null);
-    select(target.address, { hint: { ...target, tab: "governs" } });
+    setActiveAuditId(null);
+    select(target.address, { hint: { ...target } });
     syncUrl({ sel: target.address });
   }, [select, syncUrl]);
 
@@ -547,7 +560,6 @@ export default function ProtocolSurface({
         onPreview={(addr) => focusPreview(addr)}
         highlightedFunctionKey={radarSelection.functionKey}
         highlightedContract={!radarSelection.functionKey}
-        onOpenDependencyGraph={setDependencyGraphMachine}
         governsIndex={governsIndex}
         controlAdjacency={controlAdjacency}
         machines={machines}
@@ -572,6 +584,7 @@ export default function ProtocolSurface({
           onCommit={(item) => {
             if (!item) return;
             setAgentHighlights(null);
+            setActiveAuditId(null);
             select(item.address);
             syncUrl({ sel: item.address });
           }}
@@ -630,6 +643,9 @@ export default function ProtocolSurface({
               machines={machines}
               selectedMachine={selectedMachine}
               selectedPrincipal={selectedPrincipal}
+              onClearSelection={() => handleSelectMachine(null)}
+              onPreview={(addr) => focusPreview(addr)}
+              onNavigate={handleNavigate}
             />
           )}
           {isAdmin && sidebarMode === "monitoring" && (
@@ -676,11 +692,9 @@ export default function ProtocolSurface({
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
               onPreview={(addr) => focusPreview(addr)}
-              onOpenDependencyGraph={setDependencyGraphMachine}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}
-              initialTab={selection?.hint?.tab}
             />
           )}
           {sidebarMode === "detail" && selectedMachine && !radarSelection && (
@@ -738,10 +752,6 @@ export default function ProtocolSurface({
           )}
         </DraggableSidebar>
       </div>
-      <DependencyGraphModal
-        machine={dependencyGraphMachine}
-        onClose={() => setDependencyGraphMachine(null)}
-      />
     </div>
   );
 }

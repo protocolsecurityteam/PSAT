@@ -63,15 +63,15 @@ function renderPanel(activeAuditId = null) {
 describe("AuditsListPanel", () => {
   it("reports the audit covers one logical contract, not three", () => {
     renderPanel();
-    // Audit row meta reads "matches N contract(s)" — without the dedup
-    // filter this read "matches 3 contracts" because impl + historical
+    // Audit row meta reads "covers N contract(s)" — without the dedup
+    // filter this read "covers 3 contracts" because impl + historical
     // slipped in.
-    expect(screen.getByText(/matches 1 contract/i)).toBeInTheDocument();
+    expect(screen.getByText(/covers 1 contract/i)).toBeInTheDocument();
   });
 
   it("never renders the literal string 'unknown' for off-canvas impls", () => {
     renderPanel(VERIFIED_AUDIT.audit_id);
-    // The covered-contracts list opens when the audit is active.
+    // The per-contract breakdown expands when the audit is active.
     expect(screen.getByText("Vault")).toBeInTheDocument();
     expect(screen.queryByText(/unknown/i)).not.toBeInTheDocument();
     // Confirm by absence: only the proxy address renders, not the impl

@@ -5,6 +5,7 @@ import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows, governancePathTargets } from "../layout/governancePath.js";
 import { BalanceTable } from "./BalanceTable.jsx";
+import { DependsOnTab } from "./DependsOnTab.jsx";
 import { GovernsTab } from "./GovernsTab.jsx";
 import { LaneColumn } from "./LaneColumn.jsx";
 import { OpsLane } from "./OpsLane.jsx";
@@ -23,11 +24,9 @@ export function EntityCard({
   onPreview,
   highlightedFunctionKey,
   highlightedContract = false,
-  onOpenDependencyGraph,
   governsIndex,
   controlAdjacency,
   machines = [],
-  initialTab = null,
 }) {
   const isMachine = Boolean(machine);
   const address = (machine?.address || principal?.address || "").toLowerCase();
@@ -78,13 +77,10 @@ export function EntityCard({
     [isMachine, machine, highlightedFunctionKey],
   );
 
-  // A navigate can request the Governs tab pre-opened; honor it only when there
-  // is a Governs tab worth landing on (rows > 0). A principal-only card has no
-  // other tab, so it always opens on Governs.
-  const [activeTab, setActiveTab] = useState(() => {
-    if (!isMachine) return "governs";
-    return initialTab === "governs" && canCallRows.length ? "governs" : "control";
-  });
+  // Open on the default tab — Control for a contract, Governs for a
+  // principal-only card (its sole tab). Navigating in via a "go to" arrow lands
+  // here too, matching a direct canvas click.
+  const [activeTab, setActiveTab] = useState(() => (isMachine ? "control" : "governs"));
 
   useEffect(() => {
     if (highlightedFunction) setActiveTab(tabForLane(highlightedFunction.lane));
@@ -171,17 +167,6 @@ export function EntityCard({
             </>
           )}
         </div>
-        {isMachine && onOpenDependencyGraph && (
-          <div className="ps-machine-actions">
-            <button
-              type="button"
-              className="ps-machine-header-action"
-              onClick={() => onOpenDependencyGraph(machine)}
-            >
-              Dependency graph
-            </button>
-          </div>
-        )}
       </header>
 
       {principal?.type === "safe" && owners.length > 0 && (
@@ -212,6 +197,14 @@ export function EntityCard({
           Governs
           {tabCounts.governs > 0 && <span className="ps-machine-tab-count">{tabCounts.governs}</span>}
         </button>
+        {isMachine && (
+          <button
+            className={`ps-machine-tab${activeTab === "depends" ? " active" : ""}`}
+            onClick={() => setActiveTab("depends")}
+          >
+            Depends
+          </button>
+        )}
       </div>
 
       {isMachine && activeTab === "control" && (
@@ -263,6 +256,14 @@ export function EntityCard({
         <GovernsTab
           canCallRows={canCallRows}
           pathRows={pathRows}
+          onPreview={onPreview}
+          onNavigate={onNavigate}
+        />
+      )}
+      {isMachine && activeTab === "depends" && (
+        <DependsOnTab
+          machine={machine}
+          machines={machines}
           onPreview={onPreview}
           onNavigate={onNavigate}
         />
