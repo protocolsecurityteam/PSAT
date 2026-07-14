@@ -1,0 +1,375 @@
+/* Surface "Activity" tab — unified monitoring + upgrade-history timeline.
+   Visual source of truth: site/prototypes/activity-tab/index.html. Classes are
+   ps-activity-* (project convention); tokens come from styles/tokens.css. */
+
+.ps-activity-protocol,
+.ps-activity-entity {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px 8px;
+}
+
+/* Kind palette — lifted from the prototype's ps-monitor-event-icon colors. */
+.ps-activity-tl,
+.ps-activity-recent {
+  --k-upgrade: #93c5fd;
+  --k-owner: #c4b5fd;
+  --k-pause: #fbbf24;
+  --k-role: #86efac;
+  --k-signer: #f0abfc;
+  --k-timelock: #fdba74;
+  --k-state: #67e8f9;
+  --k-safe: #7dd3fc;
+}
+
+.ps-activity-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ps-activity-protocol-name {
+  font-size: 15px;
+  font-weight: 800;
+  margin-top: 2px;
+}
+.ps-activity-sect-title {
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+.ps-activity-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ps-activity-hint {
+  font-size: 10.5px;
+  color: var(--status-mute);
+  line-height: 1.5;
+  padding: 2px 2px 0;
+}
+
+/* ── type badge (mirrors pm-badge) ── */
+.ps-activity-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  background: transparent;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.ps-activity-badge.proxy { color: #60a5fa; }
+.ps-activity-badge.safe { color: #a78bfa; }
+.ps-activity-badge.timelock { color: #fbbf24; }
+.ps-activity-badge.pausable { color: #fb923c; }
+.ps-activity-badge.role_control { color: #5eead4; }
+.ps-activity-badge.governance { color: #8a80a0; }
+.ps-activity-badge.regular { color: var(--muted); }
+
+/* ── protocol-wide summary card ── */
+.ps-activity-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 18, 24, 0.42);
+  border-radius: 10px;
+  padding: 11px 12px;
+}
+.ps-activity-kv-line { font-size: 11.5px; color: var(--muted); }
+.ps-activity-kv-line b { color: var(--ink); }
+.ps-activity-kv-line.mono { font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; color: var(--status-mute); }
+.ps-activity-kv-line.faint { font-size: 10.5px; color: var(--status-mute); }
+.ps-activity-kv-line.faint b { color: var(--muted); }
+
+.ps-activity-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.28);
+}
+.ps-activity-health.warn { color: var(--status-warn); background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.28); }
+.ps-activity-health.err { color: var(--status-err); background: rgba(239, 68, 68, 0.10); border-color: rgba(239, 68, 68, 0.28); }
+.ps-activity-health.muted { color: var(--muted); background: rgba(148, 163, 184, 0.08); border-color: var(--panel-border); }
+.ps-activity-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgba(134, 239, 172, 0.18);
+}
+
+/* ── recent-across-protocol rows ── */
+.ps-activity-recent { display: grid; gap: 5px; }
+.ps-activity-recent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: rgba(15, 18, 24, 0.5);
+  border-radius: 7px;
+  padding: 7px 9px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  /* Zero the global shell/forms.css button chrome (teal drop shadow + hover lift). */
+  box-shadow: none;
+  transition: none;
+}
+.ps-activity-recent-row:hover:not(:disabled) {
+  border-color: rgba(45, 212, 191, 0.26);
+  background: rgba(20, 26, 36, 0.55);
+  transform: none;
+}
+.ps-activity-recent-row:disabled { cursor: default; opacity: 0.7; }
+.ps-activity-recent-main { min-width: 0; display: grid; gap: 3px; }
+.ps-activity-recent-id { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ps-activity-recent-name {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-activity-recent-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ps-activity-recent-sub {
+  font-size: 9.5px;
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-activity-recent-time {
+  font-size: 9.5px;
+  color: var(--status-mute);
+  font-family: var(--mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
+
+/* ── entity status strip ── */
+.ps-activity-strip {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 18, 24, 0.5);
+  border-radius: 10px;
+  padding: 11px 12px;
+}
+.ps-activity-strip-top { display: flex; align-items: center; gap: 8px; }
+.ps-activity-strip-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-activity-strip-active { margin-left: auto; font-size: 11px; font-weight: 800; color: var(--status-ok); white-space: nowrap; }
+.ps-activity-strip-active.off { color: var(--muted); }
+.ps-activity-strip-sub {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 10px;
+  color: var(--status-mute);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.ps-activity-kv { display: grid; grid-template-columns: 96px 1fr; row-gap: 4px; column-gap: 10px; font-size: 11.5px; }
+.ps-activity-kv .k { color: var(--muted); }
+.ps-activity-kv .v {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-activity-kv .v.ok { color: var(--status-ok); }
+.ps-activity-kv .v.warn { color: var(--status-warn); }
+.ps-activity-kv .v.muted { color: var(--muted); font-family: inherit; font-size: 11.5px; }
+
+/* ── alert controls ── */
+.ps-activity-watch {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 18, 24, 0.42);
+  border-radius: 10px;
+  padding: 11px;
+}
+.ps-activity-watch-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ps-activity-status { font-size: 11px; font-weight: 800; color: var(--muted); white-space: nowrap; }
+.ps-activity-status.on { color: var(--status-ok); }
+
+/* Read-only "watched for" summary — the enrolled watch set is not editable
+   here (it's derived from contract type), so the chips are static, not toggles. */
+.ps-activity-watched { display: flex; flex-wrap: wrap; gap: 5px; }
+.ps-activity-watch-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.4);
+  color: var(--ink);
+}
+.ps-activity-watch-chip.none { color: var(--status-mute); }
+
+.ps-activity-webhook-row { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+.ps-activity-webhook-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  background: rgba(45, 212, 191, 0.08);
+  color: #5eead4;
+  border: 1px solid rgba(45, 212, 191, 0.24);
+  font-family: var(--mono, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  white-space: nowrap;
+}
+.ps-activity-webhook-chip.none { background: rgba(127, 29, 29, 0.16); color: #fca5a5; border-color: rgba(248, 113, 113, 0.32); }
+.ps-activity-link-btn {
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--status-mute);
+  text-decoration: underline dotted;
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-family: inherit;
+  padding: 0;
+  /* Zero the global shell/forms.css button chrome — its teal drop shadow
+     reads as a blue hue and its hover lift is wrong on a text link. */
+  box-shadow: none;
+  transition: none;
+}
+.ps-activity-link-btn:hover { transform: none; }
+.ps-activity-link-btn:disabled { opacity: 0.5; cursor: default; }
+.ps-activity-webhook-form { display: grid; gap: 6px; }
+.ps-activity-webhook-input {
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--ink);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.ps-activity-webhook-actions { display: flex; gap: 12px; }
+
+/* ── timeline ── */
+.ps-activity-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ps-activity-ev { position: relative; display: grid; grid-template-columns: 20px 1fr; gap: 11px; padding: 9px 0; }
+.ps-activity-ev + .ps-activity-ev { border-top: 1px solid var(--line); }
+.ps-activity-rail { position: relative; display: flex; justify-content: center; }
+.ps-activity-dot { position: absolute; top: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.ps-activity-ev.crit .ps-activity-dot { width: 11px; height: 11px; top: 4px; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05); }
+.ps-activity-ev.current .ps-activity-dot { background: var(--teal); box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.22); }
+.ps-activity-rail::before { content: ""; position: absolute; top: 16px; bottom: -9px; width: 1px; background: rgba(148, 163, 184, 0.16); }
+.ps-activity-ev:last-child .ps-activity-rail::before { display: none; }
+.ps-activity-ev-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ps-activity-ev-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ps-activity-ev-title { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.ps-activity-ev-time { margin-left: auto; font-size: 10px; color: var(--status-mute); font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; }
+.ps-activity-ev-sub { font-size: 10.5px; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); }
+.ps-activity-tag { font-family: inherit; color: #5eead4; font-weight: 700; }
+.ps-activity-ev-meta { display: flex; flex-wrap: wrap; gap: 9px; font-size: 9px; color: var(--status-mute); font-family: var(--mono, ui-monospace, monospace); }
+.ps-activity-ev-meta a { color: var(--status-mute); text-decoration: none; border-bottom: 1px dotted rgba(148, 163, 184, 0.34); }
+.ps-activity-impl { color: var(--k-upgrade, #93c5fd); opacity: 0.8; }
+.ps-activity-ev.pre { opacity: 0.66; }
+.ps-activity-ev.pre .ps-activity-ev-title { font-weight: 600; }
+.ps-activity-backfill {
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--status-mute);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* kind chips */
+.ps-activity-kind {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1.5px 6px;
+  border-radius: 5px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.ps-activity-kind.k-upgrade { color: var(--k-upgrade); background: rgba(147, 197, 253, 0.10); border-color: rgba(147, 197, 253, 0.28); }
+.ps-activity-kind.k-owner { color: var(--k-owner); background: rgba(196, 181, 253, 0.10); border-color: rgba(196, 181, 253, 0.28); }
+.ps-activity-kind.k-pause { color: var(--k-pause); background: rgba(251, 191, 36, 0.10); border-color: rgba(251, 191, 36, 0.28); }
+.ps-activity-kind.k-role { color: var(--k-role); background: rgba(134, 239, 172, 0.10); border-color: rgba(134, 239, 172, 0.26); }
+.ps-activity-kind.k-signer { color: var(--k-signer); background: rgba(240, 171, 252, 0.10); border-color: rgba(240, 171, 252, 0.26); }
+.ps-activity-kind.k-timelock { color: var(--k-timelock); background: rgba(253, 186, 116, 0.10); border-color: rgba(253, 186, 116, 0.28); }
+.ps-activity-kind.k-state { color: var(--k-state); background: rgba(103, 232, 249, 0.10); border-color: rgba(103, 232, 249, 0.24); }
+.ps-activity-kind.k-safe { color: var(--k-safe); background: rgba(125, 211, 252, 0.10); border-color: rgba(125, 211, 252, 0.26); }
+.ps-activity-kind.k-other { color: var(--muted); background: rgba(148, 163, 184, 0.08); border-color: var(--panel-border); }
+
+/* Backfill timeline dots are upgrade-only (only upgrades are back-filled below
+   the boundary), so the upgrade tint is the sole reachable variant. */
+.ps-activity-dot.d-upgrade { background: var(--k-upgrade) !important; }
+
+/* boundary + empty */
+.ps-activity-boundary { display: grid; gap: 3px; padding: 12px 0 10px; text-align: center; position: relative; }
+.ps-activity-boundary::before { content: ""; position: absolute; left: 0; right: 0; top: 21px; border-top: 1px dashed rgba(245, 158, 11, 0.4); }
+.ps-activity-boundary-pill {
+  justify-self: center;
+  position: relative;
+  z-index: 1;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--amber-deep);
+  border: 1px solid rgba(245, 158, 11, 0.34);
+}
+.ps-activity-boundary-note { font-size: 10px; color: var(--status-mute); max-width: 280px; justify-self: center; line-height: 1.4; }
+.ps-activity-empty {
+  padding: 16px;
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--status-mute);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ps-activity-empty b { color: var(--muted); }

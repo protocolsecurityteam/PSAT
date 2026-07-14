@@ -7,7 +7,6 @@ import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
 import { isAddress, parseLocationPath } from "./router.js";
 import PipelineDashboard from "./pages/PipelineDashboard.jsx";
-import ProtocolMonitoringPage from "./pages/ProtocolMonitoringPage.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
 import LoadingFallback from "./LoadingFallback.jsx";
 import RunsPage from "./pages/RunsPage.jsx";
@@ -267,10 +266,6 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {isCompany && companyName && companyTab === "monitoring" && (
-        <ProtocolMonitoringPage companyName={companyName} />
-      )}
-
       {!isMonitor && !isCompany && (
         <>
           <ProductHero />

@@ -1,0 +1,121 @@
+import { useEffect, useMemo, useState } from "react";
+
+import { api } from "../../../api/client.js";
+import { AlertControls } from "./AlertControls.jsx";
+import { StatusStrip } from "./StatusStrip.jsx";
+import { Timeline } from "./Timeline.jsx";
+import { buildTimeline } from "./buildTimeline.js";
+
+const POLL_MS = 30_000;
+
+// Entity mode: the selected contract's status strip + alert controls (admin) +
+// the unified timeline. Owns the per-contract event fetch and the per-proxy
+// upgrade-history fetch (memoized in the shared cache); the merge itself is
+// pure (buildTimeline).
+export function EntityActivity({
+  machine,
+  contract,
+  subscriptions,
+  isAdmin,
+  saving,
+  onAttachWebhook,
+  cache,
+  onCache,
+  now,
+}) {
+  const [events, setEvents] = useState([]);
+  const [history, setHistory] = useState(null);
+
+  const address = machine?.address;
+  const chain = machine?.chain || contract?.chain || "ethereum";
+  const isProxy = Boolean(machine?.is_proxy);
+
+  // Per-contract events (all kinds), captured from enrollment forward.
+  useEffect(() => {
+    if (!address) { setEvents([]); return undefined; }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const q = `address=${encodeURIComponent(address)}&chain=${encodeURIComponent(chain)}&limit=100`;
+        const evs = await api(`/api/monitored-events?${q}`);
+        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
+      } catch {
+        if (!cancelled) setEvents([]);
+      }
+    };
+    load();
+    const t = setInterval(load, POLL_MS);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [address, chain]);
+
+  // Deep upgrade history for a proxy (back-filled to deployment). Cached by
+  // job_id across selections. Only upgrade_history is needed — the timeline
+  // renders impl addresses, not resolved names, so dependencies is skipped.
+  useEffect(() => {
+    if (!isProxy || !machine?.job_id) { setHistory(null); return undefined; }
+    const cached = cache && cache[machine.job_id];
+    if (cached?.history) { setHistory(cached.history); return undefined; }
+    let cancelled = false;
+    const jid = encodeURIComponent(machine.job_id);
+    api(`/api/analyses/${jid}/artifact/upgrade_history`)
+      .then((body) => {
+        if (cancelled) return;
+        const h = body && typeof body === "object" ? body : null;
+        setHistory(h);
+        if (onCache) onCache(machine.job_id, h, {});
+      })
+      .catch(() => { if (!cancelled) setHistory(null); });
+    return () => { cancelled = true; };
+    // cache/onCache omitted deliberately: read once per selection so this
+    // fetch's own cache write doesn't retrigger the effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machine?.job_id, isProxy]);
+
+  const proxy = useMemo(() => {
+    if (!history?.proxies) return null;
+    const target = (address || "").toLowerCase();
+    return history.proxies[target] || Object.values(history.proxies)[0] || null;
+  }, [history, address]);
+
+  const enrollmentBlock = contract?.enrollment_block ?? null;
+  const timeline = useMemo(
+    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy }),
+    [events, proxy, enrollmentBlock, isProxy],
+  );
+
+  // "Monitoring started" label: created_at is when the MonitoredContract row was
+  // written at enroll time — a truthful stand-in for the block→timestamp we
+  // don't have client-side. Fall back to the earliest captured event.
+  // TODO(activity): exact enrollment timestamp from enrollment_block.
+  const boundaryDate = contract?.created_at
+    || (events.length ? events[events.length - 1]?.detected_at : null);
+
+  const newestEventAt = events[0]?.detected_at || null;
+
+  return (
+    <section className="ps-activity-entity">
+      <StatusStrip machine={machine} contract={contract} lastEventAt={newestEventAt} now={now} />
+
+      {contract ? (
+        <AlertControls
+          contract={contract}
+          subscriptions={subscriptions}
+          isAdmin={isAdmin}
+          saving={saving}
+          onAttachWebhook={(url, label, groupKeys) => onAttachWebhook(contract, url, label, groupKeys)}
+        />
+      ) : null}
+
+      <div className="ps-activity-sect-title" style={{ marginTop: 2 }}>Timeline</div>
+      <Timeline
+        above={timeline.above}
+        below={timeline.below}
+        boundaryBlock={timeline.boundaryBlock}
+        boundaryDate={boundaryDate}
+        isProxy={isProxy}
+        chain={chain}
+        now={now}
+      />
+    </section>
+  );
+}

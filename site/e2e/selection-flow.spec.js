@@ -2,7 +2,7 @@
  * Full-flow selection regression (SELECTION_FILTERING_DIAGNOSIS.md).
  *
  * Mirrors the original diagnosis reproduction: search-commit a safe, then walk
- * Detail / Agent / Audits / Upgrades / Monitor asserting the safe — never one
+ * Detail / Agent / Audits / Activity asserting the safe — never one
  * of its controlled contracts — is what each tab reflects. Plus:
  *   - Flow A (search-commit) === Flow B (canvas-side principal select).
  *   - a node-less co-controller safe highlights its touch set on the canvas.
@@ -106,7 +106,7 @@ const CONTROLLED_NAMES = ["Vault", "LiquidityPool"];
 
 async function goToSurface(page, { admin = false } = {}) {
   if (admin) {
-    // The Agent/Monitor tabs gate on the presence of an admin key only.
+    // The Agent tab gates on the presence of an admin key only.
     await page.addInitScript(() => window.localStorage.setItem("psat_admin_key", "e2e"));
   }
   await page.route("**/api/company/seltest", (route) =>
@@ -171,13 +171,11 @@ test.describe("Surface selection — full flow", () => {
     await openTab(page, "Audits");
     await expect(page.locator(".ps-audits-contract-card")).toHaveCount(0);
 
-    // Upgrades: explicit "pick a contract" hint, not a leaked timeline.
-    await openTab(page, "Upgrades");
-    await expect(page.getByText(/choose a contract to see its upgrade timeline/i)).toBeVisible();
-
-    // Monitor: explicit "pick a contract" hint.
-    await openTab(page, "Monitor");
-    await expect(page.getByText(/choose a contract to see its alerts/i)).toBeVisible();
+    // Activity (folds in Upgrades + Monitor): a non-monitored principal shows a
+    // "monitoring not enabled" notice — never a leaked timeline nor a status strip.
+    await openTab(page, "Activity");
+    await expect(page.getByText(/monitoring is not enabled/i)).toBeVisible();
+    await expect(page.locator(".ps-activity-strip")).toHaveCount(0);
 
     // The URL persists the principal selection (shareable/restorable) as the
     // address only — no view axis.
