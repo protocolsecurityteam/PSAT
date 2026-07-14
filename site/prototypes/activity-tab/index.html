@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Activity tab — unified monitoring + upgrade history</title>
+<style>
+  :root {
+    --bg: #0b0f16;
+    --panel: #111620;
+    --panel-border: rgba(148, 163, 184, 0.14);
+    --ink: #e2e8f0;
+    --muted: #94a3b8;
+    --faint: #64748b;
+    --teal: #2dd4bf;
+    --line: rgba(148, 163, 184, 0.12);
+    --status-ok: #22c55e;
+    --status-warn: #f59e0b;
+    /* kind colors — lifted verbatim from ps-monitor-event-icon-* */
+    --k-upgrade: #93c5fd;
+    --k-owner: #c4b5fd;
+    --k-pause: #fbbf24;
+    --k-role: #86efac;
+    --k-signer: #f0abfc;
+    --k-timelock: #fdba74;
+    --k-state: #67e8f9;
+    --k-safe: #7dd3fc;
+    --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 30% -10%, rgba(45,212,191,0.05), transparent 60%),
+      var(--bg);
+    color: var(--ink);
+    font-family: "Instrument Sans", "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .doc-head { padding: 24px 28px 6px; max-width: 1360px; margin: 0 auto; }
+  .doc-title { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; }
+  .doc-sub { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 940px; }
+  .doc-sub strong { color: var(--ink); font-weight: 700; }
+  .doc-sub code { font-family: var(--mono); font-size: 12px; color: #cbd5e1; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 4px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .legend-dot { width: 9px; height: 9px; border-radius: 50%; }
+
+  .stage { display: flex; gap: 22px; padding: 18px 28px 60px; max-width: 1360px; margin: 0 auto; align-items: flex-start; overflow-x: auto; }
+  .col { display: flex; flex-direction: column; gap: 9px; }
+  .col-label { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); padding-left: 4px; max-width: 384px; line-height: 1.4; }
+  .col-label b { color: var(--teal); }
+
+  /* Docked sidebar shell (mirrors the real 380px right dock) */
+  .dock { width: 384px; height: 812px; display: flex; flex-direction: column; border: 1px solid var(--panel-border); border-radius: 12px; background: var(--panel); box-shadow: 0 24px 60px rgba(0,0,0,0.5); overflow: hidden; }
+  .tabs { display: flex; align-items: center; gap: 2px; padding: 9px 10px 0; border-bottom: 1px solid var(--line); flex: none; }
+  .tab { font-size: 12px; font-weight: 700; color: var(--faint); padding: 7px 9px; border-radius: 7px 7px 0 0; white-space: nowrap; }
+  .tab.on { color: var(--ink); background: rgba(45,212,191,0.08); box-shadow: inset 0 -2px 0 var(--teal); }
+  .body { padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+
+  .eyebrow { font-size: 10px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  .sect-title { font-size: 12px; font-weight: 900; letter-spacing: 0.10em; text-transform: uppercase; color: #cbd5e1; }
+
+  /* ── monitoring type badge (from pm-badge) ── */
+  .pm-badge { font-size: 9px; padding: 1px 6px; border: 1px solid currentColor; background: transparent; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; border-radius: 3px; white-space: nowrap; }
+  .pm-badge.proxy { color: #60a5fa; }
+  .pm-badge.safe { color: #a78bfa; }
+  .pm-badge.timelock { color: #fbbf24; }
+  .pm-badge.pausable { color: #fb923c; }
+  .pm-badge.role_control { color: #5eead4; }
+  .pm-badge.regular { color: var(--muted); }
+
+  /* ── monitoring status strip (replaces the analysis hero) ── */
+  .strip { display: grid; gap: 9px; border: 1px solid var(--panel-border); background: rgba(15,18,24,0.5); border-radius: 10px; padding: 11px 12px; }
+  .strip-top { display: flex; align-items: center; gap: 8px; }
+  .strip-name { font-size: 14px; font-weight: 800; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip-active { margin-left: auto; font-size: 11px; font-weight: 800; color: var(--status-ok); white-space: nowrap; }
+  .strip-sub { display: flex; gap: 8px; align-items: center; font-size: 10px; color: var(--faint); font-family: var(--mono); }
+  .pm-kv { display: grid; grid-template-columns: 92px 1fr; row-gap: 4px; column-gap: 10px; font-size: 11.5px; }
+  .pm-kv .k { color: var(--muted); }
+  .pm-kv .v { font-family: var(--mono); font-size: 11px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pm-kv .v.ok { color: var(--status-ok); }
+  .pm-kv .v.warn { color: var(--status-warn); }
+  .pm-kv .v.muted { color: var(--muted); font-family: inherit; font-size: 11.5px; }
+
+  /* ── alert controls (the folded-in Monitor tab) ── */
+  .watch { display: grid; gap: 9px; border: 1px solid var(--panel-border); background: rgba(15,18,24,0.42); border-radius: 10px; padding: 11px; }
+  .watch-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .watch-toggles { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tg { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 800; letter-spacing: 0.03em; padding: 4px 8px; border-radius: 999px; cursor: pointer; border: 1px solid rgba(148,163,184,0.16); background: rgba(15,23,42,0.4); color: var(--faint); }
+  .tg .swatch { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+  .tg.on { border-color: rgba(45,212,191,0.36); background: rgba(45,212,191,0.10); color: #5eead4; }
+  .tg.off { opacity: 0.62; }
+  .webhook-row { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+  .webhook-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; font-size: 10.5px; font-weight: 700; background: rgba(45,212,191,0.08); color: #5eead4; border: 1px solid rgba(45,212,191,0.24); font-family: var(--mono); }
+  .webhook-chip.none { background: rgba(127,29,29,0.16); color: #fca5a5; border-color: rgba(248,113,113,0.32); }
+  .link-btn { font-size: 10.5px; font-weight: 800; color: var(--faint); text-decoration: underline dotted; cursor: pointer; }
+
+  /* ── protocol-wide summary ── */
+  .card { display: grid; gap: 8px; border: 1px solid var(--panel-border); background: rgba(15,18,24,0.42); border-radius: 10px; padding: 11px 12px; }
+  .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .health { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 800; padding: 4px 9px; border-radius: 999px; }
+  .health.ok { color: #86efac; background: rgba(34,197,94,0.10); border: 1px solid rgba(34,197,94,0.28); }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(134,239,172,0.18); }
+  .btn { font-size: 11px; font-weight: 800; padding: 6px 10px; border-radius: 7px; cursor: pointer; border: 1px solid rgba(148,163,184,0.22); background: rgba(15,23,42,0.54); color: #cbd5e1; }
+  .kv { font-size: 11.5px; color: var(--muted); }
+  .kv b { color: var(--ink); }
+  .notif-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: rgba(15,18,24,0.4); }
+  .notif-line b { color: var(--ink); }
+  .notif-cta { font-size: 10px; font-weight: 800; color: #5eead4; cursor: pointer; white-space: nowrap; }
+
+  /* ── timeline ── */
+  .tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .ev { position: relative; display: grid; grid-template-columns: 20px 1fr; gap: 11px; padding: 9px 0; }
+  .ev + .ev { border-top: 1px solid var(--line); }
+  .rail { position: relative; display: flex; justify-content: center; }
+  .dot { position: absolute; top: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .ev.crit .dot { width: 11px; height: 11px; top: 4px; box-shadow: 0 0 0 3px rgba(255,255,255,0.05); }
+  .ev.current .dot { background: var(--teal); box-shadow: 0 0 0 4px rgba(45,212,191,0.22); }
+  .rail::before { content: ""; position: absolute; top: 16px; bottom: -9px; width: 1px; background: rgba(148,163,184,0.16); }
+  .ev:last-child .rail::before { display: none; }
+  .ev-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .ev-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .kind { font-size: 9px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; padding: 1.5px 6px; border-radius: 5px; white-space: nowrap; border: 1px solid transparent; }
+  .ev-title { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+  .ev-time { margin-left: auto; font-size: 10px; color: var(--faint); font-family: var(--mono); white-space: nowrap; }
+  .ev-sub { font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
+  .ev-sub .tag { font-family: "Instrument Sans", system-ui, sans-serif; color: #5eead4; font-weight: 700; }
+  .ev-meta { display: flex; flex-wrap: wrap; gap: 9px; font-size: 9px; color: var(--faint); font-family: var(--mono); }
+  .ev-meta a { color: var(--faint); text-decoration: none; border-bottom: 1px dotted rgba(148,163,184,0.34); }
+  .ev-meta .impl { color: var(--k-upgrade); opacity: 0.8; }
+  .ev.pre { opacity: 0.66; }
+  .ev.pre .ev-title { font-weight: 600; }
+  .backfill-tag { font-size: 8.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  .aud { font-size: 9px; font-weight: 700; color: #5eead4; }
+  .aud.none { color: var(--faint); }
+
+  .k-upgrade { color: var(--k-upgrade); background: rgba(147,197,253,0.10); border-color: rgba(147,197,253,0.28); }
+  .k-owner { color: var(--k-owner); background: rgba(196,181,253,0.10); border-color: rgba(196,181,253,0.28); }
+  .k-pause { color: var(--k-pause); background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.28); }
+  .k-role { color: var(--k-role); background: rgba(134,239,172,0.10); border-color: rgba(134,239,172,0.26); }
+  .k-signer { color: var(--k-signer); background: rgba(240,171,252,0.10); border-color: rgba(240,171,252,0.26); }
+  .k-timelock { color: var(--k-timelock); background: rgba(253,186,116,0.10); border-color: rgba(253,186,116,0.28); }
+  .k-state { color: var(--k-state); background: rgba(103,232,249,0.10); border-color: rgba(103,232,249,0.24); }
+  .k-safe { color: var(--k-safe); background: rgba(125,211,252,0.10); border-color: rgba(125,211,252,0.26); }
+  .d-upgrade { background: var(--k-upgrade) !important; }
+  .d-owner { background: var(--k-owner) !important; }
+  .d-pause { background: var(--k-pause) !important; }
+  .d-role { background: var(--k-role) !important; }
+  .d-signer { background: var(--k-signer) !important; }
+  .d-timelock { background: var(--k-timelock) !important; }
+  .d-safe { background: var(--k-safe) !important; }
+
+  .boundary { display: grid; gap: 3px; padding: 12px 0 10px; text-align: center; position: relative; }
+  .boundary::before { content: ""; position: absolute; left: 0; right: 0; top: 21px; border-top: 1px dashed rgba(245,158,11,0.4); }
+  .boundary-pill { justify-self: center; position: relative; z-index: 1; font-size: 9.5px; font-weight: 800; letter-spacing: 0.10em; text-transform: uppercase; padding: 4px 11px; border-radius: 999px; background: rgba(245,158,11,0.12); color: #fbbf24; border: 1px solid rgba(245,158,11,0.34); }
+  .boundary-note { font-size: 10px; color: var(--faint); max-width: 280px; justify-self: center; line-height: 1.4; }
+
+  .empty { padding: 16px; border: 1px dashed rgba(148,163,184,0.22); border-radius: 10px; text-align: center; color: var(--faint); font-size: 11px; line-height: 1.5; }
+  .empty b { color: var(--muted); }
+
+  .recent { display: grid; gap: 5px; }
+  .recent-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; border: 1px solid var(--line); background: rgba(15,18,24,0.5); border-radius: 7px; padding: 7px 9px; cursor: pointer; }
+  .recent-row:hover { border-color: rgba(45,212,191,0.26); background: rgba(20,26,36,0.55); }
+  .recent-main { min-width: 0; display: grid; gap: 3px; }
+  .recent-id { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .recent-name { font-size: 11.5px; font-weight: 800; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-line { display: flex; align-items: center; gap: 6px; }
+  .recent-time { font-size: 9.5px; color: var(--faint); font-family: var(--mono); white-space: nowrap; }
+  .hint { font-size: 10.5px; color: var(--faint); line-height: 1.5; padding: 2px 2px 0; }
+</style>
+</head>
+<body>
+  <div class="doc-head">
+    <div class="doc-title">Activity tab — one surface for monitoring + upgrade history</div>
+    <div class="doc-sub">
+      Static prototype for the Surface sidebar. The <strong>Monitor</strong> and <strong>Upgrades</strong> tabs collapse into one
+      read-first <strong>Activity</strong> tab. The entity header now borrows the standalone monitoring page's vocabulary —
+      the <code>pm-badge</code> type tag and the <strong>live state</strong> grid (Owner / Paused / Impl / Threshold · Last event · ● active) —
+      instead of repeating TVL, role, and audit facts that already live on <strong>Detail</strong> / <strong>Audits</strong>.
+      Below the header: alert toggles (the old Monitor tab), then one timeline merging upgrades + governance events, split by the
+      <strong>enrollment boundary</strong> (above = captured live; below = upgrade-only backfill). A proxy is one entity with one
+      event stream (all logs fire at the proxy address); the implementation shows up as the current-logic pointer and as
+      <strong>per-event "under impl X" attribution</strong>. Operator-only controls (re-enroll, webhook counts) are gone — this is user-facing.
+    </div>
+    <div class="legend">
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-upgrade)"></span>Upgrade</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-owner)"></span>Ownership</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-pause)"></span>Pause</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-role)"></span>Role</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-signer)"></span>Signer</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-timelock)"></span>Timelock</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--k-safe)"></span>Safe tx</span>
+      <span class="legend-item" style="margin-left:8px"><span class="legend-dot" style="background:var(--muted); width:11px;height:11px;box-shadow:0 0 0 3px rgba(255,255,255,0.05)"></span>larger dot = critical</span>
+    </div>
+  </div>
+
+  <div class="stage">
+
+    <!-- ═══════════ COLUMN 1 · NOTHING SELECTED (protocol-wide) ═══════════ -->
+    <div class="col">
+      <div class="col-label">Nothing selected · <b>protocol-wide</b> — absorbs the standalone page</div>
+      <div class="dock">
+        <div class="tabs">
+          <div class="tab">Detail</div><div class="tab">Agent</div><div class="tab">Audits<span style="opacity:.5">(53)</span></div><div class="tab on">Activity</div>
+        </div>
+        <div class="body">
+          <div class="row-between">
+            <div>
+              <div class="eyebrow">Activity</div>
+              <div style="font-size:15px;font-weight:800;margin-top:2px">etherfi</div>
+            </div>
+            <span class="health ok"><span class="pulse"></span>scanned 2m ago</span>
+          </div>
+
+          <div class="card">
+            <div class="kv"><b>68</b> contracts monitored</div>
+            <div class="kv" style="font-family:var(--mono);font-size:10.5px;color:var(--faint)">block 25,500,524</div>
+            <div class="kv" style="font-size:10.5px;color:var(--faint)">Live since <b style="color:var(--muted)">Dec 1 2025</b> · upgrade history back to <b style="color:var(--muted)">Feb 2024</b></div>
+          </div>
+
+          <div>
+            <div class="sect-title" style="margin-bottom:8px">Recent across protocol</div>
+            <div class="recent">
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge proxy">proxy</span><span class="recent-name">LiquidityPool</span></div>
+                  <div class="recent-line"><span class="kind k-upgrade">Upgrade</span><span class="ev-sub" style="font-size:9.5px">→ 0x83bc…ef12</span></div>
+                </div>
+                <div class="recent-time">2h ago</div>
+              </div>
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge proxy">proxy</span><span class="recent-name">EtherFiNodesManager</span></div>
+                  <div class="recent-line"><span class="kind k-role">Role</span><span class="ev-sub" style="font-size:9.5px">granted → 0x9a1f…844d</span></div>
+                </div>
+                <div class="recent-time">6h ago</div>
+              </div>
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge safe">safe</span><span class="recent-name">Treasury Safe</span></div>
+                  <div class="recent-line"><span class="kind k-safe">Safe tx</span><span class="ev-sub" style="font-size:9.5px">executed</span></div>
+                </div>
+                <div class="recent-time">9h ago</div>
+              </div>
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge pausable">pausable</span><span class="recent-name">WeETH</span></div>
+                  <div class="recent-line"><span class="kind k-pause">Pause</span><span class="ev-sub" style="font-size:9.5px">unpaused</span></div>
+                </div>
+                <div class="recent-time">1d ago</div>
+              </div>
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge timelock">timelock</span><span class="recent-name">EtherFiAdmin</span></div>
+                  <div class="recent-line"><span class="kind k-timelock">Timelock</span><span class="ev-sub" style="font-size:9.5px">scheduled · delay 3d</span></div>
+                </div>
+                <div class="recent-time">1d ago</div>
+              </div>
+              <div class="recent-row">
+                <div class="recent-main">
+                  <div class="recent-id"><span class="pm-badge proxy">proxy</span><span class="recent-name">EtherFiOracle</span></div>
+                  <div class="recent-line"><span class="kind k-owner">Ownership</span><span class="ev-sub" style="font-size:9.5px">transferred</span></div>
+                </div>
+                <div class="recent-time">3d ago</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="hint">The canvas is the spatial "all contracts" view — nodes carry live-event + upgrade badges. Select one to open its full timeline. →</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ COLUMN 2 · PROXY SELECTED ═══════════ -->
+    <div class="col">
+      <div class="col-label">Proxy selected · <b>LiquidityPool</b> — impl + proxy in one; events attributed to the impl that fired them</div>
+      <div class="dock">
+        <div class="tabs">
+          <div class="tab">Detail</div><div class="tab">Agent</div><div class="tab">Audits<span style="opacity:.5">(53)</span></div><div class="tab on">Activity</div>
+        </div>
+        <div class="body">
+          <!-- monitoring status strip (borrowed from the standalone contract card) -->
+          <div class="strip">
+            <div class="strip-top">
+              <span class="strip-name">LiquidityPool</span>
+              <span class="pm-badge proxy">proxy</span>
+              <span class="strip-active">● active</span>
+            </div>
+            <div class="strip-sub">proxy 0x3088…f216 · scanned 2m ago</div>
+            <div class="pm-kv">
+              <div class="k">Impl</div><div class="v">0x83bc…ef12</div>
+              <div class="k">Upgradable by</div><div class="v">0x2aca…8adc <span style="color:var(--faint)">safe</span></div>
+              <div class="k">Paused</div><div class="v ok">no</div>
+              <div class="k">Last event</div><div class="v muted">2h ago</div>
+            </div>
+          </div>
+
+          <!-- folded-in alert controls (was the Monitor tab) -->
+          <div class="watch">
+            <div class="watch-top">
+              <div class="sect-title">Alerts</div>
+              <span class="tg on" style="cursor:default">Watching · on</span>
+            </div>
+            <div class="watch-toggles">
+              <span class="tg on"><span class="swatch d-upgrade"></span>Upgrades</span>
+              <span class="tg on"><span class="swatch d-owner"></span>Ownership</span>
+              <span class="tg on"><span class="swatch d-pause"></span>Pause</span>
+              <span class="tg off"><span class="swatch d-role"></span>Roles</span>
+              <span class="tg on"><span class="swatch d-timelock"></span>Timelock</span>
+              <span class="tg off"><span class="swatch d-state"></span>State</span>
+            </div>
+            <div class="webhook-row">
+              <span class="webhook-chip">#security-alerts</span>
+              <span class="link-btn">change</span>
+            </div>
+          </div>
+
+          <div class="sect-title" style="margin-top:2px">Timeline</div>
+          <ul class="tl">
+            <li class="ev crit current">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-upgrade">Upgrade</span><span class="ev-title">Implementation upgraded</span><span class="ev-time">Mar 16 2026</span></div>
+                <div class="ev-sub">→ 0x83bc…ef12 · <span class="tag">current</span></div>
+                <div class="ev-meta"><a>0x9f2a…c41d ↗</a><span>block 25,498,120</span></div>
+              </div>
+            </li>
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-role">Role</span><span class="ev-title">Role granted</span><span class="ev-time">Mar 10 2026</span></div>
+                <div class="ev-sub">to 0x9a1f…844d by 0xcdd5…8c21</div>
+                <div class="ev-meta"><a>0x77b3…0e9a ↗</a><span>block 25,401,880</span><span class="impl">under impl 0x45c2…9b98</span></div>
+              </div>
+            </li>
+            <li class="ev crit">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-pause">Pause</span><span class="ev-title">Contract paused → unpaused</span><span class="ev-time">Feb 20 2026</span></div>
+                <div class="ev-sub">by EtherFiAdmin · 42 min window</div>
+                <div class="ev-meta"><a>0x1c40…9db2 ↗</a><span>block 25,210,455</span><span class="impl">under impl 0x45c2…9b98</span></div>
+              </div>
+            </li>
+            <li class="ev crit">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-owner">Ownership</span><span class="ev-title">Ownership transferred</span><span class="ev-time">Feb 2 2026</span></div>
+                <div class="ev-sub">0x1234…abcd → 0x2aca…8adc</div>
+                <div class="ev-meta"><a>0x88fe…4a10 ↗</a><span>block 25,012,300</span><span class="impl">under impl 0x45c2…9b98</span></div>
+              </div>
+            </li>
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-timelock">Timelock</span><span class="ev-title">Timelock operation executed</span><span class="ev-time">Jan 14 2026</span></div>
+                <div class="ev-sub">sel 0x3659cfe6 · setImpl</div>
+                <div class="ev-meta"><a>0x0ab3…77e1 ↗</a><span>block 24,880,110</span><span class="impl">under impl 0x45c2…9b98</span></div>
+              </div>
+            </li>
+
+            <div class="boundary">
+              <span class="boundary-pill">◔ Monitoring started · Dec 1 2025</span>
+              <span class="boundary-note">Only upgrades are back-filled below this line.</span>
+            </div>
+
+            <li class="ev pre">
+              <div class="rail"><span class="dot d-upgrade" style="opacity:.7"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-upgrade">Upgrade</span><span class="ev-title">Implementation upgraded</span><span class="backfill-tag">backfill</span><span class="ev-time">Nov 8 2025</span></div>
+                <div class="ev-sub">0x45c2…9b98</div>
+                <div class="ev-meta"><span>block 21,401,559</span></div>
+              </div>
+            </li>
+            <li class="ev pre">
+              <div class="rail"><span class="dot d-upgrade" style="opacity:.7"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-upgrade">Upgrade</span><span class="ev-title">Implementation upgraded</span><span class="backfill-tag">backfill</span><span class="ev-time">Oct 30 2025</span></div>
+                <div class="ev-sub">0xa5c1…a626</div>
+                <div class="ev-meta"><span>block 21,320,904</span></div>
+              </div>
+            </li>
+            <li class="ev pre">
+              <div class="rail"><span class="dot d-upgrade" style="opacity:.7"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-upgrade">Upgrade</span><span class="ev-title">Implementation upgraded</span><span class="backfill-tag">backfill</span><span class="ev-time">Aug 7 2025</span></div>
+                <div class="ev-sub">0x0259…9b3f</div>
+                <div class="ev-meta"><span>block 20,712,338</span></div>
+              </div>
+            </li>
+            <li class="ev pre">
+              <div class="rail"><span class="dot d-upgrade" style="opacity:.7"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-upgrade">Upgrade</span><span class="ev-title">First deployment</span><span class="backfill-tag">backfill</span><span class="ev-time">Feb 24 2024</span></div>
+                <div class="ev-sub">0x605f…6399 · +11 more upgrades ↓</div>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ COLUMN 3 · SAFE SELECTED ═══════════ -->
+    <div class="col">
+      <div class="col-label">Safe selected · <b>entity-aware</b> — state grid + vocab adapt; no deep backfill</div>
+      <div class="dock">
+        <div class="tabs">
+          <div class="tab">Detail</div><div class="tab">Agent</div><div class="tab">Audits<span style="opacity:.5">(53)</span></div><div class="tab on">Activity</div>
+        </div>
+        <div class="body">
+          <div class="strip">
+            <div class="strip-top">
+              <span class="strip-name">Treasury Safe</span>
+              <span class="pm-badge safe">safe</span>
+              <span class="strip-active">● active</span>
+            </div>
+            <div class="strip-sub">0x2aca…8adc · scanned 2m ago</div>
+            <div class="pm-kv">
+              <div class="k">Threshold</div><div class="v">4 <span style="color:var(--faint)">of 7</span></div>
+              <div class="k">Owners</div><div class="v">7 signers</div>
+              <div class="k">Last event</div><div class="v muted">9h ago</div>
+            </div>
+          </div>
+
+          <div class="watch">
+            <div class="watch-top">
+              <div class="sect-title">Alerts</div>
+              <span class="tg on" style="cursor:default">Watching · on</span>
+            </div>
+            <div class="watch-toggles">
+              <span class="tg on"><span class="swatch d-signer"></span>Signers</span>
+              <span class="tg on"><span class="swatch d-signer"></span>Threshold</span>
+              <span class="tg on"><span class="swatch d-safe"></span>Safe tx</span>
+              <span class="tg off"><span class="swatch d-upgrade"></span>Singleton</span>
+            </div>
+            <div class="webhook-row">
+              <span class="webhook-chip none">no webhook</span>
+              <span class="link-btn">attach Discord</span>
+            </div>
+          </div>
+
+          <div class="sect-title" style="margin-top:2px">Timeline</div>
+          <ul class="tl">
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-safe">Safe tx</span><span class="ev-title">Safe transaction executed</span><span class="ev-time">9h ago</span></div>
+                <div class="ev-sub">safeTxHash 0x7b21…e0a4</div>
+                <div class="ev-meta"><a>0x7b21…e0a4 ↗</a><span>block 25,489,001</span></div>
+              </div>
+            </li>
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-signer">Signer</span><span class="ev-title">Safe threshold changed</span><span class="ev-time">Feb 8 2026</span></div>
+                <div class="ev-sub">3 → 4</div>
+                <div class="ev-meta"><a>0x4d19…a5b0 ↗</a><span>block 25,061,772</span></div>
+              </div>
+            </li>
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-signer">Signer</span><span class="ev-title">Safe signer added</span><span class="ev-time">Feb 8 2026</span></div>
+                <div class="ev-sub">0xc0ffee…5eed</div>
+                <div class="ev-meta"><a>0x4d19…a5b0 ↗</a><span>block 25,061,772</span></div>
+              </div>
+            </li>
+            <li class="ev">
+              <div class="rail"><span class="dot"></span></div>
+              <div class="ev-body">
+                <div class="ev-top"><span class="kind k-safe">Safe tx</span><span class="ev-title">Safe transaction executed</span><span class="ev-time">Jan 3 2026</span></div>
+                <div class="ev-sub">safeTxHash 0x11ac…c65b</div>
+                <div class="ev-meta"><a>0x11ac…c65b ↗</a><span>block 24,802,554</span></div>
+              </div>
+            </li>
+
+            <div class="boundary">
+              <span class="boundary-pill">◔ Monitoring started · Dec 1 2025</span>
+            </div>
+
+            <div class="empty">
+              <b>No activity before the line.</b><br />
+              Activity beyond upgrades isn't back-filled — only tracked from Dec 1 2025 on.
+            </div>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>

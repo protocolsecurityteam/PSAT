@@ -23,8 +23,7 @@ import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
 import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
 import { RoleFilterBar } from "./surface/sidebar/RoleFilterBar.jsx";
 import { SidebarTabs } from "./surface/sidebar/SidebarTabs.jsx";
-import { UpgradesSidebarPanel } from "./surface/sidebar/UpgradesSidebarPanel.jsx";
-import { SurfaceMonitoringPanel } from "./surface/sidebar/monitoring/SurfaceMonitoringPanel.jsx";
+import { ActivityPanel } from "./surface/sidebar/activity/ActivityPanel.jsx";
 import { SearchModesBar } from "./surface/sidebar/search/SearchModesBar.jsx";
 import { SearchNavigator } from "./surface/sidebar/search/SearchNavigator.jsx";
 
@@ -96,15 +95,15 @@ export default function ProtocolSurface({
   }, [embedded]);
   const [error, setError] = useState(null);
 
-  // Right sidebar mode: "detail", "agent", "audits", "monitoring", or
-  // "upgrades". Agent and Monitor are admin-only, so non-admins open in
-  // Detail; admins open in Agent (the chat is the most useful first stop).
-  // A canvas click switches to Detail in all modes (handlers below).
+  // Right sidebar mode: "detail", "agent", "audits", or "activity". Agent is
+  // admin-only, so non-admins open in Detail; admins open in Agent (the chat is
+  // the most useful first stop). Activity is public (its write controls gate
+  // internally). A canvas click switches to Detail in all modes (handlers below).
   const [sidebarMode, setSidebarMode] = useState(() => (isAdmin ? "agent" : "detail"));
-  // If the admin key clears while an admin-only tab is open, fall back to
-  // Detail so the hidden tab's content can't linger.
+  // If the admin key clears while the admin-only Agent tab is open, fall back to
+  // Detail so the hidden tab's content can't linger. Activity stays allowed.
   useEffect(() => {
-    if (!isAdmin && (sidebarMode === "agent" || sidebarMode === "monitoring")) {
+    if (!isAdmin && sidebarMode === "agent") {
       setSidebarMode("detail");
     }
   }, [isAdmin, sidebarMode]);
@@ -648,21 +647,15 @@ export default function ProtocolSurface({
               onNavigate={handleNavigate}
             />
           )}
-          {isAdmin && sidebarMode === "monitoring" && (
-            <SurfaceMonitoringPanel
+          {sidebarMode === "activity" && (
+            <ActivityPanel
               companyData={companyData}
+              companyName={companyName}
               machines={allMachines}
               selectedMachine={selectedMachine}
               selectedPrincipal={selectedPrincipal}
-            />
-          )}
-          {sidebarMode === "upgrades" && (
-            <UpgradesSidebarPanel
-              machine={selectedMachine}
-              principal={selectedPrincipal}
-              companyName={companyName}
-              machines={machines}
               onSelect={handleSelectMachine}
+              isAdmin={isAdmin}
               cache={upgradeHistoryCache}
               onCache={cacheUpgradeHistory}
             />

@@ -27,19 +27,15 @@ export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true, is
       >
         Audits{auditCount != null ? `(${auditCount})` : ""}
       </button>
-      {isAdmin && (
-        <button
-          className={`ps-sidebar-tab ${mode === "monitoring" ? "active" : ""}`}
-          onClick={() => onSetMode("monitoring")}
-        >
-          Monitor
-        </button>
-      )}
+      {/* Activity folds the old Monitor + Upgrades tabs into one read-first
+          timeline. Reading (timeline / state / protocol feed) is public; the
+          write controls (alert toggles, webhook attach) gate on isAdmin
+          inside the panel — so the tab itself is visible to everyone. */}
       <button
-        className={`ps-sidebar-tab ${mode === "upgrades" ? "active" : ""}`}
-        onClick={() => onSetMode("upgrades")}
+        className={`ps-sidebar-tab ${mode === "activity" ? "active" : ""}`}
+        onClick={() => onSetMode("activity")}
       >
-        Upgrades
+        Activity
       </button>
     </div>
   );

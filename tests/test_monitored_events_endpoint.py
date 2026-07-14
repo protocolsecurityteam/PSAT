@@ -266,6 +266,9 @@ def test_upsert_monitoring_seeds_enrollment_block_at_head(api_client, db_session
             json={"address": addr, "chain": "ethereum", "contract_type": "regular"},
         )
         assert resp.status_code == 200
+        # The serialized payload surfaces enrollment_block so the frontend can
+        # place the monitoring-start boundary on the Activity timeline.
+        assert resp.json()["enrollment_block"] == head
 
         mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
         assert mc.enrollment_block == head  # floor set → pre-add history is suppressed
@@ -273,4 +276,57 @@ def test_upsert_monitoring_seeds_enrollment_block_at_head(api_client, db_session
     finally:
         db_session.query(MonitoredContract).filter(MonitoredContract.address == addr).delete()
         db_session.query(Protocol).filter(Protocol.id == proto.id).delete()
+        db_session.commit()
+
+
+def test_protocol_monitoring_list_serializes_enrollment_block(api_client, db_session):
+    """``GET /api/protocols/{id}/monitoring`` — the endpoint the Activity tab
+    reads — carries ``enrollment_block`` (including null for rows enrolled
+    before the column landed) so the frontend can place the boundary."""
+    from db.models import MonitoredContract, Protocol
+
+    proto = Protocol(name="__test_monitoring_list_enrollment__")
+    db_session.add(proto)
+    db_session.commit()
+
+    with_block = MonitoredContract(
+        id=uuid.uuid4(),
+        address="0x" + "a1" * 20,
+        chain="ethereum",
+        contract_type="proxy",
+        monitoring_config={"watch_upgrades": True},
+        last_known_state={},
+        last_scanned_block=25_000_000,
+        enrollment_block=24_900_000,
+        protocol_id=proto.id,
+        is_active=True,
+    )
+    # Legacy row: enrolled before the column existed → enrollment_block is null.
+    legacy = MonitoredContract(
+        id=uuid.uuid4(),
+        address="0x" + "b2" * 20,
+        chain="ethereum",
+        contract_type="safe",
+        monitoring_config={"watch_safe_signers": True},
+        last_known_state={},
+        last_scanned_block=0,
+        enrollment_block=None,
+        protocol_id=proto.id,
+        is_active=True,
+    )
+    db_session.add_all([with_block, legacy])
+    db_session.commit()
+
+    try:
+        resp = api_client.get(f"/api/protocols/{proto.id}/monitoring")
+        assert resp.status_code == 200
+        by_addr = {row["address"]: row for row in resp.json()}
+        assert "enrollment_block" in by_addr[with_block.address]
+        assert by_addr[with_block.address]["enrollment_block"] == 24_900_000
+        # Nullable — the field is present and null, never absent.
+        assert by_addr[legacy.address]["enrollment_block"] is None
+    finally:
+        for mc in (with_block, legacy):
+            db_session.delete(mc)
+        db_session.delete(proto)
         db_session.commit()

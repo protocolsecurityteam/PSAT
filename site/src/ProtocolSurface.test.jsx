@@ -1,10 +1,8 @@
 // State-variant + interaction tests for ProtocolSurface. Covers each
-// sidebar mode (Detail / Agent / Audits / Monitor / Upgrades), tab
-// switching, search interaction, and machine selection. Goal is
-// regression coverage for the upcoming ProtocolSurface.jsx file split —
-// every sub-tree (SurfaceMonitoringPanel, AuditsListPanel,
-// UpgradesSidebarPanel, EntityCard, InspectorCard, SearchNavigator)
-// has a behavioral assertion here.
+// sidebar mode (Detail / Agent / Audits / Activity), tab switching, search
+// interaction, and machine selection. Goal is regression coverage for the
+// sidebar sub-trees (ActivityPanel, AuditsListPanel, EntityCard,
+// InspectorCard, SearchNavigator) — each has a behavioral assertion here.
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
@@ -129,29 +127,14 @@ describe("ProtocolSurface — sidebar tabs", () => {
     expectNoCrash();
   });
 
-  it("opens the Monitor tab", async () => {
-    // The Agent + Monitor sidebar tabs are operator-only.
-    window.localStorage.setItem("psat_admin_key", "test-key");
+  it("opens the Activity tab and shows the protocol-wide feed", async () => {
+    // Activity is public (no admin key needed). With nothing selected it
+    // renders ProtocolActivity — the "Recent across protocol" overview.
     renderSurface();
-    await clickSidebarTab("Monitor");
+    await clickSidebarTab("Activity");
     await waitFor(() => {
-      // SurfaceMonitoringPanel shows a heading or empty-state — either
-      // proves the lazy import + initial render path didn't break.
       const text = document.body.textContent || "";
-      expect(text.length).toBeGreaterThan(0);
-    });
-    expectNoCrash();
-  });
-
-  it("opens the Upgrades tab and shows the proxy list", async () => {
-    renderSurface();
-    await clickSidebarTab("Upgrades");
-    await waitFor(() => {
-      // UpgradesSidebarPanel lists proxies with upgrade counts when no
-      // machine is selected. The Vault contract in our fixture is a proxy
-      // with upgrade_count=2.
-      const text = document.body.textContent || "";
-      expect(/Vault|upgrade/i.test(text)).toBe(true);
+      expect(/Recent across protocol|contracts monitored|Activity/i.test(text)).toBe(true);
     });
     expectNoCrash();
   });
@@ -381,8 +364,8 @@ describe("ProtocolSurface — stage-1 selection model", () => {
   });
 
   // (c) THE regression test: after committing a safe, no contract is selected in
-  // the Agent, Audits, or Upgrades tabs (the original leak lit up controls[0]).
-  it("committing a safe leaves Agent/Audits/Upgrades with no contract selected", async () => {
+  // the Agent, Audits, or Activity tabs (the original leak lit up controls[0]).
+  it("committing a safe leaves Agent/Audits/Activity with no contract selected", async () => {
     window.localStorage.setItem("psat_admin_key", "test-key");
     renderSurface(); // admin → default Agent tab
     const user = userEvent.setup();
@@ -419,18 +402,16 @@ describe("ProtocolSurface — stage-1 selection model", () => {
       document.querySelector(".ps-audits-contract-card"),
     ).not.toBeInTheDocument();
 
-    // Upgrades (M2): a principal is contract-only by nature, so the tab shows
-    // an explicit "pick a contract" hint. The original point of this assertion
-    // survives — no leaked contract: neither the global proxy list (M1-interim
-    // behavior) nor a single-contract timeline renders.
-    await clickSidebarTab("Upgrades");
+    // Activity (folds in Monitor + Upgrades): a principal is contract-only by
+    // nature, so the tab shows an explicit "pick a contract" hint — never a
+    // leaked contract's timeline nor its entity status strip.
+    await clickSidebarTab("Activity");
     await waitFor(() => {
       expect(
-        screen.getByText(/choose a contract to see its upgrade timeline/i),
+        screen.getByText(/choose a contract to see its activity/i),
       ).toBeInTheDocument();
     });
-    expect(document.querySelector(".ps-upgrades-global-hint")).toBeNull();
-    expect(document.querySelector(".ps-upgrades-sidebar-body")).toBeNull();
+    expect(document.querySelector(".ps-activity-strip")).toBeNull();
     expectNoCrash();
   });
 
@@ -608,40 +589,40 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     return new URL(window.location.href);
   }
 
-  // --- Monitor tab (stage 2): principal hint + focus-preview must not select ---
+  // --- Activity tab (stage 2): principal hint + focus-preview must not select ---
 
-  it("shows a 'pick a contract' hint in Monitor when a principal is selected", async () => {
-    window.localStorage.setItem("psat_admin_key", "test-key");
-    renderSurface(); // admin
+  it("shows a 'pick a contract' hint in Activity when a principal is selected", async () => {
+    renderSurface(); // Activity is public — no admin key needed
     const user = userEvent.setup();
     await selectSearchMode(user, "Safes");
     await commitViaEnter(user);
 
-    await clickSidebarTab("Monitor");
+    await clickSidebarTab("Activity");
     expect(
-      await screen.findByText(/choose a contract to see its alerts/i),
+      await screen.findByText(/choose a contract to see its activity/i),
     ).toBeInTheDocument();
-    // Not the contract-focused view.
-    expect(screen.queryByText(/^Contract alerts$/)).not.toBeInTheDocument();
+    // Not the entity-focused view: no status strip renders for a principal.
+    expect(document.querySelector(".ps-activity-strip")).toBeNull();
     expectNoCrash();
   });
 
-  it("does not treat a search focus-preview as a Monitor selection", async () => {
-    window.localStorage.setItem("psat_admin_key", "test-key");
-    renderSurface(); // admin
+  it("does not treat a search focus-preview as an Activity selection", async () => {
+    renderSurface();
     const user = userEvent.setup();
-    await clickSidebarTab("Monitor");
+    await clickSidebarTab("Activity");
 
     // Browse to the Vault contract via the search arrows — a focus preview,
-    // never a commit. Pre-M2, Monitoring's private focusedAddress fallback
-    // turned this into a contract selection ("Contract alerts").
+    // never a commit. ActivityPanel reads selectedMachine only (never a private
+    // focusedAddress), so a preview must stay in the protocol-wide feed.
     await user.type(searchInput(), "Vault");
     await user.keyboard("{ArrowDown}");
 
     await waitFor(() => {
-      expect(screen.getByText(/^Monitor alerts$/)).toBeInTheDocument();
+      const text = document.body.textContent || "";
+      expect(/Recent across protocol|contracts monitored|Activity/i.test(text)).toBe(true);
     });
-    expect(screen.queryByText(/^Contract alerts$/)).not.toBeInTheDocument();
+    // Preview did not commit → no entity status strip.
+    expect(document.querySelector(".ps-activity-strip")).toBeNull();
     expectNoCrash();
   });
 

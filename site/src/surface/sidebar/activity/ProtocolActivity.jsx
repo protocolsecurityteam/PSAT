@@ -1,0 +1,165 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import { api } from "../../../api/client.js";
+import { proxyDisplayName } from "../../../displayName.js";
+import { shortenAddress } from "../../../graph.js";
+import { decodeEvent, eventKind, eventKindLabel, relativeTime, scannerHealth } from "../../../monitoring/format.js";
+
+const POLL_MS = 30_000;
+
+function earliestEnrollment(contracts) {
+  const stamps = (contracts || [])
+    .map((c) => c.created_at)
+    .filter(Boolean)
+    .map((s) => new Date(s).getTime())
+    .filter(Number.isFinite);
+  if (!stamps.length) return null;
+  return new Date(Math.min(...stamps));
+}
+
+// Nothing selected → protocol-wide activity: scanner health, a monitored-count
+// summary, and the newest events across all contracts. Absorbs the standalone
+// monitoring page's overview. The canvas is the spatial "all contracts" view;
+// clicking a recent row selects that contract → the panel switches to entity mode.
+export function ProtocolActivity({ protocolId, companyName, contracts, machines, onSelect, now }) {
+  const [events, setEvents] = useState([]);
+  const [labelMap, setLabelMap] = useState({});
+
+  const refresh = useCallback(async () => {
+    if (!protocolId) return;
+    try {
+      const evs = await api(`/api/protocols/${protocolId}/events?limit=100`);
+      setEvents(Array.isArray(evs) ? evs : []);
+    } catch {
+      /* transient — keep the last good feed */
+    }
+  }, [protocolId]);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, POLL_MS);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
+      .then((addrs) => {
+        if (cancelled) return;
+        const map = {};
+        for (const a of addrs?.all_addresses || []) {
+          if (!a?.address) continue;
+          map[a.address.toLowerCase()] = {
+            name: a.name || null,
+            implName: a.implementation_name || null,
+            isProxy: !!a.is_proxy,
+          };
+        }
+        setLabelMap(map);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [companyName]);
+
+  const machineByAddress = useMemo(() => {
+    const map = new Map();
+    for (const m of machines || []) {
+      const a = m.address?.toLowerCase();
+      if (a) map.set(a, m);
+    }
+    return map;
+  }, [machines]);
+
+  const contractById = useMemo(() => {
+    const map = new Map();
+    for (const c of contracts || []) map.set(c.id, c);
+    return map;
+  }, [contracts]);
+
+  const friendlyName = useCallback((addr) => {
+    if (!addr) return "Unknown";
+    const entry = labelMap[addr.toLowerCase()];
+    const machine = machineByAddress.get(addr.toLowerCase());
+    const pretty = proxyDisplayName({
+      name: entry?.name || machine?.name,
+      isProxy: entry?.isProxy ?? machine?.is_proxy,
+      implName: entry?.implName,
+    });
+    if (pretty && !/^0x/i.test(pretty)) return pretty;
+    return shortenAddress(addr);
+  }, [labelMap, machineByAddress]);
+
+  const health = scannerHealth(contracts, now);
+  const headBlock = (contracts || []).reduce((max, c) => Math.max(max, c.last_scanned_block || 0), 0);
+  const liveSince = earliestEnrollment(contracts);
+  const recent = (events || []).slice(0, 8);
+
+  return (
+    <section className="ps-activity-protocol">
+      <div className="ps-activity-row-between">
+        <div>
+          <div className="ps-activity-eyebrow">Activity</div>
+          <div className="ps-activity-protocol-name">{companyName}</div>
+        </div>
+        <span className={`ps-activity-health ${health.tone}`}>
+          <span className="ps-activity-pulse" />{health.label}
+        </span>
+      </div>
+
+      <div className="ps-activity-card">
+        <div className="ps-activity-kv-line"><b>{contracts?.length || 0}</b> contracts monitored</div>
+        <div className="ps-activity-kv-line mono">block {headBlock ? headBlock.toLocaleString() : "—"}</div>
+        {liveSince ? (
+          <div className="ps-activity-kv-line faint">
+            Live since <b>{liveSince.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}</b>
+            {/* TODO(activity): "· upgrade history back to X" needs a protocol-wide
+                earliest-deployment source; not cheaply available client-side. */}
+          </div>
+        ) : null}
+      </div>
+
+      <div>
+        <div className="ps-activity-sect-title" style={{ marginBottom: 8 }}>Recent across protocol</div>
+        {recent.length === 0 ? (
+          <div className="ps-activity-empty">Nothing captured yet — the scanner hasn&apos;t seen an event.</div>
+        ) : (
+          <div className="ps-activity-recent">
+            {recent.map((ev) => {
+              const contract = contractById.get(ev.monitored_contract_id);
+              const addr = contract?.address || ev.data?.contract_address;
+              const type = contract?.contract_type || "regular";
+              const machine = addr ? machineByAddress.get(addr.toLowerCase()) : null;
+              const kind = eventKind(ev);
+              const decoded = decodeEvent(ev);
+              return (
+                <button
+                  key={ev.id}
+                  type="button"
+                  className="ps-activity-recent-row"
+                  onClick={() => onSelect && onSelect(machine || (addr ? { address: addr } : null))}
+                  disabled={!addr}
+                >
+                  <div className="ps-activity-recent-main">
+                    <div className="ps-activity-recent-id">
+                      <span className={`ps-activity-badge ${type}`}>{type}</span>
+                      <span className="ps-activity-recent-name">{friendlyName(addr)}</span>
+                    </div>
+                    <div className="ps-activity-recent-line">
+                      <span className={`ps-activity-kind k-${kind}`}>{eventKindLabel(ev)}</span>
+                      <span className="ps-activity-recent-sub">{decoded.sub || decoded.title}</span>
+                    </div>
+                  </div>
+                  <div className="ps-activity-recent-time">{relativeTime(ev.detected_at, now)}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="ps-activity-hint">
+        The canvas is the spatial &ldquo;all contracts&rdquo; view — select a node to open its full timeline.
+      </div>
+    </section>
+  );
+}
