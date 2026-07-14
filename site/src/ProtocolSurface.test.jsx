@@ -134,7 +134,7 @@ describe("ProtocolSurface — sidebar tabs", () => {
     await clickSidebarTab("Activity");
     await waitFor(() => {
       const text = document.body.textContent || "";
-      expect(/Recent across protocol|contracts monitored|Activity/i.test(text)).toBe(true);
+      expect(/Recent across protocol|addresses monitored|Activity/i.test(text)).toBe(true);
     });
     expectNoCrash();
   });
@@ -412,7 +412,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     await clickSidebarTab("Activity");
     await waitFor(() => {
       expect(
-        screen.getByText(/choose a contract to see its activity/i),
+        screen.getByText(/monitoring is not enabled/i),
       ).toBeInTheDocument();
     });
     expect(document.querySelector(".ps-activity-strip")).toBeNull();
@@ -603,7 +603,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
 
     await clickSidebarTab("Activity");
     expect(
-      await screen.findByText(/choose a contract to see its activity/i),
+      await screen.findByText(/monitoring is not enabled/i),
     ).toBeInTheDocument();
     // Not the entity-focused view: no status strip renders for a principal.
     expect(document.querySelector(".ps-activity-strip")).toBeNull();
@@ -623,7 +623,7 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
 
     await waitFor(() => {
       const text = document.body.textContent || "";
-      expect(/Recent across protocol|contracts monitored|Activity/i.test(text)).toBe(true);
+      expect(/Recent across protocol|addresses monitored|Activity/i.test(text)).toBe(true);
     });
     // Preview did not commit → no entity status strip.
     expect(document.querySelector(".ps-activity-strip")).toBeNull();

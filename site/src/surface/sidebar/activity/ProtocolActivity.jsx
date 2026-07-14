@@ -18,8 +18,8 @@ function earliestEnrollment(contracts) {
 }
 
 // Nothing selected → protocol-wide activity: scanner health, a monitored-count
-// summary, and the newest events across all contracts. Absorbs the standalone
-// monitoring page's overview. The canvas is the spatial "all contracts" view;
+// summary, and the newest events across every monitored address. Absorbs the
+// standalone monitoring page's overview. The canvas is the spatial protocol map;
 // clicking a recent row selects that contract → the panel switches to entity mode.
 export function ProtocolActivity({ protocolId, companyName, contracts, machines, onSelect, now }) {
   const [events, setEvents] = useState([]);
@@ -107,7 +107,7 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
       </div>
 
       <div className="ps-activity-card">
-        <div className="ps-activity-kv-line"><b>{contracts?.length || 0}</b> contracts monitored</div>
+        <div className="ps-activity-kv-line"><b>{contracts?.length || 0}</b> addresses monitored</div>
         <div className="ps-activity-kv-line mono">block {headBlock ? headBlock.toLocaleString() : "—"}</div>
         {liveSince ? (
           <div className="ps-activity-kv-line faint">
@@ -158,7 +158,7 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
       </div>
 
       <div className="ps-activity-hint">
-        The canvas is the spatial &ldquo;all contracts&rdquo; view — select a node to open its full timeline.
+        The canvas is the spatial map of the protocol — select a node to open its full timeline.
       </div>
     </section>
   );

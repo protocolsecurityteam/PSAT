@@ -171,10 +171,10 @@ test.describe("Surface selection — full flow", () => {
     await openTab(page, "Audits");
     await expect(page.locator(".ps-audits-contract-card")).toHaveCount(0);
 
-    // Activity (folds in Upgrades + Monitor): explicit "pick a contract" hint
-    // for a principal — never a leaked timeline nor an entity status strip.
+    // Activity (folds in Upgrades + Monitor): a non-monitored principal shows a
+    // "monitoring not enabled" notice — never a leaked timeline nor a status strip.
     await openTab(page, "Activity");
-    await expect(page.getByText(/choose a contract to see its activity/i)).toBeVisible();
+    await expect(page.getByText(/monitoring is not enabled/i)).toBeVisible();
     await expect(page.locator(".ps-activity-strip")).toHaveCount(0);
 
     // The URL persists the principal selection (shareable/restorable) as the

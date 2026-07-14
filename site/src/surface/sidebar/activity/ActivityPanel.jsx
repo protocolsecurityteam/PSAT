@@ -103,7 +103,7 @@ export function ActivityPanel({
   // (safe/timelock) is normally not a machine — but safes/timelocks ARE enrolled
   // for monitoring, so if the selected principal has a MonitoredContract row,
   // show its timeline (the prototype's "Safe selected" column). Only a principal
-  // with no monitored row falls back to the pick-a-contract hint.
+  // with no monitored row (e.g. an EOA) shows a "monitoring not enabled" notice.
   const principalContract = selectedPrincipal
     ? contractByAddress.get((selectedPrincipal.address || "").toLowerCase()) || null
     : null;
@@ -126,7 +126,7 @@ export function ActivityPanel({
     return (
       <section className="ps-principal-section">
         <div className="ps-inspector-empty">
-          {who} selected — choose a contract to see its activity.
+          Monitoring is not enabled for {who}.
         </div>
       </section>
     );

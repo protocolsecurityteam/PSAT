@@ -182,7 +182,7 @@ describe("ActivityPanel — protocol-wide mode", () => {
   it("shows the monitored count and the recent feed when nothing is selected", async () => {
     renderPanel({});
     await waitFor(() => {
-      expect(screen.getByText(/contracts monitored/i)).toHaveTextContent("2 contracts monitored");
+      expect(screen.getByText(/addresses monitored/i)).toHaveTextContent("2 addresses monitored");
     });
     expect(screen.getByText(/Recent across protocol/i)).toBeInTheDocument();
   });
@@ -193,12 +193,12 @@ describe("ActivityPanel — principal selected", () => {
     mockActivity({ contracts: [PROXY_CONTRACT] });
   });
 
-  it("points the user at contracts instead of the feed", async () => {
+  it("shows a 'monitoring not enabled' notice for a non-monitored principal", async () => {
     renderPanel({
       selectedMachine: null,
       selectedPrincipal: { address: SAFE, type: "safe", label: "Treasury" },
     });
-    expect(await screen.findByText(/choose a contract to see its activity/i)).toBeInTheDocument();
+    expect(await screen.findByText(/monitoring is not enabled/i)).toBeInTheDocument();
     expect(screen.queryByText(/Recent across protocol/i)).not.toBeInTheDocument();
   });
 });
@@ -217,6 +217,6 @@ describe("ActivityPanel — monitored principal (safe)", () => {
     });
     expect(await screen.findByText("Treasury Safe")).toBeInTheDocument();
     expect(screen.getByText("Timeline")).toBeInTheDocument();
-    expect(screen.queryByText(/choose a contract to see its activity/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/monitoring is not enabled/i)).not.toBeInTheDocument();
   });
 });
