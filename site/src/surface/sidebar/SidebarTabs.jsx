@@ -1,4 +1,4 @@
-export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true, isAdmin = false }) {
+export function SidebarTabs({ mode, onSetMode, showDetail = true, isAdmin = false }) {
   return (
     <div className="ps-sidebar-tabs">
       {/* showDetail is on by default in both embedded and fullscreen
@@ -25,7 +25,7 @@ export function SidebarTabs({ mode, onSetMode, auditCount, showDetail = true, is
         className={`ps-sidebar-tab ${mode === "audits" ? "active" : ""}`}
         onClick={() => onSetMode("audits")}
       >
-        Audits{auditCount != null ? `(${auditCount})` : ""}
+        Audits
       </button>
       {/* Activity folds the old Monitor + Upgrades tabs into one read-first
           timeline. Reading (timeline / state / protocol feed) is public; the

@@ -191,13 +191,17 @@ describe("ProtocolSurface — audit coverage", () => {
     installApiMocks();
   });
 
-  it("loads audit coverage and shows audit count in the Audits tab label", async () => {
+  it("shows the Audits tab with no count once coverage loads", async () => {
     renderSurface();
-    // The Audits tab is labeled "Audits(N)" once coverage resolves.
-    await waitFor(() => {
-      const auditTab = screen.queryByRole("button", { name: /Audits\(\d+\)/ });
-      expect(auditTab).toBeInTheDocument();
+    const tabBar = await waitFor(() => {
+      const el = document.querySelector(".ps-sidebar-tabs");
+      expect(el).toBeTruthy();
+      return el;
     });
+    // The tab is labeled just "Audits" — the raw report total is misleading
+    // (most reports aren't bytecode-verified), so no count is shown.
+    expect(within(tabBar).getByRole("button", { name: /^Audits$/ })).toBeInTheDocument();
+    expect(within(tabBar).queryByRole("button", { name: /Audits\s*\(\d+\)/ })).toBeNull();
     expectNoCrash();
   });
 });

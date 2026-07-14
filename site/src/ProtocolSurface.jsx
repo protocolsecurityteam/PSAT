@@ -628,7 +628,6 @@ export default function ProtocolSurface({
           <SidebarTabs
             mode={sidebarMode}
             onSetMode={setSidebarMode}
-            auditCount={coverageData?.audit_count}
             showDetail
             isAdmin={isAdmin}
           />
