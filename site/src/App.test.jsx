@@ -1,7 +1,7 @@
 // Top-level App router smoke tests. Each case sets a target URL,
 // renders <App />, and asserts a stable landmark for that route renders
 // without throwing. The goal is regression coverage — if any internal
-// page (PipelineDashboard, ProtocolMonitoringPage, CompanyOverview)
+// page (PipelineDashboard, ProtocolSurface, CompanyOverview)
 // breaks, one of these will fail.
 //
 // Each test also asserts the ErrorBoundary fallback ("Something went
@@ -107,22 +107,4 @@ describe("App router smoke tests", () => {
     expectNoCrash();
   });
 
-  it("renders the company monitoring tab at /company/:name/monitoring", async () => {
-    navigateTo("/company/etherfi/monitoring");
-    const { container } = render(<App />);
-    await waitFor(() => {
-      // ProtocolMonitoringPage's console layout shows the loading
-      // placeholder first, then either the status pulse text or the
-      // no-protocol fallback once the company fetch resolves. Any of
-      // these proves the route reached the right component.
-      const text = container.textContent || "";
-      const matched =
-        /Loading protocol monitoring/i.test(text) ||
-        /Protocol Monitoring/i.test(text) ||
-        /Discord notifications/i.test(text) ||
-        /no contracts/i.test(text);
-      expect(matched).toBe(true);
-    });
-    expectNoCrash();
-  });
 });

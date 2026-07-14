@@ -4,7 +4,7 @@ import { api } from "../../../api/client.js";
 import { principalLabel } from "../../format.js";
 import { EntityActivity } from "./EntityActivity.jsx";
 import { ProtocolActivity } from "./ProtocolActivity.jsx";
-import { eventTypesFromGroupKeys } from "../monitoring/helpers.js";
+import { eventTypesFromGroupKeys } from "./helpers.js";
 
 const POLL_MS = 30_000;
 

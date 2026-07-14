@@ -1,6 +1,5 @@
-// Pure helpers shared by every component under surface/sidebar/monitoring/.
-// JSX-returning helpers live in icons.jsx; only structural data conversion
-// belongs here.
+// Pure config helpers for the Activity tab: monitoring_config ↔ alert-group
+// keys ↔ event types, plus the monitoring contract-type of a machine.
 
 import { MONITOR_ALERT_GROUPS } from "../../meta.js";
 

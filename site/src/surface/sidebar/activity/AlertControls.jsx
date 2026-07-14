@@ -6,7 +6,7 @@ import {
   eventTypesFromGroupKeys,
   groupKeysFromConfig,
   subscriptionEventTypeSet,
-} from "../monitoring/helpers.js";
+} from "./helpers.js";
 
 // Which protocol subscriptions would fire for this contract's watch config (a
 // webhook with no event filter matches everything).

@@ -397,17 +397,3 @@ export function scannerHealth(contracts, now = Date.now()) {
   if (ageS > 600 * 5) tone = "err";
   return { tone, label: `scanned ${relativeTime(new Date(youngest).toISOString(), now)}` };
 }
-
-// Build a map of contract.id → most recent event timestamp.
-export function lastEventByContract(events) {
-  const out = {};
-  for (const e of events || []) {
-    const id = e.monitored_contract_id;
-    const t = e.detected_at;
-    if (!id || !t) continue;
-    if (!out[id] || new Date(t).getTime() > new Date(out[id]).getTime()) {
-      out[id] = t;
-    }
-  }
-  return out;
-}
