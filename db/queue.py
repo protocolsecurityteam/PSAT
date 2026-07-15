@@ -30,6 +30,7 @@ from .models import (
     SessionLocal,
     SourceFile,
     WorkerHeartbeat,
+    derive_job_chain_id,
 )
 from .storage import (
     StorageError,
@@ -277,8 +278,13 @@ def create_job(
     from utils.logging import trace_id_var
 
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
+    address = request_dict.get("address")
     job = Job(
-        address=request_dict.get("address"),
+        address=address,
+        # Explicit enqueue-path dual-write (invariant 1). Shares the model's
+        # derivation, which also runs as a column default for any non-create_job
+        # construction, so the two layers can never disagree.
+        chain_id=derive_job_chain_id(request_dict.get("chain"), address),
         company=request_dict.get("company"),
         name=request_dict.get("name"),
         status=JobStatus.queued,
@@ -831,10 +837,16 @@ def reconcile_impl_job_for_proxy(
     proxy_lc = proxy_addr.lower()
 
     def _scoped(stmt):
+        # Chain is filtered in BOTH branches. Previously the chain predicate was
+        # nested under ``root_job_id is not None``, so when root_job_id was None a
+        # same-address impl job on a *different* chain could masquerade as a
+        # duplicate (invariant 1). Impl jobs are address-scoped, so ``jobs.chain_id``
+        # is populated and the filter is total (``derive_job_chain_id`` maps the
+        # chain string to the stored id; unknown/missing → 1).
+        if chain is not None:
+            stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, impl_lc))
         if root_job_id is not None:
             stmt = stmt.where(Job.request["root_job_id"].as_string() == root_job_id)
-            if chain is not None:
-                stmt = stmt.where(Job.request["chain"].as_string() == chain)
         return stmt
 
     same_proxy = session.execute(
@@ -1440,15 +1452,16 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
         )
         .order_by(Job.updated_at.desc())
     )
+    # SQL-side chain filtering on the first-class ``jobs.chain_id`` column
+    # (invariant 1). The M0.2 backfill populated chain_id for every
+    # address-scoped row, so ``chain_id = :id`` is a total, collision-free
+    # filter; ``derive_job_chain_id`` maps the caller's chain string to the same
+    # id the dual-write stored (unknown/missing → 1) so mainnet is unchanged.
+    if chain is not None:
+        stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     candidates = session.execute(stmt).scalars().all()
 
     for candidate in candidates:
-        # Filter by chain stored in the job's request dict
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-
         src_count = session.execute(
             select(SourceFile).where(SourceFile.job_id == candidate.id).limit(1)
         ).scalar_one_or_none()
@@ -1513,14 +1526,18 @@ def find_previous_company_inventory(
         )
         .order_by(Job.updated_at.desc())
     )
+    # Company/root jobs are address-less, so ``jobs.chain_id`` is NULL for them
+    # (M0.2's CHECK requires chain_id only for address-scoped rows). Their chain
+    # identity lives solely in ``request->>'chain'``, so the SQL-side chain
+    # predicate keys on the JSONB value — an exact-string match that preserves
+    # the prior Python-side ``req.get("chain") != chain`` semantics, including
+    # excluding candidates whose request omits ``chain`` (NULL != value).
+    if chain is not None:
+        stmt = stmt.where(Job.request["chain"].as_string() == chain)
     candidates = session.execute(stmt).scalars().all()
     for candidate in candidates:
         if exclude_job_id and candidate.id == exclude_job_id:
             continue
-        if chain is not None:
-            req = candidate.request if isinstance(candidate.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
         art = session.execute(
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_inventory").limit(1)
         ).scalar_one_or_none()
@@ -1535,23 +1552,17 @@ def find_existing_job_for_address(session: Session, address: str, chain: str | N
     When *chain* is given, only jobs whose ``request["chain"]`` matches are
     returned, so an Ethereum job won't suppress a Base job at the same address.
     """
-    candidates = (
-        session.execute(
-            select(Job).where(
-                func.lower(Job.address) == address.lower(),
-                Job.status != JobStatus.failed,
-            )
-        )
-        .scalars()
-        .all()
+    stmt = select(Job).where(
+        func.lower(Job.address) == address.lower(),
+        Job.status != JobStatus.failed,
     )
-    for c in candidates:
-        if chain is not None:
-            req = c.request if isinstance(c.request, dict) else {}
-            if req.get("chain") != chain:
-                continue
-        return c
-    return None
+    # SQL-side chain filtering on ``jobs.chain_id`` (invariant 1). The M0.2
+    # backfill populated every address-scoped row, so this is total;
+    # ``derive_job_chain_id`` resolves the caller's chain string to the stored
+    # id (unknown/missing → 1), matching the dual-write.
+    if chain is not None:
+        stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
+    return session.execute(stmt.limit(1)).scalar_one_or_none()
 
 
 def is_known_proxy(session: Session, address: str, chain: str | None = None) -> bool:

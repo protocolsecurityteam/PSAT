@@ -326,6 +326,39 @@ def chain_by_name(name: str) -> ChainInfo:
     raise UnknownChainError(f"unknown chain name: {name!r}")
 
 
+def chain_cache_token(chain: str | int | None) -> str:
+    """Canonical cache-key token for a chain (invariant 11): the decimal-string
+    chain id (``"1"``, ``"8453"``).
+
+    Accepts a chain id (``int`` or decimal string), a chain name/alias
+    (``"ethereum"``, ``"base"``, ``"mainnet"``), or ``None`` (the historical
+    mainnet default). This is the single normalizer that collapses the two key
+    formats the mapping-enumeration cache used to mix — a chain *name* from one
+    code path and ``str(chain_id)`` from another — onto one token, so both hit
+    the same row.
+
+    ``None``/empty resolves to the mainnet token, mirroring the Phase-0
+    dual-write default. An *unregistered* non-numeric name is not silently
+    aliased to mainnet (that would let an unknown chain's scan serve mainnet
+    resolution and vice versa); it is returned lowercased as its own isolated
+    bucket, so a lookup degrades to a miss rather than a cross-chain collision.
+    Fail-loud on unknown chains is the M1.2 kill-the-defaults step, not this one.
+    """
+    if chain is None:
+        return "1"
+    if isinstance(chain, int):
+        return str(chain)
+    text = chain.strip()
+    if not text:
+        return "1"
+    if text.isdigit():
+        return text
+    try:
+        return str(chain_by_name(text).chain_id)
+    except UnknownChainError:
+        return text.lower()
+
+
 def supported_chain_ids() -> frozenset[int]:
     """Chain ids in the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist.
 
