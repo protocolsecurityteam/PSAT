@@ -1,9 +1,20 @@
-"""Canonical chain-label helpers shared by discovery writers."""
+"""Canonical chain registry — the single source of chain truth for PSAT.
+
+Historically this module only held the loose-label normalizer
+:func:`canonical_chain` used by discovery writers. It now also carries the
+:class:`ChainInfo` registry (invariant 5 of ``MULTICHAIN_INVARIANTS.md``): every
+per-chain constant (ids, aliases, HyperSync/explorer URLs, finality depth,
+getLogs range, bridge constants) lives here, and the four former ad-hoc chain
+maps derive from it. :func:`canonical_chain` stays as the loose-label front door
+that feeds canonical names into :func:`chain_by_name`.
+"""
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 _CHAIN_ALIASES = {
@@ -60,4 +71,296 @@ def canonical_chain_list(values: Iterable[Any] | None) -> list[str] | None:
             continue
         seen.add(chain)
         out.append(chain)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Chain registry (invariant 5)
+# ---------------------------------------------------------------------------
+
+# Fleet-wide defaults. Per-chain tuning happens at chain-enablement (inv. 14);
+# for now every chain carries the values the codebase already used on mainnet.
+DEFAULT_CONFIRMATION_DEPTH = 12
+MAX_GETLOGS_RANGE = 2000
+
+# Env allowlist of chains PSAT is allowed to operate on. Conservative default is
+# mainnet-only: an unset allowlist must not silently enable an unproven chain.
+SUPPORTED_CHAIN_IDS_ENV = "PSAT_SUPPORTED_CHAIN_IDS"
+_DEFAULT_SUPPORTED_CHAIN_IDS = frozenset({1})
+
+
+class UnknownChainError(ValueError):
+    """Raised when a chain id / name cannot be resolved in the registry.
+
+    A subclass of :class:`ValueError` so call sites that already tolerate an
+    unknown chain by catching ``ValueError`` keep working.
+    """
+
+
+@dataclass(frozen=True)
+class ChainInfo:
+    """Immutable per-chain facts. The eRPC route is NOT stored — it is derived
+    from ``chain_id`` (``{ERPC_BASE_URL}/main/evm/{chain_id}``) by
+    :func:`utils.rpc.erpc_url_for_chain_id`."""
+
+    chain_id: int
+    name: str
+    aliases: tuple[str, ...]
+    # Explicit per chain — never pattern-derived. None means the event indexer is
+    # disabled for this chain (inv. 10): no proven HyperSync/HyperRPC coverage.
+    hypersync_url: str | None
+    explorer_base_url: str
+    confirmation_depth: int
+    max_getlogs_range: int
+    # Populated at Phase 2 chain enablement (inv. 15); empty until then.
+    bridge_executors: tuple[str, ...]
+    cross_domain_messengers: tuple[str, ...]
+
+    @property
+    def supported(self) -> bool:
+        """Whether this chain is in the env allowlist. Computed (not stored) so a
+        change to ``PSAT_SUPPORTED_CHAIN_IDS`` — including in tests — is reflected
+        immediately rather than frozen at import time."""
+        return self.chain_id in supported_chain_ids()
+
+
+# Initial chain set (inv. 5): the 11 inventory chains
+# (``services/discovery/inventory_domain.py``) plus ``mode``/``berachain`` from
+# the ``utils/rpc.py`` alias map. HyperSync URL is set only where the codebase
+# already demonstrates one in use (mainnet); every other chain is None =
+# indexer-disabled until coverage is proven per inv. 14. Explorer URLs are the
+# well-known canonical bases. Finality depth / getLogs range use the current
+# fleet-wide values pending per-chain tuning.
+_CHAINS: tuple[ChainInfo, ...] = (
+    ChainInfo(
+        chain_id=1,
+        name="ethereum",
+        aliases=("mainnet",),
+        hypersync_url="https://eth.hypersync.xyz",
+        explorer_base_url="https://etherscan.io",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=42161,
+        name="arbitrum",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://arbiscan.io",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=10,
+        name="optimism",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://optimistic.etherscan.io",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=137,
+        name="polygon",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://polygonscan.com",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=8453,
+        name="base",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://basescan.org",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=43114,
+        name="avalanche",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://snowtrace.io",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=56,
+        name="bsc",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://bscscan.com",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=59144,
+        name="linea",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://lineascan.build",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=534352,
+        name="scroll",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://scrollscan.com",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=324,
+        name="zksync",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://era.zksync.network",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=81457,
+        name="blast",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://blastscan.io",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=34443,
+        name="mode",
+        aliases=(),
+        hypersync_url=None,
+        explorer_base_url="https://explorer.mode.network",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+    ChainInfo(
+        chain_id=80094,
+        name="berachain",
+        aliases=("bera",),
+        hypersync_url=None,
+        explorer_base_url="https://berascan.com",
+        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        max_getlogs_range=MAX_GETLOGS_RANGE,
+        bridge_executors=(),
+        cross_domain_messengers=(),
+    ),
+)
+
+
+def _build_indexes() -> tuple[dict[int, ChainInfo], dict[str, ChainInfo]]:
+    by_id: dict[int, ChainInfo] = {}
+    by_name: dict[str, ChainInfo] = {}
+    for info in _CHAINS:
+        if info.chain_id in by_id:
+            raise ValueError(f"duplicate chain_id in registry: {info.chain_id}")
+        by_id[info.chain_id] = info
+        for key in (info.name, *info.aliases):
+            if key in by_name:
+                raise ValueError(f"duplicate chain name/alias in registry: {key!r}")
+            by_name[key] = info
+    return by_id, by_name
+
+
+_BY_ID, _BY_NAME = _build_indexes()
+
+
+def chain_by_id(chain_id: int) -> ChainInfo:
+    """Return the :class:`ChainInfo` for *chain_id*; raise on unknown."""
+    info = _BY_ID.get(chain_id)
+    if info is None:
+        raise UnknownChainError(f"unknown chain_id: {chain_id!r}")
+    return info
+
+
+def chain_by_name(name: str) -> ChainInfo:
+    """Resolve a chain name (canonical or alias) to its :class:`ChainInfo`.
+
+    The single home of canonical-name normalization: it first checks the
+    registry's own names/aliases, then falls back to the loose-label normalizer
+    (:func:`canonical_chain`) so labels like ``"avax"`` / ``"arbitrum one"``
+    resolve too. The ``"unknown"`` discovery sentinel is NOT resolvable — it
+    raises, as does any genuinely-unknown chain.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise UnknownChainError(f"unknown chain name: {name!r}")
+    normalized = re.sub(r"[\s_-]+", " ", name.strip()).strip().lower()
+    info = _BY_NAME.get(normalized)
+    if info is not None:
+        return info
+    canonical = canonical_chain(name)
+    if canonical and canonical != "unknown":
+        info = _BY_NAME.get(canonical)
+        if info is not None:
+            return info
+    raise UnknownChainError(f"unknown chain name: {name!r}")
+
+
+def supported_chain_ids() -> frozenset[int]:
+    """Chain ids in the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist.
+
+    Comma-separated decimal ids; blanks and non-integers are ignored. When the
+    env var is unset or empty, defaults to mainnet-only (``{1}``) so an
+    unconfigured deployment never silently operates on an unproven chain.
+    """
+    raw = os.getenv(SUPPORTED_CHAIN_IDS_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_SUPPORTED_CHAIN_IDS
+    ids: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ids.add(int(token))
+        except ValueError:
+            continue
+    return frozenset(ids) if ids else _DEFAULT_SUPPORTED_CHAIN_IDS
+
+
+def all_chains() -> tuple[ChainInfo, ...]:
+    """All registered chains, in registry declaration order."""
+    return _CHAINS
+
+
+def chain_name_to_id_map() -> dict[str, int]:
+    """``{name_or_alias: chain_id}`` for every registered name and alias.
+
+    This is the registry-backed replacement for the hand-maintained
+    ``COMMON_CHAIN_IDS`` map in ``utils/rpc.py``.
+    """
+    out: dict[str, int] = {}
+    for info in _CHAINS:
+        for key in (info.name, *info.aliases):
+            out[key] = info.chain_id
     return out

@@ -32,6 +32,7 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from services.static.claims import Claim, resolve_claim_precedence
+from utils.chains import UnknownChainError, chain_by_name
 from utils.concurrency import parallel_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -40,7 +41,6 @@ from workers.base import BaseWorker
 logger = logging.getLogger("workers.policy_worker")
 
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
-CHAIN_IDS = {"ethereum": 1, "mainnet": 1}
 
 # Phase timing convention for ``process()``.
 #
@@ -450,7 +450,14 @@ class PolicyWorker(BaseWorker):
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            chain_id = CHAIN_IDS.get(str(job_chain or "ethereum").lower(), 1)
+            # Derive the int chain id from the registry (inv. 5). Non-mainnet
+            # names now map to their real ids instead of collapsing to 1 (the
+            # old hand map only knew ethereum/mainnet); an unknown chain still
+            # tolerantly falls back to mainnet rather than raising.
+            try:
+                chain_id = chain_by_name(job_chain).chain_id if job_chain else 1
+            except UnknownChainError:
+                chain_id = 1
             with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
                 try:
                     state_var_values = _load_state_var_values(

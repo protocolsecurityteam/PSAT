@@ -1,0 +1,67 @@
+[
+  {
+    "chain_id": 1,
+    "name": "ethereum",
+    "explorer_base_url": "https://etherscan.io"
+  },
+  {
+    "chain_id": 10,
+    "name": "optimism",
+    "explorer_base_url": "https://optimistic.etherscan.io"
+  },
+  {
+    "chain_id": 56,
+    "name": "bsc",
+    "explorer_base_url": "https://bscscan.com"
+  },
+  {
+    "chain_id": 137,
+    "name": "polygon",
+    "explorer_base_url": "https://polygonscan.com"
+  },
+  {
+    "chain_id": 324,
+    "name": "zksync",
+    "explorer_base_url": "https://era.zksync.network"
+  },
+  {
+    "chain_id": 8453,
+    "name": "base",
+    "explorer_base_url": "https://basescan.org"
+  },
+  {
+    "chain_id": 34443,
+    "name": "mode",
+    "explorer_base_url": "https://explorer.mode.network"
+  },
+  {
+    "chain_id": 42161,
+    "name": "arbitrum",
+    "explorer_base_url": "https://arbiscan.io"
+  },
+  {
+    "chain_id": 43114,
+    "name": "avalanche",
+    "explorer_base_url": "https://snowtrace.io"
+  },
+  {
+    "chain_id": 59144,
+    "name": "linea",
+    "explorer_base_url": "https://lineascan.build"
+  },
+  {
+    "chain_id": 80094,
+    "name": "berachain",
+    "explorer_base_url": "https://berascan.com"
+  },
+  {
+    "chain_id": 81457,
+    "name": "blast",
+    "explorer_base_url": "https://blastscan.io"
+  },
+  {
+    "chain_id": 534352,
+    "name": "scroll",
+    "explorer_base_url": "https://scrollscan.com"
+  }
+]

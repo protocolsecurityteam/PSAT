@@ -25,6 +25,7 @@ from db.queue import (
 )
 from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -42,16 +43,6 @@ class DAppCrawlWorker(BaseWorker):
             raise ValueError("dapp_crawl job missing dapp_urls in request")
 
         chain_id = request.get("chain_id") or 1
-        chain_id_to_name = {
-            1: "ethereum",
-            10: "optimism",
-            56: "bsc",
-            137: "polygon",
-            8453: "base",
-            42161: "arbitrum",
-            43114: "avalanche",
-            534352: "scroll",
-        }
         wait = request.get("wait") or 10
 
         # Derive / create Protocol row from URL hostname if no company context exists
@@ -134,7 +125,11 @@ class DAppCrawlWorker(BaseWorker):
 
         # Write ALL discovered addresses to contracts table
         protocol_id = protocol_row.id
-        default_chain = request.get("chain") or chain_id_to_name.get(chain_id)
+        try:
+            chain_name = chain_by_id(chain_id).name
+        except UnknownChainError:
+            chain_name = None
+        default_chain = request.get("chain") or chain_name
         # Build per-address context from address_details
         detail_by_addr: dict[str, dict] = {}
         for detail in result.get("address_details", []):
