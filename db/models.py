@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -14,6 +15,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -30,6 +32,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
+
+from utils.chains import UnknownChainError, chain_by_name
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -62,11 +68,64 @@ class JobStage(str, enum.Enum):
     done = "done"
 
 
+def derive_job_chain_id(chain_value: Any, address: str | None) -> int | None:
+    """Resolve a job's first-class ``chain_id`` from its ``request["chain"]``.
+
+    Single source of derivation truth for the ``jobs.chain_id`` dual-write
+    (invariant 1). Address-less company/root jobs carry no chain identity
+    (a deployment concept) and return None; the CHECK constraint permits that.
+    For address-scoped jobs the chain string resolves through the canonical
+    registry; missing/empty is the mainnet edge default, and an unrecognized
+    value (typo, the ``"unknown"`` sentinel, or a non-string) falls back to
+    mainnet with a warning so a misconfiguration is visible without changing
+    mainnet behaviour. Mirrors the M0.2 migration backfill so dual-written and
+    legacy rows agree.
+    """
+    if address is None:
+        return None
+    if chain_value is None or (isinstance(chain_value, str) and not chain_value.strip()):
+        return 1
+    try:
+        return chain_by_name(chain_value).chain_id
+    except UnknownChainError:
+        logger.warning(
+            "derive_job_chain_id: unrecognized chain %r for address %s; defaulting chain_id=1",
+            chain_value,
+            address,
+        )
+        return 1
+
+
+def _job_chain_id_insert_default(context: Any) -> int | None:
+    """Column ``default`` for ``jobs.chain_id`` — fires only when a row is
+    inserted without an explicit chain_id.
+
+    ``db.queue.create_job`` sets chain_id explicitly (the enqueue-path
+    dual-write), so this never runs on the production path. It is a
+    defense-in-depth net: any direct ``Job(...)`` construction (only tests
+    today) still gets a derived chain_id from its own ``request["chain"]`` and
+    can't violate the CHECK constraint. Never a constant default — always the
+    same registry-backed derivation."""
+    params = context.get_current_parameters()
+    request = params.get("request")
+    chain = request.get("chain") if isinstance(request, dict) else None
+    return derive_job_chain_id(chain, params.get("address"))
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # First-class chain identity for the deployment (invariant 1). Derived at
+    # create time from ``request["chain"]`` via the canonical registry and
+    # dual-written alongside the string chain in ``request``. Nullable, but a
+    # CHECK constraint (see ``__table_args__``) requires it for address-scoped
+    # jobs; company/root jobs with ``address IS NULL`` keep it NULL. Reads still
+    # come from ``request["chain"]`` until the M0.2 Item-2 dedup flip. ``default``
+    # derives from this row's own ``request["chain"]`` when a caller omits
+    # chain_id, so no construction path can silently violate the CHECK.
+    chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=_job_chain_id_insert_default)
     company: Mapped[str | None] = mapped_column(String, nullable=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), nullable=False, default=JobStatus.queued)
@@ -126,6 +185,17 @@ class Job(Base):
             "ix_jobs_lease_expires_at",
             "lease_expires_at",
             postgresql_where=text("status = 'processing'"),
+        ),
+        # Serves the M0.2 Item-2 SQL-side dedup lookups keyed on
+        # ``(lower(address), chain_id)``. Mirrors the ``lower(address)``
+        # functional-index style used elsewhere (ix_function_principals_lower_address)
+        # since the dedup helpers compare ``func.lower(Job.address)``.
+        Index("ix_jobs_lower_address_chain_id", text("lower(address)"), "chain_id"),
+        # Address-scoped jobs must carry a chain_id; company/root jobs
+        # (address IS NULL) legitimately leave it NULL (invariant 1).
+        CheckConstraint(
+            "address IS NULL OR chain_id IS NOT NULL",
+            name="ck_jobs_chain_id_required_for_address",
         ),
     )
 

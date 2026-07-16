@@ -90,6 +90,30 @@ def _resolve_job_concurrency(stage_value: str) -> int:
     return _read("PSAT_JOB_CONCURRENCY") or 1
 
 
+def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
+    """Chain label for the ``chain`` logging contextvar (invariant 4).
+
+    Prefers the human-readable chain *name* in ``request['chain']`` so existing
+    Loki filters (``chain="ethereum"``) keep working. Falls back to the canonical
+    name of the job's first-class ``chain_id`` (M0.2) so a job that carries a
+    chain_id but whose request omits ``chain`` still tags every log line. Returns
+    ``None`` when neither is available (e.g. an address-less company job whose
+    request has no chain), which ``bind_trace_context`` treats as "don't bind".
+    """
+    chain = request.get("chain")
+    if chain:
+        return chain
+    chain_id = getattr(job, "chain_id", None)
+    if chain_id is None:
+        return None
+    from utils.chains import UnknownChainError, chain_by_id
+
+    try:
+        return chain_by_id(chain_id).name
+    except UnknownChainError:
+        return None
+
+
 class JobHandledDirectly(Exception):
     """Raised by process() when it has already completed/failed the job itself."""
 
@@ -293,7 +317,7 @@ class BaseWorker:
             stage=self.stage.value,
             worker_id=self.worker_id,
             address=getattr(job, "address", None),
-            chain=request.get("chain"),
+            chain=_job_chain_log_value(job, request),
         ):
             # Per-job accumulator for ``record_degraded`` calls. Reset
             # alongside ``bind_trace_context`` so K>1 jobs running in

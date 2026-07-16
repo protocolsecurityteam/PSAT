@@ -99,9 +99,15 @@ def clear_enumeration_cache() -> None:
 
 
 def _chain_key(chain: str | None) -> str:
-    """Chain component of the L1 key, mirroring L2's ``(chain or DEFAULT_CHAIN).lower()``
-    (DEFAULT_CHAIN = "ethereum") so the in-process and durable layers agree."""
-    return (chain or "ethereum").lower()
+    """Chain component of the L1 key: the canonical decimal-string chain-id token
+    (invariant 11). Callers reach this with either a chain *name* (``"ethereum"``)
+    or ``str(chain_id)`` (``"1"``) for the same contract; ``chain_cache_token``
+    folds both onto one token so the two paths share a cache entry. L2
+    (``db.mapping_enumeration_cache``) normalizes identically, so the in-process
+    and durable layers stay in agreement."""
+    from utils.chains import chain_cache_token
+
+    return chain_cache_token(chain)
 
 
 def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:

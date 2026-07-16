@@ -13,6 +13,7 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
+from utils.chains import chain_name_to_id_map
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -25,23 +26,9 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-COMMON_CHAIN_IDS = {
-    "ethereum": 1,
-    "mainnet": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "scroll": 534352,
-    "zksync": 324,
-    "blast": 81457,
-    "mode": 34443,
-    "bera": 80094,
-    "berachain": 80094,
-}
+# Name/alias → chain-id map, derived from the canonical registry (inv. 5). Kept
+# as a module constant for the existing ``chain_id_for_chain_name`` lookup.
+COMMON_CHAIN_IDS = chain_name_to_id_map()
 
 # Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
 # Keyed on (chain_id, address) when the chain id is resolvable so RPC-URL aliases

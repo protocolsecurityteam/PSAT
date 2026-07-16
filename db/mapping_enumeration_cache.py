@@ -30,10 +30,9 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import MappingEnumerationCache, SessionLocal
+from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_CHAIN = "ethereum"
 
 
 def _ttl_seconds() -> float:
@@ -120,7 +119,7 @@ def find_fresh(
     "stale-OK" mode, expose it via a separate ``find_any`` rather than
     re-purposing this entry point.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
     eff_ttl = _ttl_seconds() if ttl_s is None else ttl_s
 
@@ -165,7 +164,7 @@ def upsert(
     pure optimization; a write failure must not break the resolution
     pipeline that just produced a valid enumeration.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
 
     session = SessionLocal()

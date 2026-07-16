@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import requests as _requests
 
 from utils import llm, tavily
+from utils.chains import chain_by_name
 
 from .static_dependencies import normalize_address as _normalize_address
 
@@ -62,20 +63,24 @@ LOW_TRUST_DOMAINS = {
 
 CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "base": 4, "unknown": 99}
 
-# Etherscan v2 chain IDs for chains the inventory pipeline can discover.
-CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "scroll": 534352,
-    "zksync": 324,
-    "blast": 81457,
-}
+# Etherscan v2 chain IDs for chains the inventory pipeline can discover. The set
+# of discoverable chains is intentionally this fixed list (it bounds the
+# all-chain probe in ``chain_resolver``); the id values come from the canonical
+# registry (inv. 5) so they can't drift from the rest of the codebase.
+_INVENTORY_CHAINS = (
+    "ethereum",
+    "arbitrum",
+    "optimism",
+    "polygon",
+    "base",
+    "avalanche",
+    "bsc",
+    "linea",
+    "scroll",
+    "zksync",
+    "blast",
+)
+CHAIN_IDS: dict[str, int] = {name: chain_by_name(name).chain_id for name in _INVENTORY_CHAINS}
 
 
 class RateLimiter:
