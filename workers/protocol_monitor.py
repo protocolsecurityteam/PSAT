@@ -40,7 +40,16 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
+
+def _default_rpc_seed() -> str:
+    """The mainnet eRPC seed the monitor loops start from, resolved at call time.
+
+    The scan / poll / enrollment / TVL loops resolve each contract's own chain
+    RPC internally from this seed (``services.monitoring.chain_rpc``), so this is
+    only the mainnet base + local-fork override. Resolved on demand rather than
+    at import so ``ERPC_BASE_URL`` / test env changes are honored, not frozen at
+    module load."""
+    return default_rpc_url(chain_id=1) or ""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -207,7 +216,11 @@ def main():
     configure_logging()
 
     parser = argparse.ArgumentParser(description="Unified protocol monitor worker")
-    parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help="Ethereum RPC URL")
+    parser.add_argument(
+        "--rpc-url",
+        default=None,
+        help="RPC URL seed (defaults to the mainnet eRPC route; per-chain routes are resolved from it)",
+    )
     parser.add_argument(
         "--interval",
         type=float,
@@ -240,6 +253,8 @@ def main():
         help="Run the legacy proxy-only scanner (backward compat fallback)",
     )
     args = parser.parse_args()
+    if args.rpc_url is None:
+        args.rpc_url = _default_rpc_seed()
 
     # The flag modes run a single loop in the foreground and exit cleanly on a
     # signal. The default (no-flag) mode installs its own signal handlers around

@@ -41,6 +41,7 @@ from services.monitoring import (
     HEARTBEAT_PROTOCOL_SCANNER,
     emit_monitor_cycle,
 )
+from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
@@ -52,6 +53,7 @@ from services.monitoring.event_topics import (
 from services.monitoring.polling_plan import decode_poll_value
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
+from utils.chains import UnknownChainError, chain_by_name
 from utils.rpc import (
     MAX_BATCH_SIZE,
     rpc_batch_request,
@@ -120,6 +122,33 @@ def _scan_float_env(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _max_getlogs_range_for(chain: str) -> int:
+    """Per-chain getLogs window width from the registry (inv. 10). Mainnet's
+    registry value equals ``MAX_BLOCK_RANGE`` so mainnet is unchanged; an
+    unresolvable chain falls back to the fleet-wide constant."""
+    try:
+        return chain_by_name(chain).max_getlogs_range
+    except UnknownChainError:
+        return MAX_BLOCK_RANGE
+
+
+def _confirmation_depth_for(chain: str) -> int:
+    """Per-chain reorg-confirmation depth (inv. 10). An explicit
+    ``PSAT_SCAN_CONFIRMATION_DEPTH`` override still wins fleet-wide (operator
+    lever); otherwise the registry's per-chain depth applies. Mainnet's registry
+    value equals ``DEFAULT_CONFIRMATION_DEPTH`` so mainnet is unchanged."""
+    raw = os.getenv("PSAT_SCAN_CONFIRMATION_DEPTH")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    try:
+        return chain_by_name(chain).confirmation_depth
+    except UnknownChainError:
+        return DEFAULT_CONFIRMATION_DEPTH
 
 
 # psycopg2 raises DeadlockDetected (SQLSTATE 40P01) when Postgres aborts one
@@ -509,7 +538,6 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     address_batch = max(1, _scan_int_env("PSAT_SCAN_ADDRESS_BATCH", 200))
     max_windows_cohort = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", 25))
     max_windows_pass = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_PASS", 50))
-    confirmation_depth = max(0, _scan_int_env("PSAT_SCAN_CONFIRMATION_DEPTH", DEFAULT_CONFIRMATION_DEPTH))
 
     index_rows = session.execute(
         select(
@@ -536,9 +564,10 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         return ScanResult([])
 
     # Cohorts: (chain, block bucket) groups, split at the address batch size.
+    # The bucket width is the chain's own getLogs range (mainnet == MAX_BLOCK_RANGE).
     grouped: dict[tuple[str, int], list] = defaultdict(list)
     for row in index_rows:
-        grouped[(row.chain, row.last_scanned_block // MAX_BLOCK_RANGE)].append(row)
+        grouped[(row.chain, row.last_scanned_block // _max_getlogs_range_for(row.chain))].append(row)
 
     cohorts: list[_Cohort] = []
     for (chain, _bucket), members in grouped.items():
@@ -578,10 +607,10 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         return ScanResult([])
     cohorts = [c for c in cohorts if c.chain in held_chains]
 
-    # Ships ethereum-only: the single rpc_url arg serves every chain present.
-    # Cohort keys already carry chain so a per-chain rpc map is the only change
-    # a second chain needs.
-    rpc_by_chain = {chain: rpc_url for chain in {c.chain for c in cohorts}}
+    # Each cohort's chain resolves its OWN eRPC route from the registry
+    # (``rpc_url`` is the mainnet seed / local-fork override). Mainnet keeps the
+    # incoming URL verbatim, so its head reads and getLogs are unchanged.
+    rpc_by_chain = {chain: rpc_for_chain(chain, rpc_url) for chain in {c.chain for c in cohorts}}
     fetchers: dict[str, RpcEventLogFetcher] = {}
     head_by_chain: dict[str, int] = {}
 
@@ -594,7 +623,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         if chain not in fetchers:
             fetchers[chain] = RpcEventLogFetcher(
                 rpc_by_chain[chain],
-                max_block_range=MAX_BLOCK_RANGE,
+                max_block_range=_max_getlogs_range_for(chain),
                 min_bisect_span=FETCHER_MIN_BISECT_SPAN,
             )
         return fetchers[chain]
@@ -614,7 +643,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 continue
             if cohort.chain not in held_chains:
                 continue
-            confirmed_head = _head_for(cohort.chain) - confirmation_depth
+            confirmed_head = _head_for(cohort.chain) - _confirmation_depth_for(cohort.chain)
             if cohort.cursor >= confirmed_head:
                 cohort.done = True
                 continue
@@ -632,7 +661,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             if window_start > confirmed_head:
                 cohort.done = True
                 break
-            window_end = min(cohort.cursor + MAX_BLOCK_RANGE, confirmed_head)
+            window_end = min(cohort.cursor + _max_getlogs_range_for(cohort.chain), confirmed_head)
 
             # A cohort always has ≥1 address — an empty list would match ANY
             # address on the wire, so the getLogs is never issued without one.
@@ -695,7 +724,8 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     # Budget-exhausted only if we stopped at the hard pass cap with work left.
     if windows_scanned >= max_windows_pass:
         budget_exhausted = any(
-            not c.done and not c.failed and c.cursor < (_head_for(c.chain) - confirmation_depth) for c in cohorts
+            not c.done and not c.failed and c.cursor < (_head_for(c.chain) - _confirmation_depth_for(c.chain))
+            for c in cohorts
         )
 
     # max_lag_blocks: head − min cursor across all contracts (raw head, so
@@ -1540,37 +1570,46 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     else:
         oldest_age_s = int((now - min(ts for ts in polled_ats if ts)).total_seconds())
 
-    # Expand each contract's polling plan, then pack whole contracts into
-    # <=MAX_BATCH_SIZE-call chunks — a contract's calls never split across a
-    # chunk boundary, so its dispatch indexes stay contiguous within one batch.
-    chunks: list[list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]]] = []
-    current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
-    current_calls = 0
+    # Partition by chain FIRST so a chunk never mixes chains — its single batch
+    # RPC goes to that chunk's own chain (mainnet keeps the incoming ``rpc_url``).
+    # Within a chain, pack whole contracts into <=MAX_BATCH_SIZE-call chunks — a
+    # contract's calls never split across a chunk boundary, so its dispatch
+    # indexes stay contiguous within one batch. Single-chain (the common case)
+    # packs identically to before, since contract order within a chain is kept.
+    contracts_by_chain: dict[str, list[MonitoredContract]] = defaultdict(list)
     for mc in contracts:
-        plan = (mc.monitoring_config or {}).get("polling_plan") or []
-        entries: list[tuple[dict, tuple[str, list]]] = []
-        if isinstance(plan, list):
-            for entry in plan:
-                if not isinstance(entry, dict):
-                    continue
-                call = _rpc_call_for_entry(mc.address, entry)
-                if call is None:
-                    continue
-                entries.append((entry, call))
-        if current and current_calls + len(entries) > MAX_BATCH_SIZE:
-            chunks.append(current)
-            current = []
-            current_calls = 0
-        current.append((mc, entries))
-        current_calls += len(entries)
-    if current:
-        chunks.append(current)
+        contracts_by_chain[mc.chain].append(mc)
+
+    chunks: list[tuple[str, list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]]]] = []
+    for chunk_chain, chain_contracts in contracts_by_chain.items():
+        current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
+        current_calls = 0
+        for mc in chain_contracts:
+            plan = (mc.monitoring_config or {}).get("polling_plan") or []
+            entries: list[tuple[dict, tuple[str, list]]] = []
+            if isinstance(plan, list):
+                for entry in plan:
+                    if not isinstance(entry, dict):
+                        continue
+                    call = _rpc_call_for_entry(mc.address, entry)
+                    if call is None:
+                        continue
+                    entries.append((entry, call))
+            if current and current_calls + len(entries) > MAX_BATCH_SIZE:
+                chunks.append((chunk_chain, current))
+                current = []
+                current_calls = 0
+            current.append((mc, entries))
+            current_calls += len(entries)
+        if current:
+            chunks.append((chunk_chain, current))
 
     new_events: list[MonitoredEvent] = []
     chunks_failed = 0
 
-    for chunk in chunks:
+    for chunk_chain, chunk in chunks:
         chunk_ids = [mc.id for mc, _ in chunk]
+        chunk_rpc_url = rpc_for_chain(chunk_chain, rpc_url)
         batch_calls: list[tuple[str, list]] = []
         # (contract, batch_index, entry_dict)
         dispatch: list[tuple[MonitoredContract, int, dict]] = []
@@ -1581,7 +1620,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 
         if batch_calls:
             try:
-                results = rpc_batch_request(rpc_url, batch_calls)
+                results = rpc_batch_request(chunk_rpc_url, batch_calls)
             except Exception as exc:
                 logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
                 # Leave this chunk's contracts unstamped so they sort first
