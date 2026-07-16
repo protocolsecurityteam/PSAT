@@ -273,7 +273,7 @@ def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, see
     # network on the deferred-verify path.
     calls = {"github": 0, "etherscan": 0}
 
-    def boom_etherscan(_addr):
+    def boom_etherscan(_addr, **_kw):
         calls["etherscan"] += 1
         raise AssertionError("coverage worker must not call etherscan")
 
@@ -344,7 +344,7 @@ def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_sessi
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="Pool",
                 compiler_version="0.8",
@@ -652,7 +652,7 @@ def test_coverage_worker_makes_zero_http_calls_on_deferred_path(db_session, seed
         calls["github"] += 1
         raise AssertionError("github fetch reached on deferred path")
 
-    def record_etherscan(_addr):
+    def record_etherscan(_addr, **_kw):
         calls["etherscan"] += 1
         raise AssertionError("etherscan fetch reached on deferred path")
 

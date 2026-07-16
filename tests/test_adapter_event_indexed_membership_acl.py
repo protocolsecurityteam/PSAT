@@ -229,7 +229,7 @@ def test_caller_event_arg_position_none_when_no_caller_key():
 
 
 def test_matches_scores_caller_keyed_membership_without_value_predicate():
-    score = EventIndexedAdapter.matches(_eigenpod_descriptor(), EvaluationContext())
+    score = EventIndexedAdapter.matches(_eigenpod_descriptor(), EvaluationContext(chain_id=1))
     assert score == 55
 
 
@@ -242,7 +242,7 @@ def test_matches_zero_for_composeQueue_value_position_none():
             {"topic0": "0x" + "ab" * 32, "direction": "set", "value_position": None, "key_position": 0}
         ],
     }
-    assert EventIndexedAdapter.matches(desc, EvaluationContext()) == 0
+    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
 
 
 def test_matches_zero_for_no_hint_admins_membership():
@@ -251,13 +251,13 @@ def test_matches_zero_for_no_hint_admins_membership():
         "storage_var": "admins",
         "key_sources": [{"source": "msg_sender"}],
     }
-    assert EventIndexedAdapter.matches(desc, EvaluationContext()) == 0
+    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
 
 
 def test_registry_picks_event_indexed_for_caller_keyed_membership(monkeypatch):
     registry = AdapterRegistry()
     registry.register(EventIndexedAdapter)
-    picked = registry.pick(_eigenpod_descriptor(), EvaluationContext(contract_address=CONTRACT))
+    picked = registry.pick(_eigenpod_descriptor(), EvaluationContext(chain_id=1, contract_address=CONTRACT))
     assert picked is EventIndexedAdapter
 
 

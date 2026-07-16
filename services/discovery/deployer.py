@@ -103,14 +103,16 @@ def _get_deployed_contracts(deployer: str, debug: bool = False, chain_id: int = 
     return deployed
 
 
-def _get_one_name(addr: str) -> tuple[str, str | None]:
+def _get_one_name(addr: str, chain_id: int) -> tuple[str, str | None]:
     """Fetch the contract name for a single address (rate-limited centrally by etherscan.get)."""
-    return addr, etherscan.get_contract_name(addr)
+    return addr, etherscan.get_contract_name(addr, chain_id=chain_id)
 
 
 def _batch_get_names(
     addresses: list[str],
     debug: bool = False,
+    *,
+    chain_id: int,
 ) -> dict[str, str]:
     """Best-effort contract name lookup using a thread pool.  Returns ``{address: name}``."""
     if not addresses:
@@ -124,7 +126,7 @@ def _batch_get_names(
         futures: dict = {}
         for addr in addresses:
             ctx = contextvars.copy_context()
-            futures[executor.submit(ctx.run, _get_one_name, addr)] = addr
+            futures[executor.submit(ctx.run, _get_one_name, addr, chain_id)] = addr
         for future in as_completed(futures):
             try:
                 addr, name = future.result()
@@ -239,13 +241,11 @@ def expand_from_deployers(
         f"Qualified deployers created {len(all_deployed)} total contract(s), {len(all_deployed.keys() - seed_set)} new",
     )
 
-    # Step 4 — name resolution for new addresses. Name lookups route through
-    # the shared ``get_contract_name`` wrapper, which carries no chain param
-    # yet, so names resolve on mainnet only until that wrapper gains one.
+    # Step 4 — name resolution for new addresses, on the expansion's own chain.
     new_addresses = sorted(all_deployed.keys() - seed_set)
     names: dict[str, str] = {}
     if resolve_names and new_addresses:
-        names = _batch_get_names(new_addresses, debug=debug)
+        names = _batch_get_names(new_addresses, debug=debug, chain_id=chain_id)
 
     # Step 5 — build inventory entries
     entries: list[dict[str, Any]] = []

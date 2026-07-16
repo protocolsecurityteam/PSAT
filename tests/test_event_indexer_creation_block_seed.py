@@ -256,7 +256,7 @@ def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(sessi
     session.add(ControllerValue(contract_id=contract.id, controller_id="state_variable:authority", value=authority))
     session.commit()
 
-    inserted = enroll_from_completed_jobs(session, chain_id=1)
+    inserted = enroll_from_completed_jobs(session)
     assert inserted >= len(_SOLMATE_ROLE_TOPICS)
 
     # All three RolesAuthority role cursors are seeded one below the authority's
@@ -313,7 +313,7 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
     )
     session.commit()
 
-    inserted = enroll_from_completed_jobs(session, chain_id=1)
+    inserted = enroll_from_completed_jobs(session)
     assert inserted == 0
     zero_cursors = session.execute(
         select(func.count())

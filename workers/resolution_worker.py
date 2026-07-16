@@ -332,13 +332,14 @@ class ResolutionWorker(BaseWorker):
         job: Job,
         contract_row: Contract | None,
         *,
-        chain_id: int = 1,
+        chain_id: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
         """Fetch ETH + token balances and store in contract_balances table.
 
-        ``chain_id`` scopes every Etherscan v2 read to the job's chain so an L2
-        job records L2 balances/prices, not mainnet ones. Defaults to mainnet."""
+        ``chain_id`` is required (inv. 6): it scopes every Etherscan v2 read to
+        the job's chain so an L2 job records L2 balances/prices, not mainnet
+        ones. A chainless balance fetch can no longer default to mainnet."""
         from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances, parallel_get
 
         address = job.address

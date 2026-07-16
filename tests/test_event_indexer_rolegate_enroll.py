@@ -236,7 +236,7 @@ def test_enrolls_roleset_at_proxy_via_proxy_hop(session, monkeypatch):
     session.commit()
 
     _completed_job_with_gate(session, _gate_descriptor())
-    inserted = enroll_from_completed_jobs(session, chain_id=1)
+    inserted = enroll_from_completed_jobs(session)
     assert inserted >= 1
 
     row = session.execute(
@@ -264,7 +264,7 @@ def test_union_enrolls_when_undetectable(session, monkeypatch):
     _stub_probe_code(monkeypatch, "0x00")
     _completed_job_with_gate(session, _gate_descriptor())
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     enrolled = {
         t
         for (t,) in session.execute(
@@ -281,8 +281,8 @@ def test_enrollment_is_idempotent(session, monkeypatch):
     _stub_probe_code(monkeypatch, "0x00")
     _completed_job_with_gate(session, _gate_descriptor())
 
-    first = enroll_from_completed_jobs(session, chain_id=1)
-    second = enroll_from_completed_jobs(session, chain_id=1)
+    first = enroll_from_completed_jobs(session)
+    second = enroll_from_completed_jobs(session)
     assert first >= 1
     assert second == 0
 
@@ -295,7 +295,7 @@ def test_zero_address_authority_skips(session, monkeypatch):
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _completed_job_with_gate(session, _gate_descriptor(authority_address="0x" + "00" * 20))
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     any_cursor = session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one()
     assert any_cursor == 0
 
@@ -312,7 +312,7 @@ def test_unresolved_authority_skips(session, monkeypatch):
     desc["authority_contract"] = {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}}
     _completed_job_with_gate(session, desc)
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     any_cursor = session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one()
     assert any_cursor == 0
 
@@ -342,7 +342,7 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
     session.add(ControllerValue(contract_id=contract.id, controller_id="state_variable:roleRegistry", value=_PROXY))
     session.commit()
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     row = session.execute(
         select(IndexedEventCursor.last_indexed_block)
         .where(func.lower(IndexedEventCursor.event_address) == _PROXY)
@@ -396,7 +396,7 @@ def test_shared_authority_detects_standard_once(session, monkeypatch):
     gate_b["callee_signature"] = "onlyOperatingTimelock(address)"  # distinct gate, same authority
     _completed_job_with_two_gates(session, [gate_a, gate_b])
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     assert calls["n"] == 1
 
 
@@ -412,7 +412,7 @@ def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
     session.commit()
     _completed_job_with_gate(session, _gate_descriptor())
 
-    enroll_from_completed_jobs(session, chain_id=1)  # first pass seeds the cursor
+    enroll_from_completed_jobs(session)  # first pass seeds the cursor
 
     calls = {"n": 0}
     real = eli.resolve_probe_code
@@ -422,7 +422,7 @@ def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(eli, "resolve_probe_code", _counting)
-    enroll_from_completed_jobs(session, chain_id=1)  # cursor present → skip detection
+    enroll_from_completed_jobs(session)  # cursor present → skip detection
     assert calls["n"] == 0
 
 
@@ -441,7 +441,7 @@ def test_solmate_cancall_still_enrolls_its_topics(session, monkeypatch):
     }
     _completed_job_with_gate(session, desc)
 
-    enroll_from_completed_jobs(session, chain_id=1)
+    enroll_from_completed_jobs(session)
     enrolled = {
         t
         for (t,) in session.execute(

@@ -69,7 +69,7 @@ def _job(**overrides) -> Any:
         "id": "job-1",
         "address": TARGET,
         "name": "TestContract",
-        "request": {"rpc_url": "https://rpc.example"},
+        "request": {"rpc_url": "https://rpc.example", "chain_id": 1},
         "company": None,
         "protocol_id": None,
     }
@@ -190,7 +190,7 @@ def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
     job = _job(
         address=IMPL,
         name="Impl",
-        request={"rpc_url": "https://rpc.example", "proxy_address": PROXY},
+        request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
     _patch_dep_phase(monkeypatch, worker, dynamic=capture_dynamic)
     # Mock upgrade history to avoid Etherscan calls
@@ -849,7 +849,7 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     job = _job(
         address=IMPL,
         name="Impl",
-        request={"rpc_url": "https://rpc.example", "proxy_address": PROXY},
+        request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
 
     # What static worker stored
@@ -1432,7 +1432,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
 
     worker = PolicyWorker()
     session = MagicMock()
-    job = _job(request={"rpc_url": "https://rpc.example"})
+    job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
 
     # Missing contract_analysis
     monkeypatch.setattr(
@@ -1467,7 +1467,7 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
 
     worker = ResolutionWorker()
     session = MagicMock()
-    job = _job(request={"rpc_url": "https://rpc.example"})
+    job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
 
     import pytest
 

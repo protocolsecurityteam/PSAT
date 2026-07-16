@@ -36,7 +36,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-from utils.chains import UnknownChainError, chain_by_id
+from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
@@ -1688,7 +1688,11 @@ class StaticWorker(BaseWorker):
                         info_cache[_addr] = (_data.get("name"), _data.get("selectors", {}))
 
             with log_timed_phase(logger, "enrichment"):
-                enrich_dependency_metadata(unified, info_cache=info_cache)
+                enrich_dependency_metadata(
+                    unified,
+                    info_cache=info_cache,
+                    chain_id=require_chain(chain=_parent_chain_name(job), context="dependency enrichment").chain_id,
+                )
 
             # Store updated enrichment cache (includes any newly fetched entries)
             enrichment_data = {

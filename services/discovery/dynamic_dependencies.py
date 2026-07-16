@@ -190,6 +190,9 @@ def resolve_trace_rpc(rpc_url: str | None = None) -> str:
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     from utils.rpc import default_rpc_url
 
+    # Pipeline callers pass a chain-resolved rpc_url; this explicit-mainnet base
+    # is only reached from the trace CLI when no --dynamic-rpc is given — a
+    # documented dev-tool default (inv. 6), not a silent one.
     resolved = default_rpc_url(chain_id=1)
     if resolved:
         return resolved

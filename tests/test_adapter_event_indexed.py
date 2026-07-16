@@ -127,13 +127,13 @@ def test_event_indexed_matches_with_add_event_hint():
             {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A},
         ],
     }
-    score = EventIndexedAdapter.matches(descriptor, EvaluationContext())
+    score = EventIndexedAdapter.matches(descriptor, EvaluationContext(chain_id=1))
     assert 0 < score <= 60  # low score so specialized adapters win
 
 
 def test_event_indexed_does_not_match_without_hints():
     descriptor = {"kind": "mapping_membership"}
-    assert EventIndexedAdapter.matches(descriptor, EvaluationContext()) == 0
+    assert EventIndexedAdapter.matches(descriptor, EvaluationContext(chain_id=1)) == 0
 
 
 def test_event_indexed_enumerate_with_repo():
@@ -256,7 +256,7 @@ def test_event_indexed_no_backend_yields_check_only():
             {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {}, "data_to_keys": {}},
         ],
     }
-    ctx = EvaluationContext(contract_address=ADDR_A)
+    ctx = EvaluationContext(chain_id=1, contract_address=ADDR_A)
     cap = EventIndexedAdapter().enumerate(descriptor, ctx)
     assert cap.kind == "external_check_only"
     assert cap.check is not None
@@ -367,7 +367,7 @@ def test_registry_event_indexed_handles_two_key_descriptor():
     }
     registry = AdapterRegistry()
     registry.register(EventIndexedAdapter)
-    picked = registry.pick(descriptor, EvaluationContext())
+    picked = registry.pick(descriptor, EvaluationContext(chain_id=1))
     assert picked is EventIndexedAdapter
 
 
@@ -383,5 +383,5 @@ def test_registry_event_indexed_picks_when_no_specialized_match():
     }
     registry = AdapterRegistry()
     registry.register(EventIndexedAdapter)
-    picked = registry.pick(descriptor, EvaluationContext())
+    picked = registry.pick(descriptor, EvaluationContext(chain_id=1))
     assert picked is EventIndexedAdapter

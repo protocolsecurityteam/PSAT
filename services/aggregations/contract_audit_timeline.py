@@ -21,13 +21,14 @@ def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dic
     contract reads its own chain's cache, not mainnet's; only addresses absent
     there are fetched live. There is no timeline-local cache — dedup and
     size-bounding live in those shared layers, so a rapid reload of the surface
-    view doesn't fire one RPC per audit row. The live fetch fallback is still
-    mainnet-anchored (``services.audits.coverage._fetch_bytecode_keccak`` is
-    chain-agnostic and outside this item's file set); the chain-correct PG read
-    covers the common cache-warm path, and mainnet is unchanged either way."""
+    view doesn't fire one RPC per audit row. The live fetch fallback
+    (``services.audits.coverage._fetch_bytecode_keccak``) reads on the same
+    chain, derived from ``chain_id`` via the registry."""
     from services.audits.coverage import _fetch_bytecode_keccak
+    from utils.chains import chain_by_id
     from utils.rpc import _pg_bytecode_get
 
+    chain_name = chain_by_id(chain_id).name
     out: dict[str, str | None] = {}
     for raw in addresses:
         if not raw:
@@ -37,7 +38,7 @@ def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dic
         if pg_hit is not None:
             out[addr] = pg_hit[1]
             continue
-        out[addr] = _fetch_bytecode_keccak(addr)
+        out[addr] = _fetch_bytecode_keccak(addr, chain_name)
     return out
 
 

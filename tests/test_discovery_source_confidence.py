@@ -870,7 +870,7 @@ class TestProxyOfHighImplRuntimeAdoption:
         # The worker needs ``job.request`` to be a dict and ``job.id`` to
         # exist; everything else accessed in ``_resolve_proxy`` is mocked.
         worker_job = SimpleNamespace(
-            id=proxy_job.id, address=proxy_addr, name="OrphanProxy", request={"rpc_url": "rpc"}
+            id=proxy_job.id, address=proxy_addr, name="OrphanProxy", request={"rpc_url": "rpc", "chain_id": 1}
         )
         StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "OrphanProxy")
         db_session.commit()

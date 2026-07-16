@@ -15,7 +15,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
+from db.models import (
+    Contract,
+    ControllerValue,
+    IndexedEventCursor,
+    IndexedEventLog,
+    Job,
+    JobStatus,
+    SessionLocal,
+    derive_job_chain_id,
+)
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
@@ -589,7 +598,7 @@ def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
     )
 
 
-def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain_id: int = 1) -> int | None:
+def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain_id: int) -> int | None:
     """The ``last_indexed_block`` a new cursor should start at: one below the
     event address's creation block, so the first scan window begins at the
     deploy block and the ~20M empty pre-deployment blocks are never fetched.
@@ -620,7 +629,7 @@ def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain
     return seed
 
 
-def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: int = 500) -> int:
+def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     jobs = session.execute(
         select(Job)
         .where(Job.status == JobStatus.completed)
@@ -639,10 +648,19 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
         if not isinstance(artifact, dict):
             continue
         # Stamp each cursor with the job's own chain — the first-class
-        # ``Job.chain_id`` (backfilled to 1 for legacy mainnet rows). Fall back to
-        # the caller's default only for a not-yet-migrated NULL, never guessing a
-        # chain for an address that lives on another.
-        job_chain_id = job.chain_id if isinstance(job.chain_id, int) else chain_id
+        # ``Job.chain_id`` (backfilled for all address-scoped rows in Phase 0).
+        # For a not-yet-migrated NULL, derive from the job's own ``request["chain"]``
+        # via the registry rather than a map-wide default (inv. 6), so an address
+        # that lives on another chain is never guessed as mainnet.
+        job_chain_id = (
+            job.chain_id
+            if isinstance(job.chain_id, int)
+            else derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
+        )
+        if job_chain_id is None:
+            # Address-scoped by the query filter above, so derivation always
+            # yields an id; guard defensively rather than seed a NULL-chain cursor.
+            continue
         values = _state_var_values_for_job(session, job)
         for descriptor in _descriptors_from_artifact(artifact):
             for hint in descriptor.get("enumeration_hint") or []:

@@ -155,6 +155,9 @@ def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
         admin="0xad1c000000000000000000000000000000000000",
     )
     target_job = _create_target_job_with_contract(db_session, source_job.id)
+    req = target_job.request if isinstance(target_job.request, dict) else {}
+    target_job.request = {**req, "chain_id": 1}
+    db_session.commit()
 
     # resolve_current_implementation returns the SAME address -> no upgrade
     monkeypatch.setattr(

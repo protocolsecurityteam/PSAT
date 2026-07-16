@@ -134,7 +134,7 @@ def _address_has_active_job(session: Session, address: str | None, *, exclude_jo
     return row is not None
 
 
-def reconcile_deferred_resolutions(session: Session, *, chain_id: int = 1, limit: int = 200) -> int:
+def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: int = 200) -> int:
     """One reconciliation pass.
 
     Re-enqueue the policy stage of every completed job whose index-cold
@@ -254,7 +254,7 @@ def _role_row_past_frontier(session: Session, chain_id: int, event_address: str,
     return row is not None
 
 
-def reconcile_role_set_drift(session: Session, *, chain_id: int = 1, limit: int = 200) -> int:
+def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 200) -> int:
     """One role-drift pass — the warm counterpart to the cold self-heal above.
 
     Re-enqueue the policy stage of every completed job whose persisted capability

@@ -514,7 +514,7 @@ def test_owner_or_business_or_branch_preserved(tmp_path):
     )
     contract = sl.contracts[0]
     trees = _build_pipeline(contract)
-    cap = evaluate_tree_with_registry(trees["f(uint256)"], _registry(), EvaluationContext())
+    cap = evaluate_tree_with_registry(trees["f(uint256)"], _registry(), EvaluationContext(chain_id=1))
     # OR root with finite_set (owner) + conditional_universal (business).
     assert cap.kind == "OR"
     assert len(cap.children) == 2
@@ -576,7 +576,7 @@ def test_combined_authority_and_side_conditions(tmp_path):
     # Evaluator: caller_authority leaf produces a finite_set placeholder;
     # pause + reentrancy produce conditional_universal. Intersect appends
     # both conditions.
-    cap = evaluate_tree_with_registry(trees["execute()"], _registry(), EvaluationContext())
+    cap = evaluate_tree_with_registry(trees["execute()"], _registry(), EvaluationContext(chain_id=1))
     # finite_set ∩ conditional_universal ∩ conditional_universal
     # = finite_set (with both conditions appended).
     assert cap.kind == "finite_set"

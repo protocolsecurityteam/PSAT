@@ -32,7 +32,7 @@ def test_reads_keccak_from_pg_bytecode_cache(monkeypatch):
     addr = "0x" + "ab" * 20
     monkeypatch.setattr("utils.rpc._pg_bytecode_get", lambda _c, _a: ("0x6080", "0x" + "11" * 32))
 
-    def _no_live(_a):
+    def _no_live(_a, _chain):
         raise AssertionError("must not fetch live when bytecode_cache has the row")
 
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", _no_live)
@@ -50,7 +50,7 @@ def test_reads_pg_on_mainnet_chain_id(monkeypatch):
         return ("0x60", "0x" + "33" * 32)
 
     monkeypatch.setattr("utils.rpc._pg_bytecode_get", _pg)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a: None)
+    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
 
     cat._bytecode_keccak_now_batch({"0x" + "ee" * 20})
     assert seen == [1]
@@ -60,7 +60,7 @@ def test_falls_back_to_live_on_pg_miss(monkeypatch):
     """A bytecode_cache miss falls back to the live fetch path."""
     addr = "0x" + "cd" * 20
     monkeypatch.setattr("utils.rpc._pg_bytecode_get", lambda _c, _a: None)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a: "0x" + "22" * 32)
+    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: "0x" + "22" * 32)
 
     out = cat._bytecode_keccak_now_batch({addr})
     assert out == {addr.lower(): "0x" + "22" * 32}
@@ -73,7 +73,7 @@ def test_skips_empty_addresses(monkeypatch):
         raise AssertionError("empty address must not be queried")
 
     monkeypatch.setattr("utils.rpc._pg_bytecode_get", _no_pg)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a: None)
+    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
     bad_addrs: set = {"", None}  # deliberately malformed input the batcher must skip
     out = cat._bytecode_keccak_now_batch(bad_addrs)
     assert out == {}

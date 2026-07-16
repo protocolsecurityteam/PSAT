@@ -29,6 +29,7 @@ def _job(**overrides) -> Any:
         "name": None,
         "company": None,
         "protocol_id": None,
+        "chain_id": 1,
         "request": {},
     }
     defaults.update(overrides)
@@ -57,7 +58,7 @@ def _patch_discovery(monkeypatch, etherscan_result):
     """
     monkeypatch.setattr(
         "workers.discovery.fetch",
-        lambda _addr: etherscan_result,
+        lambda _addr, **_kw: etherscan_result,
     )
     # Deployer expansion probes Etherscan (getcontractcreation) for the creator;
     # these tests assert on the parsed source/contract, not deployer data.
@@ -441,7 +442,7 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
     fetch_calls: list[str] = []
     creators_calls: list[list[str]] = []
 
-    def fake_fetch(addr: str) -> dict:
+    def fake_fetch(addr: str, *, chain_id: int = 1) -> dict:
         fetch_calls.append(addr)
         return result
 
@@ -475,7 +476,7 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
     result = _etherscan_result()
     _patch_discovery(monkeypatch, result)
 
-    monkeypatch.setattr("workers.discovery.fetch", lambda _addr: result)
+    monkeypatch.setattr("workers.discovery.fetch", lambda _addr, **_kw: result)
 
     def boom(_addrs):
         raise RuntimeError("creators API down")

@@ -412,7 +412,7 @@ def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job(request={})  # no rpc_url in request
+    job = _job(request={"chain_id": 1})  # no rpc_url in request; mainnet chain supplied explicitly
 
     store_calls, created_jobs = _capture_store_and_create(monkeypatch)
     monkeypatch.delenv("ETH_RPC", raising=False)

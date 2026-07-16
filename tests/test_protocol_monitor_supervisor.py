@@ -285,11 +285,11 @@ def test_default_mode_spawns_exactly_three_named_threads():
             {"tvl": ("services.monitoring.tvl", "run_tvl_loop")},
             {"tvl": ((7.0,), {})},
         ),
-        # --reconcile → run_enrollment_reconciler_loop(rpc_url, interval=interval)
+        # --reconcile → run_enrollment_reconciler_loop(rpc_url, chain, interval=interval)
         (
             ["--reconcile", "--rpc-url", "http://x", "--interval", "9"],
             {"rec": ("services.monitoring.reconciler", "run_enrollment_reconciler_loop")},
-            {"rec": (("http://x",), {"interval": 9.0})},
+            {"rec": (("http://x", "ethereum"), {"interval": 9.0})},
         ),
         # --poll (unified) → run_poll_loop(rpc_url, interval, startup_offset_s=0)
         # (standalone poller has no co-scheduled scanner to de-phase from).

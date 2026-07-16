@@ -49,6 +49,7 @@ def _make_inputs(audit_id: int, contract_id: int, address: str) -> _EquivalenceI
     return _EquivalenceInputs(
         audit_report_id=audit_id,
         contract_id=contract_id,
+        contract_chain="ethereum",
         contract_address=address,
         reviewed_commits=("abc1234",),
         scope_contracts=("MyPool",),
@@ -77,7 +78,7 @@ def _stub_etherscan_and_github(monkeypatch, *, etherscan_calls=None, github_call
         detail="",
     )
 
-    def fake_fetch_etherscan(addr):
+    def fake_fetch_etherscan(addr, **_kw):
         if etherscan_calls is not None:
             etherscan_calls.append(addr)
         return fake_fetch
@@ -182,7 +183,7 @@ def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypa
         detail="",
     )
 
-    monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", lambda _addr: fake_fetch)
+    monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", lambda _addr, **_kw: fake_fetch)
 
     fake_outcome = MagicMock()
     fake_outcome.status = "proven"
@@ -205,6 +206,7 @@ def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypa
     inputs[(bad_audit_id, matches[2].contract_id)] = _EquivalenceInputs(
         audit_report_id=bad_audit_id,
         contract_id=matches[2].contract_id,
+        contract_chain="ethereum",
         contract_address=f"0x{2:040x}",
         reviewed_commits=("boom",),
         scope_contracts=("MyPool",),
@@ -257,7 +259,7 @@ def test_apply_equivalence_http_consistent_under_8_threads(monkeypatch):
         detail="",
     )
 
-    def recording_fetch(addr):
+    def recording_fetch(addr, **_kw):
         thread_safe_record(addr)
         return fake_fetch
 

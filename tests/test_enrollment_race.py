@@ -118,9 +118,10 @@ def _seed_policy_job(session):
         address="0x" + "b7" * 20,
         name="TestContract",
         protocol_id=proto.id,
+        chain_id=1,
         status=JobStatus.processing,
         stage=JobStage.policy,
-        request={"rpc_url": "https://rpc.example"},
+        request={"rpc_url": "https://rpc.example", "chain": "ethereum"},
     )
     session.add(job)
     session.commit()
@@ -194,7 +195,7 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
     try:
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
             # No PendingRollbackError / IntegrityError may escape.
-            fired = maybe_enroll_protocol(race_session, proto.id, "http://rpc")
+            fired = maybe_enroll_protocol(race_session, proto.id, "http://rpc", "ethereum")
     finally:
         del race_session.execute  # restore the bound method
 

@@ -731,7 +731,7 @@ def test_probe_rate_limit_prunes_stale_buckets(monkeypatch):
     predicate_capabilities._probe_rate_state.clear()
     predicate_capabilities._probe_rate_state[("old-key", stale_addr, 1)] = collections.deque([1.0])
 
-    predicate_capabilities._probe_rate_check("new-key", fresh_addr)
+    predicate_capabilities._probe_rate_check("new-key", fresh_addr, 1)
 
     assert ("old-key", stale_addr, 1) not in predicate_capabilities._probe_rate_state
     assert ("new-key", fresh_addr, 1) in predicate_capabilities._probe_rate_state

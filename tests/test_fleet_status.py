@@ -303,7 +303,7 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
     monkeypatch.setattr(reconciler, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(reconciler, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
 
-    reconciler.run_enrollment_reconciler_loop("rpc://x", interval=0, stop_event=stop)
+    reconciler.run_enrollment_reconciler_loop("rpc://x", "ethereum", interval=0, stop_event=stop)
 
     assert len(beats) == 1
     process, kw = beats[0]

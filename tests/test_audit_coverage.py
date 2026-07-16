@@ -916,7 +916,7 @@ def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_p
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     # Stub Etherscan: return a single source file whose sha matches.
-    def fake_etherscan(address):
+    def fake_etherscan(address, **_kw):
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="MyPool",
@@ -964,7 +964,7 @@ def test_source_equivalence_leaves_temporal_match_when_hashes_differ(db_session,
     db_session.commit()
 
     # Stubs return mismatching hashes.
-    def fake_etherscan(address):
+    def fake_etherscan(address, **_kw):
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="MyPool", compiler_version="0.8", files={"src/MyPool.sol": "aaa"}
@@ -1021,7 +1021,7 @@ def test_source_equivalence_prefers_db_source_files(db_session, seed_protocol, m
     # Etherscan stub blows up loudly — if the DB path fails, we'll know.
     etherscan_calls = {"count": 0}
 
-    def boom_etherscan(address):
+    def boom_etherscan(address, **_kw):
         etherscan_calls["count"] += 1
         raise AssertionError("Etherscan should not be called when DB source is available")
 
@@ -1076,7 +1076,7 @@ def test_source_equivalence_falls_back_to_etherscan_when_no_db_source(db_session
 
     etherscan_calls = {"count": 0}
 
-    def fake_etherscan(address):
+    def fake_etherscan(address, **_kw):
         etherscan_calls["count"] += 1
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
@@ -1118,7 +1118,7 @@ def test_source_equivalence_skipped_when_audit_missing_commits(db_session, seed_
 
     called = {"etherscan": 0, "github": 0}
 
-    def boom_etherscan(address):
+    def boom_etherscan(address, **_kw):
         called["etherscan"] += 1
         return None
 
@@ -1149,7 +1149,7 @@ def test_verify_source_equivalence_off_by_default(db_session, seed_protocol, mon
 
     called = {"etherscan": 0, "github": 0}
 
-    def boom_etherscan(address):
+    def boom_etherscan(address, **_kw):
         called["etherscan"] += 1
         return None
 
@@ -1188,7 +1188,7 @@ def test_deferred_path_stamps_pending_when_audit_is_verifiable(db_session, seed_
 
     called = {"etherscan": 0, "github": 0}
 
-    def boom_etherscan(address):
+    def boom_etherscan(address, **_kw):
         called["etherscan"] += 1
         raise AssertionError("etherscan must not be called on the deferred path")
 
@@ -1271,7 +1271,7 @@ def test_deferred_path_for_contract_stamps_pending(db_session, seed_protocol, mo
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: (_ for _ in ()).throw(AssertionError("must not call etherscan")),
+        lambda _addr, **_kw: (_ for _ in ()).throw(AssertionError("must not call etherscan")),
     )
     monkeypatch.setattr(
         source_equivalence,
@@ -1323,7 +1323,7 @@ def test_verify_one_coverage_row_proves_when_hashes_match(db_session, seed_proto
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="MyPool",
                 compiler_version="0.8",
@@ -1380,7 +1380,7 @@ def test_verify_one_coverage_row_writes_hash_mismatch_when_hashes_differ(db_sess
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="MyPool",
                 compiler_version="0.8",
@@ -1443,7 +1443,7 @@ def test_verify_one_coverage_row_etherscan_unverified(db_session, seed_protocol,
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
             source=None,
             status="unverified",
             detail="no verified source for 0xaaaa…",
@@ -1480,7 +1480,7 @@ def test_source_equivalence_uses_referenced_repos_when_source_repo_missing(
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     fetched_repos: list[str] = []
 
-    def fake_etherscan(address):
+    def fake_etherscan(address, **_kw):
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name="MyPool",
@@ -1883,7 +1883,7 @@ def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
 
     monkeypatch.setattr(rpc, "get_code", _stub_get_code({addr: "0x1234"}))
 
-    got = cov._fetch_bytecode_keccak(addr)
+    got = cov._fetch_bytecode_keccak(addr, "ethereum")
     assert got is not None
     assert got.startswith("0x")
     assert len(got) == 66  # 0x + 64 hex chars
@@ -1895,7 +1895,7 @@ def test_fetch_bytecode_keccak_none_on_empty_code(monkeypatch):
     from utils import rpc
 
     monkeypatch.setattr(rpc, "get_code", _stub_get_code({}))
-    assert cov._fetch_bytecode_keccak("0x" + "cd" * 20) is None
+    assert cov._fetch_bytecode_keccak("0x" + "cd" * 20, "ethereum") is None
 
 
 def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
@@ -1907,7 +1907,7 @@ def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
         raise RuntimeError("RPC down")
 
     monkeypatch.setattr(rpc, "get_code", boom)
-    assert cov._fetch_bytecode_keccak("0x" + "ef" * 20) is None
+    assert cov._fetch_bytecode_keccak("0x" + "ef" * 20, "ethereum") is None
 
 
 def test_upsert_coverage_stamps_bytecode_keccak(db_session, seed_protocol, monkeypatch):

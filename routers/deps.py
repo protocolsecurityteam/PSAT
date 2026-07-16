@@ -42,7 +42,12 @@ if not ADMIN_KEY:
         "Set PSAT_ADMIN_KEY in the environment to enable admin operations."
     )
 
+# Mainnet-scoped default RPC for the admin/API dependency layer (inv. 6 edge):
+# these endpoints serve mainnet paths today, and a required chain param at the
+# FastAPI dependency is impractical. An explicit, documented mainnet choice —
+# not a buried default — logged so the assumption is visible in startup logs.
 DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
+logger.info("routers.deps: DEFAULT_RPC_URL bound to mainnet (chain_id=1) eRPC route")
 MAX_TVL_HISTORY_DAYS = 90
 
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")

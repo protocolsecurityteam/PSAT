@@ -278,12 +278,19 @@ def main():
         signal.signal(signal.SIGINT, handle_signal)
         from services.monitoring.reconciler import (
             DEFAULT_RECONCILE_INTERVAL_S,
+            RECONCILER_FALLBACK_CHAIN,
             run_enrollment_reconciler_loop,
         )
 
         interval = args.interval if args.interval is not None else DEFAULT_RECONCILE_INTERVAL_S
-        logger.info("Enrollment reconciler starting (interval=%ss)", interval)
-        run_enrollment_reconciler_loop(args.rpc_url, interval=interval)
+        # Explicit daemon-edge fallback chain (inv. 6); each protocol's real chain
+        # is still derived per-protocol inside the loop.
+        logger.info(
+            "Enrollment reconciler starting (interval=%ss, fallback chain=%s)",
+            interval,
+            RECONCILER_FALLBACK_CHAIN,
+        )
+        run_enrollment_reconciler_loop(args.rpc_url, RECONCILER_FALLBACK_CHAIN, interval=interval)
         return
 
     if args.legacy:

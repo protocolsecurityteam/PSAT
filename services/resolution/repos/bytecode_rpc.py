@@ -20,7 +20,7 @@ class BytecodeSelectorRepo:
     """``BytecodeRepo`` backed by ``eth_getCode`` (cached). ``has_selector``
     checks whether a function selector appears in the runtime dispatcher."""
 
-    def __init__(self, rpc_url: str | None, chain_id: int = 1) -> None:
+    def __init__(self, rpc_url: str | None, chain_id: int) -> None:
         self._rpc_url = rpc_url
         self._chain_id = chain_id
 

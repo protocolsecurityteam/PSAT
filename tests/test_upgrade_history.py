@@ -63,7 +63,7 @@ def _mock_no_enrichment(monkeypatch):
     """Stub out get_contract_info so no real Etherscan calls are made."""
     from utils import etherscan
 
-    monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: (None, {}))
+    monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: (None, {}))
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
         from utils import etherscan
 
-        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: ("ImplContract", {}))
+        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplContract", {}))
 
         result = uh.build_upgrade_history(deps_path)
 
@@ -414,7 +414,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(
             etherscan,
             "get_contract_info",
-            lambda addr: pytest.fail(f"get_contract_info should not be called for known address {addr}"),
+            lambda addr, **_kw: pytest.fail(f"get_contract_info should not be called for known address {addr}"),
         )
 
         result = uh.build_upgrade_history(deps_path)
@@ -445,7 +445,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
         from utils import etherscan
 
-        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: ("ImplV1", {}))
+        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplV1", {}))
 
         result = uh.build_upgrade_history(deps_path)
         impls = result["proxies"][target]["implementations"]
@@ -473,7 +473,7 @@ class TestBuildUpgradeHistory:
 
         call_count = [0]
 
-        def counting_get_info(addr):
+        def counting_get_info(addr, **_kw):
             call_count[0] += 1
             return ("SharedImpl", {})
 
@@ -705,7 +705,7 @@ def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
     monkeypatch.setattr(etherscan_mod, "get", fake_get)
     # Name enrichment goes through the get_contract_info wrapper — stub it so
     # the test never leaves the machine.
-    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr: (None, {}))
+    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
 
     target = ADDR(0xABC)
     deps = {
@@ -735,7 +735,7 @@ def test_build_upgrade_history_defaults_to_mainnet(monkeypatch):
         return {"result": []}
 
     monkeypatch.setattr(etherscan_mod, "get", fake_get)
-    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr: (None, {}))
+    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
 
     target = ADDR(0xABC)
     deps = {

@@ -119,9 +119,9 @@ def _workspace_name(contract_name: str, address: str, prefix: str) -> str:
     return f"{_sanitize_name(prefix)}_{_sanitize_name(contract_name)}_{address.lower()[2:10]}"
 
 
-def _contract_name_for_address(address: str) -> str | None:
+def _contract_name_for_address(address: str, chain_id: int) -> str | None:
     try:
-        result = fetch(address)
+        result = fetch(address, chain_id=chain_id)
     except Exception:
         return None
     if not isinstance(result, dict):
@@ -175,6 +175,8 @@ def _build_effective_permissions(
 def _build_static_artifacts(
     effective_address: str,
     workspace_prefix: str,
+    *,
+    chain_id: int,
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
 
@@ -190,7 +192,7 @@ def _build_static_artifacts(
     cache can call this exact closure when it needs to populate the
     persistent row. The tempdir is cleaned up at function exit.
     """
-    result = fetch(effective_address)
+    result = fetch(effective_address, chain_id=chain_id)
     contract_name = str(result.get("ContractName", "Contract"))
     project_name = _workspace_name(contract_name, effective_address, workspace_prefix)
 
@@ -205,15 +207,13 @@ def _build_static_artifacts(
 
 def _chain_name_for_materialization(chain_id: int) -> str:
     """Canonical chain name used as the ``contract_materializations`` cache key
-    component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` — the exact
-    string the env-default path used before — so mainnet cache keys are
-    unchanged; an unregistered id falls back to the same env default."""
-    from utils.chains import UnknownChainError, chain_by_id
+    component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` so mainnet
+    cache keys are unchanged. An unregistered id fails loud (inv. 6): the old
+    ``PSAT_DEFAULT_CHAIN`` env fallback is gone, so a bad chain_id can no longer
+    key an L2's artifacts under mainnet."""
+    from utils.chains import require_chain
 
-    try:
-        return chain_by_id(chain_id).name
-    except UnknownChainError:
-        return os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+    return require_chain(chain_id, context="materialization chain name").name
 
 
 def _materialize_with_cross_process_cache(
@@ -235,16 +235,23 @@ def _materialize_with_cross_process_cache(
       * the DB layer raises (e.g., the table doesn't exist in a
         fixture-isolated test, or the DB is unreachable).
     """
+    # Chain threaded from the job/contract (via ``_chain_name_for_materialization``
+    # at the walk entry). A chainless call is a data bug (inv. 6): fail loud
+    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
+    from utils.chains import require_chain
+
+    build_chain_id = require_chain(chain=chain, context="contract materialization").chain_id
+
     if not bytecode_keccak:
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
 
     try:
         from db import contract_materializations as cm
     except Exception as exc:
         logger.debug("contract_materializations unavailable, falling back to direct build: %s", exc)
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
 
     if not cm.is_enabled():
         # Operator-controlled kill switch (PSAT_CONTRACT_MATERIALIZATIONS=0)
@@ -252,17 +259,16 @@ def _materialize_with_cross_process_cache(
         # broken table or hot-spot lock contention can't fail-stop the
         # pipeline.
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
 
-    # Chain threaded from the job/contract; env fallback stays for jobs with no
-    # chain (killing it is M1.2). Mainnet resolves to "ethereum" either way.
-    chain = chain or os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
     built = {"ran": False}
 
     def _builder() -> Mapping[str, Any]:
         built["ran"] = True
         _bump_materialize_metric("materialize_builds")
-        name, analysis, plan, predicate_trees = _build_static_artifacts(effective_address, workspace_prefix)
+        name, analysis, plan, predicate_trees = _build_static_artifacts(
+            effective_address, workspace_prefix, chain_id=build_chain_id
+        )
         return {
             "contract_name": name,
             "analysis": analysis,
@@ -288,7 +294,7 @@ def _materialize_with_cross_process_cache(
             raise
         logger.warning("contract_materializations.materialize_or_wait failed, falling back: %s", exc)
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix)
+        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
 
     if not built["ran"]:
         # materialize_or_wait returned without invoking our builder — served from
@@ -719,7 +725,7 @@ def _replay_mapping_principals(
     depth: int,
     nodes: dict[str, ResolvedGraphNode],
     edges: dict[tuple, ResolvedGraphEdge],
-    chain_id: int = 1,
+    chain_id: int,
 ) -> str:
     """Replay mapping-writer events for *address* into principal nodes/edges,
     returning the enumeration status.
@@ -759,6 +765,9 @@ def _replay_mapping_principals(
         result = enumerate_mapping_allowlist_sync(
             address,
             mapping_specs,
+            # inv. 6: the scan URL is derived from the walk's chain, not a mainnet
+            # default. Mainnet ("1") is byte-identical to the prior chain-less call.
+            chain=str(chain_id),
             bearer_token=hypersync_token,
             from_block=scan_floor,
         )
@@ -892,7 +901,7 @@ def resolve_control_graph(
     *,
     root_artifacts: LoadedArtifacts,
     rpc_url: str,
-    chain_id: int = 1,
+    chain_id: int,
     max_depth: int = DEFAULT_RECURSION_MAX_DEPTH,
     workspace_prefix: str = "recursive",
     nested_artifacts_override: dict[str, LoadedArtifacts] | None = None,
@@ -902,10 +911,10 @@ def resolve_control_graph(
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
     """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
 
-    ``chain_id`` scopes the two chain-sensitive reads inside the walk: the
-    ``contract_materializations`` cache key (via the chain's canonical name) and
-    the mapping-writer replay's scan floor. Defaults to mainnet (M1.1 keeps the
-    default; callers thread the job's real chain)."""
+    ``chain_id`` is required (inv. 6): it scopes the two chain-sensitive reads
+    inside the walk — the ``contract_materializations`` cache key (via the
+    chain's canonical name) and the mapping-writer replay's scan floor. A
+    chainless walk can no longer run as mainnet; callers thread the job's chain."""
     chain_name = _chain_name_for_materialization(chain_id)
     root_analysis = root_artifacts["analysis"]
     root_subject = root_analysis.get("subject", {})
@@ -1045,7 +1054,7 @@ def resolve_control_graph(
 
             if mat_exc is not None or artifacts is None:
                 err_text = str(mat_exc) if mat_exc is not None else "no artifacts produced"
-                contract_name = _contract_name_for_address(address)
+                contract_name = _contract_name_for_address(address, chain_id)
                 record_degraded(
                     phase="recursive_materialize",
                     exc=mat_exc if mat_exc is not None else RuntimeError(err_text),

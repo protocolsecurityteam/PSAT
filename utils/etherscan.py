@@ -269,8 +269,13 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-def get(module: str, action: str, chain_id: int = 1, **params) -> dict:
-    """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire."""
+def get(module: str, action: str, chain_id: int, **params) -> dict:
+    """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
+
+    *chain_id* is required (invariant 6): the v2 endpoint is chain-scoped via the
+    ``chainid`` query param, so a call with no chain can no longer silently hit
+    mainnet. Callers thread the job/contract chain explicitly.
+    """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
     key = _cache_key(module, action, chain_id, params)
@@ -477,13 +482,13 @@ def parallel_get(
     return results
 
 
-def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
+def get_contract_info(address: str, *, chain_id: int) -> tuple[str | None, dict[str, str]]:
     """Fetch contract name and selector map in a single Etherscan call.
 
     Returns (name_or_None, {selector: function_name}).
     """
     try:
-        data = get("contract", "getsourcecode", address=address)
+        data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
         result = data["result"][0]
     except Exception as exc:
         # Errored fetch (network/rate-limit/shape) — distinct from a verified
@@ -505,15 +510,15 @@ def get_contract_info(address: str) -> tuple[str | None, dict[str, str]]:
     return name, selector_map
 
 
-def get_contract_name(address: str) -> str | None:
+def get_contract_name(address: str, *, chain_id: int) -> str | None:
     """Return the verified contract name for *address*, or None if unavailable."""
-    name, _ = get_contract_info(address)
+    name, _ = get_contract_info(address, chain_id=chain_id)
     return name
 
 
-def get_source(address: str) -> dict:
+def get_source(address: str, *, chain_id: int) -> dict:
     """Fetch verified source code for a contract address. Returns the first result."""
-    data = get("contract", "getsourcecode", address=address)
+    data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
     result = data["result"][0]
 
     if not result.get("SourceCode"):
@@ -527,13 +532,13 @@ def get_source(address: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def get_eth_balance(address: str, chain_id: int = 1) -> int:
+def get_eth_balance(address: str, chain_id: int) -> int:
     """Return the ETH balance of *address* in wei."""
     data = get("account", "balance", chain_id=chain_id, address=address, tag="latest")
     return int(data["result"])
 
 
-def get_eth_price(chain_id: int = 1) -> float:
+def get_eth_price(chain_id: int) -> float:
     """Return the current ETH price in USD via Etherscan's ethprice endpoint."""
     data = get("stats", "ethprice", chain_id=chain_id)
     return float(data["result"]["ethusd"])
@@ -543,7 +548,7 @@ _token_balance_lock = threading.Lock()
 _token_balance_last_call = 0.0
 
 
-def get_token_balances(address: str, chain_id: int = 1) -> list[dict]:
+def get_token_balances(address: str, chain_id: int) -> list[dict]:
     """Return all ERC-20 token balances for *address* in a single call.
 
     Uses Etherscan's ``addresstokenbalance`` endpoint. Hardcoded to 1 req/s

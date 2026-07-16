@@ -297,13 +297,13 @@ def test_reconciler_reenqueues_only_when_authority_backfilled(db_session):
     job = _seed_completed_job_with_cap(db_session, address=teller, capability_expr=_deferred_cap(authority))
 
     # (a) No cursor at all for the authority → still waiting → not re-enqueued.
-    assert reconcile_deferred_resolutions(db_session) == 0
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
     assert job.status == JobStatus.completed and job.stage == JobStage.done
 
     # (b) Cursor exists but backfill not complete → thrash guard holds.
     _seed_role_cursors(db_session, authority, backfill_complete=False)
     db_session.commit()
-    assert reconcile_deferred_resolutions(db_session) == 0
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
 
     # (c) Backfill complete → re-enqueue the policy stage.
@@ -312,12 +312,12 @@ def test_reconciler_reenqueues_only_when_authority_backfilled(db_session):
     ).scalars():
         cur.backfill_complete = True
     db_session.commit()
-    assert reconcile_deferred_resolutions(db_session) == 1
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
     assert job.status == JobStatus.queued and job.stage == JobStage.policy
 
     # (d) Idempotent: the job is no longer completed/done, so a second pass is a
     # no-op (no re-enqueue storm).
-    assert reconcile_deferred_resolutions(db_session) == 0
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
 
 
 @requires_postgres
@@ -331,7 +331,7 @@ def test_reconciler_skips_when_address_has_an_active_job(db_session):
     db_session.add(Job(address=addr, status=JobStatus.processing, stage=JobStage.policy, request={"chain": "ethereum"}))
     db_session.commit()
 
-    assert reconcile_deferred_resolutions(db_session) == 0
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
     assert job.status == JobStatus.completed and job.stage == JobStage.done
 
 
@@ -349,7 +349,7 @@ def test_reconciler_ignores_non_deferred_external_check(db_session):
     _seed_role_cursors(db_session, target, backfill_complete=True)
     db_session.commit()
 
-    assert reconcile_deferred_resolutions(db_session) == 0
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
 
 
@@ -434,7 +434,7 @@ def test_drift_reenqueues_on_post_frontier_row(db_session):
     _seed_role_set_row(db_session, authority, block=200)  # a grant past the frontier
     db_session.commit()
 
-    assert reconcile_role_set_drift(db_session) == 1
+    assert reconcile_role_set_drift(db_session, chain_id=1) == 1
     assert job.status == JobStatus.queued and job.stage == JobStage.policy
 
 
@@ -447,7 +447,7 @@ def test_drift_ignores_pre_frontier_row(db_session):
     _seed_role_set_row(db_session, authority, block=50)  # already folded (<= frontier)
     db_session.commit()
 
-    assert reconcile_role_set_drift(db_session) == 0
+    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
 
 
@@ -462,7 +462,7 @@ def test_drift_requires_backfill_complete(db_session):
     _seed_role_set_row(db_session, authority, block=200)
     db_session.commit()
 
-    assert reconcile_role_set_drift(db_session) == 0
+    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
 
 
@@ -477,7 +477,7 @@ def test_drift_ignores_non_role_store_capability(db_session):
     _seed_role_set_row(db_session, authority, block=200)
     db_session.commit()
 
-    assert reconcile_role_set_drift(db_session) == 0
+    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
 
 

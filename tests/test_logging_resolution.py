@@ -47,6 +47,7 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
                 depth=0,
                 nodes={},
                 edges={},
+                chain_id=1,
             )
     finally:
         stage_metrics_var.reset(tok_m)

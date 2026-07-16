@@ -130,7 +130,7 @@ def test_dapp_sniffer_exception_records_degraded_and_counts():
     from services.crawlers.dapp.browser import DAppCrawler
     from services.crawlers.dapp.wallet import HoneypotWallet
 
-    crawler = DAppCrawler(wallet=HoneypotWallet())
+    crawler = DAppCrawler(wallet=HoneypotWallet(), chain_id=1)
 
     class _BoomResponse:
         url = "https://example.test/api/data.json"

@@ -49,7 +49,7 @@ _W_ACTIVITY = 0.65
 
 def _fetch_last_active_ts(
     address: str,
-    chain_id: int = 1,
+    chain_id: int,
     debug: bool = False,
 ) -> float | None:
     """Return the Unix timestamp of the most recent transaction, or None."""

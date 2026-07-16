@@ -829,6 +829,7 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
             "eth_call",
             [{"to": contract.lower(), "data": selector}, hex(block) if isinstance(block, int) else "latest"],
             retries=1,
+            chain_id=getattr(outer, "chain_id", None),
         )
     except Exception:
         _bump_resolve_counter(outer, "live_getter_failures")
@@ -892,6 +893,7 @@ def _live_resolve_authority_slot(
             "eth_getStorageAt",
             [contract.lower(), slot, hex(block) if isinstance(block, int) else "latest"],
             retries=1,
+            chain_id=getattr(outer, "chain_id", None),
         )
     except Exception:
         _bump_resolve_counter(outer, "live_slot_failures")
@@ -1124,6 +1126,10 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
         return []
     block = getattr(outer, "block", None)
     chain_id = getattr(outer, "chain_id", None)
+    if not isinstance(chain_id, int):
+        # ctx.chain_id is required (inv. 6); without a chain there is nothing to
+        # scan — return empty rather than defaulting the scan to mainnet.
+        return []
     _bump_resolve_counter(outer, "mapping_value_scans")
     from services.resolution.creation_block_floor import resolve_scan_floor
 
@@ -1131,7 +1137,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     # external check) rather than scan from genesis.
     floor = resolve_scan_floor(
         contract,
-        chain_id if isinstance(chain_id, int) else 1,
+        chain_id,
         session=getattr(outer, "session", None),
     )
     if floor is None:
@@ -1158,7 +1164,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
             # inv. 11: one cache-key token format everywhere (decimal-string chain
             # id). ``enumerate_mapping_values_sync`` re-normalizes via the same
             # helper, so mainnet ("1") is byte-identical to the prior ``str(1)``.
-            chain=chain_cache_token(chain_id) if isinstance(chain_id, int) else None,
+            chain=chain_cache_token(chain_id),
             **kwargs,
         )
     except Exception:
@@ -1541,6 +1547,12 @@ def _observed_event_key_words(
     from services.resolution.adapters.event_indexed import _resolve_event_address
     from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
 
+    scan_chain_id = getattr(outer_ctx, "chain_id", None)
+    if not isinstance(scan_chain_id, int):
+        # ctx.chain_id is required (inv. 6); a chainless durable read can no longer
+        # default to mainnet's indexed logs.
+        return []
+
     out: set[str] = set()
     for hint in event_hints:
         topic0 = hint.get("topic0")
@@ -1551,7 +1563,7 @@ def _observed_event_key_words(
             continue
         stmt = (
             select(IndexedEventLog)
-            .where(IndexedEventLog.chain_id == getattr(outer_ctx, "chain_id", 1))
+            .where(IndexedEventLog.chain_id == scan_chain_id)
             .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
             .where(func.lower(IndexedEventLog.topic0) == topic0.lower())
             .order_by(
@@ -1630,11 +1642,14 @@ def _observed_event_key_words_from_hypersync(
         from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
+        if not isinstance(scan_chain_id, int):
+            # ctx.chain_id is required (inv. 6); no chain → no scan surface.
+            return []
         # Per-chain HyperSync endpoint (inv. 5), driven by the evaluation's chain:
         # meta override, then env override, then the registry URL. A chain with no
         # registry coverage has no scan surface — skip the live scan (no members)
         # rather than silently scanning mainnet.
-        registry_url = _hypersync_url_for_chain(scan_chain_id if isinstance(scan_chain_id, int) else 1)
+        registry_url = _hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
         if not url:
             return []
@@ -1652,7 +1667,7 @@ def _observed_event_key_words_from_hypersync(
             # from genesis; a known floor scans deploy→head.
             floor = resolve_scan_floor(
                 event_address,
-                scan_chain_id if isinstance(scan_chain_id, int) else 1,
+                scan_chain_id,
                 session=getattr(outer_ctx, "session", None),
             )
             if floor is None:
@@ -1866,7 +1881,11 @@ def _maybe_inline_cross_contract_call(
         return None
     registry_addr = registry_addr.lower()
 
-    chain_id = getattr(outer_ctx, "chain_id", 1)
+    chain_id = getattr(outer_ctx, "chain_id", None)
+    if not isinstance(chain_id, int):
+        # ctx.chain_id is required (inv. 6); a chainless inline can't key its
+        # recursion stack or resolve the callee on a chain.
+        return None
     stack = outer_ctx.evaluation_stack if hasattr(outer_ctx, "evaluation_stack") else set()
     callee_identity = callee_signature or callee_selector or ""
     key = (chain_id, registry_addr, callee_identity)

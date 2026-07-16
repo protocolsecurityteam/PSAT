@@ -488,7 +488,7 @@ def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil
     _grant_authority(test_db, vault_contract.id, real_safe, function_name="transferOwnership")
     test_db.commit()
 
-    enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
 
     real_mc = test_db.execute(
         select(MonitoredContract).where(MonitoredContract.address == real_safe)
@@ -554,7 +554,7 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
     test_db.commit()
 
     # Run 1: Safe enrolled & active.
-    enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
     first = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
     assert first.is_active is True
     assert first.enrollment_source == "auto"
@@ -581,7 +581,7 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
     test_db.expire_all()
 
     # Run 2: zombie state — re-enroll should demote the Safe.
-    enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
     demoted = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
     assert demoted.is_active is False, (
         f"Zombie Safe should be deactivated (got is_active={demoted.is_active}, source={demoted.enrollment_source})"
@@ -623,7 +623,7 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     _grant_authority(test_db, host_contract.id, admin_addr, function_name="upgrade")
     test_db.commit()
 
-    enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
     first = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == admin_addr)).scalar_one()
     assert first.contract_type == "proxy"
     assert first.is_active is True
@@ -632,7 +632,7 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     # Re-enroll twice without changing any underlying evidence. The
     # ping-pong this guards against would flip is_active on each run.
     for _ in range(2):
-        enroll_protocol_contracts(test_db, proto.id, rpc_url)
+        enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
         test_db.expire_all()
         again = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == admin_addr)).scalar_one()
         assert again.is_active is True, (
@@ -686,7 +686,7 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
     )
     test_db.commit()
 
-    enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
     mc = test_db.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
 
     assert mc.last_known_state is not None
@@ -875,7 +875,7 @@ def test_late_protocol_id_stamp_converges_via_reconciler(anvil_env, test_db):
     # Phase C — reconciler tick. Walks every Protocol row and re-runs
     # ``enroll_protocol_contracts``. Idempotent: HIGH stays enrolled,
     # orphan finally gets its MonitoredContract row.
-    reconciled = reconcile_enrollments(test_db, rpc_url)
+    reconciled = reconcile_enrollments(test_db, rpc_url, "ethereum")
     assert reconciled >= 1, "reconciler must touch at least one protocol"
 
     orphan_mc = test_db.execute(
@@ -893,7 +893,7 @@ def test_late_protocol_id_stamp_converges_via_reconciler(anvil_env, test_db):
 
     # Idempotency — a second reconciler pass with no state changes must
     # leave both MC rows in place and untouched-by-stale-detection.
-    reconcile_enrollments(test_db, rpc_url)
+    reconcile_enrollments(test_db, rpc_url, "ethereum")
     rows = test_db.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)).scalars().all()
     addresses = {r.address for r in rows if r.is_active}
     assert high_addr.lower() in addresses
@@ -1016,7 +1016,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
 
     try:
         # ---- Phase 1: enrollment consumes the tracking_plan -----------------
-        enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url)
+        enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
         assert len(enrolled) == 1
         mc = enrolled[0]
         config = mc.monitoring_config or {}

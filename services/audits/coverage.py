@@ -915,21 +915,21 @@ def _match_to_row_kwargs(match: CoverageMatch) -> dict:
 # --- Bytecode anchor ----------------------------------------------------
 
 
-def _rpc_url() -> str:
-    """eRPC route for bytecode-anchor reads.
+def _rpc_url(chain: str) -> str:
+    """eRPC route for bytecode-anchor reads on the contract's own chain (inv. 6).
 
-    Coverage anchors are ethereum-deployed, so this resolves the mainnet eRPC
-    route — same as policy_worker / protocol_monitor, which also go through
-    ``default_rpc_url``. Raises when eRPC is unconfigured; the caller catches
-    that and records "drift unknown" rather than hitting a direct provider.
+    The anchor reads the impl's runtime bytecode where it is deployed — an L2
+    contract must be read on its L2, not mainnet. Raises when the chain is
+    unknown or eRPC is unconfigured; the caller catches that and records "drift
+    unknown" rather than hitting the wrong chain or a direct provider.
     """
     from utils.rpc import require_rpc_url
 
-    return require_rpc_url(chain_id=1)
+    return require_rpc_url(chain=chain, context="audit coverage bytecode anchor")
 
 
-def _fetch_bytecode_keccak(address: str) -> str | None:
-    """Runtime bytecode keccak256 at ``address`` via ``eth_getCode``.
+def _fetch_bytecode_keccak(address: str, chain: str) -> str | None:
+    """Runtime bytecode keccak256 at ``address`` on ``chain`` via ``eth_getCode``.
 
     Returns ``"0x" + 64hex`` on success, ``None`` when the RPC call fails
     or the address has no code (EOA / selfdestructed). ``None`` propagates
@@ -943,7 +943,7 @@ def _fetch_bytecode_keccak(address: str) -> str | None:
     if not address:
         return None
     try:
-        code_hex = get_code(_rpc_url(), address)
+        code_hex = get_code(_rpc_url(chain), address)
     except Exception as exc:
         logger.warning("bytecode anchor: eth_getCode failed for %s: %s", address, exc)
         return None
@@ -969,16 +969,20 @@ def _apply_bytecode_anchor(
     """
     if not matches:
         return matches
-    addr_by_cid: dict[int, str] = {
-        cid: addr
-        for cid, addr in session.execute(
-            select(Contract.id, Contract.address).where(Contract.id.in_({m.contract_id for m in matches}))
+    # Chain is read alongside the address so each anchor probes the impl's own
+    # chain (inv. 6); a legacy NULL chain resolves to mainnet at the read below.
+    row_by_cid: dict[int, tuple[str, str | None]] = {
+        cid: (addr, chain)
+        for cid, addr, chain in session.execute(
+            select(Contract.id, Contract.address, Contract.chain).where(
+                Contract.id.in_({m.contract_id for m in matches})
+            )
         ).all()
     }
 
     keccak_by_cid: dict[int, str | None] = {}
-    for cid in addr_by_cid:
-        keccak_by_cid[cid] = _fetch_bytecode_keccak(addr_by_cid[cid])
+    for cid, (addr, chain) in row_by_cid.items():
+        keccak_by_cid[cid] = _fetch_bytecode_keccak(addr, chain or "ethereum")
 
     now = datetime.now(timezone.utc)
     stamped: list[CoverageMatch] = []
@@ -1022,6 +1026,7 @@ class _EquivalenceInputs:
     audit_report_id: int
     contract_id: int
     contract_address: str | None
+    contract_chain: str | None
     reviewed_commits: tuple[str, ...]
     scope_contracts: tuple[str, ...]
     source_repo: str | None
@@ -1072,6 +1077,7 @@ def _preload_equivalence_inputs(
             audit_report_id=m.audit_report_id,
             contract_id=m.contract_id,
             contract_address=contract.address,
+            contract_chain=contract.chain,
             reviewed_commits=tuple(audit.reviewed_commits or ()),
             scope_contracts=tuple(audit.scope_contracts or ()),
             source_repo=audit.source_repo,
@@ -1218,13 +1224,18 @@ def _apply_equivalence_http(
             matched_commit_sha=matched_commit_sha if proven else None,
         )
 
-    def _fetch_etherscan(addr_key: str, contract_address: str, contract_id: int) -> EtherscanFetch:
+    def _fetch_etherscan(addr_key: str, contract_address: str, contract_id: int, chain: str | None) -> EtherscanFetch:
         with cache_lock:
             cached = etherscan_cache.get(addr_key)
         if cached is not None:
             return cached
         try:
-            raw_fetch = fetch_etherscan_source_files(contract_address)
+            from utils.chains import require_chain
+
+            raw_fetch = fetch_etherscan_source_files(
+                contract_address,
+                chain_id=require_chain(chain=chain or "ethereum", context="coverage etherscan fetch").chain_id,
+            )
             if isinstance(raw_fetch, EtherscanFetch):
                 fetch = raw_fetch
             elif isinstance(raw_fetch, VerifiedSource):
@@ -1268,7 +1279,9 @@ def _apply_equivalence_http(
         fetch_status = "ok"
         fetch_detail = ""
         if impl_source is None and data.contract_address:
-            fetch = _fetch_etherscan(data.contract_address.lower(), data.contract_address, m.contract_id)
+            fetch = _fetch_etherscan(
+                data.contract_address.lower(), data.contract_address, m.contract_id, data.contract_chain
+            )
             impl_source = fetch.source
             fetch_status = fetch.status
             fetch_detail = fetch.detail
@@ -1597,7 +1610,14 @@ def verify_one_coverage_row(
     fetch_detail = ""
     if impl_source is None and contract.address:
         try:
-            fetch = fetch_etherscan_source_files(contract.address)
+            from utils.chains import require_chain
+
+            fetch = fetch_etherscan_source_files(
+                contract.address,
+                chain_id=require_chain(
+                    chain=contract.chain or "ethereum", context="coverage row etherscan fetch"
+                ).chain_id,
+            )
         except Exception as exc:
             logger.warning(
                 "verify_one_coverage_row: etherscan fetch crashed for contract %s",

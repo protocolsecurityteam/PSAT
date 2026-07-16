@@ -132,7 +132,10 @@ class BytecodeRepo(Protocol):
 
 @dataclass
 class EvaluationContext:
-    chain_id: int = 1
+    # Required (inv. 6): the chain the evaluator binds its event/bytecode/RPC
+    # reads to. No mainnet default — a contextless walk can no longer run as
+    # chain 1. Callers thread the job's chain_id.
+    chain_id: int
     rpc_url: str | None = None
     block: int | None = None
     finality_depth: int = 12

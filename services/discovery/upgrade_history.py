@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 from services.discovery.static_dependencies import normalize_address
+from utils.chains import require_chain
 
 logger = logging.getLogger(__name__)
 
@@ -347,14 +348,14 @@ def _build_implementation_timeline(
 # ---------------------------------------------------------------------------
 
 
-def _enrich_implementations(implementations: list[dict], known_names: dict[str, str]) -> None:
+def _enrich_implementations(implementations: list[dict], known_names: dict[str, str], *, chain_id: int) -> None:
     """Add contract names to historical implementations not already named in dependencies.json."""
     from utils.etherscan import get_contract_info, parallel_get
 
     addrs_to_fetch = sorted({impl["address"] for impl in implementations if impl["address"] not in known_names})
     fetched: dict[str, str | None] = {}
     if addrs_to_fetch:
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in addrs_to_fetch}
+        calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=chain_id)) for addr in addrs_to_fetch}
         results = parallel_get(calls)
         for addr in addrs_to_fetch:
             value = results.get(addr)
@@ -488,7 +489,7 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     # Resolve names: always apply already-known names from dependencies.json.
     # When enrich=True, also call Etherscan for historical unknowns.
     if enrich:
-        _enrich_implementations(all_implementations, known_names)
+        _enrich_implementations(all_implementations, known_names, chain_id=chain_id)
     else:
         # Still apply names we already have — zero extra API calls
         for impl in all_implementations:
@@ -714,7 +715,10 @@ def backfill_historical_impl_contracts(
     new_addrs = [addr for addr in impl_addrs if addr not in existing_rows]
     name_results: dict[str, str | None] = {}
     if new_addrs:
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in new_addrs}
+        # NULL Contract.chain is legacy-mainnet by convention (same coalesce as
+        # routers/jobs.py); a named-but-unknown chain fails loud.
+        name_chain_id = require_chain(chain=chain or "ethereum", context="historical impl name fetch").chain_id
+        calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=name_chain_id)) for addr in new_addrs}
         fetched = parallel_get(calls)
         for addr in new_addrs:
             value = fetched.get(addr)

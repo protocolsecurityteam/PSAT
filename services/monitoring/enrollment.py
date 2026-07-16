@@ -65,7 +65,7 @@ def maybe_enroll_protocol(
     session: Session,
     protocol_id: int,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
     exclude_job_id: Any = None,
 ) -> bool:
     """Low-latency enrollment hint — fires from PolicyWorker.process()
@@ -143,7 +143,7 @@ def enroll_protocol_contracts(
     session: Session,
     protocol_id: int,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
     calling_job_id: Any = None,
     enroll_controllers: bool = True,
 ) -> list[MonitoredContract]:

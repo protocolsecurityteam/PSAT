@@ -94,7 +94,7 @@ def test_predicate_index_out_of_range():
         predicate_index=5,
         member="0x" + "11" * 20,
         registry=_StubRegistry(),
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "leaf_index_out_of_range"
@@ -108,7 +108,7 @@ def test_non_membership_leaf_returns_unknown():
         predicate_index=0,
         member="0x" + "11" * 20,
         registry=_StubRegistry(),
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "non_membership_leaf"
@@ -124,12 +124,16 @@ def test_index_picks_leaf_by_dfs_order():
 
     # index=0 picks the membership leaf -> resolvable
     reg = _StubRegistry(CapabilityExpr.finite_set(["0x" + "11" * 20]))
-    res0 = probe_membership(tree, predicate_index=0, member="0x" + "11" * 20, registry=reg, ctx=EvaluationContext())
+    res0 = probe_membership(
+        tree, predicate_index=0, member="0x" + "11" * 20, registry=reg, ctx=EvaluationContext(chain_id=1)
+    )
     assert res0["result"] == "yes"
     assert res0["leaf_kind"] == "membership"
 
     # index=1 picks the equality leaf -> not membership
-    res1 = probe_membership(tree, predicate_index=1, member="0x" + "11" * 20, registry=reg, ctx=EvaluationContext())
+    res1 = probe_membership(
+        tree, predicate_index=1, member="0x" + "11" * 20, registry=reg, ctx=EvaluationContext(chain_id=1)
+    )
     assert res1["leaf_kind"] == "equality"
     assert res1["reason"] == "non_membership_leaf"
 
@@ -147,7 +151,7 @@ def test_finite_set_exact_yes():
         predicate_index=0,
         member=addr,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "yes"
     assert res["reason"] == "finite_set_exact"
@@ -161,7 +165,7 @@ def test_finite_set_exact_no():
         predicate_index=0,
         member="0x" + "22" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "no"
     assert res["reason"] == "finite_set_exact"
@@ -177,7 +181,7 @@ def test_finite_set_lower_bound_absent_is_unknown():
         predicate_index=0,
         member="0x" + "22" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "lower_bound_absent"
@@ -194,7 +198,7 @@ def test_finite_set_upper_bound_absent_is_no():
         predicate_index=0,
         member=absent,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res_absent["result"] == "no"
 
@@ -203,7 +207,7 @@ def test_finite_set_upper_bound_absent_is_no():
         predicate_index=0,
         member="0x" + "11" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res_present["result"] == "unknown"
     assert res_present["reason"] == "upper_bound_present"
@@ -216,7 +220,7 @@ def test_threshold_group_signer_yes():
         predicate_index=0,
         member="0x" + "22" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert yes["result"] == "yes"
     assert yes["reason"] == "threshold_group_signer"
@@ -226,7 +230,7 @@ def test_threshold_group_signer_yes():
         predicate_index=0,
         member="0x" + "44" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert no["result"] == "no"
 
@@ -238,7 +242,7 @@ def test_cofinite_blacklist_excluded_no():
         predicate_index=0,
         member="0x" + "11" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "no"
     assert res["reason"] == "cofinite_blacklisted"
@@ -251,7 +255,7 @@ def test_cofinite_blacklist_not_listed_yes():
         predicate_index=0,
         member="0x" + "22" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "yes"
 
@@ -271,7 +275,7 @@ def test_external_check_only_surfaces_probe_descriptor():
         predicate_index=0,
         member="0x" + "11" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "external_check_only"
@@ -286,7 +290,7 @@ def test_unsupported_capability_passes_reason_through():
         predicate_index=0,
         member="0x" + "11" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "capability_unsupported"
@@ -315,7 +319,7 @@ def test_and_all_yes_returns_yes():
         predicate_index=0,
         member=addr,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "yes"
     assert res["reason"] == "and_all_yes"
@@ -334,7 +338,7 @@ def test_and_one_no_returns_no():
         predicate_index=0,
         member=addr,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "no"
     assert res["reason"] == "and_any_no"
@@ -353,7 +357,7 @@ def test_or_any_yes_returns_yes():
         predicate_index=0,
         member=addr,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "yes"
     assert res["reason"] == "or_any_yes"
@@ -372,7 +376,7 @@ def test_or_all_no_returns_no():
         predicate_index=0,
         member=addr,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "no"
     assert res["reason"] == "or_all_no"
@@ -411,7 +415,7 @@ def test_probe_signature_returns_unknown_for_non_signature_leaf():
         predicate_index=0,
         recovered_signer="0x" + "11" * 20,
         registry=_StubRegistry(),
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "non_signature_leaf"
@@ -427,7 +431,7 @@ def test_probe_signature_index_out_of_range():
         predicate_index=5,
         recovered_signer="0x" + "11" * 20,
         registry=_StubRegistry(),
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "leaf_index_out_of_range"
@@ -452,7 +456,7 @@ def test_probe_signature_real_evaluator_for_state_var_signer():
         predicate_index=0,
         recovered_signer="0x" + "ee" * 20,
         registry=AdapterRegistry(),
-        ctx=EvaluationContext(contract_address="0x" + "ab" * 20),
+        ctx=EvaluationContext(chain_id=1, contract_address="0x" + "ab" * 20),
     )
     # The eval path should wrap a signer_capability (finite_set
     # placeholder for state-var-typed signer).
@@ -477,7 +481,7 @@ def test_or_with_unknown_returns_unknown():
         predicate_index=0,
         member="0x" + "22" * 20,
         registry=reg,
-        ctx=EvaluationContext(),
+        ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
     assert res["reason"] == "or_some_unknown"

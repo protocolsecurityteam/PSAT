@@ -122,6 +122,28 @@ def _chain_key(chain: str | None) -> str:
     return chain_cache_token(chain)
 
 
+def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
+    """The HyperSync scan endpoint for *chain* (inv. 6).
+
+    ``chain`` is the same name / decimal-id token the cache key uses. A chainless
+    call fails loud (``require_chain`` raises) rather than defaulting the scan to
+    mainnet; a registered chain with no proven HyperSync coverage returns ``None``
+    so the caller reports the scan unavailable instead of scanning the wrong
+    chain. Mainnet resolves to its registry URL — byte-identical to the old
+    ``DEFAULT_HYPERSYNC_URL`` default, so mainnet scans are unchanged.
+    """
+    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+    from utils.chains import require_chain
+
+    if isinstance(chain, int) or (isinstance(chain, str) and chain.strip().isdigit()):
+        info = require_chain(int(chain), context="mapping enumeration hypersync url")
+    else:
+        info = require_chain(
+            chain=chain if isinstance(chain, str) else None, context="mapping enumeration hypersync url"
+        )
+    return _hypersync_url_for_chain(info.chain_id)
+
+
 def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:
     """The fingerprint L2 (db.mapping_enumeration_cache) keys on, so L1 distinguishes
     the same (chain, address, specs) identity L2 does. Falls back to a local stable
@@ -599,6 +621,22 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
+    # Per-chain scan URL (inv. 6): derive from ``chain`` unless the caller pinned
+    # an explicit URL or injected a client (tests). Mainnet is byte-identical to
+    # the old default; an unknown/missing chain fails loud; a no-coverage chain
+    # returns unavailable rather than silently scanning mainnet.
+    if not kwargs.get("client") and not kwargs.get("hypersync_url"):
+        scan_url = _scan_hypersync_url_for_chain(chain)
+        if scan_url is None:
+            return EnumerationResult(
+                principals=[],
+                status="incomplete_no_hypersync_coverage",
+                pages_fetched=0,
+                last_block_scanned=int(kwargs.get("from_block") or 0),
+                error="hypersync_unavailable_for_chain",
+            )
+        kwargs["hypersync_url"] = scan_url
+
     result = asyncio.run(enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs))
 
     if specs_hash is not None:
@@ -817,6 +855,19 @@ def enumerate_mapping_values_sync(
             if now - inserted_at < _cache_ttl_s():
                 return result
             del _VALUE_CACHE[cache_key]
+
+    # Per-chain scan URL (inv. 6): see ``enumerate_mapping_allowlist_sync``.
+    if not kwargs.get("client") and not kwargs.get("hypersync_url"):
+        scan_url = _scan_hypersync_url_for_chain(chain)
+        if scan_url is None:
+            return EnumerationValueResult(
+                entries=[],
+                status="incomplete_no_hypersync_coverage",
+                pages_fetched=0,
+                last_block_scanned=int(kwargs.get("from_block") or 0),
+                error="hypersync_unavailable_for_chain",
+            )
+        kwargs["hypersync_url"] = scan_url
 
     result = asyncio.run(enumerate_mapping_values(contract_address, writer_specs, **kwargs))
 

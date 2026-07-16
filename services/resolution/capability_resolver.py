@@ -51,9 +51,9 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
-from utils.chains import UnknownChainError
+from utils.chains import require_chain
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import ChainContext, chain_context, eth_call_batch, require_rpc_url, rpc_request
+from utils.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
@@ -246,22 +246,20 @@ def _resolve_chain_context(
     chain: str | None,
 ) -> ChainContext:
     """Bind ``chain_id`` to its RPC URL (invariant 7). Registry-backed via
-    :func:`utils.rpc.chain_context`; an unregistered ``chain_id`` (only reachable
-    from a hand-built job request) falls back to the loose :func:`require_rpc_url`
-    resolver so behaviour is unchanged for chains the registry doesn't know yet —
-    making that path fail loud is the M1.2 kill-the-defaults step, not this one."""
-    try:
-        return chain_context(chain_id, explicit_rpc_url=explicit_rpc_url)
-    except UnknownChainError:
-        url = require_rpc_url(explicit_rpc_url=explicit_rpc_url, chain_id=chain_id, chain=chain)
-        return ChainContext(chain_id=chain_id, rpc_url=url)
+    :func:`utils.rpc.chain_context`. An unregistered ``chain_id`` (only reachable
+    from a hand-built job request) now fails loud (invariant 6): ``require_chain``
+    raises :class:`~utils.chains.UnsupportedChainError` with call context instead
+    of silently building an eRPC route for an unknown chain. A local (Anvil/test)
+    ``explicit_rpc_url`` still wins for fork tests."""
+    require_chain(chain_id, chain=chain, context="capability resolution chain context")
+    return chain_context(chain_id, explicit_rpc_url=explicit_rpc_url)
 
 
 def resolve_contract_capabilities(
     session: Session,
     *,
     address: str,
-    chain_id: int = 1,
+    chain_id: int,
     block: int | None = None,
     job_id: Any = None,
     chain: str | None = None,
@@ -273,6 +271,11 @@ def resolve_contract_capabilities(
     The caller MUST keep ``session`` open for the duration of the
     call — adapters consume the repos lazily inside
     ``evaluate_tree_with_registry``.
+
+    ``chain_id`` is required (invariant 6): it binds the live event/bytecode
+    reads to the right chain via a single :class:`ChainContext`. Callers thread
+    the job/contract chain — a chainless call can no longer run the predicate
+    tree as mainnet.
 
     ``job_id`` lets in-pipeline callers (e.g. the policy worker's semantic
     enrichment pass) target the job they're currently processing. The
@@ -414,8 +417,10 @@ def resolve_contract_capabilities(
     # (no RPC / blocknum read failure) leaves ``block`` unpinned -> the fold's
     # coverage gate demotes, the safe direction. The differential probe keeps its own
     # shallower head-12 height (default OFF), independent of this coverage pin.
-    resolution_block: int | None = _resolve_resolution_block(rpc_url, block)
-    probe_block: int | None = _resolve_probe_block(rpc_url, block) if differential_probe_enabled() else None
+    resolution_block: int | None = _resolve_resolution_block(rpc_url, block, chain_id=chain_id)
+    probe_block: int | None = (
+        _resolve_probe_block(rpc_url, block, chain_id=chain_id) if differential_probe_enabled() else None
+    )
     # One-shot consumed/live probe (default ON). The runtime address IS a proxy
     # when the analysis artifact came from an implementation child job, or the
     # job carried an explicit ``proxy_address`` — so an unset latch on it is a
@@ -558,7 +563,7 @@ def _probe_cache_put(key: tuple[int, str, str, int], result: "ProbeResult") -> N
     _PROBE_CACHE[key] = result
 
 
-def _resolve_probe_block(rpc_url: str | None, block: int | None) -> int | None:
+def _resolve_probe_block(rpc_url: str | None, block: int | None, *, chain_id: int | None = None) -> int | None:
     """Pin a concrete probe height. Prefer the caller's ``block``; else read the
     head and step back a finality margin. None on any failure (no RPC, blocknum
     read fails) → probing is skipped for the pass (strictly additive)."""
@@ -567,13 +572,13 @@ def _resolve_probe_block(rpc_url: str | None, block: int | None) -> int | None:
     if not rpc_url:
         return None
     try:
-        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1), 16)
+        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception:
         return None
     return max(1, head - 12)
 
 
-def _resolve_resolution_block(rpc_url: str | None, block: int | None) -> int | None:
+def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_id: int | None = None) -> int | None:
     """Pin the per-pass evaluation height for event-indexed coverage (#119).
 
     Prefer the caller's explicit ``block`` (a deliberate as-of height). Otherwise
@@ -589,7 +594,7 @@ def _resolve_resolution_block(rpc_url: str | None, block: int | None) -> int | N
     if not rpc_url:
         return None
     try:
-        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1), 16)
+        head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception:
         return None
     return max(1, head - RESOLVER_FINALITY_MARGIN)
@@ -668,7 +673,7 @@ def _maybe_differential_probe(
             return cap
 
         def _wire_call_batch(calls: list[dict[str, str]], block_tag: str):  # noqa: ANN202
-            return eth_call_batch(rpc_url, calls, block_tag)
+            return eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
 
         call_batch = _wire_call_batch
 

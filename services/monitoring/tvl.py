@@ -132,10 +132,12 @@ def refresh_contract_balances(
     if not contracts:
         return {}
 
-    # Fetch ETH price once for all contracts
+    # Fetch ETH price once for all contracts. ETH/USD is an L1-scoped quote, so
+    # the native-ETH USD value uses the mainnet price for every chain's ETH
+    # balance — an explicit, documented mainnet read, not a silent default.
     eth_price: float | None = None
     try:
-        eth_price = get_eth_price()
+        eth_price = get_eth_price(chain_id=1)
     except Exception as exc:
         logger.warning(
             "ETH price fetch failed: %s — ETH balances will not include USD values for %d contract(s)",

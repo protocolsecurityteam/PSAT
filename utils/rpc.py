@@ -309,7 +309,6 @@ def default_rpc_url(
     explicit_rpc_url: str | None = None,
     chain_id: int | str | None = None,
     chain: str | None = None,
-    default_chain_id: int | None = 1,
 ) -> str | None:
     """Resolve the RPC URL PSAT should use for a chain — eRPC only.
 
@@ -321,10 +320,12 @@ def default_rpc_url(
     2. Otherwise build the eRPC route for the resolved chain id. Unknown
        explicit chain names are not silently mapped to mainnet.
 
-    Returns None when no eRPC route can be built (``ERPC_BASE_URL`` unset, or an
-    unrecognized chain) so callers fail loud via :func:`require_rpc_url` instead
-    of silently hitting a direct provider. There is intentionally no ``ETH_RPC``
-    or public-node fallback.
+    Returns None when no chain can be resolved (``None`` / empty / the
+    ``"unknown"`` sentinel / an unregistered name) OR ``ERPC_BASE_URL`` is unset,
+    so callers fail loud via :func:`require_rpc_url` instead of silently hitting
+    mainnet or a direct provider. There is intentionally no ``ETH_RPC``,
+    public-node, or silent-mainnet fallback: a chainless call is a plumbing bug,
+    not a mainnet request (invariant 6).
     """
     if is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
@@ -339,12 +340,6 @@ def default_rpc_url(
             effective_chain_id = None
     if effective_chain_id is None:
         effective_chain_id = chain_id_for_chain_name(chain)
-    # Empty/None or discovery's ``"unknown"`` sentinel falls back to the default
-    # chain (mainnet); a genuinely-named but unsupported chain (e.g. "fantom")
-    # stays unresolved so the caller fails loud instead of guessing mainnet.
-    chain_is_named = isinstance(chain, str) and bool(chain.strip()) and chain.strip().lower() != "unknown"
-    if effective_chain_id is None and not chain_is_named:
-        effective_chain_id = default_chain_id
 
     return erpc_url_for_chain_id(effective_chain_id)
 
@@ -354,24 +349,34 @@ def require_rpc_url(
     explicit_rpc_url: str | None = None,
     chain_id: int | str | None = None,
     chain: str | None = None,
-    default_chain_id: int | None = 1,
+    context: str = "RPC URL resolution",
 ) -> str:
     """:func:`default_rpc_url` that raises instead of returning None.
 
     Use on pipeline paths where a missing RPC route is a hard configuration
-    error, not something to paper over with a direct-provider fallback.
+    error. Two failure modes are reported distinctly (so a raise is not
+    misdiagnosed as an eRPC-config problem when the real fault is a missing
+    chain):
+
+    * no chain / unknown chain → :class:`~utils.chains.UnsupportedChainError`
+      (via :func:`~utils.chains.require_chain`), carrying *context*;
+    * chain resolves but ``ERPC_BASE_URL`` is unset → :class:`RuntimeError`.
+
+    A local (Anvil/test) ``explicit_rpc_url`` still wins without a chain.
     """
-    url = default_rpc_url(
-        explicit_rpc_url=explicit_rpc_url,
-        chain_id=chain_id,
-        chain=chain,
-        default_chain_id=default_chain_id,
-    )
+    if explicit_rpc_url and is_local_rpc_url(explicit_rpc_url):
+        return explicit_rpc_url
+
+    from utils.chains import require_chain
+
+    info = require_chain(chain_id, chain=chain, context=context)
+    url = erpc_url_for_chain_id(info.chain_id)
     if not url:
         raise RuntimeError(
-            "No eRPC route available: set ERPC_BASE_URL (and ERPC_SECRET) to the eRPC "
-            "proxy, or pass an explicit local rpc_url for Anvil/tests. PSAT routes all "
-            "hosted reads through eRPC; ETH_RPC is no longer consulted."
+            f"{context}: chain_id={info.chain_id} resolved but no eRPC route — set "
+            "ERPC_BASE_URL (and ERPC_SECRET) to the eRPC proxy, or pass an explicit "
+            "local rpc_url for Anvil/tests. PSAT routes all hosted reads through eRPC; "
+            "ETH_RPC is no longer consulted."
         )
     return url
 
@@ -413,6 +418,55 @@ def _is_configured_erpc_url(rpc_url: str) -> bool:
     return normalized_url == normalized_base or normalized_url.startswith(f"{normalized_base}/")
 
 
+def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
+    """Parse the chain id embedded in a configured-eRPC URL path
+    (``{ERPC_BASE_URL}/main/evm/{id}``).
+
+    Returns None when ``ERPC_BASE_URL`` is unset or the URL is not eRPC-shaped
+    (local Anvil, explicit hosts, a bare/healthcheck eRPC URL) — the runtime
+    guard is then a no-op. Ported from ``refactor/great-purge`` (invariant 7).
+    """
+    if not isinstance(rpc_url, str):
+        return None
+    base = os.getenv("ERPC_BASE_URL")
+    if not base:
+        return None
+    normalized_url = rpc_url.rstrip("/")
+    prefix = f"{base.rstrip('/')}/main/evm/"
+    if not normalized_url.startswith(prefix):
+        return None
+    suffix = normalized_url[len(prefix) :]
+    if not suffix or "/" in suffix:
+        return None
+    try:
+        chain_id = int(suffix)
+    except ValueError:
+        return None
+    # Reject non-canonical spellings ("01") so the guard never half-matches.
+    return chain_id if str(chain_id) == suffix else None
+
+
+def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
+    """Runtime guard (invariant 7): when a caller declares *chain_id* and
+    *rpc_url* is a configured-eRPC URL, the chain id embedded in the URL path
+    must match the declared one. Raises :class:`RuntimeError` (with both ids and
+    a sanitized URL) on disagreement — catching every rpc_url/chain_id plumbing
+    mistake at the wire. No-op when *chain_id* is None or the URL isn't
+    eRPC-shaped (local/explicit hosts), so non-eRPC paths are unaffected.
+    """
+    if chain_id is None:
+        return
+    url_chain_id = _erpc_chain_id_from_url(rpc_url)
+    if url_chain_id is None or url_chain_id == chain_id:
+        return
+    from utils.secrets import sanitize_url
+
+    raise RuntimeError(
+        f"eRPC URL/chain_id mismatch: caller declared chain_id={chain_id} but the RPC "
+        f"URL routes chain_id={url_chain_id} ({sanitize_url(rpc_url)})"
+    )
+
+
 def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return JSON-RPC headers, adding eRPC auth only for configured eRPC URLs."""
     headers = {"Content-Type": "application/json"}
@@ -450,7 +504,10 @@ def rpc_request(
     params: list[Any],
     retries: int = 1,
     headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> Any:
+    _assert_url_chain_id(rpc_url, chain_id)
     session = _get_session()
     for attempt in range(retries + 1):
         try:
@@ -647,10 +704,14 @@ def rpc_batch_request(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
     headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> list[Any]:
     """Send a JSON-RPC batch and return results in call order; per-call errors yield ``None``."""
     if not calls:
         return []
+
+    _assert_url_chain_id(rpc_url, chain_id)
 
     results: list[Any] = [None] * len(calls)
 
@@ -692,11 +753,15 @@ def rpc_batch_request_with_status(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
     headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> list[tuple[Any, bool]]:
     """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
     legitimate ``None`` result."""
     if not calls:
         return []
+
+    _assert_url_chain_id(rpc_url, chain_id)
 
     # Default to (None, True) so any chunk that fails wholesale leaves
     # its slots flagged as errored — matches the sequential path's
@@ -813,6 +878,7 @@ def eth_call_batch(
     block_tag: str = "latest",
     *,
     headers: Mapping[str, str] | None = None,
+    chain_id: int | None = None,
 ) -> list[EthCallResult]:
     """Batch N read-only ``eth_call``s — each its own ``{from?, to, data}`` — in one
     JSON-RPC array request at a single ``block_tag``, returning a per-call
@@ -830,6 +896,7 @@ def eth_call_batch(
     if not calls:
         return []
 
+    _assert_url_chain_id(rpc_url, chain_id)
     results: list[EthCallResult] = [EthCallResult(False, "0x", None, "no_response")] * len(calls)
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
         chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
@@ -892,6 +959,7 @@ def multicall3_aggregate3(
     *,
     chunk_size: int | None = None,
     headers: Mapping[str, str] | None = None,
+    chain_id: int | None = None,
 ) -> list[tuple[bool, str]]:
     """Collapse N read-only ``eth_call``s into one billable call (per chunk) via Multicall3 ``aggregate3``.
 
@@ -928,6 +996,7 @@ def multicall3_aggregate3(
             "eth_call",
             [{"to": MULTICALL3_ADDRESS, "data": data}, block_tag],
             headers=headers,
+            chain_id=chain_id,
         )
         if not isinstance(raw, str) or not raw.startswith("0x"):
             raise RuntimeError(f"multicall3 aggregate3: non-hex result {raw!r}")

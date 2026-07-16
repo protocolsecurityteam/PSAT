@@ -33,7 +33,7 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from services.static.claims import Claim, resolve_claim_precedence
-from utils.chains import UnknownChainError, chain_by_id, chain_by_name
+from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.concurrency import parallel_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -129,7 +129,7 @@ def _root_artifacts(
     }
 
 
-def _load_nested_artifacts(session: Session, job_id, *, chain: str | None = None) -> dict[str, LoadedArtifacts]:
+def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str, LoadedArtifacts]:
     """Hydrate ``recursive.*`` artifacts written by the resolution stage.
 
     Resolution writes only the runtime-state slices (snapshot,
@@ -168,9 +168,10 @@ def _load_nested_artifacts(session: Session, job_id, *, chain: str | None = None
     # Hydrate analysis + tracking_plan from contract_materializations.
     # Address-keyed lookup keyed on the job's chain (the same name the resolution
     # stage materialized under); on a row miss we drop the bundle below since the
-    # downstream consumers can't operate without analysis. Env fallback stays for
-    # a chain-less caller (killing it is M1.2); mainnet resolves to "ethereum".
-    chain = chain or os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+    # downstream consumers can't operate without analysis. ``chain`` is the job's
+    # resolved chain name — a chainless call is a data bug (inv. 6), so fail loud
+    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
+    require_chain(chain=chain, context="policy nested-artifact hydration")
     for address, bundle in bundles.items():
         try:
             mrow = cm.find_by_address(session, chain=chain, address=address)
@@ -197,7 +198,7 @@ def _resolve_semantic_capabilities(
     contract_address: str,
     job_id: Any,
     chain: str | None = None,
-    chain_id: int = 1,
+    chain_id: int,
 ) -> dict[str, dict[str, Any]] | None:
     """Run the semantic capability resolver for ``contract_address`` against
     the in-progress job. Returns ``{function_signature: capability_dict}``
@@ -209,10 +210,10 @@ def _resolve_semantic_capabilities(
     derives this from ``job.request['chain']`` when None is passed,
     so passing it here is belt-and-suspenders.
 
-    ``chain_id`` is the int chain the resolver binds its RPC/event reads to
-    (inv. 7): without it the predicate-eval tree ran as chain 1 even for an L2
-    job. Defaults to mainnet (M1.1 keeps the default; the caller threads the
-    job's real chain)."""
+    ``chain_id`` is required (inv. 6/7): it binds the resolver's RPC/event reads
+    to the job's real chain. Without it the predicate-eval tree would run as
+    chain 1 even for an L2 job; a chainless call is now a hard error, not a
+    silent mainnet default. The caller threads the job's ``chain_id``."""
     try:
         from services.resolution.capability_resolver import resolve_contract_capabilities
     except Exception as exc:  # pragma: no cover — import-error handled defensively

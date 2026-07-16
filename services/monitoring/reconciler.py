@@ -69,6 +69,11 @@ logger = logging.getLogger(__name__)
 # "MonitoredContract may be stale for up to ten minutes."
 DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL", "600"))
 
+# Daemon-edge fallback chain for the reconciler loop (inv. 6): the base RPC chain
+# and the ambiguous-protocol default handed to ``_protocol_chain``. Explicit and
+# overridable via env rather than a buried ``chain="ethereum"`` signature default.
+RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereum")
+
 # Lease TTL for a claimed queue row — must exceed the worst single-protocol
 # ``enroll_protocol_contracts`` build (a full ``build_governance_view``) so a
 # slow build doesn't hand its row to a competing drainer mid-flight.
@@ -221,7 +226,7 @@ def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
 
 def drain_enrollment_queue(
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
     *,
     lease_ttl_s: int | None = None,
     max_claims: int | None = None,
@@ -317,7 +322,7 @@ def _queue_depth(session: Session) -> int:
 def reconcile_enrollments(
     session: Session,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
 ) -> int:
     """DEPRECATED — walk-all reconciliation pass; superseded by the dirty-queue
     drain (:func:`drain_enrollment_queue` + :func:`sweep_enqueue_stale`).
@@ -358,9 +363,9 @@ def reconcile_enrollments(
 
 def run_enrollment_reconciler_loop(
     rpc_url: str,
+    chain: str,
     interval: float = DEFAULT_RECONCILE_INTERVAL_S,
     stop_event: Event | None = None,
-    chain: str = "ethereum",
 ) -> None:
     """Long-running reconciler. Each tick = slow-sweep enqueue + queue drain.
 
@@ -410,8 +415,15 @@ def main() -> None:
 
     from utils.rpc import require_rpc_url
 
-    rpc_url = require_rpc_url(chain="ethereum")
-    run_enrollment_reconciler_loop(rpc_url, stop_event=stop_event)
+    # Daemon edge (inv. 6): the reconciler is one process serving every chain;
+    # ``RECONCILER_FALLBACK_CHAIN`` is the explicit, documented base + ambiguous-
+    # protocol fallback (``_protocol_chain`` still derives each protocol's own
+    # chain, and ``rpc_for_chain`` picks the per-chain URL). Logged so the choice
+    # is visible, not a buried default.
+    fallback_chain = RECONCILER_FALLBACK_CHAIN
+    logger.info("enrollment reconciler daemon starting with fallback chain=%s", fallback_chain)
+    rpc_url = require_rpc_url(chain=fallback_chain)
+    run_enrollment_reconciler_loop(rpc_url, fallback_chain, stop_event=stop_event)
 
 
 if __name__ == "__main__":

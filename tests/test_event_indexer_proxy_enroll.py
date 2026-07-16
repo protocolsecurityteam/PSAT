@@ -211,7 +211,7 @@ def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
     )
     session.commit()
 
-    inserted = enroll_from_completed_jobs(session, chain_id=1)
+    inserted = enroll_from_completed_jobs(session)
     assert inserted >= 2  # RoleGranted + RoleRevoked, both at the proxy
 
     # The role cursors are enrolled at the PROXY (which emits the events), seeded
