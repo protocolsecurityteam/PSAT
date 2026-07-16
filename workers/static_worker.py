@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
-from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition
+from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
@@ -36,6 +36,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
@@ -80,6 +81,21 @@ def _request_rpc_url(request: dict) -> str | None:
         chain_id=request.get("chain_id"),
         chain=chain if isinstance(chain, str) else None,
     )
+
+
+def _parent_chain_name(job: Job) -> str:
+    """Canonical chain name of the parent job, for stamping onto a spawned impl
+    child so chain never cascades as ``None`` (inv. 6). Uses the first-class
+    ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
+    registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    chain_id = getattr(job, "chain_id", None)
+    if not isinstance(chain_id, int):
+        request = job.request if isinstance(job.request, dict) else {}
+        chain_id = derive_job_chain_id(request.get("chain"), job.address) or 1
+    try:
+        return chain_by_id(chain_id).name
+    except UnknownChainError:
+        return "ethereum"
 
 
 def _redirect_proxy_policy_dependencies(
@@ -1272,8 +1288,11 @@ class StaticWorker(BaseWorker):
                 "discovery_relationship": "implementation",
                 "parent_owns_high": parent_owns_high,
             }
-            if request.get("chain") is not None:
-                child_request["chain"] = request.get("chain")
+            # Always stamp the child's chain from the parent (inv. 6): a None here
+            # used to cascade and let the impl child derive its own default chain,
+            # divorcing it from the proxy's chain. Mainnet parents carry
+            # chain="ethereum", so this is unchanged there.
+            child_request["chain"] = request.get("chain") or _parent_chain_name(job)
             if getattr(job, "protocol_id", None):
                 child_request["protocol_id"] = job.protocol_id
             if force:

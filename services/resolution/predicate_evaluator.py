@@ -1150,11 +1150,15 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
         kwargs["hypersync_url"] = hypersync_url
     try:
         from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
+        from utils.chains import chain_cache_token
 
         scan = enumerate_mapping_values_sync(
             contract,
             cast(Any, writer_specs),
-            chain=str(chain_id) if isinstance(chain_id, int) else None,
+            # inv. 11: one cache-key token format everywhere (decimal-string chain
+            # id). ``enumerate_mapping_values_sync`` re-normalizes via the same
+            # helper, so mainnet ("1") is byte-identical to the prior ``str(1)``.
+            chain=chain_cache_token(chain_id) if isinstance(chain_id, int) else None,
             **kwargs,
         )
     except Exception:

@@ -203,11 +203,25 @@ def _build_static_artifacts(
     return contract_name, cast(dict[str, Any], analysis), plan, predicate_trees
 
 
+def _chain_name_for_materialization(chain_id: int) -> str:
+    """Canonical chain name used as the ``contract_materializations`` cache key
+    component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` — the exact
+    string the env-default path used before — so mainnet cache keys are
+    unchanged; an unregistered id falls back to the same env default."""
+    from utils.chains import UnknownChainError, chain_by_id
+
+    try:
+        return chain_by_id(chain_id).name
+    except UnknownChainError:
+        return os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+
+
 def _materialize_with_cross_process_cache(
     *,
     effective_address: str,
     bytecode_keccak: str | None,
     workspace_prefix: str,
+    chain: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Consult the persistent contract_materializations table; build on miss.
 
@@ -240,7 +254,9 @@ def _materialize_with_cross_process_cache(
         _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix)
 
-    chain = os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+    # Chain threaded from the job/contract; env fallback stays for jobs with no
+    # chain (killing it is M1.2). Mainnet resolves to "ethereum" either way.
+    chain = chain or os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
     built = {"ran": False}
 
     def _builder() -> Mapping[str, Any]:
@@ -318,6 +334,7 @@ def _materialize_contract_artifacts(
     rpc_url: str,
     *,
     workspace_prefix: str,
+    chain: str | None = None,
 ) -> LoadedArtifacts:
     """Build analysis + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
     # Proxy check — analyze the implementation but read storage from the proxy.
@@ -392,6 +409,7 @@ def _materialize_contract_artifacts(
         effective_address=effective_address,
         bytecode_keccak=bytecode_keccak,
         workspace_prefix=workspace_prefix,
+        chain=chain,
     )
     # Address-mismatch retarget: when the persistent row was populated for
     # a different address that shares this bytecode, the cached
@@ -701,6 +719,7 @@ def _replay_mapping_principals(
     depth: int,
     nodes: dict[str, ResolvedGraphNode],
     edges: dict[tuple, ResolvedGraphEdge],
+    chain_id: int = 1,
 ) -> str:
     """Replay mapping-writer events for *address* into principal nodes/edges,
     returning the enumeration status.
@@ -726,7 +745,7 @@ def _replay_mapping_principals(
 
     from services.resolution.creation_block_floor import resolve_scan_floor
 
-    scan_floor = resolve_scan_floor(address, 1)
+    scan_floor = resolve_scan_floor(address, chain_id)
     if scan_floor is None:
         logger.info(
             "mapping_enumerator: deferring replay (no scan floor resolved)",
@@ -873,6 +892,7 @@ def resolve_control_graph(
     *,
     root_artifacts: LoadedArtifacts,
     rpc_url: str,
+    chain_id: int = 1,
     max_depth: int = DEFAULT_RECURSION_MAX_DEPTH,
     workspace_prefix: str = "recursive",
     nested_artifacts_override: dict[str, LoadedArtifacts] | None = None,
@@ -880,7 +900,13 @@ def resolve_control_graph(
     initial_graph: ResolvedControlGraph | None = None,
     heartbeat: Callable[[], None] | None = None,
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
-    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place."""
+    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
+
+    ``chain_id`` scopes the two chain-sensitive reads inside the walk: the
+    ``contract_materializations`` cache key (via the chain's canonical name) and
+    the mapping-writer replay's scan floor. Defaults to mainnet (M1.1 keeps the
+    default; callers thread the job's real chain)."""
+    chain_name = _chain_name_for_materialization(chain_id)
     root_analysis = root_artifacts["analysis"]
     root_subject = root_analysis.get("subject", {})
     root_address = str(root_subject.get("address", "")).lower()
@@ -958,6 +984,7 @@ def resolve_control_graph(
                 address,
                 rpc_url,
                 workspace_prefix=workspace_prefix,
+                chain=chain_name,
             )
             return artifacts, None
         except Exception as exc:
@@ -1078,6 +1105,7 @@ def resolve_control_graph(
                     depth=depth,
                     nodes=nodes,
                     edges=edges,
+                    chain_id=chain_id,
                 )
                 # Surface enumeration status on the node so downstream stages can flag incomplete allowlists.
                 if contract_node_id in nodes:

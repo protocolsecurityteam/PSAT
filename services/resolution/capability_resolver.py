@@ -51,8 +51,9 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from utils.chains import UnknownChainError
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import eth_call_batch, require_rpc_url, rpc_request
+from utils.rpc import ChainContext, chain_context, eth_call_batch, require_rpc_url, rpc_request
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
@@ -239,6 +240,23 @@ def find_dependency_provider_job_for_address(
     return None
 
 
+def _resolve_chain_context(
+    chain_id: int,
+    explicit_rpc_url: str | None,
+    chain: str | None,
+) -> ChainContext:
+    """Bind ``chain_id`` to its RPC URL (invariant 7). Registry-backed via
+    :func:`utils.rpc.chain_context`; an unregistered ``chain_id`` (only reachable
+    from a hand-built job request) falls back to the loose :func:`require_rpc_url`
+    resolver so behaviour is unchanged for chains the registry doesn't know yet —
+    making that path fail loud is the M1.2 kill-the-defaults step, not this one."""
+    try:
+        return chain_context(chain_id, explicit_rpc_url=explicit_rpc_url)
+    except UnknownChainError:
+        url = require_rpc_url(explicit_rpc_url=explicit_rpc_url, chain_id=chain_id, chain=chain)
+        return ChainContext(chain_id=chain_id, rpc_url=url)
+
+
 def resolve_contract_capabilities(
     session: Session,
     *,
@@ -324,21 +342,22 @@ def resolve_contract_capabilities(
         req_chain = runtime_job.request.get("chain")
         if isinstance(req_chain, str) and req_chain:
             chain = req_chain
-    rpc_url: str | None = None
-    rpc_chain_id: int | str | None = None
+    explicit_rpc_url: str | None = None
     for candidate_job in (analysis_job, runtime_job):
         if not isinstance(candidate_job.request, dict):
             continue
-        if rpc_chain_id is None:
-            rpc_chain_id = candidate_job.request.get("chain_id")
         if isinstance(candidate_job.request.get("rpc_url"), str):
-            rpc_url = candidate_job.request["rpc_url"]
+            explicit_rpc_url = candidate_job.request["rpc_url"]
             break
-    rpc_url = require_rpc_url(
-        explicit_rpc_url=rpc_url,
-        chain_id=rpc_chain_id,
-        chain=chain,
-    )
+    # inv. 7: resolve the RPC URL *from* ``chain_id`` via a single ChainContext so
+    # the (chain_id, rpc_url) pair can never disagree. They used to come from
+    # independent sources — the request's ``chain_id`` for the URL and the
+    # caller's ``chain_id`` argument for the event/bytecode reads — which let the
+    # URL point at one chain while the reads ran as another. A local (Anvil/test)
+    # explicit rpc_url still wins for fork tests, exactly as before.
+    ctx_chain = _resolve_chain_context(chain_id, explicit_rpc_url, chain)
+    rpc_url = ctx_chain.rpc_url
+    chain_id = ctx_chain.chain_id
 
     registry = AdapterRegistry()
     # Named standard adapters first (higher matches() scores win); the generic

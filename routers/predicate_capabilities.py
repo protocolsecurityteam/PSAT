@@ -35,7 +35,7 @@ router = APIRouter()
 
 _PROBE_RATE_LIMIT = int(os.environ.get("PSAT_PROBE_RATE_LIMIT", "10"))
 _PROBE_RATE_WINDOW_S = float(os.environ.get("PSAT_PROBE_RATE_WINDOW_S", "60"))
-_probe_rate_state: dict[tuple[str, str], Any] = {}
+_probe_rate_state: dict[tuple[str, str, int], Any] = {}
 
 
 def _prune_probe_rate_state(now: float) -> None:
@@ -46,10 +46,14 @@ def _prune_probe_rate_state(now: float) -> None:
             _probe_rate_state.pop(key, None)
 
 
-def _probe_rate_check(admin_key: str | None, address: str) -> None:
-    """Raise HTTPException(429) when the (admin_key, address) sliding
+def _probe_rate_check(admin_key: str | None, address: str, chain_id: int = 1) -> None:
+    """Raise HTTPException(429) when the (admin_key, address, chain_id) sliding
     window has hit its limit. No-op when the limit is 0 (env override
-    for testing / disabled-by-default flag use)."""
+    for testing / disabled-by-default flag use).
+
+    The chain is part of the bucket key (inv. 12): the same address on two chains
+    is two distinct contracts, so probing one must not consume the other's budget.
+    Defaults to mainnet so a caller that omits it keeps the mainnet bucket."""
     if _PROBE_RATE_LIMIT <= 0:
         return
     import collections as _collections
@@ -57,7 +61,7 @@ def _probe_rate_check(admin_key: str | None, address: str) -> None:
 
     now = _time.time()
     _prune_probe_rate_state(now)
-    key = (admin_key or "<no-key>", address.lower())
+    key = (admin_key or "<no-key>", address.lower(), chain_id)
     state = _probe_rate_state.get(key)
     if state is None:
         state = _collections.deque()
@@ -207,7 +211,7 @@ def probe_contract_membership(
     from the semantic capability rendering.
     """
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
 
     # Lazy-import the resolver bits so the probe route doesn't impose
     # its dependency surface on the rest of the API.
@@ -296,7 +300,7 @@ def probe_contract_signature(
     from services.resolution.repos import PostgresEventLogRepo
 
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
         job = session.execute(
             select(Job)

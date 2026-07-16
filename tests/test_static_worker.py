@@ -76,6 +76,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
             "proxy_type": "unknown",
             "discovery_relationship": "implementation",
             "parent_owns_high": False,
+            "chain": "ethereum",
         }
     ]
 

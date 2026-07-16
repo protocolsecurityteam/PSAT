@@ -10,22 +10,21 @@ from sqlalchemy.orm import Session
 
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
 from services.audits.serializers import _audit_brief
-
-# Coverage anchors are ethereum-deployed, so the live keccak is read from the
-# mainnet ``bytecode_cache`` layer (utils.rpc — the durable system of record for
-# deployed bytecode).
-_ANCHOR_CHAIN_ID = 1
+from utils.chains import UnknownChainError, chain_by_name
 
 
-def _bytecode_keccak_now_batch(addresses: set[str]) -> dict[str, str | None]:
+def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dict[str, str | None]:
     """Return ``{lower_address: keccak_hex_or_None}`` for a set of addresses.
 
     Reads ``code_keccak`` from the durable ``bytecode_cache`` (utils.rpc PG
-    layer); only addresses absent there are fetched live, which itself populates
-    that layer plus the bounded in-process ``_GETCODE_CACHE``. There is no
-    timeline-local cache — dedup and size-bounding live in those shared layers,
-    so a rapid reload of the surface view doesn't fire one RPC per audit row.
-    """
+    layer) on ``chain_id`` — derived from the timeline's contract row so an L2
+    contract reads its own chain's cache, not mainnet's; only addresses absent
+    there are fetched live. There is no timeline-local cache — dedup and
+    size-bounding live in those shared layers, so a rapid reload of the surface
+    view doesn't fire one RPC per audit row. The live fetch fallback is still
+    mainnet-anchored (``services.audits.coverage._fetch_bytecode_keccak`` is
+    chain-agnostic and outside this item's file set); the chain-correct PG read
+    covers the common cache-warm path, and mainnet is unchanged either way."""
     from services.audits.coverage import _fetch_bytecode_keccak
     from utils.rpc import _pg_bytecode_get
 
@@ -34,7 +33,7 @@ def _bytecode_keccak_now_batch(addresses: set[str]) -> dict[str, str | None]:
         if not raw:
             continue
         addr = raw.lower()
-        pg_hit = _pg_bytecode_get(_ANCHOR_CHAIN_ID, addr)
+        pg_hit = _pg_bytecode_get(chain_id, addr)
         if pg_hit is not None:
             out[addr] = pg_hit[1]
             continue
@@ -141,8 +140,13 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
     # one RPC per distinct address, cached briefly so repeated hits don't
     # spam the provider. Compared against the persisted
     # ``bytecode_keccak_at_match`` to produce ``bytecode_drift``.
+    try:
+        anchor_chain_id = chain_by_name(contract.chain).chain_id if contract.chain else 1
+    except UnknownChainError:
+        anchor_chain_id = 1
     live_keccaks = _bytecode_keccak_now_batch(
-        {addr_by_cid[r.contract_id] for r in best_by_audit.values() if r.contract_id in addr_by_cid}
+        {addr_by_cid[r.contract_id] for r in best_by_audit.values() if r.contract_id in addr_by_cid},
+        chain_id=anchor_chain_id,
     )
 
     coverage_out: list[dict[str, Any]] = []
