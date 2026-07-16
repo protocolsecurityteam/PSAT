@@ -76,7 +76,7 @@ def _tx_selector(input_data: Any) -> str:
     return "0x"
 
 
-def fetch_contract_transactions(address: str, limit: int = 30, start_block: int = 0) -> list[dict]:
+def fetch_contract_transactions(address: str, limit: int = 30, start_block: int = 0, chain_id: int = 1) -> list[dict]:
     """Fetch recent normal and internal transactions for an address from Etherscan.
 
     If the most recent normal transactions are all plain ETH transfers
@@ -91,6 +91,7 @@ def fetch_contract_transactions(address: str, limit: int = 30, start_block: int 
             data = etherscan_get(
                 "account",
                 action,
+                chain_id=chain_id,
                 address=address,
                 startblock=start_block,
                 endblock=99_999_999,
@@ -116,6 +117,7 @@ def fetch_contract_transactions(address: str, limit: int = 30, start_block: int 
             data = etherscan_get(
                 "account",
                 "txlist",
+                chain_id=chain_id,
                 address=address,
                 startblock=start_block,
                 endblock=99_999_999,
@@ -352,6 +354,7 @@ def find_dynamic_dependencies(
     proxy_address: str | None = None,
     code_cache: dict[str, str] | None = None,
     start_block: int | None = None,
+    chain_id: int = 1,
 ) -> dict:
     """Trace representative transactions and return a dynamic dependency graph.
 
@@ -370,7 +373,9 @@ def find_dynamic_dependencies(
         selected_txs = [_fetch_tx_metadata_from_rpc(trace_rpc, tx_hash.strip()) for tx_hash in tx_hashes]
     else:
         fetch_start = start_block if start_block is not None else 0
-        txs = fetch_contract_transactions(tx_source, limit=max(20, tx_limit * 6), start_block=fetch_start)
+        txs = fetch_contract_transactions(
+            tx_source, limit=max(20, tx_limit * 6), start_block=fetch_start, chain_id=chain_id
+        )
         selected_txs = pick_representative_transactions(tx_source, txs, max_txs=tx_limit)
 
     if not selected_txs:

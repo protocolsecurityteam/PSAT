@@ -235,7 +235,7 @@ def parse_upgrade_log(log: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0) -> list[dict]:
+def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0, chain_id: int = 1) -> list[dict]:
     """Fetch all logs for a given address and topic0 via Etherscan getLogs."""
     from utils.etherscan import get
 
@@ -243,6 +243,7 @@ def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0) 
         data = get(
             "logs",
             "getLogs",
+            chain_id=chain_id,
             address=proxy_address,
             topic0=topic0,
             fromBlock=str(from_block),
@@ -254,7 +255,7 @@ def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0) 
         return []
 
 
-def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0) -> list[dict]:
+def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[dict]:
     """Fetch all EIP-1967 upgrade events for proxy addresses via Etherscan.
 
     Queries each proxy for all three event types (Upgraded, AdminChanged,
@@ -265,6 +266,8 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0) -> lis
         proxy_addresses: List of proxy contract addresses to query.
         from_block: Only fetch events from this block number onwards.
             Defaults to 0 (fetch all history).
+        chain_id: Chain the proxies live on; threaded to the Etherscan getLogs
+            query so L2 upgrade events resolve against the right explorer.
     """
     all_events: list[dict] = []
 
@@ -282,7 +285,9 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0) -> lis
         from utils.etherscan import parallel_get
 
         calls = {
-            f"{addr}|{topic0}": (lambda a=addr, t=topic0: _fetch_logs_etherscan(a, t, from_block=from_block))
+            f"{addr}|{topic0}": (
+                lambda a=addr, t=topic0: _fetch_logs_etherscan(a, t, from_block=from_block, chain_id=chain_id)
+            )
             for addr, topic0 in tasks
         }
         results = parallel_get(calls)
@@ -421,7 +426,7 @@ def _strip_internal(event: dict) -> dict:
     return {k: v for k, v in event.items() if not k.startswith("_")}
 
 
-def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block: int = 0) -> dict:
+def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block: int = 0, chain_id: int = 1) -> dict:
     """Build upgrade history for all proxy contracts in a unified deps dict.
 
     Args:
@@ -433,9 +438,10 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         from_block: Only fetch events from this block number onwards.
             Defaults to 0 (fetch all history).  Used for incremental
             fetching when previous upgrade history is available.
-
-    Returns:
-        UpgradeHistoryOutput dict with per-proxy upgrade timelines.
+        chain_id: Chain the target proxy lives on; threaded to the Etherscan
+            getLogs query. Name enrichment still routes through the shared
+            ``get_contract_info`` wrapper, which carries no chain param yet
+            (mainnet only until the wrapper gains one).
     """
     target_address, proxy_meta, known_names = _extract_proxies_from_dependencies(dependencies)
 
@@ -448,7 +454,7 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
         }
 
     # Etherscan getLogs — indexed by address+topic, <1s per query
-    all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block)
+    all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block, chain_id=chain_id)
 
     # Group events by emitting proxy address
     events_by_proxy: dict[str, list[dict]] = {addr: [] for addr in proxy_meta}

@@ -140,6 +140,8 @@ def enrich_dependency_metadata(
 
         # Each ``get_contract_info`` call still routes through the shared
         # _rate_lock — parallel_get only stacks the inter-call dead time.
+        # ``get_contract_info`` carries no chain param yet, so name/selector
+        # enrichment resolves on mainnet only until that wrapper gains one.
         calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in missing}
         results = parallel_get(calls)
         for addr in missing:
