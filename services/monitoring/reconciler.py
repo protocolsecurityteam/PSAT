@@ -54,8 +54,9 @@ from typing import NamedTuple
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
-from db.models import MonitoringEnrollmentQueue, Protocol, SessionLocal
+from db.models import Contract, MonitoringEnrollmentQueue, Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
+from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.enrollment import enroll_protocol_contracts, mark_enrollment_dirty
 from utils.logging import configure_logging
 
@@ -93,6 +94,26 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _protocol_chain(session: Session, protocol_id: int, default: str) -> str:
+    """The chain a protocol's contracts live on (v1 chain-as-island, inv. 15).
+
+    Reads the distinct non-null ``Contract.chain`` values for the protocol and
+    returns the sole chain when unambiguous, else *default*. Used to thread each
+    protocol's own chain (and its eRPC route) into ``enroll_protocol_contracts``
+    instead of the reconciler's mainnet default; ``enroll_protocol_contracts``
+    still resolves each contract's chain independently, so this pins the fallback
+    for NULL-chain rows and the seed RPC.
+    """
+    chains = {
+        c
+        for c in session.execute(
+            select(Contract.chain).where(Contract.protocol_id == protocol_id, Contract.chain.isnot(None)).distinct()
+        ).scalars()
+        if c
+    }
+    return chains.pop() if len(chains) == 1 else default
 
 
 class EnrollmentClaim(NamedTuple):
@@ -234,7 +255,14 @@ def drain_enrollment_queue(
     for claim in claims:
         try:
             with SessionLocal() as work_session:
-                enroll_protocol_contracts(work_session, claim.protocol_id, rpc_url, chain, enroll_controllers=True)
+                protocol_chain = _protocol_chain(work_session, claim.protocol_id, chain)
+                enroll_protocol_contracts(
+                    work_session,
+                    claim.protocol_id,
+                    rpc_for_chain(protocol_chain, rpc_url),
+                    protocol_chain,
+                    enroll_controllers=True,
+                )
                 _finish_success(work_session, claim)
             drained += 1
         except Exception:
@@ -308,7 +336,8 @@ def reconcile_enrollments(
     reconciled = 0
     for pid in protocol_ids:
         try:
-            enroll_protocol_contracts(session, pid, rpc_url, chain)
+            protocol_chain = _protocol_chain(session, pid, chain)
+            enroll_protocol_contracts(session, pid, rpc_for_chain(protocol_chain, rpc_url), protocol_chain)
             reconciled += 1
         except Exception:
             logger.exception("reconciler enrollment failed for protocol %s", pid)

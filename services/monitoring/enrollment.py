@@ -23,6 +23,7 @@ from db.models import (
     WatchedProxy,
 )
 from services.governance.control_graph_types import reconcile_control_graph_types
+from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
 from utils.rpc import rpc_request
@@ -216,18 +217,28 @@ def enroll_protocol_contracts(
         session.flush()
         logger.info("Reconciled %d control-graph node types for protocol %s", reconciled, protocol_id)
 
-    # Get current block number for last_scanned_block
-    try:
-        result = rpc_request(rpc_url, "eth_blockNumber", [])
-        current_block = int(result, 16)
-    except Exception:
-        logger.warning("Could not get current block, defaulting to 0")
-        current_block = 0
+    # Seed ``last_scanned_block`` from each contract's OWN chain head, not a
+    # single mainnet read for every chain. ``rpc_url`` is the mainnet seed /
+    # local-fork override; ``rpc_for_chain`` keeps it verbatim for mainnet and
+    # resolves the chain's eRPC route otherwise. Memoized per chain so a
+    # many-contract protocol issues one head read per chain.
+    block_by_chain: dict[str, int] = {}
+
+    def _block_for(contract_chain: str) -> int:
+        if contract_chain not in block_by_chain:
+            try:
+                result = rpc_request(rpc_for_chain(contract_chain, rpc_url), "eth_blockNumber", [])
+                block_by_chain[contract_chain] = int(result, 16)
+            except Exception:
+                logger.warning("Could not get current block for chain %s, defaulting to 0", contract_chain)
+                block_by_chain[contract_chain] = 0
+        return block_by_chain[contract_chain]
 
     enrolled: list[MonitoredContract] = []
 
     for contract in contracts:
         contract_chain = contract.chain or chain
+        current_block = _block_for(contract_chain)
 
         # Load summary
         summary = session.execute(
@@ -339,7 +350,7 @@ def enroll_protocol_contracts(
         # Create WatchedProxy only for actual proxy shells (is_proxy / proxy_type),
         # not UUPS implementations that are merely "upgradeable" per summary.
         if contract_type == "proxy" and (contract.is_proxy or contract.proxy_type):
-            _bridge_to_watched_proxy(session, mc, contract, current_block)
+            _bridge_to_watched_proxy(session, mc, contract, current_block, contract_chain)
 
         enrolled.append(mc)
 
@@ -353,7 +364,15 @@ def enroll_protocol_contracts(
     # re-includes existing controller rows from the DB, so skipping this pass
     # never deactivates controllers a prior reconciler enrolled.
     if enroll_controllers:
-        _enroll_controller_addresses(session, contracts, protocol_id, chain, current_block)
+        # v1 is chain-as-island (inv. 15): a controller's chain equals the chain
+        # of the contracts it governs — control edges never cross chains. Derive
+        # it from the protocol's enrolled contracts rather than the caller's
+        # default so a non-mainnet protocol's controllers enroll on their own
+        # chain; fall back to the caller's ``chain`` when the contracts don't pin
+        # a single one.
+        contract_chains = {c.chain for c in contracts if c.chain}
+        controller_chain = contract_chains.pop() if len(contract_chains) == 1 else chain
+        _enroll_controller_addresses(session, contracts, protocol_id, controller_chain, _block_for(controller_chain))
         # Flush so controller rows are visible to the stale-detection query below.
         session.flush()
 
@@ -649,12 +668,18 @@ def _bridge_to_watched_proxy(
     mc: MonitoredContract,
     contract: Contract,
     current_block: int,
+    chain: str,
 ) -> None:
-    """Create or link a WatchedProxy row for backward compatibility."""
+    """Create or link a WatchedProxy row for backward compatibility.
+
+    *chain* is the MonitoredContract's resolved chain (``contract.chain`` or the
+    caller's fallback), so the WatchedProxy is keyed on the same ``(address,
+    chain)`` as its MonitoredContract instead of an independent mainnet default.
+    """
     existing_wp = session.execute(
         select(WatchedProxy).where(
             WatchedProxy.proxy_address == contract.address.lower(),
-            WatchedProxy.chain == (contract.chain or "ethereum"),
+            WatchedProxy.chain == chain,
         )
     ).scalar_one_or_none()
 
@@ -676,7 +701,7 @@ def _bridge_to_watched_proxy(
             .values(
                 id=uuid.uuid4(),
                 proxy_address=contract.address.lower(),
-                chain=contract.chain or "ethereum",
+                chain=chain,
                 label=contract.contract_name,
                 proxy_type=contract.proxy_type,
                 last_known_implementation=contract.implementation,
@@ -688,7 +713,7 @@ def _bridge_to_watched_proxy(
         wp = session.execute(
             select(WatchedProxy).where(
                 WatchedProxy.proxy_address == contract.address.lower(),
-                WatchedProxy.chain == (contract.chain or "ethereum"),
+                WatchedProxy.chain == chain,
             )
         ).scalar_one()
         mc.watched_proxy_id = wp.id
