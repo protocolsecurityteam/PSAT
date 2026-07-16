@@ -171,6 +171,33 @@ def all_topic0s() -> list[str]:
     return sorted(topics)
 
 
+def spec_by_topic0() -> dict[str, RoleEventSpec]:
+    """Reverse lookup topic0 → its grant/revoke ``RoleEventSpec``, across every
+    standard — the fold engine's decode table: given an indexed row's topic0 it
+    reads which topics carry (holder, role, active) without re-deriving the event
+    shape. Standards' topic0s are disjoint (distinct signatures), so the union is
+    unambiguous; a later collision would surface here as a lost entry rather than
+    a silent mis-decode."""
+    out: dict[str, RoleEventSpec] = {}
+    for standard in STANDARDS:
+        for spec in standard.grant_events:
+            out[spec.topic0] = spec
+    return out
+
+
+def resolve_standard(code_hex: str | None) -> RoleStoreStandard | None:
+    """The single standard a role store speaks, for the adapter's ``matches`` /
+    ``enumerate`` (as opposed to the indexer's ``detect_standards``, which
+    union-enrolls on ambiguity). Exactly one detected standard → that standard;
+    zero → ``None`` (no recognized store → the adapter declines, the ``:1976``
+    guard backstops, loud). More than one is not a fold the adapter can trust —
+    the marker sets are disjoint, so a double match means a store masquerading as
+    both, which we DECLINE rather than guess a fold polarity for (fail-closed, the
+    safe direction: the guard still gates it)."""
+    detected = detect_standards(code_hex)
+    return detected[0] if len(detected) == 1 else None
+
+
 def _selector_in_code(selector: str, body: str) -> bool:
     sel = selector.lower().removeprefix("0x")
     if len(sel) != 8:

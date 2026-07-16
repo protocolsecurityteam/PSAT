@@ -48,6 +48,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.policy.capability_surface import project_capability_surface  # noqa: E402
+from services.resolution.adapters.enumerable_role_store import _NEGATIVE_CONTROL_ADDR  # noqa: E402
 from services.resolution.capabilities import CapabilityExpr  # noqa: E402
 from services.resolution.permissionless_shapes import (  # noqa: E402
     is_caller_keyed_time_allowlist,
@@ -58,6 +59,7 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     _public_without_root_cofinites,
     evaluate_tree,
 )
+from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
 from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
@@ -368,9 +370,19 @@ def _and_denylist_opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _seed_two_hop(session, *, caller_trees: dict[str, Any], callee_trees: dict[str, Any]) -> dict[str, Any]:
+def _seed_two_hop(
+    session,
+    *,
+    caller_trees: dict[str, Any],
+    callee_trees: dict[str, Any],
+    seed_hook: Any = None,
+) -> dict[str, Any]:
     """Seed a caller + registry (as its ``registry`` state var), resolve the
-    caller, and return the ``guarded(uint256)`` capability dict."""
+    caller, and return the ``guarded(uint256)`` capability dict.
+
+    ``seed_hook(session, registry_addr)`` runs after the contracts are seeded and
+    before the resolve — the adapter-live variants use it to make the registry a
+    recognized role store (impl markers + indexed events + warm cursor)."""
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -410,6 +422,8 @@ def _seed_two_hop(session, *, caller_trees: dict[str, Any], callee_trees: dict[s
             source="state_variable",
         )
     )
+    if seed_hook is not None:
+        seed_hook(session, registry_addr)
     session.commit()
 
     caps = resolve_contract_capabilities(session, address=caller_addr, chain="ethereum", job_id=caller_job.id)
@@ -430,7 +444,7 @@ def _is_public(cap_dict: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _cmp_leaf(operands, operator):
+def _cmp_leaf(operands, operator) -> Any:
     return {
         "kind": "comparison",
         "operator": operator,
@@ -509,6 +523,137 @@ def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
     assert cap["kind"] == "external_check_only", f"real opaque delegated gate must gate, got {cap['kind']}"
     assert not _is_public(cap)
     assert "inline_refine_only_guard" in _basis(cap)
+
+
+# ---------------------------------------------------------------------------
+# Section 3b — the adapter-live flip (Stage 2). Same faithful opaque shape as
+# fixture 1, but with the registry made a recognized Solady role store: the
+# EnumerableRoleStoreAdapter enumerates the controllers, so the outer gate never
+# reaches the :1976 guard and resolves to the concrete multisig.
+# ---------------------------------------------------------------------------
+
+_LIVE_IMPL = "0x" + "3b" * 20
+_LIVE_MULTISIG = "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+_LIVE_ROLE = 1  # OPERATION_MULTISIG_ROLE (Solady uint256 id)
+_ROLE_SET_TOPIC0 = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
+
+
+def _word(value: int) -> str:
+    return "0x" + format(value, "064x")
+
+
+def _addr_word(address: str) -> str:
+    return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def _adapter_live_seed_hook(callee_sig: str):
+    """Make the seeded registry a recognized Solady role store: proxy→impl
+    linkage, one active RoleSet grant to the multisig, and a warm cursor."""
+
+    def _hook(session, registry_addr: str) -> None:
+        from sqlalchemy import func, select
+
+        from db.models import Contract, IndexedEventCursor, IndexedEventLog
+
+        contract = session.execute(
+            select(Contract).where(func.lower(Contract.address) == registry_addr.lower())
+        ).scalar_one()
+        contract.implementation = _LIVE_IMPL
+        contract.is_proxy = True
+        session.add(
+            IndexedEventLog(
+                chain_id=1,
+                event_address=registry_addr.lower(),
+                topic0=_ROLE_SET_TOPIC0.lower(),
+                tx_hash=(1).to_bytes(32, "big"),
+                log_index=0,
+                block_number=100,
+                block_hash=(100).to_bytes(32, "big"),
+                transaction_index=0,
+                topics=[_ROLE_SET_TOPIC0, _addr_word(_LIVE_MULTISIG), _word(_LIVE_ROLE), _word(1)],
+                data_words=[],
+            )
+        )
+        session.add(
+            IndexedEventCursor(
+                chain_id=1,
+                event_address=registry_addr.lower(),
+                topic0=_ROLE_SET_TOPIC0.lower(),
+                last_indexed_block=25_000_000,
+                backfill_complete=True,
+            )
+        )
+
+    return _hook
+
+
+def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) -> None:
+    """Stub the two wires the adapter touches under the full resolver: standard
+    detection (``get_code`` markers on the impl) and the Multicall3 gate probe
+    (``rpc_request``). Any non-probe RPC (e.g. the resolver's head pin) raises so
+    it falls back exactly as under netguard — the offline default."""
+    from eth_abi.abi import decode as abi_decode
+    from eth_abi.abi import encode as abi_encode
+    from eth_utils.crypto import keccak
+
+    import services.resolution.role_store_standards as rss
+    import utils.rpc as _rpc
+
+    marker_code = "0x" + "".join("63" + s.removeprefix("0x") for s in SOLADY_ENUMERABLE_ROLES.marker_selectors)
+
+    def _fake_get_code(rpc_url, address, *, chain_id=None):
+        return marker_code if address.lower() == _LIVE_IMPL.lower() else "0x00"
+
+    monkeypatch.setattr(rss, "get_code", _fake_get_code)
+    monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: None)
+
+    gate_sel = keccak(text=callee_sig).hex()[:8]
+    members_l = {m.lower() for m in members}
+    control_l = _NEGATIVE_CONTROL_ADDR.lower()
+
+    def _stub(rpc_url, method, params=None, **kwargs):
+        to = (params[0].get("to") if params and isinstance(params[0], dict) else None) if method == "eth_call" else None
+        from utils.rpc import MULTICALL3_ADDRESS
+
+        if method != "eth_call" or (to or "").lower() != MULTICALL3_ADDRESS.lower():
+            raise RuntimeError("only the Multicall3 gate probe is stubbed")
+        assert params is not None
+        body = bytes.fromhex(params[0]["data"][10:])
+        calls = abi_decode(["(address,bool,bytes)[]"], body)[0]
+        results: list[tuple[bool, bytes]] = []
+        for _target, _allow, calldata in calls:
+            sel = calldata[:4].hex()
+            addr = "0x" + calldata[4:36][-20:].hex()
+            if sel == gate_sel:
+                ok = False if addr == control_l else (addr in members_l)
+                results.append((ok, b""))
+            else:
+                results.append((False, b""))
+        return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
+
+    monkeypatch.setattr(_rpc, "rpc_request", _stub)
+
+
+def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):
+    """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC
+    §6 Stage 2): the SAME faithful opaque ``onlyOperatingMultisig`` shape as the
+    guard fixture, but the registry is now a recognized Solady role store with
+    indexed grants and stubbed gate probes. The EnumerableRoleStoreAdapter
+    enumerates the controller, so the function resolves ``finite_set([multisig])``
+    — never reaching the guard."""
+    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
+    _install_adapter_live_wire(monkeypatch, "onlyOperatingMultisig(address)", {_LIVE_MULTISIG})
+    cap = _seed_two_hop(
+        session,
+        caller_trees=caller,
+        callee_trees=_opaque_callee_tree("onlyOperatingMultisig(address)"),
+        seed_hook=_adapter_live_seed_hook("onlyOperatingMultisig(address)"),
+    )
+    assert cap["kind"] == "finite_set", f"adapter-live gate must enumerate, got {cap['kind']}"
+    assert cap.get("members") == [_LIVE_MULTISIG.lower()]
+    assert cap.get("membership_quality") == "exact"
+    assert any(step.get("step") == "enumerable_role_store" for step in cap.get("trace") or [])
+    assert "inline_refine_only_guard" not in _basis(cap)
 
 
 def test_fixture3_computed_variant_gates(session, both_flags):
@@ -691,6 +836,169 @@ def test_public_without_root_cofinites_or_with_conditional_is_public():
         ]
     )
     assert _public_without_root_cofinites(or_cap) is True
+
+
+def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
+    """Milestone follow-up (b): OR(root cofinite, conditional_universal) — the
+    counterfactual strips ONLY the root cofinite, leaving the conditional_universal,
+    which is still public. So a laundered allowlist that OR-composes a denylist with
+    an opaque public arm survives the strip → the guard's antecedent holds (True)."""
+    from services.resolution.capabilities import Condition
+
+    or_cap = CapabilityExpr.structural_or(
+        [
+            CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="root"),
+            CapabilityExpr.conditional_universal(Condition(kind="business", description="opaque authority")),
+        ]
+    )
+    assert _public_without_root_cofinites(or_cap) is True
+
+
+# ---------------------------------------------------------------------------
+# Section 6 — transparent role-store variants (milestone follow-up a). Every
+# shape where the account binding SURVIVES the helper/modifier boundary keeps
+# gating exactly as today; none opens. Sources from rolegate-failopen-repro/
+# repro_pr151_B.py + repro_2771.py, alongside the fixture-5 pin above.
+# ---------------------------------------------------------------------------
+
+_TV_EXTERNAL_ROLEREGISTRY = """
+pragma solidity ^0.8.19;
+interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
+contract C {
+    bytes32 public constant OPERATION_MULTISIG_ROLE = keccak256("OP");
+    IRoleRegistry public roleRegistry; uint256 public maxBid; error Unauthorized();
+    function _checkRole(bytes32 role, address account) internal view {
+        if (!roleRegistry.hasRole(role, account)) revert Unauthorized();
+    }
+    function _checkRole(bytes32 role) internal view { _checkRole(role, msg.sender); }
+    function setMaxBidPrice(uint256 x) external { _checkRole(OPERATION_MULTISIG_ROLE); maxBid = x; }
+}
+"""
+
+_TV_EXTERNAL_MSGSENDER_HELPER = """
+pragma solidity ^0.8.19;
+interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
+contract C {
+    bytes32 public constant OPERATION_MULTISIG_ROLE = keccak256("OP");
+    IRoleRegistry public roleRegistry; uint256 public maxBid; error Unauthorized();
+    function _msgSender() internal view returns (address) { return msg.sender; }
+    function _checkRole(bytes32 role, address account) internal view {
+        if (!roleRegistry.hasRole(role, account)) revert Unauthorized();
+    }
+    function _checkRole(bytes32 role) internal view { _checkRole(role, _msgSender()); }
+    function setMaxBidPrice(uint256 x) external { _checkRole(OPERATION_MULTISIG_ROLE); maxBid = x; }
+}
+"""
+
+_TV_MODIFIER_ONLYROLE_LOCAL = """
+pragma solidity ^0.8.19;
+contract AccessControl {
+    mapping(bytes32 => mapping(address => bool)) private _roles;
+    error AccessControlUnauthorizedAccount(address account, bytes32 role);
+    function hasRole(bytes32 role, address account) public view returns (bool) { return _roles[role][account]; }
+    function _checkRole(bytes32 role, address account) internal view {
+        if (!hasRole(role, account)) revert AccessControlUnauthorizedAccount(account, role);
+    }
+    function _checkRole(bytes32 role) internal view { _checkRole(role, _msgSender()); }
+    function _msgSender() internal view virtual returns (address) { return msg.sender; }
+    modifier onlyRole(bytes32 role) { _checkRole(role); _; }
+}
+contract C is AccessControl {
+    bytes32 public constant OPERATION_MULTISIG_ROLE = keccak256("OP"); uint256 public maxBid;
+    function setMaxBidPrice(uint256 x) external onlyRole(OPERATION_MULTISIG_ROLE) { maxBid = x; }
+}
+"""
+
+_TV_ERC2771 = """
+pragma solidity ^0.8.19;
+interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
+contract C {
+    bytes32 public constant OPERATION_MULTISIG_ROLE = keccak256("OP");
+    IRoleRegistry public roleRegistry; address public trustedForwarder; uint256 public maxBid; error Unauthorized();
+    function _msgSender() internal view returns (address signer) {
+        if (msg.sender == trustedForwarder && msg.data.length >= 20) {
+            assembly { signer := shr(96, calldataload(sub(calldatasize(), 20))) }
+        } else { signer = msg.sender; }
+    }
+    function _checkRole(bytes32 role, address account) internal view {
+        if (!roleRegistry.hasRole(role, account)) revert Unauthorized();
+    }
+    function _checkRole(bytes32 role) internal view { _checkRole(role, _msgSender()); }
+    modifier onlyRole(bytes32 role) { _checkRole(role); _; }
+    function setMaxBidPrice(uint256 x) external onlyRole(OPERATION_MULTISIG_ROLE) { maxBid = x; }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "source, expected_kind",
+    [
+        (_TV_EXTERNAL_ROLEREGISTRY, "external_check_only"),
+        (_TV_EXTERNAL_MSGSENDER_HELPER, "external_check_only"),
+        (_TV_MODIFIER_ONLYROLE_LOCAL, "finite_set"),
+        (_TV_ERC2771, "external_check_only"),
+    ],
+    ids=["external_roleregistry", "external_msgSender_helper", "modifier_onlyRole_local", "erc2771"],
+)
+def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expected_kind):
+    """Every transparent variant gates (never ``conditional_universal``/public): the
+    account binding survives the helper/modifier boundary, so the ACL leaf stays
+    caller-tainted and resolves to a non-public shape under both flags."""
+    from services.resolution.capability_resolver import capability_to_dict
+
+    contract = _compile(tmp_path, source, "C")
+    trees = _build_pipeline(contract)
+    cap = evaluate_tree(trees["setMaxBidPrice(uint256)"])
+    assert cap.kind == expected_kind, f"expected {expected_kind}, got {cap.kind}"
+    assert cap.kind != "conditional_universal"
+    assert not project_capability_surface(capability_to_dict(cap)).authority_public
+
+
+# ---------------------------------------------------------------------------
+# Section 7 — two-hop EFFECTFUL permissionless delegation (milestone follow-up
+# c). The guard's ``not is_permissionless_caller_shape`` conjunct must spare a
+# value-movement self-service call at the inline site — the guard never gates it,
+# so the 11 permissionless rows survive under both flags.
+# ---------------------------------------------------------------------------
+
+_CALLER_EFFECTFUL = """
+pragma solidity ^0.8.19;
+interface IReg { function pull(address from, uint256 amt) external returns (bool); }
+contract CallerLike {
+    IReg public registry;
+    uint256 public v;
+    function guarded(uint256 x) external { require(registry.pull(msg.sender, x), "fail"); v = x; }
+}
+"""
+
+_CALLEE_EFFECTFUL = {
+    "pull(address,uint256)": {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "truthy",
+            "authority_role": "business",
+            "operands": [{"source": "computed"}],
+            "references_msg_sender": False,
+            "parameter_indices": [],
+            "expression": "return true",
+            "basis": [],
+        },
+    }
+}
+
+
+def test_two_hop_effectful_permissionless_guard_spares(session, both_flags):
+    """A caller whose gate is an EFFECTFUL delegated ``registry.pull(msg.sender, x)``
+    (value movement) is the ``is_permissionless_caller_shape`` class: the guard's
+    ¬permissionless conjunct means it never appends ``inline_refine_only_guard``.
+    Under earned-public it stays open (conditional_universal); the guard tag is
+    absent under both flags."""
+    caller = _build_pipeline(_compile(_tmp(), _CALLER_EFFECTFUL, "CallerLike"))
+    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_CALLEE_EFFECTFUL)
+    assert "inline_refine_only_guard" not in _basis(cap), "permissionless value movement must not hit the guard"
+    if both_flags == "1":
+        assert _is_public(cap), f"value movement must stay open under earned-public, got {cap['kind']}"
 
 
 # A fresh scratch dir so the many single-file compiles in the two-hop tests

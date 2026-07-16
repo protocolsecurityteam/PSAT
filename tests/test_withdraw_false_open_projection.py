@@ -175,12 +175,12 @@ def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_p
     # checking the helper directly below.
     assert not surface.authority_public
 
-    from services.policy.capability_surface import _is_solmate_provably_empty
+    from services.policy.capability_surface import _is_role_store_provably_empty
 
-    assert not _is_solmate_provably_empty(under_resolved)
+    assert not _is_role_store_provably_empty(under_resolved)
     # Non-finite-set and non-empty Solmate sets are never the provably-nobody gate.
-    assert not _is_solmate_provably_empty({"kind": "external_check_only"})
-    assert not _is_solmate_provably_empty(
+    assert not _is_role_store_provably_empty({"kind": "external_check_only"})
+    assert not _is_role_store_provably_empty(
         {
             "kind": "finite_set",
             "members": ["0x" + "ab" * 20],
@@ -188,7 +188,7 @@ def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_p
             "trace": [{"step": "solmate_roles_authority"}],
         }
     )
-    assert _is_solmate_provably_empty(
+    assert _is_role_store_provably_empty(
         {
             "kind": "finite_set",
             "members": [],
