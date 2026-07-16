@@ -38,7 +38,7 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
-from utils.rpc import encode_address_word, multicall3_aggregate3
+from utils.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from ..role_store_standards import (
@@ -117,7 +117,8 @@ class EnumerableRoleStoreAdapter:
         topic0s = list(standard.topic0s())
         # Cold durable index: no warm cursor yet. Defer (mirror Solmate) so the
         # reconciler re-resolves exactly once the RoleSet backfill reaches head —
-        # a live probe now would freeze a non-self-healing lower bound.
+        # a live probe now would freeze a non-self-healing lower bound. Checked
+        # before pinning a height so a cold index self-heals even without an RPC.
         try:
             cursor_block = min_indexed(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s)
         except Exception:
@@ -125,8 +126,21 @@ class EnumerableRoleStoreAdapter:
         if cursor_block is None:
             return _check_only(authority, callee_selector, ["no_index_cursor"])
 
+        rpc_url = ctx.rpc_url
+        if not rpc_url:
+            return _check_only(authority, callee_selector, ["no_rpc_for_probe"])
+        # Pin ONE height for the fold read, the gate probe, AND the trace frontier so
+        # the enumeration is offline-reproducible and the drift arm (§6 Stage 4) has a
+        # fixed frontier to compare a later indexed row against. The resolver usually
+        # pins the whole pass (ctx.block); an unpinned pass (a transient blocknum-read
+        # failure upstream) re-reads head once here, and a failed read settles to
+        # probe_unavailable rather than reading the three consumers at three heights.
+        pinned_block = _pin_probe_block(ctx, rpc_url)
+        if pinned_block is None:
+            return _check_only(authority, callee_selector, ["probe_unavailable"])
+
         try:
-            rows = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=ctx.block)
+            rows = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=pinned_block)
         except Exception:
             return _check_only(authority, callee_selector, ["event_log_backend_error"])
         if not rows:
@@ -139,16 +153,12 @@ class EnumerableRoleStoreAdapter:
         controller_addrs, role_labels = _registry_controller_context(ctx, authority)
         candidates = sorted(active_holders | controller_addrs)
 
-        rpc_url = ctx.rpc_url
-        if not rpc_url:
-            return _check_only(authority, callee_selector, ["no_rpc_for_probe"])
-
         probe = _probe_gate(
             rpc_url=rpc_url,
             authority=authority,
             callee_selector=callee_selector,
             candidates=candidates,
-            block=ctx.block,
+            block=pinned_block,
             memo=_pass_memo(ctx),
         )
         if probe.transport_failed:
@@ -169,7 +179,7 @@ class EnumerableRoleStoreAdapter:
                 getter=standard.enumerable_getter,
                 roles=_active_roles(rows),
                 fold_holders=active_holders,
-                block=ctx.block,
+                block=pinned_block,
             )
             if mismatch:
                 return _check_only(authority, callee_selector, ["role_fold_getter_mismatch"])
@@ -180,7 +190,12 @@ class EnumerableRoleStoreAdapter:
                 "authority": authority,
                 "standard": standard.name,
                 "callee_selector": callee_selector,
-                "probe_block": ctx.block,
+                "probe_block": pinned_block,
+                # The height the fold covers (the least-advanced backfilled cursor):
+                # the role-drift arm re-resolves when a grant/revoke is later indexed
+                # PAST this frontier. Not probe_block — a grant in (frontier, probe]
+                # would otherwise be missed.
+                "fold_frontier": cursor_block,
                 "candidate_count": len(candidates),
                 "candidates_from_events": sorted(active_holders),
                 "candidates_from_controllers": sorted(controller_addrs),
@@ -450,6 +465,29 @@ def _detect_standard(authority: str, ctx: EvaluationContext) -> RoleStoreStandar
     standard = resolve_standard(code)
     memo[key] = standard
     return standard
+
+
+def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
+    """One concrete height for the whole enumeration. A resolver that already pinned
+    the pass (``ctx.block`` is an int) is honored verbatim; an unpinned pass reads
+    ``eth_blockNumber`` once, memoized per chain in ``live_read_memo`` so a family of
+    gated functions shares the read. ``None`` (a failed read) makes the caller settle
+    to ``probe_unavailable`` — the fail-closed direction (§7.7), never a fold/probe/
+    trace read at three different heights."""
+    if isinstance(ctx.block, int):
+        return ctx.block
+    memo = _pass_memo(ctx)
+    key = ("role_store_pin_block", ctx.chain_id)
+    if key in memo:
+        return memo[key]
+    pinned: int | None = None
+    try:
+        raw = rpc_request(rpc_url, "eth_blockNumber", [])
+        pinned = int(raw, 16) if isinstance(raw, str) else None
+    except Exception:
+        pinned = None
+    memo[key] = pinned
+    return pinned
 
 
 def _pass_memo(ctx: EvaluationContext) -> dict[Any, Any]:

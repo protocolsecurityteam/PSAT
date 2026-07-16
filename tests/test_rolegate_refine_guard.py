@@ -612,6 +612,11 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     control_l = _NEGATIVE_CONTROL_ADDR.lower()
 
     def _stub(rpc_url, method, params=None, **kwargs):
+        # The adapter's pin-once (§A1) reads one eth_blockNumber when the resolver
+        # left the pass height unpinned (netguard blocks its head read). Answer with
+        # a height above the seeded grant so the fold + probe pin to it.
+        if method == "eth_blockNumber":
+            return hex(25_000_000)
         to = (params[0].get("to") if params and isinstance(params[0], dict) else None) if method == "eth_call" else None
         from utils.rpc import MULTICALL3_ADDRESS
 
@@ -631,7 +636,12 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
                 results.append((False, b""))
         return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
 
+    # Patch the adapter's imported reference too, so its pin-once eth_blockNumber
+    # read reaches the stub (the adapter did ``from utils.rpc import rpc_request``).
+    import services.resolution.adapters.enumerable_role_store as _ers
+
     monkeypatch.setattr(_rpc, "rpc_request", _stub)
+    monkeypatch.setattr(_ers, "rpc_request", _stub)
 
 
 def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):

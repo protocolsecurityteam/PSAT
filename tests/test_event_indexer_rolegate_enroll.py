@@ -93,13 +93,13 @@ def test_rejects_non_external_set():
 def test_topic0s_uses_detected_standard(monkeypatch):
     monkeypatch.setattr(eli, "resolve_probe_code", lambda *a, **k: "0xdeadbeef")
     monkeypatch.setattr(eli, "detect_standards", lambda code: [SOLADY_ENUMERABLE_ROLES])
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1) == [_ROLE_SET]
+    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == [_ROLE_SET]
 
 
 def test_topic0s_unions_when_inconclusive(monkeypatch):
     monkeypatch.setattr(eli, "resolve_probe_code", lambda *a, **k: "0x00")
     monkeypatch.setattr(eli, "detect_standards", lambda code: [])
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1) == all_topic0s()
+    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == all_topic0s()
 
 
 def test_topic0s_unions_when_probe_raises(monkeypatch):
@@ -107,7 +107,25 @@ def test_topic0s_unions_when_probe_raises(monkeypatch):
         raise RuntimeError("wire down")
 
     monkeypatch.setattr(eli, "resolve_probe_code", _boom)
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1) == all_topic0s()
+    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == all_topic0s()
+
+
+def test_topic0s_cache_dedups_detection(monkeypatch):
+    # The pass-scoped cache makes a repeated authority reuse the first detection —
+    # one resolve_probe_code (one eth_getCode) for a whole registry family.
+    calls = {"n": 0}
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return "0xdeadbeef"
+
+    monkeypatch.setattr(eli, "resolve_probe_code", _counting)
+    monkeypatch.setattr(eli, "detect_standards", lambda code: [SOLADY_ENUMERABLE_ROLES])
+    cache: dict[str, list[str]] = {}
+    first = eli._role_store_topic0s(cast(Any, None), _PROXY, 1, cache)
+    second = eli._role_store_topic0s(cast(Any, None), _PROXY, 1, cache)
+    assert first == second == [_ROLE_SET]
+    assert calls["n"] == 1
 
 
 # --- integration: enroll_from_completed_jobs -------------------------------
@@ -321,9 +339,7 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
     contract = Contract(address=_PROTECTED, job_id=job.id, chain="ethereum")
     session.add(contract)
     session.flush()
-    session.add(
-        ControllerValue(contract_id=contract.id, controller_id="state_variable:roleRegistry", value=_PROXY)
-    )
+    session.add(ControllerValue(contract_id=contract.id, controller_id="state_variable:roleRegistry", value=_PROXY))
     session.commit()
 
     enroll_from_completed_jobs(session, chain_id=1)
@@ -333,6 +349,81 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
         .where(func.lower(IndexedEventCursor.topic0) == _ROLE_SET)
     ).first()
     assert row is not None and row[0] == deploy - 1
+
+
+def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
+    from db.models import Job, JobStage, JobStatus
+    from db.queue import store_artifact
+
+    job = Job(
+        address=_PROTECTED,
+        request={"address": _PROTECTED, "name": "GatedContract"},
+        status=JobStatus.completed,
+        stage=JobStage.done,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(job)
+    session.flush()
+    trees = {f"fn{i}()": {"op": "LEAF", "leaf": {"set_descriptor": d}} for i, d in enumerate(descriptors)}
+    store_artifact(session, job.id, "predicate_trees", data={"trees": trees})
+    session.commit()
+    return job
+
+
+@requires_postgres
+def test_shared_authority_detects_standard_once(session, monkeypatch):
+    # A2/F1: N delegated gates sharing one authority proxy → exactly one
+    # resolve_probe_code (one eth_getCode family cost), not one per descriptor.
+    from db.models import Contract
+
+    _seed_creation_block(monkeypatch, 22_039_954)
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
+    session.commit()
+
+    calls = {"n": 0}
+    real = eli.resolve_probe_code
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(eli, "resolve_probe_code", _counting)
+
+    gate_a = _gate_descriptor()
+    gate_b = _gate_descriptor()
+    gate_b["callee_signature"] = "onlyOperatingTimelock(address)"  # distinct gate, same authority
+    _completed_job_with_two_gates(session, [gate_a, gate_b])
+
+    enroll_from_completed_jobs(session, chain_id=1)
+    assert calls["n"] == 1
+
+
+@requires_postgres
+def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
+    # A2/F1: once the authority has a role-store cursor, a later pass skips
+    # detection entirely — zero eth_getCode for the whole 250-gate steady state.
+    from db.models import Contract
+
+    _seed_creation_block(monkeypatch, 22_039_954)
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
+    session.commit()
+    _completed_job_with_gate(session, _gate_descriptor())
+
+    enroll_from_completed_jobs(session, chain_id=1)  # first pass seeds the cursor
+
+    calls = {"n": 0}
+    real = eli.resolve_probe_code
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(eli, "resolve_probe_code", _counting)
+    enroll_from_completed_jobs(session, chain_id=1)  # cursor present → skip detection
+    assert calls["n"] == 0
 
 
 @requires_postgres

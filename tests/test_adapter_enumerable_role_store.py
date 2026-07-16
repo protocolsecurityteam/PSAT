@@ -25,6 +25,7 @@ from eth_utils.crypto import keccak
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import services.resolution.role_store_standards as rss  # noqa: E402
+from services.policy.capability_surface import project_capability_surface  # noqa: E402
 from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402
 from services.resolution.adapters.enumerable_role_store import (  # noqa: E402
     _NEGATIVE_CONTROL_ADDR,
@@ -32,6 +33,7 @@ from services.resolution.adapters.enumerable_role_store import (  # noqa: E402
 )
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
 from services.resolution.adapters.solmate_roles import SolmateRolesAuthorityAdapter  # noqa: E402
+from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
 from services.resolution.role_store_standards import (  # noqa: E402
     OZ_ACCESS_CONTROL_ENUMERABLE,
@@ -206,6 +208,8 @@ def _install_probe_stub(
     control_passes: bool = False,
     transport_fail: bool = False,
     getter_holders: dict[int, list[str]] | None = None,
+    head_block: int = _CURSOR_BLOCK,
+    blocknumber_fail: bool = False,
 ) -> None:
     gate_sel = keccak(text=_CALLEE_SIG).hex()[:8]
     getter = SOLADY_ENUMERABLE_ROLES.enumerable_getter
@@ -216,6 +220,11 @@ def _install_probe_stub(
     control_l = _NEGATIVE_CONTROL_ADDR.lower()
 
     def _stub(rpc_url, method, params=None, **kwargs):
+        if method == "eth_blockNumber":
+            # Pin-once height read for the ctx.block-None path (§A1).
+            if blocknumber_fail:
+                raise RuntimeError("stubbed eth_blockNumber failure")
+            return hex(head_block)
         if transport_fail:
             raise RuntimeError("stubbed transport failure")
         assert method == "eth_call"
@@ -249,10 +258,13 @@ def _install_probe_stub(
         return "0x" + encoded.hex()
 
     # Patch the wire only: the real ``multicall3_aggregate3`` (its aggregate3
-    # encode/decode) runs against this stubbed ``rpc_request``.
+    # encode/decode) runs against this stubbed ``rpc_request``. Patch the adapter's
+    # imported reference too so the pin-once eth_blockNumber read is stubbed.
+    import services.resolution.adapters.enumerable_role_store as _ers
     import utils.rpc as _rpc
 
     monkeypatch.setattr(_rpc, "rpc_request", _stub)
+    monkeypatch.setattr(_ers, "rpc_request", _stub)
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +372,73 @@ def test_warm_fold_probe_returns_finite_set(session, monkeypatch, both_flags):
     assert cap.membership_quality == "exact"
     assert cap.last_indexed_block == _CURSOR_BLOCK
     assert any(step.get("step") == "enumerable_role_store" for step in cap.trace)
+
+
+@requires_postgres
+def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both_flags):
+    # Unpinned pass (ctx.block None): the adapter reads ONE eth_blockNumber height
+    # and uses it for the fold read + probe + trace, so the enumeration still lands.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG}, head_block=_CURSOR_BLOCK)
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=None))
+    assert cap.kind == "finite_set"
+    assert cap.members == [_MULTISIG.lower()]
+    step = next(s for s in cap.trace if s.get("step") == "enumerable_role_store")
+    assert step["probe_block"] == _CURSOR_BLOCK
+
+
+@requires_postgres
+def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeypatch, both_flags):
+    # Unpinned pass AND the height read fails → probe_unavailable (fail-closed),
+    # never a fold/probe/trace read at three different (or unpinned) heights.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG}, blocknumber_fail=True)
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=None))
+    assert cap.kind == "external_check_only"
+    assert _extra(cap).get("basis") == ["probe_unavailable"]
+    assert "deferred_pending_index" not in _extra(cap)
+
+
+@requires_postgres
+def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
+    # The drift arm (§Stage 4) keys on fold_frontier == the folded cursor height.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG})
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
+    step = next(s for s in cap.trace if s.get("step") == "enumerable_role_store")
+    assert step["fold_frontier"] == _CURSOR_BLOCK
+
+
+@requires_postgres
+def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
+    # Spec §4 acceptance: the enumerated controllers render principal_type="controller"
+    # THROUGH project_capability_surface, carrying the trace for auditability.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG})
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
+    surface = project_capability_surface(capability_to_dict(cap))
+    assert [r["address"] for r in surface.principal_rows] == [_MULTISIG.lower()]
+    assert all(r["principal_type"] == "controller" for r in surface.principal_rows)
 
 
 @requires_postgres

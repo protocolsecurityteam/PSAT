@@ -121,11 +121,34 @@ def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
     return any(isinstance(k, dict) and k.get("source") in _CALLER_SOURCES for k in keys)
 
 
-def _role_store_topic0s(session: Session, authority: str, chain_id: int) -> list[str]:
+_ALL_ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
+
+
+def _authority_has_role_store_cursor(session: Session, chain_id: int, authority: str) -> bool:
+    """True iff a role-store grant/revoke cursor is already enrolled for
+    ``authority``. When it is, standard detection — an ``eth_getCode`` per gate
+    descriptor, ~250/pass at steady state on the paid RPC — can be skipped
+    entirely: the cursor exists and ``enroll_event_cursor`` would only no-op."""
+    row = session.execute(
+        select(IndexedEventCursor.event_address)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == authority.lower())
+        .where(IndexedEventCursor.topic0.in_(_ALL_ROLE_STORE_TOPIC0S))
+        .limit(1)
+    ).first()
+    return row is not None
+
+
+def _role_store_topic0s(session: Session, authority: str, chain_id: int, cache: dict[str, list[str]]) -> list[str]:
     """The grant/revoke topic0s to enroll at ``authority``. Detect the standard
     from the impl bytecode behind the registry proxy; when detection is
     inconclusive, enroll the UNION of all standards' topic0s — over-enrollment is
-    a cheap empty scan window, a missed cursor kills the recall path."""
+    a cheap empty scan window, a missed cursor kills the recall path. Memoized
+    per authority within a pass (mirrors ``seed_cache``) so the ~92 functions of a
+    single registry family share one ``resolve_probe_code`` (one ``eth_getCode``)."""
+    key = authority.lower()
+    if key in cache:
+        return cache[key]
     try:
         code = resolve_probe_code(session, authority, chain_id)
     except Exception:
@@ -135,8 +158,11 @@ def _role_store_topic0s(session: Session, authority: str, chain_id: int) -> list
         topics: set[str] = set()
         for standard in detected:
             topics.update(standard.topic0s())
-        return sorted(topics)
-    return all_topic0s()
+        result = sorted(topics)
+    else:
+        result = all_topic0s()
+    cache[key] = result
+    return result
 
 
 class LogFetcher(Protocol):
@@ -577,6 +603,7 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
     ).scalars()
     inserted = 0
     seed_cache: dict[str, int | None] = {}
+    role_store_topic_cache: dict[str, list[str]] = {}
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
@@ -626,10 +653,12 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 # nothing. Skip if the authority isn't resolved yet; a later pass
                 # enrolls it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if _is_enrollable_event_address(authority):
+                if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
+                    session, chain_id, authority
+                ):
                     start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
                     if start_block is not None:
-                        for topic0 in _role_store_topic0s(session, authority, chain_id):
+                        for topic0 in _role_store_topic0s(session, authority, chain_id, role_store_topic_cache):
                             if enroll_event_cursor(
                                 session,
                                 chain_id=chain_id,
