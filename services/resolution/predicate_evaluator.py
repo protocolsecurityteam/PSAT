@@ -54,6 +54,7 @@ from .permissionless_shapes import (
     earned_public_enabled,
     is_caller_keyed_membership_allowlist,
     is_caller_keyed_time_allowlist,
+    is_caller_keyed_time_denylist,
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
@@ -429,6 +430,19 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                         "expression": leaf.get("expression"),
                     },
                 )
+            )
+        if leaf_is_caller_tainted(leaf) and is_caller_keyed_time_denylist(leaf):
+            # Deny-by-exception: a caller-keyed time denylist proceeds for the
+            # unset/expired caller, so it is public modulo a finite, time-bounded
+            # exclusion — a cofinite, not a bare open. Emitting it as a
+            # root-subject cofinite is what lets the refine-only inline guard's
+            # counterfactual distinguish it from a laundered allowlist and spare
+            # it (leave it public) instead of gating it.
+            return CapabilityExpr.cofinite_blacklist(
+                [],
+                blacklist_quality="lower_bound",
+                conditions=[_condition_from_leaf(leaf)],
+                subject="root",
             )
         cond = _condition_from_leaf(leaf)
         return CapabilityExpr.conditional_universal(cond)
@@ -1973,7 +1987,53 @@ def _maybe_inline_cross_contract_call(
         # returned non-None and pre-empted that adapter for every Solmate-protected
         # contract analyzed alongside its RolesAuthority, so the adapter never ran.
         return None
+    if (
+        leaf.get("operator") == "truthy"
+        and leaf_is_caller_tainted(leaf)
+        and not is_permissionless_caller_shape(leaf)
+        and _public_without_root_cofinites(resolved)
+    ):
+        # Refine-only invariant: un-inlined, this caller-tainted delegated gate
+        # fails closed; an inline result that projects public would un-gate it,
+        # so keep the outer delegated check. A public verdict that survives
+        # removing root-subject cofinites is a laundered allowlist, not a
+        # legitimate deny-by-exception denylist — only the former fires here.
+        cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+        if cap.check is not None:
+            extra = dict(cap.check.extra or {})
+            basis = list(extra.get("basis") or [])
+            if "inline_refine_only_guard" not in basis:
+                basis.append("inline_refine_only_guard")
+            extra["basis"] = basis
+            cap = replace(cap, check=replace(cap.check, extra=extra))
+        return cap
     return resolved
+
+
+def _public_without_root_cofinites(cap: CapabilityExpr) -> bool:
+    """Would the resolved capability's projected writer surface be public with
+    every root-subject ``cofinite_blacklist`` node counterfactually removed?
+
+    A cofinite can only arise from a ``negate()`` exclusion arm (which needs
+    falsy polarity — impossible on the guard's truthy path) or the
+    deny-by-exception emission (which needs surviving caller taint plus a
+    proven proceed-relation). Neither is a laundered un-gated allowlist, so a
+    surface that is public ONLY because of a cofinite is legitimately public
+    and must be spared; public via any other kind (a taint-lost opaque leaf
+    folding to ``conditional_universal``) is the fail-open the guard closes."""
+    from services.policy.capability_surface import project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+
+    def strip(node: dict[str, Any]) -> dict[str, Any]:
+        if node.get("kind") == "cofinite_blacklist" and node.get("subject", "root") == "root":
+            return {"kind": "unsupported", "unsupported_reason": "cofinite_counterfactual", "confidence": "check_only"}
+        children = node.get("children")
+        if isinstance(children, list):
+            node = {**node, "children": [strip(c) if isinstance(c, dict) else c for c in children]}
+        return node
+
+    counterfactual = strip(capability_to_dict(cap))
+    return project_capability_surface(counterfactual).authority_public
 
 
 def _inline_result_needs_materialization(cap: CapabilityExpr) -> bool:
