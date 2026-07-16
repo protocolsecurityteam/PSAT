@@ -486,9 +486,7 @@ def _stub_role_store_wire(monkeypatch):
     # The scan-floor's Etherscan creation-block lookup is keyless-silent in CI but
     # dials out when a local .env carries an API key. None is the documented
     # "lookup failed -> cursor/defer" path, identical to the keyless behaviour.
-    monkeypatch.setattr(
-        "services.resolution.creation_block_floor.get_contract_creation_block", lambda *a, **k: None
-    )
+    monkeypatch.setattr("services.resolution.creation_block_floor.get_contract_creation_block", lambda *a, **k: None)
 
 
 class SessionFactory:
