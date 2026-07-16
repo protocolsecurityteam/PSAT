@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import urlparse
 
@@ -13,7 +14,7 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
-from utils.chains import chain_name_to_id_map
+from utils.chains import chain_by_id, chain_name_to_id_map
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -373,6 +374,34 @@ def require_rpc_url(
             "hosted reads through eRPC; ETH_RPC is no longer consulted."
         )
     return url
+
+
+@dataclass(frozen=True)
+class ChainContext:
+    """A chain id and the RPC URL resolved for it, bound together (invariant 7 of
+    ``MULTICHAIN_INVARIANTS.md``).
+
+    Construct only via :func:`chain_context` — threading one object instead of
+    two loose values is what keeps a caller from pairing chain A's id with
+    chain B's URL (the two are resolved from independent sources today and can
+    disagree silently).
+    """
+
+    chain_id: int
+    rpc_url: str
+
+
+def chain_context(chain_id: int, *, explicit_rpc_url: str | None = None) -> ChainContext:
+    """Build a :class:`ChainContext` for a registered chain.
+
+    Registry-backed: *chain_id* must resolve via :func:`utils.chains.chain_by_id`
+    (raises ``UnknownChainError`` otherwise) and the URL comes from
+    :func:`require_rpc_url` — eRPC for hosted reads, with a local (Anvil/test)
+    *explicit_rpc_url* allowed to win exactly as it does everywhere else.
+    """
+    info = chain_by_id(chain_id)
+    url = require_rpc_url(explicit_rpc_url=explicit_rpc_url, chain_id=info.chain_id)
+    return ChainContext(chain_id=info.chain_id, rpc_url=url)
 
 
 def _is_configured_erpc_url(rpc_url: str) -> bool:
