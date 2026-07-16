@@ -164,7 +164,7 @@ def test_find_dynamic_dependencies_aggregates_graph(monkeypatch):
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
-        lambda _address, limit=0, start_block=0: [
+        lambda _address, limit=0, start_block=0, chain_id=1: [
             {
                 "hash": tx1,
                 "to": target,
@@ -232,7 +232,7 @@ def test_find_dynamic_dependencies_filters_precompiles_and_eoas(monkeypatch):
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
-        lambda _addr, limit=0, start_block=0: [
+        lambda _addr, limit=0, start_block=0, chain_id=1: [
             {"hash": tx1, "to": target, "isError": "0", "blockNumber": "10", "input": "0xaa"},
         ],
     )
@@ -269,7 +269,7 @@ def test_find_dynamic_dependencies_continues_on_single_trace_failure(monkeypatch
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
-        lambda _address, limit=0, start_block=0: [
+        lambda _address, limit=0, start_block=0, chain_id=1: [
             {
                 "hash": tx1,
                 "to": target,
@@ -313,7 +313,7 @@ def test_find_dynamic_dependencies_raises_if_all_traces_fail(monkeypatch):
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
-        lambda _address, limit=0, start_block=0: [
+        lambda _address, limit=0, start_block=0, chain_id=1: [
             {
                 "hash": "0xtx1",
                 "to": target,
@@ -491,7 +491,7 @@ def test_proxy_address_fetches_txs_from_proxy_and_rewrites_edges(monkeypatch):
 
     fetch_addresses = []
 
-    def fake_fetch_txs(address, limit=0, start_block=0):
+    def fake_fetch_txs(address, limit=0, start_block=0, chain_id=1):
         fetch_addresses.append(address)
         return [
             {"hash": tx1, "to": proxy, "isError": "0", "blockNumber": "10", "input": "0xdeadbeef"},
@@ -629,7 +629,7 @@ def _trace_parity_helper(monkeypatch, fanout: str):
     monkeypatch.setattr(
         ddc,
         "fetch_contract_transactions",
-        lambda _addr, limit=0, start_block=0: [
+        lambda _addr, limit=0, start_block=0, chain_id=1: [
             {
                 "hash": tx_hashes[i],
                 "to": target,
@@ -670,3 +670,53 @@ def test_find_dynamic_dependencies_parity_parallel_vs_sequential(monkeypatch):
     # is meaningful.
     assert seq["dependency_graph"] == par["dependency_graph"]
     assert seq["transactions_analyzed"] == par["transactions_analyzed"]
+
+
+# ---------------------------------------------------------------------------
+# Multichain (M1.1): chain_id threading to Etherscan tx calls
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_contract_transactions_threads_chain_id(monkeypatch):
+    """A non-mainnet chain_id reaches both the txlist and txlistinternal calls."""
+    seen_chain_ids = []
+
+    def fake_etherscan_get(_module, _action, **kwargs):
+        seen_chain_ids.append(kwargs.get("chain_id"))
+        return {"result": []}
+
+    monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
+    ddc.fetch_contract_transactions("0x1", chain_id=8453)
+    # txlist + txlistinternal, both stamped with the Base chain id.
+    assert seen_chain_ids == [8453, 8453]
+
+
+def test_fetch_contract_transactions_defaults_to_mainnet(monkeypatch):
+    """Absent an explicit chain_id, calls carry chain_id=1 (mainnet unchanged)."""
+    seen_chain_ids = []
+
+    def fake_etherscan_get(_module, _action, **kwargs):
+        seen_chain_ids.append(kwargs.get("chain_id"))
+        return {"result": []}
+
+    monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
+    ddc.fetch_contract_transactions("0x1")
+    assert seen_chain_ids == [1, 1]
+
+
+def test_find_dynamic_dependencies_threads_chain_id_to_fetch(monkeypatch):
+    """find_dynamic_dependencies passes its chain_id down to the tx fetch."""
+    captured = {}
+
+    def fake_fetch(address, limit=30, start_block=0, chain_id=1):
+        captured["chain_id"] = chain_id
+        return []
+
+    monkeypatch.setattr(ddc, "fetch_contract_transactions", fake_fetch)
+    # Trace RPC is a separate (M1.2) concern — stub it so no network is touched.
+    monkeypatch.setattr(ddc, "resolve_trace_rpc", lambda url=None: "https://rpc.example")
+
+    with pytest.raises(ddc.NoNewTransactionsError):
+        ddc.find_dynamic_dependencies("0x" + "11" * 20, tx_limit=1, chain_id=8453)
+
+    assert captured["chain_id"] == 8453

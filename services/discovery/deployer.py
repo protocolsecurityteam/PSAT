@@ -52,6 +52,7 @@ def _batch_get_creators(
     addresses: list[str],
     batch_size: int = 5,
     debug: bool = False,
+    chain_id: int = 1,
 ) -> dict[str, str]:
     """Look up contract creators in batches.
 
@@ -64,6 +65,7 @@ def _batch_get_creators(
             data = etherscan.get(
                 "contract",
                 "getcontractcreation",
+                chain_id=chain_id,
                 contractaddresses=",".join(batch),
             )
             for item in data.get("result", []):
@@ -76,12 +78,13 @@ def _batch_get_creators(
     return creators
 
 
-def _get_deployed_contracts(deployer: str, debug: bool = False) -> list[str]:
+def _get_deployed_contracts(deployer: str, debug: bool = False, chain_id: int = 1) -> list[str]:
     """Return all contract addresses created by *deployer* via ``txlist``."""
     try:
         data = etherscan.get(
             "account",
             "txlist",
+            chain_id=chain_id,
             address=deployer,
             startblock="0",
             endblock="99999999",
@@ -181,6 +184,7 @@ def expand_from_deployers(
     min_seed_count: int = _MIN_SEED_COUNT,
     min_seed_share: float = _MIN_SEED_SHARE,
     debug: bool = False,
+    chain_id: int = 1,
 ) -> list[dict[str, Any]]:
     """Discover additional contracts by tracing deployer wallets.
 
@@ -201,7 +205,7 @@ def expand_from_deployers(
     _debug_log(debug, f"Deployer expansion: {len(normalized_seeds)} seed address(es)")
 
     # Step 1 — find deployer wallets
-    creators = _batch_get_creators(normalized_seeds, debug=debug)
+    creators = _batch_get_creators(normalized_seeds, debug=debug, chain_id=chain_id)
     if not creators:
         _debug_log(debug, "No deployer wallets identified")
         return []
@@ -226,7 +230,7 @@ def expand_from_deployers(
     seed_set = set(normalized_seeds)
     all_deployed: dict[str, set[str]] = {}  # address → deployers that created it
     for deployer in qualified_deployers:
-        deployed = _get_deployed_contracts(deployer, debug=debug)
+        deployed = _get_deployed_contracts(deployer, debug=debug, chain_id=chain_id)
         for addr in deployed:
             all_deployed.setdefault(addr, set()).add(deployer)
 
@@ -235,7 +239,9 @@ def expand_from_deployers(
         f"Qualified deployers created {len(all_deployed)} total contract(s), {len(all_deployed.keys() - seed_set)} new",
     )
 
-    # Step 4 — name resolution for new addresses
+    # Step 4 — name resolution for new addresses. Name lookups route through
+    # the shared ``get_contract_name`` wrapper, which carries no chain param
+    # yet, so names resolve on mainnet only until that wrapper gains one.
     new_addresses = sorted(all_deployed.keys() - seed_set)
     names: dict[str, str] = {}
     if resolve_names and new_addresses:
