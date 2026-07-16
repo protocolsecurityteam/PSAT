@@ -486,7 +486,7 @@ def test_benchmark_high_impact_endpoints(seeded, api_client, db_session, monkeyp
     # benchmark measures DB cost only.
     from services.aggregations import contract_audit_timeline as _cat
 
-    monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs: {a.lower(): None for a in addrs})
+    monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs, chain_id=1: {a.lower(): None for a in addrs})
 
     results: list[dict] = []
 
@@ -598,7 +598,7 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
     """Every hot endpoint must stay under its query budget."""
     from services.aggregations import contract_audit_timeline as _cat
 
-    monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs: {a.lower(): None for a in addrs})
+    monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs, chain_id=1: {a.lower(): None for a in addrs})
 
     sample_run = "perf_000"
     proxy_contract_id = seeded["proxy_contract_id"]

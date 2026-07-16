@@ -22,6 +22,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -45,6 +46,12 @@ _BASE = 8453
 _BASE_HYPERSYNC = "https://base.hypersync.xyz"
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
+
+
+def _url(fetcher: object) -> str:
+    """rpc_url of a concrete Rpc*Fetcher; the fetcher maps are typed by Protocol,
+    which deliberately doesn't carry the attribute."""
+    return cast(Any, fetcher).rpc_url
 
 
 def _can_connect() -> bool:
@@ -84,9 +91,9 @@ def test_build_fetchers_mainnet_uses_indexer_rpc_override(monkeypatch):
     # Registry ships every non-mainnet chain with hypersync_url=None, so only
     # chain 1 is covered today — and it takes the dedicated-lane override.
     assert set(fetchers) == {1}
-    assert fetchers[1].rpc_url == "http://127.0.0.1:8545"
-    assert head_fetchers[1].rpc_url == "http://127.0.0.1:8545"
-    assert block_hash_fetchers[1].rpc_url == "http://127.0.0.1:8545"
+    assert _url(fetchers[1]) == "http://127.0.0.1:8545"
+    assert _url(head_fetchers[1]) == "http://127.0.0.1:8545"
+    assert _url(block_hash_fetchers[1]) == "http://127.0.0.1:8545"
 
 
 def test_build_fetchers_mainnet_falls_back_to_erpc(monkeypatch):
@@ -94,7 +101,7 @@ def test_build_fetchers_mainnet_falls_back_to_erpc(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     fetchers, _, _ = _build_indexer_fetchers()
     # No override → the registry-backed eRPC route for chain 1, unchanged.
-    assert fetchers[1].rpc_url == "https://erpc.example/main/evm/1"
+    assert _url(fetchers[1]) == "https://erpc.example/main/evm/1"
 
 
 def test_build_fetchers_second_chain_uses_registry_hypersync_url(monkeypatch):
@@ -103,10 +110,10 @@ def test_build_fetchers_second_chain_uses_registry_hypersync_url(monkeypatch):
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(chains=chains)
     # Mainnet keeps its lane; Base reads its registry hypersync_url — NOT the
     # mainnet override, NOT eRPC.
-    assert fetchers[1].rpc_url == "http://127.0.0.1:8545"
-    assert fetchers[_BASE].rpc_url == _BASE_HYPERSYNC
-    assert head_fetchers[_BASE].rpc_url == _BASE_HYPERSYNC
-    assert block_hash_fetchers[_BASE].rpc_url == _BASE_HYPERSYNC
+    assert _url(fetchers[1]) == "http://127.0.0.1:8545"
+    assert _url(fetchers[_BASE]) == _BASE_HYPERSYNC
+    assert _url(head_fetchers[_BASE]) == _BASE_HYPERSYNC
+    assert _url(block_hash_fetchers[_BASE]) == _BASE_HYPERSYNC
 
 
 def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):

@@ -14,9 +14,17 @@ import os
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
+
+def _row(**attrs: Any) -> Any:
+    """SimpleNamespace stand-in for a Job/Contract row, typed Any so call sites
+    annotated with the ORM types accept it."""
+    return SimpleNamespace(**attrs)
+
 
 _BASE_ID = 8453
 _BASE_URL_SUFFIX = "/main/evm/8453"
@@ -157,28 +165,28 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
 def test_resolution_worker_chain_id_for_job_column_and_derived():
     from workers.resolution_worker import _chain_id_for_job
 
-    assert _chain_id_for_job(SimpleNamespace(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
+    assert _chain_id_for_job(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
     # No column → derive from request chain.
-    assert _chain_id_for_job(SimpleNamespace(request={"chain": "base"}, address="0x1")) == _BASE_ID
-    assert _chain_id_for_job(SimpleNamespace(request={"chain": "ethereum"}, address="0x1")) == 1
+    assert _chain_id_for_job(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
+    assert _chain_id_for_job(_row(request={"chain": "ethereum"}, address="0x1")) == 1
 
 
 def test_policy_worker_chain_helpers_base():
     from workers.policy_worker import _chain_id_for_job, _chain_name_for_job
 
-    job = SimpleNamespace(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
+    job = _row(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
     assert _chain_id_for_job(job) == _BASE_ID
     assert _chain_name_for_job(job) == "base"
-    mainnet = SimpleNamespace(request={"chain": "ethereum"}, address="0x1")
+    mainnet = _row(request={"chain": "ethereum"}, address="0x1")
     assert _chain_name_for_job(mainnet) == "ethereum"
 
 
 def test_static_worker_parent_chain_name_never_none():
     from workers.static_worker import _parent_chain_name
 
-    assert _parent_chain_name(SimpleNamespace(chain_id=_BASE_ID, request={}, address="0x1")) == "base"
+    assert _parent_chain_name(_row(chain_id=_BASE_ID, request={}, address="0x1")) == "base"
     # Chain-less parent still resolves to a concrete name (mainnet), never None.
-    assert _parent_chain_name(SimpleNamespace(request={}, address="0x1")) == "ethereum"
+    assert _parent_chain_name(_row(request={}, address="0x1")) == "ethereum"
 
 
 def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
@@ -205,8 +213,8 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
 
     worker = ResolutionWorker()
     session = MagicMock()
-    job = SimpleNamespace(id="job-1", address="0x" + "11" * 20, request={"chain": "base"})
-    contract_row = SimpleNamespace(id=7)
+    job = _row(id="job-1", address="0x" + "11" * 20, request={"chain": "base"})
+    contract_row = _row(id=7)
 
     worker._fetch_balances(session, job, contract_row, chain_id=_BASE_ID)
 
@@ -255,8 +263,8 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
 def test_job_matches_contract_chain_cross_chain():
     from services.aggregations.company_overview import _job_matches_contract_chain
 
-    base_job = SimpleNamespace(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
-    mainnet_job = SimpleNamespace(chain_id=1, request={"chain": "ethereum"}, address="0x1")
+    base_job = _row(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
+    mainnet_job = _row(chain_id=1, request={"chain": "ethereum"}, address="0x1")
 
     assert _job_matches_contract_chain(base_job, "base") is True
     assert _job_matches_contract_chain(base_job, "ethereum") is False

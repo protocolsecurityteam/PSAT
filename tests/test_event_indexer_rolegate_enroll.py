@@ -121,7 +121,7 @@ def test_topic0s_cache_dedups_detection(monkeypatch):
 
     monkeypatch.setattr(eli, "resolve_probe_code", _counting)
     monkeypatch.setattr(eli, "detect_standards", lambda code: [SOLADY_ENUMERABLE_ROLES])
-    cache: dict[str, list[str]] = {}
+    cache: dict[tuple[int, str], list[str]] = {}
     first = eli._role_store_topic0s(cast(Any, None), _PROXY, 1, cache)
     second = eli._role_store_topic0s(cast(Any, None), _PROXY, 1, cache)
     assert first == second == [_ROLE_SET]
