@@ -20,6 +20,7 @@ from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
+from utils.chains import ChainInfo, UnknownChainError, all_chains, chain_by_id, supported_chain_ids
 from utils.etherscan import get_contract_creation_block
 from utils.logging import configure_logging, log_timed_phase
 from utils.rpc import require_rpc_url
@@ -139,14 +140,17 @@ def _authority_has_role_store_cursor(session: Session, chain_id: int, authority:
     return row is not None
 
 
-def _role_store_topic0s(session: Session, authority: str, chain_id: int, cache: dict[str, list[str]]) -> list[str]:
+def _role_store_topic0s(
+    session: Session, authority: str, chain_id: int, cache: dict[tuple[int, str], list[str]]
+) -> list[str]:
     """The grant/revoke topic0s to enroll at ``authority``. Detect the standard
     from the impl bytecode behind the registry proxy; when detection is
     inconclusive, enroll the UNION of all standards' topic0s — over-enrollment is
-    a cheap empty scan window, a missed cursor kills the recall path. Memoized
-    per authority within a pass (mirrors ``seed_cache``) so the ~92 functions of a
-    single registry family share one ``resolve_probe_code`` (one ``eth_getCode``)."""
-    key = authority.lower()
+    a cheap empty scan window, a missed cursor kills the recall path. Memoized per
+    ``(chain_id, authority)`` within a pass (mirrors ``seed_cache``) so the ~92
+    functions of a single registry family share one ``resolve_probe_code`` (one
+    ``eth_getCode``) — keyed by chain since the impl bytecode is per-chain."""
+    key = (chain_id, authority.lower())
     if key in cache:
         return cache[key]
     try:
@@ -475,6 +479,11 @@ def scan_enrolled_events(
     # the per-window hot path.
     targets: dict[int, int] = {}
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
+    # Chains whose cursors were skipped this pass for lack of a fetcher — logged
+    # once each (inv. 4/10). The indexer is deliberately disabled for a chain with
+    # ``hypersync_url is None``, but a chain that silently accretes cursors and
+    # never advances must be visible in the logs, not a black hole.
+    skipped_chains: set[int] = set()
     for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
         # Global per-pass budget: stop and return once this pass has scanned
         # pass_budget windows total, even with cold groups still unserviced.
@@ -489,7 +498,23 @@ def scan_enrolled_events(
         head_fetcher = head_fetchers.get(chain_id)
         block_hash_fetcher = block_hash_fetchers.get(chain_id)
         if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
+            if chain_id not in skipped_chains:
+                skipped_chains.add(chain_id)
+                logger.warning(
+                    "event indexer has no fetcher for chain; its enrolled cursors are not being "
+                    "advanced this pass (indexer disabled for this chain, or its hypersync_url is unset)",
+                    extra={"chain_id": chain_id},
+                )
             continue
+        # Per-chain finality (inv. 10): L2s reorg at different depths, so the
+        # confirmed-head target and every rewind use the registry's depth for THIS
+        # chain, not the fleet-wide default. Registry mainnet value == 12, so
+        # chain 1 is unchanged; the passed-in ``confirmation_depth`` is the
+        # last-resort fallback for a chain absent from the registry.
+        try:
+            chain_confirmation_depth = chain_by_id(chain_id).confirmation_depth
+        except UnknownChainError:
+            chain_confirmation_depth = confirmation_depth
         # Walk several windows per group, but cap it (per-group) so one
         # high-volume address can't consume the whole pass budget, and stop at
         # the global budget mid-group. Commit per window: each transaction (and
@@ -498,7 +523,7 @@ def scan_enrolled_events(
         group_members_at_target = 0
         try:
             if chain_id not in targets:
-                targets[chain_id] = max(0, head_fetcher.head_block() - confirmation_depth)
+                targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
             for _ in range(max(1, max_windows_per_cursor)):
                 if windows_scanned >= pass_budget:
                     break
@@ -511,7 +536,7 @@ def scan_enrolled_events(
                     target=targets[chain_id],
                     block_hash_fetcher=block_hash_fetcher,
                     block_hash_memo=block_hash_memo,
-                    confirmation_depth=confirmation_depth,
+                    confirmation_depth=chain_confirmation_depth,
                     max_block_span=max_block_span,
                     insert_batch_size=insert_batch_size,
                 )
@@ -564,7 +589,7 @@ def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
     )
 
 
-def _seed_block(address: str, cache: dict[str, int | None], *, chain_id: int = 1) -> int | None:
+def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain_id: int = 1) -> int | None:
     """The ``last_indexed_block`` a new cursor should start at: one below the
     event address's creation block, so the first scan window begins at the
     deploy block and the ~20M empty pre-deployment blocks are never fetched.
@@ -572,21 +597,23 @@ def _seed_block(address: str, cache: dict[str, int | None], *, chain_id: int = 1
     Returns ``None`` when the creation block can't be determined, so the caller
     defers enrollment to a later pass (retrying once it resolves) instead of
     seeding at genesis: a single transient Etherscan failure must never pin a
-    cursor to a full-chain backfill. Cached per pass (one lookup per address).
+    cursor to a full-chain backfill. Cached per pass, keyed by ``(chain_id,
+    address)`` — the same address on two chains has independent creation blocks.
     """
-    key = address.lower()
+    addr = address.lower()
+    key = (chain_id, addr)
     if key in cache:
         return cache[key]
     seed: int | None = None
     try:
-        created = get_contract_creation_block(key, chain_id=chain_id)
+        created = get_contract_creation_block(addr, chain_id=chain_id)
         if isinstance(created, int) and created > 0:
             seed = created - 1
     except Exception as exc:
         logger.warning(
             "creation-block lookup failed for %s; deferring enrollment to a later pass",
-            key,
-            extra={"address": key, "chain_id": chain_id, "exc_type": type(exc).__name__},
+            addr,
+            extra={"address": addr, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
         seed = None
     cache[key] = seed
@@ -602,12 +629,20 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
         .limit(limit)
     ).scalars()
     inserted = 0
-    seed_cache: dict[str, int | None] = {}
-    role_store_topic_cache: dict[str, list[str]] = {}
+    # Caches are keyed by ``(chain_id, address)`` — the enrolled cursor's chain is
+    # the job's own chain, not a single map-wide value, so the same address on two
+    # chains keeps independent creation blocks and role-store standards.
+    seed_cache: dict[tuple[int, str], int | None] = {}
+    role_store_topic_cache: dict[tuple[int, str], list[str]] = {}
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
+        # Stamp each cursor with the job's own chain — the first-class
+        # ``Job.chain_id`` (backfilled to 1 for legacy mainnet rows). Fall back to
+        # the caller's default only for a not-yet-migrated NULL, never guessing a
+        # chain for an address that lives on another.
+        job_chain_id = job.chain_id if isinstance(job.chain_id, int) else chain_id
         values = _state_var_values_for_job(session, job)
         for descriptor in _descriptors_from_artifact(artifact):
             for hint in descriptor.get("enumeration_hint") or []:
@@ -617,13 +652,13 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 address = _event_address_for_descriptor(descriptor, hint, job, values)
                 if not _is_enrollable_event_address(address):
                     continue
-                start_block = _seed_block(address, seed_cache, chain_id=chain_id)
+                start_block = _seed_block(address, seed_cache, chain_id=job_chain_id)
                 if start_block is None:
                     # Creation block not yet known — enroll on a later pass at the
                     # real deploy block rather than backfilling from genesis.
                     continue
                 if enroll_event_cursor(
-                    session, chain_id=chain_id, event_address=address, topic0=topic0, start_block=start_block
+                    session, chain_id=job_chain_id, event_address=address, topic0=topic0, start_block=start_block
                 ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
@@ -635,12 +670,12 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 # it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if _is_enrollable_event_address(authority):
-                    start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
+                    start_block = _seed_block(authority, seed_cache, chain_id=job_chain_id)
                     if start_block is not None:
                         for topic0 in _SOLMATE_ROLE_TOPICS:
                             if enroll_event_cursor(
                                 session,
-                                chain_id=chain_id,
+                                chain_id=job_chain_id,
                                 event_address=authority,
                                 topic0=topic0,
                                 start_block=start_block,
@@ -654,14 +689,14 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                 # enrolls it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
-                    session, chain_id, authority
+                    session, job_chain_id, authority
                 ):
-                    start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
+                    start_block = _seed_block(authority, seed_cache, chain_id=job_chain_id)
                     if start_block is not None:
-                        for topic0 in _role_store_topic0s(session, authority, chain_id, role_store_topic_cache):
+                        for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
                             if enroll_event_cursor(
                                 session,
-                                chain_id=chain_id,
+                                chain_id=job_chain_id,
                                 event_address=authority,
                                 topic0=topic0,
                                 start_block=start_block,
@@ -907,10 +942,18 @@ def run_event_log_indexer_loop(
             try:
                 with SessionLocal() as session:
                     with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
-                        reenqueued = reconcile_deferred_resolutions(session)
-                        # Warm-drift arm: re-resolve completed jobs whose enumerated
-                        # role-store set has a grant/revoke indexed past its frontier.
-                        drift_reenqueued = reconcile_role_set_drift(session)
+                        # Reconcile once per chain the indexer serves — the
+                        # reconcilers filter authorities by chain_id, so the old
+                        # single implicit chain_id=1 call left every non-mainnet
+                        # chain's index-cold deferrals un-self-healed. The chain set
+                        # is the registry allowlist (inv. 10/14): mainnet-only
+                        # ({1}) by default, so mainnet behavior is unchanged.
+                        for reconcile_chain_id in sorted(supported_chain_ids()):
+                            reenqueued += reconcile_deferred_resolutions(session, chain_id=reconcile_chain_id)
+                            # Warm-drift arm: re-resolve completed jobs whose
+                            # enumerated role-store set has a grant/revoke indexed
+                            # past its frontier.
+                            drift_reenqueued += reconcile_role_set_drift(session, chain_id=reconcile_chain_id)
                         ph["reenqueued"] = reenqueued
                         ph["drift_reenqueued"] = drift_reenqueued
                 if reenqueued or drift_reenqueued:
@@ -966,9 +1009,38 @@ def run_event_log_indexer_loop(
         backfill.join(timeout=max(1.0, interval))
 
 
-def main() -> None:
+def _build_indexer_fetchers(
+    chains: Sequence[ChainInfo] | None = None,
+) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
+    """Build the per-chain fetcher maps the indexer scan loop dispatches on.
+
+    Indexer chain set = registry chains that declare HyperSync coverage (inv. 10):
+    a chain with ``hypersync_url is None`` is deliberately indexer-disabled and
+    gets no fetcher (its cursors are then skipped-and-logged by the scan loop).
+
+    Mainnet keeps its pre-multichain lane exactly: ``PSAT_INDEXER_RPC_URL`` when
+    set (the dedicated lane so the serial indexer doesn't starve on the shared
+    eRPC proxy under job load), else the registry-backed eRPC route. Every other
+    covered chain reads from its registry ``hypersync_url``.
+    """
     from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
 
+    registry_chains = all_chains() if chains is None else chains
+    override = os.getenv("PSAT_INDEXER_RPC_URL")
+    fetchers: dict[int, LogFetcher] = {}
+    head_fetchers: dict[int, HeadBlockFetcher] = {}
+    block_hash_fetchers: dict[int, BlockHashFetcher] = {}
+    for info in registry_chains:
+        if info.hypersync_url is None:
+            continue
+        rpc_url = (override or require_rpc_url(chain_id=1)) if info.chain_id == 1 else info.hypersync_url
+        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url)
+        head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url)
+        block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url)
+    return fetchers, head_fetchers, block_hash_fetchers
+
+
+def main() -> None:
     # JsonFormatter on the root logger so every line this daemon emits — and
     # every ``extra={}`` field it already attaches (windows_scanned, inserted,
     # exc_type, the cursor triad) — ships as queryable JSON instead of plaintext.
@@ -982,13 +1054,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # PSAT_INDEXER_RPC_URL is the deliberate dedicated lane so the serial
-    # indexer doesn't starve on the shared eRPC proxy under job load; eRPC is
-    # the default when it's unset.
-    rpc_url = os.getenv("PSAT_INDEXER_RPC_URL") or require_rpc_url(chain_id=1)
-    fetchers = {1: RpcEventLogFetcher(rpc_url)}
-    head_fetchers = {1: RpcHeadBlockFetcher(rpc_url)}
-    block_hash_fetchers = {1: RpcBlockHashFetcher(rpc_url)}
+    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
     run_event_log_indexer_loop(
         fetchers=fetchers,
         head_fetchers=head_fetchers,
