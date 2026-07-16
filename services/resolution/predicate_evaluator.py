@@ -1627,10 +1627,18 @@ def _observed_event_key_words_from_hypersync(
             import hypersync  # type: ignore
         except Exception:
             return []
-        url = str(
-            getattr(outer_ctx, "meta", {}).get("hypersync_url")
-            or os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
-        )
+        from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+
+        scan_chain_id = getattr(outer_ctx, "chain_id", None)
+        # Per-chain HyperSync endpoint (inv. 5), driven by the evaluation's chain:
+        # meta override, then env override, then the registry URL. A chain with no
+        # registry coverage has no scan surface — skip the live scan (no members)
+        # rather than silently scanning mainnet.
+        registry_url = _hypersync_url_for_chain(scan_chain_id if isinstance(scan_chain_id, int) else 1)
+        url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
+        if not url:
+            return []
+        url = str(url)
         timeout_s = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
         max_pages = int(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_MAX_PAGES", "50"))
         from services.resolution.hypersync_bound import build_hypersync_client, hypersync_slot
@@ -1638,7 +1646,6 @@ def _observed_event_key_words_from_hypersync(
         client = build_hypersync_client(hypersync, url=url, bearer_token=token)
         from services.resolution.creation_block_floor import resolve_scan_floor
 
-        scan_chain_id = getattr(outer_ctx, "chain_id", None)
         found: set[str] = set()
         for event_address, topic0s in address_topics.items():
             # No floor → DEFER this address (skip the live scan) rather than scan

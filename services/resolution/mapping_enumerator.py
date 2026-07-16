@@ -18,7 +18,19 @@ from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HYPERSYNC_URL = "https://eth.hypersync.xyz"
+
+def _mainnet_hypersync_url() -> str:
+    """Mainnet HyperSync endpoint from the registry (inv. 5), not a hardcoded
+    literal. The signature default for the enumerators below; callers thread the
+    per-chain URL for non-mainnet scans."""
+    from utils.chains import chain_by_id
+
+    url = chain_by_id(1).hypersync_url
+    assert url is not None  # mainnet always has HyperSync coverage
+    return url
+
+
+DEFAULT_HYPERSYNC_URL: str = _mainnet_hypersync_url()
 
 # Pagination bounds (default 60s / 50 pages); without these caps a 2017-deployed contract can wedge a worker for ~80
 # min. Read once at import — bounds aren't expected to change at runtime.
