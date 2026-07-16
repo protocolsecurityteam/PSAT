@@ -19,6 +19,7 @@ from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEven
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.etherscan import get_contract_creation_block
 from utils.logging import configure_logging, log_timed_phase
 from utils.rpc import require_rpc_url
@@ -85,6 +86,57 @@ def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
     return (isinstance(signature, str) and signature.replace(" ", "") == _SOLMATE_CANCALL_SIGNATURE) or (
         isinstance(selector, str) and selector.lower() == _SOLMATE_CANCALL_SELECTOR
     )
+
+
+# Key sources that resolve to the transaction's caller — a gate keyed on one of
+# these discriminates who may call. Mirrors the resolution-side _CALLER_SOURCES
+# (predicate_evaluator / event_indexed) so the indexer's trigger agrees with the
+# adapter that folds what it enrolls.
+_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+
+def _is_single_address_param_signature(signature: Any) -> bool:
+    """True for ``name(address)`` — exactly one parameter, of type ``address``.
+    The shape of a delegated role gate's callee (``onlyOperatingMultisig(address)``
+    and siblings), as opposed to Solmate's 3-arg canCall or a multi-arg canCall."""
+    if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
+        return False
+    params = signature[signature.index("(") + 1 : signature.rindex(")")]
+    return [p.strip() for p in params.split(",") if p.strip()] == ["address"]
+
+
+def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
+    """A caller-keyed external bool check against a single-address-param callee on
+    a delegated authority — ``roleRegistry.onlyX(msg.sender)`` — that is NOT the
+    already-handled Solmate canCall. The registry's own predicate trees compile to
+    zero descriptors (assembly sload/mload operands), so this caller-side outer
+    descriptor is the only enrollment trigger for its RoleSet cursor."""
+    if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
+        return False
+    if _is_solmate_cancall_descriptor(descriptor):
+        return False
+    if not _is_single_address_param_signature(descriptor.get("callee_signature")):
+        return False
+    keys = descriptor.get("key_sources") or []
+    return any(isinstance(k, dict) and k.get("source") in _CALLER_SOURCES for k in keys)
+
+
+def _role_store_topic0s(session: Session, authority: str, chain_id: int) -> list[str]:
+    """The grant/revoke topic0s to enroll at ``authority``. Detect the standard
+    from the impl bytecode behind the registry proxy; when detection is
+    inconclusive, enroll the UNION of all standards' topic0s — over-enrollment is
+    a cheap empty scan window, a missed cursor kills the recall path."""
+    try:
+        code = resolve_probe_code(session, authority, chain_id)
+    except Exception:
+        code = None
+    detected = detect_standards(code)
+    if detected:
+        topics: set[str] = set()
+        for standard in detected:
+            topics.update(standard.topic0s())
+        return sorted(topics)
+    return all_topic0s()
 
 
 class LogFetcher(Protocol):
@@ -559,6 +611,25 @@ def enroll_from_completed_jobs(session: Session, *, chain_id: int = 1, limit: in
                     start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
                     if start_block is not None:
                         for topic0 in _SOLMATE_ROLE_TOPICS:
+                            if enroll_event_cursor(
+                                session,
+                                chain_id=chain_id,
+                                event_address=authority,
+                                topic0=topic0,
+                                start_block=start_block,
+                            ):
+                                inserted += 1
+            elif _is_delegated_role_gate_descriptor(descriptor):
+                # Enroll the role-store's grant/revoke cursor at the authority
+                # PROXY — the delegatecall emits RoleSet there, so job.address
+                # (the protected contract) would index an address that emits
+                # nothing. Skip if the authority isn't resolved yet; a later pass
+                # enrolls it once its ControllerValue is captured.
+                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+                if _is_enrollable_event_address(authority):
+                    start_block = _seed_block(authority, seed_cache, chain_id=chain_id)
+                    if start_block is not None:
+                        for topic0 in _role_store_topic0s(session, authority, chain_id):
                             if enroll_event_cursor(
                                 session,
                                 chain_id=chain_id,
