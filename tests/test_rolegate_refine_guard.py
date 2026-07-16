@@ -526,6 +526,100 @@ def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
 
 
 # ---------------------------------------------------------------------------
+# Section 3a — durability telemetry (Stage 4): the guard-fire metric+WARNING and
+# the delegated_gate_unresolved tripwire keyed on the callee signature.
+# ---------------------------------------------------------------------------
+
+
+def test_guard_fire_emits_metric_and_warning(session, both_flags, caplog):
+    import logging as _logging
+
+    import services.resolution.predicate_evaluator as _pe
+    from utils.logging import stage_metrics_var
+
+    _pe._GUARD_FIRE_COUNTS.clear()
+    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    caplog.set_level(_logging.WARNING, logger="services.resolution.predicate_evaluator")
+    try:
+        cap = _seed_two_hop(
+            session, caller_trees=caller, callee_trees=_opaque_callee_tree("onlyOperatingMultisig(address)")
+        )
+    finally:
+        stage_metrics_var.reset(token)
+    assert "inline_refine_only_guard" in _basis(cap)
+    guard_keys = [k for k in metrics if k.startswith("inline_refine_only_guard::")]
+    assert guard_keys and all(metrics[k] >= 1 for k in guard_keys)
+    assert any("refine-only guard closed" in r.getMessage() for r in caplog.records)
+
+
+def test_delegated_gate_unresolved_emitted_on_settled_gate(earned_public):
+    # A caller gate that SETTLES external_check_only without a pending-index
+    # deferral trips the durability metric, keyed on the callee signature.
+    import services.resolution.predicate_evaluator as _pe
+    from utils.logging import stage_metrics_var
+
+    _pe._DELEGATED_GATE_UNRESOLVED_COUNTS.clear()
+    leaf = {
+        "kind": "external_set",
+        "operator": "truthy",
+        "operands": [{"source": "msg_sender"}],
+        "set_descriptor": {"kind": "external_set", "key_sources": [{"source": "msg_sender"}]},
+    }
+    check = CapabilityExpr.external_check_only(
+        _external_check(target="0x" + "a1" * 20, selector="0x12345678", sig="onlyOperatingMultisig(address)")
+    )
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        out = _pe._stamp_caller_gate_check(check, leaf)
+    finally:
+        stage_metrics_var.reset(token)
+    assert out.kind == "external_check_only"
+    assert metrics.get("delegated_gate_unresolved::onlyOperatingMultisig(address)") == 1
+
+
+def test_delegated_gate_unresolved_skipped_when_deferred(earned_public):
+    # A cold-index deferral is transient (the reconciler self-heals it) — it must
+    # NOT trip the tripwire, or every cold first pass would false-alarm.
+    import services.resolution.predicate_evaluator as _pe
+    from utils.logging import stage_metrics_var
+
+    _pe._DELEGATED_GATE_UNRESOLVED_COUNTS.clear()
+    leaf = {
+        "kind": "external_set",
+        "operator": "truthy",
+        "operands": [{"source": "msg_sender"}],
+        "set_descriptor": {"kind": "external_set", "key_sources": [{"source": "msg_sender"}]},
+    }
+    check = CapabilityExpr.external_check_only(
+        _external_check(
+            target="0x" + "a1" * 20,
+            selector="0x12345678",
+            sig="onlyOperatingMultisig(address)",
+            deferred=True,
+        )
+    )
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        _pe._stamp_caller_gate_check(check, leaf)
+    finally:
+        stage_metrics_var.reset(token)
+    assert not any(k.startswith("delegated_gate_unresolved") for k in metrics)
+
+
+def _external_check(*, target: str, selector: str, sig: str, deferred: bool = False):
+    from services.resolution.capabilities import ExternalCheck
+
+    extra: dict[str, Any] = {"basis": [], "callee_signature": sig}
+    if deferred:
+        extra["deferred_pending_index"] = True
+    return ExternalCheck(target_address=target, target_call_selector=selector, extra=extra)
+
+
+# ---------------------------------------------------------------------------
 # Section 3b — the adapter-live flip (Stage 2). Same faithful opaque shape as
 # fixture 1, but with the registry made a recognized Solady role store: the
 # EnumerableRoleStoreAdapter enumerates the controllers, so the outer gate never

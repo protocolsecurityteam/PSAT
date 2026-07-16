@@ -39,6 +39,7 @@ from services.resolution.role_store_standards import (  # noqa: E402
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
 )
+from utils.logging import stage_metrics_var  # noqa: E402
 
 _PROXY = "0x" + "62" * 20  # registry proxy — where RoleSet is emitted
 _IMPL = "0x" + "3b" * 20  # role-store impl behind the proxy
@@ -439,6 +440,75 @@ def test_finite_set_projects_principal_type_controller(session, monkeypatch, bot
     surface = project_capability_surface(capability_to_dict(cap))
     assert [r["address"] for r in surface.principal_rows] == [_MULTISIG.lower()]
     assert all(r["principal_type"] == "controller" for r in surface.principal_rows)
+
+
+@requires_postgres
+def test_settled_decline_records_metric(session, monkeypatch, both_flags):
+    # Adapter-site decline counter: a settled probe_unavailable is observable at the
+    # adapter (its persisted basis is superseded by the :1976 guard downstream).
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG}, transport_fail=True)
+
+    import services.resolution.adapters.enumerable_role_store as ers
+
+    ers._DECLINE_COUNTS.clear()  # module counter is process-lived; isolate this run
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
+    finally:
+        stage_metrics_var.reset(token)
+    assert cap.kind == "external_check_only"
+    assert _extra(cap).get("basis") == ["probe_unavailable"]
+    assert metrics.get("role_store_decline_probe_unavailable") == 1
+
+
+@requires_postgres
+def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypatch, both_flags):
+    # F3: a transport blip must NOT poison the shared pass memo — a second enumerate
+    # for the same (authority, selector, block) re-probes and can succeed. (Pre-fix
+    # the failure was cached and settled the whole family to probe_unavailable.)
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+
+    calls = {"n": 0}
+    gate_sel = keccak(text=_CALLEE_SIG).hex()[:8]
+    members_l = {_MULTISIG.lower()}
+    control_l = _NEGATIVE_CONTROL_ADDR.lower()
+
+    def _stub(rpc_url, method, params=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("stubbed one-shot transport blip")
+        body = bytes.fromhex(params[0]["data"][10:])
+        decoded = abi_decode(["(address,bool,bytes)[]"], body)[0]
+        results = []
+        for _t, _a, calldata in decoded:
+            addr = "0x" + calldata[4:36][-20:].hex()
+            if calldata[:4].hex() == gate_sel:
+                results.append((False if addr == control_l else (addr in members_l), b""))
+            else:
+                results.append((False, b""))
+        return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
+
+    import utils.rpc as _rpc
+
+    monkeypatch.setattr(_rpc, "rpc_request", _stub)
+
+    ctx = _ctx(session)  # one ctx → one shared live_read_memo across both calls
+    first = EnumerableRoleStoreAdapter().enumerate(_descriptor(), ctx)
+    assert first.kind == "external_check_only"
+    assert _extra(first).get("basis") == ["probe_unavailable"]
+    second = EnumerableRoleStoreAdapter().enumerate(_descriptor(), ctx)
+    assert second.kind == "finite_set"
+    assert second.members == [_MULTISIG.lower()]
 
 
 @requires_postgres

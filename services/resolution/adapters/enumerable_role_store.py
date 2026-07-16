@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
+from utils.logging import record_stage_metric
 from utils.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 
 from ..capabilities import CapabilityExpr, ExternalCheck
@@ -62,6 +64,15 @@ _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller
 _MATCH_SCORE = 90
 
 _TRACE_STEP = "enumerable_role_store"
+
+# Settled (non-deferring) adapter declines worth a metric — the persisted row's
+# basis is superseded by the :1976 guard downstream, so the adapter is the only
+# site where these are observable. A running count per reason (record_stage_metric
+# folds it into the policy stage's timing artifact) surfaces a store the adapter
+# recognized-but-couldn't-fold (negative control), a fold/getter disagreement, or a
+# probe-transport blip, distinct from an ordinary cold-index deferral.
+_ADAPTER_DECLINE_REASONS = {"negative_control_passed", "role_fold_getter_mismatch", "probe_unavailable"}
+_DECLINE_COUNTS: "Counter[str]" = Counter()
 
 
 def _getter_crosscheck_enabled() -> bool:
@@ -267,13 +278,12 @@ def _probe_gate(
     try:
         results = multicall3_aggregate3(rpc_url, calls, block_tag=block_tag)
     except Exception:
-        result = _ProbeResult(set(), control_passed=False, transport_failed=True)
-        memo[key] = result
-        return result
+        # Do NOT memoize a transport failure: a single blip would otherwise settle
+        # the whole same-(authority, selector, block) family to probe_unavailable
+        # for the pass. Successes are memoized below; a failure re-probes next time.
+        return _ProbeResult(set(), control_passed=False, transport_failed=True)
     if len(results) != len(calls):
-        result = _ProbeResult(set(), control_passed=False, transport_failed=True)
-        memo[key] = result
-        return result
+        return _ProbeResult(set(), control_passed=False, transport_failed=True)
 
     control_passed = bool(results[0][0])
     survivors = {cand for cand, (ok, _data) in zip(candidates, results[1:]) if ok}
@@ -432,6 +442,10 @@ def _check_only(authority: str | None, callee_selector: str | None, basis: list[
     # marked — marking would spin the reconciler forever.
     if "no_index_cursor" in basis:
         extra["deferred_pending_index"] = True
+    for reason in basis:
+        if reason in _ADAPTER_DECLINE_REASONS:
+            _DECLINE_COUNTS[reason] += 1
+            record_stage_metric(f"role_store_decline_{reason}", _DECLINE_COUNTS[reason])
     logger.debug(
         "enumerable_role_store decision",
         extra={

@@ -57,11 +57,17 @@ from services.resolution.capabilities import CapabilityExpr, ExternalCheck  # no
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.deferred_reconciler import (  # noqa: E402
     DEFERRED_MARKER,
+    ROLE_STORE_TRACE_STEP,
     _iter_deferred_authorities,
+    _iter_role_store_frontiers,
     reconcile_deferred_resolutions,
+    reconcile_role_set_drift,
 )
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
+from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
+
+_ROLE_SET_TOPIC0 = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 _SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
@@ -348,6 +354,134 @@ def test_reconciler_ignores_non_deferred_external_check(db_session):
 
 
 # ---------------------------------------------------------------------------
+# Stage 4 — role-drift arm: re-resolve an enumerated role store when a grant/
+# revoke is indexed past the trace's folded frontier (the warm self-heal).
+# ---------------------------------------------------------------------------
+
+
+def _role_store_cap(authority: str, frontier: int, members=("0x" + "ab" * 20,)) -> dict:
+    return capability_to_dict(
+        CapabilityExpr.finite_set(
+            [m.lower() for m in members],
+            quality="exact",
+            confidence="enumerable",
+            last_indexed_block=frontier,
+            trace=[
+                {
+                    "step": ROLE_STORE_TRACE_STEP,
+                    "authority": authority.lower(),
+                    "fold_frontier": frontier,
+                    "standard": "solady_enumerable_roles",
+                }
+            ],
+        )
+    )
+
+
+def _seed_role_store_cursor(
+    session, authority: str, *, backfill_complete: bool = True, last_block: int = 10_000
+) -> None:
+    session.add(
+        IndexedEventCursor(
+            chain_id=1,
+            event_address=authority.lower(),
+            topic0=_ROLE_SET_TOPIC0.lower(),
+            last_indexed_block=last_block,
+            backfill_complete=backfill_complete,
+        )
+    )
+
+
+def _seed_role_set_row(session, authority: str, *, block: int) -> None:
+    session.add(
+        IndexedEventLog(
+            chain_id=1,
+            event_address=authority.lower(),
+            topic0=_ROLE_SET_TOPIC0.lower(),
+            tx_hash=block.to_bytes(32, "big"),
+            log_index=0,
+            block_number=block,
+            block_hash=b"\x00" * 32,
+            transaction_index=0,
+            topics=[_ROLE_SET_TOPIC0.lower()],
+            data_words=[],
+        )
+    )
+
+
+def test_iter_role_store_frontiers_walks_nested():
+    auth = "0x" + "a1" * 20
+    cap = CapabilityExpr.structural_and(
+        [
+            CapabilityExpr.finite_set(["0x" + "b2" * 20]),
+            CapabilityExpr.finite_set(
+                ["0x" + "c3" * 20],
+                trace=[{"step": ROLE_STORE_TRACE_STEP, "authority": auth, "fold_frontier": 42}],
+            ),
+        ]
+    )
+    assert set(_iter_role_store_frontiers(capability_to_dict(cap))) == {(auth, 42)}
+    # A step without a numeric frontier is skipped (defensive).
+    assert list(_iter_role_store_frontiers({"trace": [{"step": ROLE_STORE_TRACE_STEP, "authority": auth}]})) == []
+
+
+@requires_postgres
+def test_drift_reenqueues_on_post_frontier_row(db_session):
+    authority = "0x" + "a4" * 20
+    addr = "0x" + "b5" * 20
+    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_role_store_cap(authority, 100))
+    _seed_role_store_cursor(db_session, authority, backfill_complete=True)
+    _seed_role_set_row(db_session, authority, block=200)  # a grant past the frontier
+    db_session.commit()
+
+    assert reconcile_role_set_drift(db_session) == 1
+    assert job.status == JobStatus.queued and job.stage == JobStage.policy
+
+
+@requires_postgres
+def test_drift_ignores_pre_frontier_row(db_session):
+    authority = "0x" + "a6" * 20
+    addr = "0x" + "b7" * 20
+    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_role_store_cap(authority, 100))
+    _seed_role_store_cursor(db_session, authority, backfill_complete=True)
+    _seed_role_set_row(db_session, authority, block=50)  # already folded (<= frontier)
+    db_session.commit()
+
+    assert reconcile_role_set_drift(db_session) == 0
+    assert job.stage == JobStage.done
+
+
+@requires_postgres
+def test_drift_requires_backfill_complete(db_session):
+    # A post-frontier row while the cursor is mid-backfill would re-resolve into a
+    # cold deferral — gate on backfill_complete so the re-run lands a warm fold.
+    authority = "0x" + "a8" * 20
+    addr = "0x" + "b9" * 20
+    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_role_store_cap(authority, 100))
+    _seed_role_store_cursor(db_session, authority, backfill_complete=False)
+    _seed_role_set_row(db_session, authority, block=200)
+    db_session.commit()
+
+    assert reconcile_role_set_drift(db_session) == 0
+    assert job.stage == JobStage.done
+
+
+@requires_postgres
+def test_drift_ignores_non_role_store_capability(db_session):
+    # A deferred (non-enumerated) cap has no enumerable_role_store trace step → the
+    # drift arm never selects it (that's the cold reconciler's job, not this one).
+    authority = "0x" + "aa" * 20
+    addr = "0x" + "bb" * 20
+    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_deferred_cap(authority))
+    _seed_role_store_cursor(db_session, authority, backfill_complete=True)
+    _seed_role_set_row(db_session, authority, block=200)
+    db_session.commit()
+
+    assert reconcile_role_set_drift(db_session) == 0
+    assert job.stage == JobStage.done
+
+
+# ---------------------------------------------------------------------------
 # Wiring — the self-heal must be invoked by the event indexer loop so it can't
 # be silently unwired.
 # ---------------------------------------------------------------------------
@@ -360,3 +494,4 @@ def test_event_indexer_loop_invokes_deferred_reconciler():
 
     src = inspect.getsource(event_log_indexer.run_event_log_indexer_loop)
     assert "reconcile_deferred_resolutions" in src
+    assert "reconcile_role_set_drift" in src

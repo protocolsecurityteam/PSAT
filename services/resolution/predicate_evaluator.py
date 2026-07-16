@@ -27,6 +27,7 @@ correct, just unfilled.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -39,6 +40,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     PredicateTree,
     SetDescriptor,
 )
+from utils.logging import record_stage_metric
 
 from .capabilities import (
     CapabilityExpr,
@@ -62,6 +64,42 @@ from .permissionless_shapes import (
 logger = logging.getLogger(__name__)
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+# Telemetry for the delegated-role-gate durability invariant (CONTROLLER_RESOLUTION_
+# SPEC §5): the guard closing a fail-open, and the broader tripwire of a caller gate
+# that settles unresolved. Both keyed by callee signature so a NOVEL role-store
+# standard the adapter can't yet fold shows up as a new label spiking — the one
+# human link (add it to role_store_standards.py). Running counts folded into the
+# policy stage's timing artifact via record_stage_metric (a no-op off-worker).
+_GUARD_FIRE_COUNTS: "Counter[str]" = Counter()
+_DELEGATED_GATE_UNRESOLVED_COUNTS: "Counter[str]" = Counter()
+
+
+def _record_guard_fire(descriptor: Any) -> None:
+    """The refine-only guard fired — a delegated caller gate that would have
+    fail-open-published is kept closed. metric + WARNING so a regression (or a
+    novel un-foldable standard) is loud, not just a silent metric bump."""
+    sig = descriptor.get("callee_signature") if isinstance(descriptor, dict) else None
+    sig = sig if isinstance(sig, str) else "unknown"
+    _GUARD_FIRE_COUNTS[sig] += 1
+    record_stage_metric(f"inline_refine_only_guard::{sig}", _GUARD_FIRE_COUNTS[sig])
+    logger.warning(
+        "refine-only guard closed a delegated-gate fail-open",
+        extra={"callee_signature": sig, "basis": "inline_refine_only_guard"},
+    )
+
+
+def _record_delegated_gate_unresolved(check: "ExternalCheck") -> None:
+    """Durability tripwire: a caller gate settled ``external_check_only`` without a
+    pending-index deferral — resolved-unknown for good (guard-fired, adapter
+    decline, or a bare external check). A metric only; the guard's WARNING is the
+    loud arm, this is the queryable count per callee signature."""
+    extra = check.extra or {}
+    sig = extra.get("callee_signature")
+    if not isinstance(sig, str):
+        sig = check.target_call_selector if isinstance(check.target_call_selector, str) else "unknown"
+    _DELEGATED_GATE_UNRESOLVED_COUNTS[sig] += 1
+    record_stage_metric(f"delegated_gate_unresolved::{sig}", _DELEGATED_GATE_UNRESOLVED_COUNTS[sig])
 
 
 def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
@@ -2006,6 +2044,7 @@ def _maybe_inline_cross_contract_call(
                 basis.append("inline_refine_only_guard")
             extra["basis"] = basis
             cap = replace(cap, check=replace(cap.check, extra=extra))
+        _record_guard_fire(descriptor)
         return cap
     return resolved
 
@@ -2360,7 +2399,13 @@ def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> Capabi
     if tag not in basis:
         basis.append(tag)
     extra["basis"] = basis
-    return replace(cap, check=replace(cap.check, extra=extra))
+    stamped = replace(cap, check=replace(cap.check, extra=extra))
+    # A caller gate that settles here without a pending-index deferral is unresolved
+    # for good — the durability tripwire (a transient cold deferral self-heals via
+    # the reconciler and is excluded).
+    if stamped.check is not None and not extra.get("deferred_pending_index"):
+        _record_delegated_gate_unresolved(stamped.check)
+    return stamped
 
 
 def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = None) -> CapabilityExpr:

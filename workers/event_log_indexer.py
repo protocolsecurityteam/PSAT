@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ControllerValue, IndexedEventCursor, IndexedEventLog, Job, JobStatus, SessionLocal
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
-from services.resolution.deferred_reconciler import reconcile_deferred_resolutions
+from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.etherscan import get_contract_creation_block
@@ -903,13 +903,23 @@ def run_event_log_indexer_loop(
     try:
         while not stop_event.is_set():
             reenqueued = 0
+            drift_reenqueued = 0
             try:
                 with SessionLocal() as session:
                     with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
                         reenqueued = reconcile_deferred_resolutions(session)
+                        # Warm-drift arm: re-resolve completed jobs whose enumerated
+                        # role-store set has a grant/revoke indexed past its frontier.
+                        drift_reenqueued = reconcile_role_set_drift(session)
                         ph["reenqueued"] = reenqueued
-                if reenqueued:
-                    logger.info("deferred-resolution reconciler re-enqueued %d job(s)", reenqueued)
+                        ph["drift_reenqueued"] = drift_reenqueued
+                if reenqueued or drift_reenqueued:
+                    logger.info(
+                        "reconcilers re-enqueued %d job(s) (deferred=%d role_drift=%d)",
+                        reenqueued + drift_reenqueued,
+                        reenqueued,
+                        drift_reenqueued,
+                    )
             except Exception:
                 logger.exception("deferred-resolution reconcile pass failed")
             # Read the cursor triad straight from the table, independent of the
@@ -948,6 +958,7 @@ def run_event_log_indexer_loop(
                     "total_cursors": total_cursors,
                     "pending_cursors": max(0, total_cursors - caught_up_cursors),
                     "deferred_reenqueued_last_pass": reenqueued,
+                    "role_drift_reenqueued_last_pass": drift_reenqueued,
                 },
             )
             stop_event.wait(interval)
