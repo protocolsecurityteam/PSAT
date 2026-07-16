@@ -185,10 +185,10 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     if kind == "finite_set":
         if cap_dict.get("members"):
             return False
-        # An empty Solmate RolesAuthority enumeration is a provably-nobody gate:
-        # the capability is not public and no role holds it, so no caller passes
-        # ``requiresAuth``. AND-ed with a sibling public path it still blocks.
-        if _is_solmate_provably_empty(cap_dict):
+        # An empty confirmed role-store enumeration is a provably-nobody gate: the
+        # capability is not public and no confirmed member passes the gate, so no
+        # caller is authorized. AND-ed with a sibling public path it still blocks.
+        if _is_role_store_provably_empty(cap_dict):
             return True
         # A generic exact-empty / empty-by-design set is RESOLVED (an accept-side
         # ceiling, e.g. a 2-step transfer with none pending) and folds as a side
@@ -210,14 +210,22 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     return False
 
 
-def _is_solmate_provably_empty(cap_dict: dict[str, Any]) -> bool:
-    """An EXACT-quality empty ``finite_set`` enumerated from a Solmate
-    ``RolesAuthority``: the ``requiresAuth`` capability is not public and no role
-    holds it at the resolution block, so the on-chain authority authorizes
-    literally no caller. Keyed on the adapter's ``solmate_roles_authority`` trace
-    step so only this confirmed-warm read counts — an empty LOWER_BOUND set
-    (under-resolved / cold index) and a generic empty-exact ceiling (no such
-    trace) are excluded."""
+# Adapter trace steps whose EXACT-empty enumeration is a confirmed "nobody passes
+# this gate": the Solmate RolesAuthority fold and the enumerable role-store adapter
+# (fold + pinned-block gate probe). Both settle a cold / unconfirmed read to a
+# deferral or external check rather than an empty exact set, so an exact-empty here
+# is a real provably-nobody, not an under-resolution artifact.
+_PROVABLY_EMPTY_TRACE_STEPS = {"solmate_roles_authority", "enumerable_role_store"}
+
+
+def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
+    """An EXACT-quality empty ``finite_set`` enumerated by a confirmed role-store
+    adapter (Solmate RolesAuthority, or the enumerable role-store fold+probe): the
+    capability is not public and no confirmed member passes the gate at the
+    resolution block, so the on-chain authority authorizes literally no caller.
+    Keyed on the adapter's trace step so only a confirmed-warm read counts — an
+    empty LOWER_BOUND set (under-resolved / cold index) and a generic empty-exact
+    ceiling (no such trace) are excluded."""
     if cap_dict.get("kind") != "finite_set":
         return False
     if cap_dict.get("members"):
@@ -227,7 +235,7 @@ def _is_solmate_provably_empty(cap_dict: dict[str, Any]) -> bool:
     trace = cap_dict.get("trace")
     if not isinstance(trace, list):
         return False
-    return any(isinstance(step, dict) and step.get("step") == "solmate_roles_authority" for step in trace)
+    return any(isinstance(step, dict) and step.get("step") in _PROVABLY_EMPTY_TRACE_STEPS for step in trace)
 
 
 def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:

@@ -420,9 +420,14 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             subject=a.subject,
         )
     if a.kind == "cofinite_blacklist":
+        # The complement of a cofinite denylist is exactly its members. A
+        # lower_bound denylist ("at least these are denied") complements to a
+        # lower_bound finite set, not a provably-complete one — calling it "exact"
+        # would claim we enumerated everyone the gate admits.
+        quality = "exact" if a.blacklist_quality == "exact" else "lower_bound"
         return CapabilityExpr.finite_set(
             list(a.blacklist or []),
-            quality="exact",
+            quality=quality,
             confidence=a.confidence,
             conditions=a.conditions,
             subject=a.subject,

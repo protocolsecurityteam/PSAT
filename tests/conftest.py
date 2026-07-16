@@ -461,6 +461,34 @@ def _stub_resolution_finality_head_read(monkeypatch):
     monkeypatch.setattr("services.resolution.capability_resolver.rpc_request", _no_head_read)
 
 
+@pytest.fixture(autouse=True)
+def _stub_role_store_wire(monkeypatch):
+    """Keep the offline suite hermetic against the role-store wire reads.
+
+    ``EnumerableRoleStoreAdapter.matches`` runs on every external_set dispatch and
+    calls ``resolve_probe_code`` (``eth_getCode`` / EIP-1967 ``eth_getStorageAt``)
+    to detect the standard; the adapter's ``_pin_probe_block`` reads
+    ``eth_blockNumber`` on an unpinned pass. Both are UNCONDITIONAL wire reads on
+    a resolvable authority, so any resolver-driving test would otherwise dial the
+    poisoned eRPC URL and trip the offline guard. Raising here reproduces the
+    exact failure path the code already takes on an unreachable RPC (detection
+    inconclusive -> matches()=0 -> inline/guard; pin failure -> probe_unavailable),
+    so offline behaviour is byte-identical without the wire. Dedicated role-store
+    tests monkeypatch these bindings in the test body (which runs after this
+    fixture), so they still exercise detection, fold, and probe."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: role-store wire read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("services.resolution.role_store_standards.get_code", _no_wire)
+    monkeypatch.setattr("services.resolution.role_store_standards.rpc_request", _no_wire)
+    monkeypatch.setattr("services.resolution.adapters.enumerable_role_store.rpc_request", _no_wire)
+    # The scan-floor's Etherscan creation-block lookup is keyless-silent in CI but
+    # dials out when a local .env carries an API key. None is the documented
+    # "lookup failed -> cursor/defer" path, identical to the keyless behaviour.
+    monkeypatch.setattr("services.resolution.creation_block_floor.get_contract_creation_block", lambda *a, **k: None)
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 

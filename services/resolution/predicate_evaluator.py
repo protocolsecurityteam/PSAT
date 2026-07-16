@@ -27,6 +27,7 @@ correct, just unfilled.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -39,6 +40,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     PredicateTree,
     SetDescriptor,
 )
+from utils.logging import record_stage_metric
 
 from .capabilities import (
     CapabilityExpr,
@@ -54,6 +56,7 @@ from .permissionless_shapes import (
     earned_public_enabled,
     is_caller_keyed_membership_allowlist,
     is_caller_keyed_time_allowlist,
+    is_caller_keyed_time_denylist,
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
@@ -61,6 +64,42 @@ from .permissionless_shapes import (
 logger = logging.getLogger(__name__)
 
 _CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
+# Telemetry for the delegated-role-gate durability invariant (CONTROLLER_RESOLUTION_
+# SPEC §5): the guard closing a fail-open, and the broader tripwire of a caller gate
+# that settles unresolved. Both keyed by callee signature so a NOVEL role-store
+# standard the adapter can't yet fold shows up as a new label spiking — the one
+# human link (add it to role_store_standards.py). Running counts folded into the
+# policy stage's timing artifact via record_stage_metric (a no-op off-worker).
+_GUARD_FIRE_COUNTS: "Counter[str]" = Counter()
+_DELEGATED_GATE_UNRESOLVED_COUNTS: "Counter[str]" = Counter()
+
+
+def _record_guard_fire(descriptor: Any) -> None:
+    """The refine-only guard fired — a delegated caller gate that would have
+    fail-open-published is kept closed. metric + WARNING so a regression (or a
+    novel un-foldable standard) is loud, not just a silent metric bump."""
+    sig = descriptor.get("callee_signature") if isinstance(descriptor, dict) else None
+    sig = sig if isinstance(sig, str) else "unknown"
+    _GUARD_FIRE_COUNTS[sig] += 1
+    record_stage_metric(f"inline_refine_only_guard::{sig}", _GUARD_FIRE_COUNTS[sig])
+    logger.warning(
+        "refine-only guard closed a delegated-gate fail-open",
+        extra={"callee_signature": sig, "basis": "inline_refine_only_guard"},
+    )
+
+
+def _record_delegated_gate_unresolved(check: "ExternalCheck") -> None:
+    """Durability tripwire: a caller gate settled ``external_check_only`` without a
+    pending-index deferral — resolved-unknown for good (guard-fired, adapter
+    decline, or a bare external check). A metric only; the guard's WARNING is the
+    loud arm, this is the queryable count per callee signature."""
+    extra = check.extra or {}
+    sig = extra.get("callee_signature")
+    if not isinstance(sig, str):
+        sig = check.target_call_selector if isinstance(check.target_call_selector, str) else "unknown"
+    _DELEGATED_GATE_UNRESOLVED_COUNTS[sig] += 1
+    record_stage_metric(f"delegated_gate_unresolved::{sig}", _DELEGATED_GATE_UNRESOLVED_COUNTS[sig])
 
 
 def _bump_resolve_counter(outer_ctx: Any, key: str, n: int = 1) -> None:
@@ -429,6 +468,19 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                         "expression": leaf.get("expression"),
                     },
                 )
+            )
+        if leaf_is_caller_tainted(leaf) and is_caller_keyed_time_denylist(leaf):
+            # Deny-by-exception: a caller-keyed time denylist proceeds for the
+            # unset/expired caller, so it is public modulo a finite, time-bounded
+            # exclusion — a cofinite, not a bare open. Emitting it as a
+            # root-subject cofinite is what lets the refine-only inline guard's
+            # counterfactual distinguish it from a laundered allowlist and spare
+            # it (leave it public) instead of gating it.
+            return CapabilityExpr.cofinite_blacklist(
+                [],
+                blacklist_quality="lower_bound",
+                conditions=[_condition_from_leaf(leaf)],
+                subject="root",
             )
         cond = _condition_from_leaf(leaf)
         return CapabilityExpr.conditional_universal(cond)
@@ -1973,7 +2025,54 @@ def _maybe_inline_cross_contract_call(
         # returned non-None and pre-empted that adapter for every Solmate-protected
         # contract analyzed alongside its RolesAuthority, so the adapter never ran.
         return None
+    if (
+        leaf.get("operator") == "truthy"
+        and leaf_is_caller_tainted(leaf)
+        and not is_permissionless_caller_shape(leaf)
+        and _public_without_root_cofinites(resolved)
+    ):
+        # Refine-only invariant: un-inlined, this caller-tainted delegated gate
+        # fails closed; an inline result that projects public would un-gate it,
+        # so keep the outer delegated check. A public verdict that survives
+        # removing root-subject cofinites is a laundered allowlist, not a
+        # legitimate deny-by-exception denylist — only the former fires here.
+        cap = _external_check_from_descriptor(leaf, descriptor, ctx)
+        if cap.check is not None:
+            extra = dict(cap.check.extra or {})
+            basis = list(extra.get("basis") or [])
+            if "inline_refine_only_guard" not in basis:
+                basis.append("inline_refine_only_guard")
+            extra["basis"] = basis
+            cap = replace(cap, check=replace(cap.check, extra=extra))
+        _record_guard_fire(descriptor)
+        return cap
     return resolved
+
+
+def _public_without_root_cofinites(cap: CapabilityExpr) -> bool:
+    """Would the resolved capability's projected writer surface be public with
+    every root-subject ``cofinite_blacklist`` node counterfactually removed?
+
+    A cofinite can only arise from a ``negate()`` exclusion arm (which needs
+    falsy polarity — impossible on the guard's truthy path) or the
+    deny-by-exception emission (which needs surviving caller taint plus a
+    proven proceed-relation). Neither is a laundered un-gated allowlist, so a
+    surface that is public ONLY because of a cofinite is legitimately public
+    and must be spared; public via any other kind (a taint-lost opaque leaf
+    folding to ``conditional_universal``) is the fail-open the guard closes."""
+    from services.policy.capability_surface import project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+
+    def strip(node: dict[str, Any]) -> dict[str, Any]:
+        if node.get("kind") == "cofinite_blacklist" and node.get("subject", "root") == "root":
+            return {"kind": "unsupported", "unsupported_reason": "cofinite_counterfactual", "confidence": "check_only"}
+        children = node.get("children")
+        if isinstance(children, list):
+            node = {**node, "children": [strip(c) if isinstance(c, dict) else c for c in children]}
+        return node
+
+    counterfactual = strip(capability_to_dict(cap))
+    return project_capability_surface(counterfactual).authority_public
 
 
 def _inline_result_needs_materialization(cap: CapabilityExpr) -> bool:
@@ -2300,7 +2399,13 @@ def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> Capabi
     if tag not in basis:
         basis.append(tag)
     extra["basis"] = basis
-    return replace(cap, check=replace(cap.check, extra=extra))
+    stamped = replace(cap, check=replace(cap.check, extra=extra))
+    # A caller gate that settles here without a pending-index deferral is unresolved
+    # for good — the durability tripwire (a transient cold deferral self-heals via
+    # the reconciler and is excluded).
+    if stamped.check is not None and not extra.get("deferred_pending_index"):
+        _record_delegated_gate_unresolved(stamped.check)
+    return stamped
 
 
 def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = None) -> CapabilityExpr:

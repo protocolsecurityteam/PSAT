@@ -281,6 +281,24 @@ def test_negate_blacklist_yields_finite():
     assert out.members == [ADDR_A.lower(), ADDR_B.lower()]
 
 
+def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
+    # ROLEGATE_FIX_SPEC §8 residual: a lower_bound cofinite ("at least these are
+    # denied") complements to a lower_bound finite set — not a provably-complete
+    # "exact" one, which would falsely claim we enumerated everyone the gate admits.
+    bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
+    out = negate(bl)
+    assert out.kind == "finite_set"
+    assert out.members == [ADDR_A.lower()]
+    assert out.membership_quality == "lower_bound"
+
+
+def test_negate_exact_blacklist_yields_exact_finite():
+    bl = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])  # default exact
+    out = negate(bl)
+    assert out.kind == "finite_set"
+    assert out.membership_quality == "exact"
+
+
 def test_negate_finite_then_negate_returns_finite():
     """Double negation: negate(negate(finite_exact)) == finite_exact (canonical)."""
     fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B])

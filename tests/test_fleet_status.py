@@ -340,6 +340,7 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
     # the published ScanSummary — stub it (the MagicMock session can't run SQL).
     monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (1, 2))
     monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session: 4)
+    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session: 1)
     monkeypatch.setattr(idx, "record_heartbeat", record)
 
     t = Thread(
@@ -380,6 +381,7 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
         "total_cursors": 2,
         "pending_cursors": 1,
         "deferred_reenqueued_last_pass": 4,
+        "role_drift_reenqueued_last_pass": 1,
     }
 
 
@@ -424,6 +426,7 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
     monkeypatch.setattr(idx, "scan_enrolled_events", blocking_scan)
     monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (0, 0))
     monkeypatch.setattr(idx, "reconcile_deferred_resolutions", fake_reconcile)
+    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session: 0)
     monkeypatch.setattr(idx, "record_heartbeat", record)
 
     t = Thread(

@@ -252,6 +252,46 @@ def is_caller_keyed_time_allowlist(leaf: LeafPredicate) -> bool:
     return op in ("lt", "lte")
 
 
+def is_caller_keyed_time_denylist(leaf: LeafPredicate) -> bool:
+    """True iff the leaf is a *deny-by-exception* caller-keyed time denylist —
+    the proceed-relation-inverted twin of ``is_caller_keyed_time_allowlist``:
+    ``if (blacklistedUntil[msg.sender] > block.timestamp) revert`` proceeds when
+    the caller's keyed time is in the PAST or unset (mapping default 0), so the
+    default caller is ALLOWED and only a finite, time-bounded set is excluded.
+
+    That is public modulo a finite exclusion — a cofinite denylist, not an
+    authorization — so it must resolve to ``cofinite_blacklist`` (public + a
+    deny-by-exception condition), never a caller SET.
+
+    The discriminator is the same operand skeleton as the allowlist, with the
+    proceed-relation *upper*-bounding the caller value by the timestamp
+    (``caller_value <= now``): the default 0 satisfies it → allow-by-default.
+    """
+    if leaf.get("kind") != "comparison":
+        return False
+    operands = leaf.get("operands") or []
+    if len(operands) != 2:
+        return False
+    caller_idx = next((i for i, o in enumerate(operands) if o.get("source") in _CALLER_TAINT_SOURCES), None)
+    time_idx = next(
+        (
+            i
+            for i, o in enumerate(operands)
+            if o.get("source") == "block_context" and o.get("block_context_kind") == "timestamp"
+        ),
+        None,
+    )
+    if caller_idx is None or time_idx is None:
+        return False
+    op = leaf.get("operator")
+    # Proceed-relation upper-bounds the caller value by the timestamp (allow-by-default):
+    #   caller is LHS → "caller OP time"  → denylist when OP in {lt, lte}
+    #   caller is RHS → "time OP caller"  → denylist when OP in {gt, gte}  (i.e. caller <= time)
+    if caller_idx < time_idx:
+        return op in ("lt", "lte")
+    return op in ("gt", "gte")
+
+
 def is_caller_keyed_membership_allowlist(leaf: LeafPredicate) -> bool:
     """True iff the leaf is a positive (``truthy``) membership test keyed on the
     caller — ``require(allowed[msg.sender])`` — i.e. an ALLOWLIST: only the
