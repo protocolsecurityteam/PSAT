@@ -487,6 +487,7 @@ def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypa
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("stubbed one-shot transport blip")
+        assert params
         body = bytes.fromhex(params[0]["data"][10:])
         decoded = abi_decode(["(address,bool,bytes)[]"], body)[0]
         results = []

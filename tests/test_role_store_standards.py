@@ -210,9 +210,7 @@ def test_resolve_probe_code_none_rpc_url_degrades(monkeypatch):
     # default_rpc_url yields no URL (no RPC configured): every wire hop is a no-op,
     # so the probe returns None and detection is inconclusive — never a raise.
     monkeypatch.setattr(rss, "default_rpc_url", lambda **k: None)
-    monkeypatch.setattr(
-        rss, "get_code", lambda *a, **k: (_ for _ in ()).throw(AssertionError("get_code with no url"))
-    )
+    monkeypatch.setattr(rss, "get_code", lambda *a, **k: (_ for _ in ()).throw(AssertionError("get_code with no url")))
     code = resolve_probe_code(_sess({_PROXY: _IMPL}), _PROXY, 1)
     assert code is None
     assert detect_standards(code) == []

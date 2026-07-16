@@ -38,7 +38,7 @@ import textwrap
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -60,6 +60,7 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     evaluate_tree,
 )
 from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
 from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
@@ -573,7 +574,7 @@ def test_delegated_gate_unresolved_emitted_on_settled_gate(earned_public):
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:
-        out = _pe._stamp_caller_gate_check(check, leaf)
+        out = _pe._stamp_caller_gate_check(check, cast(LeafPredicate, leaf))
     finally:
         stage_metrics_var.reset(token)
     assert out.kind == "external_check_only"
@@ -604,7 +605,7 @@ def test_delegated_gate_unresolved_skipped_when_deferred(earned_public):
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:
-        _pe._stamp_caller_gate_check(check, leaf)
+        _pe._stamp_caller_gate_check(check, cast(LeafPredicate, leaf))
     finally:
         stage_metrics_var.reset(token)
     assert not any(k.startswith("delegated_gate_unresolved") for k in metrics)
