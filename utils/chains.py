@@ -387,6 +387,33 @@ def require_chain(
     )
 
 
+def require_supported_chain(
+    chain_id: int | str | None = None,
+    *,
+    chain: str | None = None,
+    context: str,
+) -> ChainInfo:
+    """Resolve a chain AND require it be enabled for this deployment (invariant 14).
+
+    The single enforcement point for the user-facing chain-accepting edges: it
+    first resolves the chain through :func:`require_chain` (registry lookup +
+    fail-loud on an unknown/missing chain), then rejects a chain that exists in
+    the registry but is absent from the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist —
+    so an edge cannot enroll / analyze / monitor a chain the deployment has not
+    proven and enabled. Both failure modes raise :class:`UnsupportedChainError`
+    (naming the chain and the allowlist env var); routers translate it to HTTP
+    400. State-writing edges call this; read-only listings and historical-row
+    cleanup do not, so a since-disabled chain's rows stay reachable.
+    """
+    info = require_chain(chain_id, chain=chain, context=context)
+    if info.chain_id not in supported_chain_ids():
+        raise UnsupportedChainError(
+            f"{context}: chain {info.name!r} (chain_id={info.chain_id}) is not enabled for this "
+            f"deployment; add it to {SUPPORTED_CHAIN_IDS_ENV} to enable it"
+        )
+    return info
+
+
 def chain_cache_token(chain: str | int | None) -> str:
     """Canonical cache-key token for a chain (invariant 11): the decimal-string
     chain id (``"1"``, ``"8453"``).

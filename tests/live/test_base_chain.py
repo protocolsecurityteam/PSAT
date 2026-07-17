@@ -8,14 +8,18 @@ supporting Base. On a mainnet-only deployment the whole module skips cleanly —
 prod stays mainnet-only; only the Base-enabled preview sets
 ``PSAT_SUPPORTED_CHAIN_IDS=1,8453`` (see .github/workflows/pr.yml deploy step).
 
-The deployed server exposes no allowlist read endpoint, and the monitoring /
-enrollment endpoints accept any *registered* chain without consulting the
-allowlist — so a skip cannot be derived from an "unsupported chain" API error.
-The gate is therefore explicit: the live-tests runner declares the deployed
-allowlist via ``PSAT_LIVE_SUPPORTED_CHAIN_IDS`` (mirror of the deploy's
+The deployed server exposes no allowlist read endpoint. The enrollment/analyze
+edges now DO consult the allowlist (they reject an unsupported chain with HTTP
+400), but that rejection can't be the primary gate: the module skip must fire
+before the expensive company fixtures run, and it can't distinguish a real
+"Base unsupported" 400 from an unrelated request error. The gate is therefore
+explicit and up-front: the live-tests runner declares the deployed allowlist via
+``PSAT_LIVE_SUPPORTED_CHAIN_IDS`` (mirror of the deploy's
 ``PSAT_SUPPORTED_CHAIN_IDS``). When that is unset we fall back to a positive
 server probe — Base showing up in ``/api/health/monitoring`` chains means the
-deployment is already exercising Base — and otherwise skip.
+deployment is already exercising Base — and otherwise skip. The Base enrollment
+fixture then treats a server-side unsupported-chain 400 as a clean skip too, a
+defense-in-depth layer for a mainnet-only preview that slips past both.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import os
 from typing import Any
 
 import pytest
+import requests
 
 from tests.live.conftest import LiveClient
 
@@ -113,7 +118,18 @@ def base_monitored_contract(
         "needs_polling": False,
         "is_active": True,
     }
-    return live_client.upsert_protocol_monitoring(company_protocol_id, payload)
+    try:
+        return live_client.upsert_protocol_monitoring(company_protocol_id, payload)
+    except requests.HTTPError as exc:
+        # Defense in depth: a mainnet-only deployment now rejects a Base
+        # enrollment with HTTP 400 (allowlist enforcement). If the up-front
+        # module gate somehow passed on a Base-less deployment, skip cleanly
+        # rather than fail — this module never asserts against a chain the
+        # server has not enabled.
+        resp = exc.response
+        if resp is not None and resp.status_code == 400:
+            pytest.skip(f"deployment rejected Base enrollment (allowlist): {resp.text[:200]}")
+        raise
 
 
 def test_base_monitored_contract_chain_roundtrips(base_monitored_contract):

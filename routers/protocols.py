@@ -17,6 +17,7 @@ from db.models import (
     TvlSnapshot,
 )
 from schemas.api_requests import ProtocolSubscribeRequest
+from utils.chains import UnsupportedChainError, require_supported_chain
 
 from . import deps
 
@@ -59,6 +60,13 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, A
     in-flight job checks. Useful when enrollment produced wrong results
     or after manual DB changes.
     """
+    # Allowlist enforcement (inv. 14): re-enroll spawns monitoring work on the
+    # resolved chain, so a chain this deployment has not enabled is rejected here.
+    # The admin-edge default 'ethereum' stays and is supported everywhere.
+    try:
+        require_supported_chain(chain=chain, context="protocol re-enroll")
+    except UnsupportedChainError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     rpc_url = deps.DEFAULT_RPC_URL
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)

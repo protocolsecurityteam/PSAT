@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
+from utils.chains import UnsupportedChainError, require_supported_chain
 from utils.rpc import rpc_request
 
 from . import deps
@@ -72,6 +73,13 @@ def list_monitored_contracts(
 @router.post("/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)])
 def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> dict[str, Any]:
     """Create or update one monitored contract for a protocol."""
+    # Allowlist enforcement (inv. 14): enrolling a contract on a chain takes
+    # scanner leases and RPC on that chain, so a chain this deployment has not
+    # enabled is rejected here (the default 'ethereum' is supported everywhere).
+    try:
+        require_supported_chain(chain=request.chain, context="monitored-contract enrollment")
+    except UnsupportedChainError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
         if protocol is None:

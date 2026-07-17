@@ -10,12 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 
-from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol
+from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
-from utils.chains import UnknownChainError, chain_by_name
+from utils.chains import UnknownChainError, UnsupportedChainError, chain_by_name, require_supported_chain
 
 from . import deps
 
@@ -36,6 +36,19 @@ def list_jobs() -> list[dict[str, Any]]:
 def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
     if request.address and not request.address.startswith("0x"):
         raise HTTPException(status_code=400, detail="Address must start with 0x")
+    # Allowlist enforcement (inv. 14): the edge keeps its mainnet default, but a
+    # submission that resolves to a chain this deployment has not enabled is
+    # rejected before a job is spawned. Enforce on the *resolved* chain — the same
+    # ``derive_job_chain_id`` value the job carries — so a chainless/mainnet
+    # default is unaffected and an address-less company/dapp/defillama submission
+    # (no chain identity; it fans out to the protocol's declared chains during
+    # discovery, an internal derivation not gated here) is left alone.
+    resolved_chain_id = derive_job_chain_id(request.chain, request.address)
+    if resolved_chain_id is not None:
+        try:
+            require_supported_chain(resolved_chain_id, context="/api/analyze")
+        except UnsupportedChainError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     with deps.SessionLocal() as session:
         # Workers honor ``request["rpc_url"]`` only as a local-node override
         # (Anvil / test fork) via ``default_rpc_url``; a hosted URL here is
