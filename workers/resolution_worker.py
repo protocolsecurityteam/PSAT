@@ -42,13 +42,16 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 
 def _rpc_url_for_job(job: Job) -> str:
+    """eRPC URL for the job's own chain, resolved via the first-class
+    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    a chainless ``/api/analyze`` submission carries the mainnet edge default
+    only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
-    chain = request.get("chain")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=request.get("chain_id"),
-        chain=chain if isinstance(chain, str) else None,
+        chain_id=_chain_id_for_job(job),
+        context=f"resolution rpc for job {job.id}",
     )
 
 

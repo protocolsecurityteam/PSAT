@@ -233,3 +233,46 @@ def test_registry_still_resolves_all_supported_chains():
     assert chain_by_id(1).name == "ethereum"
     with pytest.raises(UnknownChainError):
         chain_by_id(999999)
+
+
+class TestResolutionRpcUrlUsesJobChainColumn:
+    """Regression: a chainless /api/analyze request carries its mainnet edge
+    default only in the first-class ``jobs.chain_id`` column — the request
+    JSONB has no chain keys. ``_rpc_url_for_job`` must resolve through the
+    column, or every such job dies terminal at the resolution stage (the
+    PR #153 live-suite failure)."""
+
+    def test_chainless_request_resolves_via_column(self, monkeypatch):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.resolution_worker import _rpc_url_for_job
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+        job = cast(Any, SimpleNamespace(id="j1", address="0x" + "ab" * 20, chain_id=1, request={}))
+        assert _rpc_url_for_job(job) == "https://erpc.example/main/evm/1"
+
+    def test_second_chain_column_wins(self, monkeypatch):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.resolution_worker import _rpc_url_for_job
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+        job = cast(Any, SimpleNamespace(id="j2", address="0x" + "ab" * 20, chain_id=8453, request={}))
+        assert _rpc_url_for_job(job) == "https://erpc.example/main/evm/8453"
+
+    def test_local_rpc_override_still_wins(self, monkeypatch):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.resolution_worker import _rpc_url_for_job
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+        job = cast(
+            Any,
+            SimpleNamespace(
+                id="j3", address="0x" + "ab" * 20, chain_id=1, request={"rpc_url": "http://127.0.0.1:8545"}
+            ),
+        )
+        assert _rpc_url_for_job(job) == "http://127.0.0.1:8545"
