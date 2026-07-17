@@ -29,6 +29,10 @@ from services.resolution.repos.event_logs_hypersync import (
 
 MAINNET_URL = "https://eth.hypersync.xyz"
 BASE_URL = "https://base.hypersync.xyz"
+# A registry chain still marked indexer-disabled (hypersync_url=None). Base used
+# to fill this role, but Phase 2 gave it a proven HyperSync URL — so the
+# "unavailable chain" example moves to arbitrum, which stays disabled for now.
+UNAVAILABLE_CHAIN_ID = 42161  # arbitrum
 
 EVENT_ADDRESS = "0x00000000000000000000000000000000c0ffee19"
 TOPIC_ADD = "0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d"
@@ -65,10 +69,12 @@ def _capture_build_url(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_registry_gives_mainnet_url_and_marks_base_unavailable():
+def test_registry_drives_per_chain_hypersync_availability():
     assert _hypersync_url_for_chain(1) == MAINNET_URL
-    # Base has no proven HyperSync coverage yet → indexer/repo disabled there.
-    assert _hypersync_url_for_chain(8453) is None
+    # Base earned proven HyperSync coverage in Phase 2 → repo enabled there.
+    assert _hypersync_url_for_chain(8453) == BASE_URL
+    # A chain without proven coverage → indexer/repo disabled there.
+    assert _hypersync_url_for_chain(UNAVAILABLE_CHAIN_ID) is None
     # Unknown chain id degrades to unavailable, not a raise (fail-loud is M1.2).
     assert _hypersync_url_for_chain(999999) is None
 
@@ -101,7 +107,7 @@ def test_repo_chain1_scans_mainnet_registry_url(_capture_build_url):
 
 def test_repo_unavailable_chain_skips_scan(_capture_build_url):
     repo = HyperSyncEventLogRepo(from_block=0, bearer_token="tok")
-    result = _fold_writes(repo, chain_id=8453)
+    result = _fold_writes(repo, chain_id=UNAVAILABLE_CHAIN_ID)
     assert result.confidence == "partial"
     assert result.partial_reason == "hypersync_unavailable_for_chain"
     # The chain has no scan surface — the client is never built.
@@ -111,7 +117,7 @@ def test_repo_unavailable_chain_skips_scan(_capture_build_url):
 def test_repo_history_unavailable_chain_skips_scan(_capture_build_url):
     repo = HyperSyncEventLogRepo(from_block=0, bearer_token="tok")
     result = repo.fold_event_history(
-        chain_id=8453,
+        chain_id=UNAVAILABLE_CHAIN_ID,
         event_address=EVENT_ADDRESS,
         event_hints=[{"topic0": TOPIC_ADD, "direction": "add", "topics_to_keys": TOPICS_TO_KEYS, "data_to_keys": {}}],
         key_sources=KEY_SOURCES,
@@ -168,7 +174,9 @@ def test_external_check_unavailable_chain_skips_scan(monkeypatch, _capture_build
     _stub_floor_defer(monkeypatch)
 
     out = asyncio.run(
-        mod._candidate_addresses_from_hypersync_async(checker_address="0x" + "11" * 20, limit=8, chain_id=8453)
+        mod._candidate_addresses_from_hypersync_async(
+            checker_address="0x" + "11" * 20, limit=8, chain_id=UNAVAILABLE_CHAIN_ID
+        )
     )
     assert out == []
     assert "url" not in _capture_build_url  # no coverage → client never built
@@ -219,7 +227,7 @@ def test_observed_keys_unavailable_chain_skips_scan(monkeypatch, _capture_build_
     monkeypatch.delenv("PSAT_HYPERSYNC_URL", raising=False)
     monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
 
-    out = _observed(SimpleNamespace(meta={}, chain_id=8453, block=None))
+    out = _observed(SimpleNamespace(meta={}, chain_id=UNAVAILABLE_CHAIN_ID, block=None))
     assert out == []
     assert "url" not in _capture_build_url  # registry None → no scan, no mainnet fallback
 
@@ -235,7 +243,7 @@ def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_u
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
 
-    _observed(SimpleNamespace(meta={"hypersync_url": BASE_URL}, chain_id=8453, block=None))
+    _observed(SimpleNamespace(meta={"hypersync_url": BASE_URL}, chain_id=UNAVAILABLE_CHAIN_ID, block=None))
     assert _capture_build_url["url"] == BASE_URL
 
 

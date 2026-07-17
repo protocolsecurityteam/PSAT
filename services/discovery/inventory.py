@@ -271,6 +271,7 @@ def search_protocol_inventory(
     max_queries: int = 4,
     run_deployer: bool = True,
     debug: bool = False,
+    declared_chains: list[str] | None = None,
 ) -> dict[str, Any]:
     clean_company = company.strip()
     if not clean_company:
@@ -395,8 +396,14 @@ def search_protocol_inventory(
     unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
     if unknown_count:
         _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
+        # Fold the requested chain into the declared set (invariant 3): a caller
+        # asking for a specific chain is declaring it. ``None`` stays ``None`` so
+        # standalone callers keep the legacy all-chain probe.
+        resolve_declared = declared_chains
+        if resolve_declared is not None:
+            resolve_declared = [*resolve_declared, requested_chain] if requested_chain else list(resolve_declared)
         try:
-            contracts = resolve_unknown_chains(contracts, debug=debug)
+            contracts = resolve_unknown_chains(contracts, declared_chains=resolve_declared, debug=debug)
             resolved = unknown_count - sum(1 for c in contracts if _primary_chain(c) == "unknown")
             notes.append(f"Chain resolution: resolved {resolved}/{unknown_count} unknown chain(s)")
         except Exception as exc:

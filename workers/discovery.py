@@ -15,7 +15,7 @@ from typing import cast
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStage
+from db.models import Contract, Job, JobStage, Protocol
 from db.queue import (
     advance_job,
     bulk_upsert_discovered_contracts,
@@ -34,7 +34,7 @@ from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, p
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
-from utils.chains import UnknownChainError, chain_by_name, require_chain
+from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -167,6 +167,27 @@ class DiscoveryWorker(BaseWorker):
             if isinstance(_raw, dict):
                 prev_inventory = _raw
 
+        # Evidence-based chain membership (invariant 3): the declared chain set
+        # narrows discovery's ``eth_getCode`` probe so it CONFIRMS membership on
+        # chains the protocol is known to use rather than ORIGINATING it on any
+        # chain an address happens to have code on. Sourced from the requested
+        # chain plus the persisted ``Protocol.chains`` of a prior run (read here,
+        # written back below). Always a list — never ``None`` — so the pipeline
+        # is always narrowed; ``None`` would re-enable the legacy all-chain probe.
+        declared_chains: list[str] = []
+        seen_declared: set[str] = set()
+        requested = canonical_chain(chain) if chain else None
+        if requested and requested != "unknown":
+            declared_chains.append(requested)
+            seen_declared.add(requested)
+        if prev_job and prev_job.protocol_id:
+            prev_protocol = session.get(Protocol, prev_job.protocol_id)
+            for existing_chain in (prev_protocol.chains or []) if prev_protocol else []:
+                canon = canonical_chain(existing_chain)
+                if canon and canon != "unknown" and canon not in seen_declared:
+                    declared_chains.append(canon)
+                    seen_declared.add(canon)
+
         self.update_detail(session, job, f"Discovering contracts + audits for {company}")
         logger.info("Discovery started for job %s: company=%s, chain=%s", job.id, company, chain)
 
@@ -177,7 +198,7 @@ class DiscoveryWorker(BaseWorker):
 
         try:
             with log_timed_phase(logger, "unified_discovery") as ph:
-                unified = run_discovery(company, chain=chain)
+                unified = run_discovery(company, chain=chain, declared_chains=declared_chains)
                 inventory = unified["addresses"]
                 audit_result_raw: dict | None = unified["audits"]
                 discovery_meta = unified["meta"]
@@ -191,7 +212,7 @@ class DiscoveryWorker(BaseWorker):
                 include_traceback=True,
             )
             logger.warning("Job %s: unified discovery failed, falling back to legacy search: %s", job.id, exc)
-            inventory = search_protocol_inventory(company, chain=chain)
+            inventory = search_protocol_inventory(company, chain=chain, declared_chains=declared_chains)
             audit_result_raw = None
             discovery_meta = {"fallback": True, "error": str(exc)}
 
@@ -218,6 +239,22 @@ class DiscoveryWorker(BaseWorker):
             aliases=resolved.get("all_names") or [],
         )
         job.protocol_id = protocol_row.id
+
+        # Persist the protocol's declared chain set (invariant 3): the union of
+        # what a prior run already recorded, the requested chain, and every
+        # chain a discovered contract is now confirmed on (candidates excluded —
+        # they carry no corroborating evidence). Written here so the next run
+        # reads it back above and narrows its probe accordingly. Never shrinks:
+        # a chain proven once stays declared.
+        proven_chains: set[str] = set(declared_chains)
+        for entry in inventory.get("contracts", []):
+            for ch in canonical_chain_list(entry.get("chains")) or []:
+                if ch and ch != "unknown":
+                    proven_chains.add(ch)
+        existing_chains: set[str] = set(protocol_row.chains or [])
+        merged_chains: list[str] = sorted(proven_chains | existing_chains)
+        if merged_chains != sorted(existing_chains):
+            protocol_row.chains = merged_chains
         session.commit()
 
         # --- Audit report discovery ---
@@ -288,8 +325,17 @@ class DiscoveryWorker(BaseWorker):
             )
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
-        # into roughly one round-trip.
-        bulk_upsert_discovered_contracts(session, protocol_id=protocol_row.id, entries=bulk_entries)
+        # into roughly one round-trip. Inventory entries without their own chain
+        # inherit the company discovery's chain (inv. 6, mainnet edge default)
+        # rather than persisting chain=NULL and duplicating against sibling
+        # writers' 'ethereum' stubs.
+        inventory_default_chain = canonical_chain(chain) or "ethereum"
+        bulk_upsert_discovered_contracts(
+            session,
+            protocol_id=protocol_row.id,
+            entries=bulk_entries,
+            default_chain=inventory_default_chain,
+        )
         session.commit()
 
         store_artifact(
@@ -353,6 +399,20 @@ class DiscoveryWorker(BaseWorker):
             protocol.get("url"),
         )
 
+        # Seed both sibling scans with the discovery job's chain (inv. 6): derive
+        # chain_id from the request's chain string via the registry rather than a
+        # bare ``or 1``. A company discovery with no chain defaults to mainnet —
+        # an explicit, documented choice. Each scan still attributes each address's
+        # own chain from its own results; this is only the per-address fallback, so
+        # a non-mainnet company's addresses inherit its chain instead of mainnet.
+        spawn_chain = request.get("chain")
+        spawn_chain_id = request.get("chain_id")
+        if not spawn_chain_id:
+            try:
+                spawn_chain_id = chain_by_name(spawn_chain).chain_id if spawn_chain else 1
+            except UnknownChainError:
+                spawn_chain_id = 1
+
         # Spawn DefiLlama adapter scans — one per sub-protocol
         all_slugs = protocol.get("all_slugs", [])
         if not all_slugs and protocol.get("slug"):
@@ -365,6 +425,8 @@ class DiscoveryWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "analyze_limit": request.get("analyze_limit", 5),
+                "chain": spawn_chain,
+                "chain_id": spawn_chain_id,
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
             }
@@ -374,18 +436,6 @@ class DiscoveryWorker(BaseWorker):
         # Spawn DApp crawl
         dapp_url = protocol.get("url")
         if dapp_url:
-            # Seed the crawl with the discovery job's chain (inv. 6): derive
-            # chain_id from the request's chain string via the registry rather
-            # than a bare ``or 1``. A company discovery with no chain defaults to
-            # mainnet — an explicit, documented choice; the crawl worker still
-            # re-resolves each found contract's own chain from crawl results.
-            spawn_chain = request.get("chain")
-            spawn_chain_id = request.get("chain_id")
-            if not spawn_chain_id:
-                try:
-                    spawn_chain_id = chain_by_name(spawn_chain).chain_id if spawn_chain else 1
-                except UnknownChainError:
-                    spawn_chain_id = 1
             dapp_request = {
                 "dapp_urls": [dapp_url],
                 "name": f"{company}_dapp_crawl",
@@ -456,11 +506,12 @@ class DiscoveryWorker(BaseWorker):
         # serial RTT between them goes away.
         # Address-scoped discovery jobs always carry a chain (Phase-0 dual-write
         # + backfill); one that can't resolve is a data bug — fail loud (inv. 6).
-        fetch_chain_id = require_chain(
+        fetch_chain = require_chain(
             getattr(job, "chain_id", None),
             chain=request.get("chain") if isinstance(request, dict) else None,
             context=f"discovery source fetch for {address}",
-        ).chain_id
+        )
+        fetch_chain_id = fetch_chain.chain_id
         with log_timed_phase(logger, "source_fetch"):
             fan_out = etherscan.parallel_get(
                 {
@@ -492,12 +543,22 @@ class DiscoveryWorker(BaseWorker):
         elif isinstance(creators_or_exc, BaseException):
             logger.debug("Could not fetch deployer for %s: %s", address, creators_or_exc)
 
-        # Write to contracts table — upsert to handle pre-existing discovered rows
+        # Write to contracts table — upsert to handle pre-existing discovered rows.
+        # Chain identity comes from the job's first-class chain_id (resolved above
+        # via the registry), never the request payload: a chainless /api/analyze
+        # submission would otherwise write chain=NULL and, because NULL ≠ NULL
+        # defeats uq_contract_address_chain, duplicate against 'ethereum' stubs
+        # (inv. 1/6/12).
         request = job.request if isinstance(job.request, dict) else {}
+        chain_name = fetch_chain.name
         existing = session.execute(
             select(Contract).where(
                 Contract.address == address.lower(),
-                Contract.chain == request.get("chain"),
+                # Legacy NULL-chain rows are mainnet by convention; coalescing lets
+                # a mainnet write dedup against them instead of minting a duplicate,
+                # while a non-mainnet write (coalesce → 'ethereum' ≠ its own name)
+                # correctly never matches a NULL/mainnet row at the same address.
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name,
             )
         ).scalar_one_or_none()
 
@@ -599,7 +660,7 @@ class DiscoveryWorker(BaseWorker):
             contract = Contract(
                 job_id=job.id,
                 address=address.lower(),
-                chain=request.get("chain"),
+                chain=chain_name,
                 protocol_id=owning_protocol_id,
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),

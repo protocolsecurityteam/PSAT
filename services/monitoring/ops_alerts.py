@@ -31,12 +31,18 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from db.queue import HEARTBEAT_OPS_ALERTER, HEARTBEAT_PROTOCOL_SCANNER
+from db.models import IndexedEventCursor, MonitoredContract
+from db.queue import (
+    HEARTBEAT_EVENT_INDEXER,
+    HEARTBEAT_OPS_ALERTER,
+    HEARTBEAT_PROTOCOL_SCANNER,
+)
 from services.monitoring.notifier import _send_discord
-from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify
+from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
+from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,87 @@ def collect_stale_processes(session: Session, *, now: datetime | None = None) ->
         if cls in (STALE, ERROR):
             stale.append({"name": process, "beat_age_s": beat_age_s, "status": cls})
     return stale
+
+
+def _chain_name_for_token(token: str) -> str:
+    """Registry canonical name for a decimal chain-id *token*, else the token
+    itself — a health read must never raise on a legacy/unregistered chain."""
+    if token.isdigit():
+        try:
+            return chain_by_id(int(token)).name
+        except UnknownChainError:
+            pass
+    return token
+
+
+def collect_chain_health(session: Session, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Per-chain staleness for the chain-scoped subsystems (invariant 4).
+
+    A fleet-global "monitoring OK" hides a chain whose indexer or scanner has
+    stalled while another chain stays fresh. This reads the freshness of the
+    per-chain rows those subsystems already write — indexer cursors carry
+    ``chain_id``; monitored contracts carry ``chain`` — and flags a chain stale
+    on the same ``stale_after_seconds`` rule the process-level check uses. A
+    subsystem with no rows on a chain is ``idle`` (not a fault).
+
+    Returns one entry per chain, keyed by canonical chain-id token, each with
+    the two subsystems' status and an aggregate ``stale`` flag.
+    """
+    now = now or datetime.now(timezone.utc)
+    indexer_window = stale_after_seconds(PROCESS_META[HEARTBEAT_EVENT_INDEXER]["interval_s"])
+    scanner_window = stale_after_seconds(PROCESS_META[HEARTBEAT_PROTOCOL_SCANNER]["interval_s"])
+
+    per_chain: dict[str, dict[str, Any]] = {}
+
+    def _entry(token: str) -> dict[str, Any]:
+        return per_chain.setdefault(
+            token,
+            {
+                "chain_id": int(token) if token.isdigit() else None,
+                "name": _chain_name_for_token(token),
+                "indexer": "idle",
+                "monitoring": "idle",
+            },
+        )
+
+    # Indexer: stalest cursor run per chain. A chain whose cursors haven't been
+    # scanned within the indexer window is a stalled per-chain indexer.
+    for chain_id, cursors, oldest_run in session.execute(
+        select(
+            IndexedEventCursor.chain_id,
+            func.count(),
+            func.min(IndexedEventCursor.last_run_at),
+        ).group_by(IndexedEventCursor.chain_id)
+    ).all():
+        if not cursors:
+            continue
+        age = _age_seconds(oldest_run, now)
+        entry = _entry(chain_cache_token(chain_id))
+        entry["indexer"] = STALE if (age is None or age >= indexer_window) else "fresh"
+
+    # Monitoring: freshest scan-frontier advance per chain among active
+    # contracts. A chain enrolled but not advancing within the scanner window is
+    # a stalled per-chain scanner.
+    for chain, active, latest in session.execute(
+        select(
+            MonitoredContract.chain,
+            func.count(),
+            func.max(MonitoredContract.updated_at),
+        )
+        .where(MonitoredContract.is_active.is_(True))
+        .group_by(MonitoredContract.chain)
+    ).all():
+        if not active:
+            continue
+        age = _age_seconds(latest, now)
+        entry = _entry(chain_cache_token(chain))
+        entry["monitoring"] = STALE if (age is None or age >= scanner_window) else "fresh"
+
+    out: list[dict[str, Any]] = []
+    for entry in per_chain.values():
+        entry["stale"] = STALE in (entry["indexer"], entry["monitoring"])
+        out.append(entry)
+    return sorted(out, key=lambda d: (d["chain_id"] is None, d["chain_id"] or 0, d["name"]))
 
 
 def _current_problems(beats: dict[str, dict[str, Any]], now: datetime) -> dict[str, dict[str, Any]]:

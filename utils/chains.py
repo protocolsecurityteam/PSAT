@@ -119,8 +119,16 @@ class ChainInfo:
     chain_id: int
     name: str
     aliases: tuple[str, ...]
-    # Explicit per chain — never pattern-derived. None means the event indexer is
-    # disabled for this chain (inv. 10): no proven HyperSync/HyperRPC coverage.
+    # Explicit per chain — never pattern-derived. Non-None marks a chain with
+    # proven Envio coverage and serves two roles:
+    #   * it is the "event indexer enabled for this chain" signal (inv. 10); and
+    #   * it is the NATIVE HyperSync query endpoint (``<chain>.hypersync.xyz``) that
+    #     the inline resolution repos (``event_logs_hypersync.py``,
+    #     ``mapping_enumerator.py``) POST to directly with an ENVIO_API_TOKEN bearer.
+    # The durable event indexer does NOT read this URL: it goes through the chain's
+    # eRPC route, which fronts a HyperRPC (JSON-RPC) upstream carrying the Envio
+    # token server-side plus provider failover. ``None`` = no proven coverage =
+    # indexer disabled for this chain.
     hypersync_url: str | None
     explorer_base_url: str
     confirmation_depth: int
@@ -193,12 +201,23 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=8453,
         name="base",
         aliases=(),
-        hypersync_url=None,
+        # Coverage is preview-validated (inv. 14): HyperSync is unreachable from
+        # the dev network, so the $0-cost indexer path for this URL is proven in
+        # the PR preview environment, not here.
+        hypersync_url="https://base.hypersync.xyz",
         explorer_base_url="https://basescan.org",
-        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        # 75 × ~2s ≈ 150s wall-clock, matching/exceeding mainnet finality
+        # (12 × ~12s ≈ 144s). OP-stack unsafe-head reorgs are shallow but
+        # possible until the L1 batch is posted, so we track the L1 window.
+        confirmation_depth=75,
         max_getlogs_range=MAX_GETLOGS_RANGE,
-        bridge_executors=(),
-        cross_domain_messengers=(),
+        # OP-stack L2 predeploys for authority recognition (inv. 15). The
+        # L2StandardBridge *executes* bridged deposits/withdrawals → bridge
+        # executor; the L2CrossDomainMessenger *relays* L1↔L2 messages and is
+        # the contract whose xDomainMessageSender surfaces an aliased L1 owner
+        # → cross-domain messenger.
+        bridge_executors=("0x4200000000000000000000000000000000000010",),
+        cross_domain_messengers=("0x4200000000000000000000000000000000000007",),
     ),
     ChainInfo(
         chain_id=43114,
@@ -374,6 +393,33 @@ def require_chain(
         f"{context}: no chain supplied (chain_id={chain_id!r}, chain={chain!r}); "
         "chain is required and can no longer default to mainnet"
     )
+
+
+def require_supported_chain(
+    chain_id: int | str | None = None,
+    *,
+    chain: str | None = None,
+    context: str,
+) -> ChainInfo:
+    """Resolve a chain AND require it be enabled for this deployment (invariant 14).
+
+    The single enforcement point for the user-facing chain-accepting edges: it
+    first resolves the chain through :func:`require_chain` (registry lookup +
+    fail-loud on an unknown/missing chain), then rejects a chain that exists in
+    the registry but is absent from the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist —
+    so an edge cannot enroll / analyze / monitor a chain the deployment has not
+    proven and enabled. Both failure modes raise :class:`UnsupportedChainError`
+    (naming the chain and the allowlist env var); routers translate it to HTTP
+    400. State-writing edges call this; read-only listings and historical-row
+    cleanup do not, so a since-disabled chain's rows stay reachable.
+    """
+    info = require_chain(chain_id, chain=chain, context=context)
+    if info.chain_id not in supported_chain_ids():
+        raise UnsupportedChainError(
+            f"{context}: chain {info.name!r} (chain_id={info.chain_id}) is not enabled for this "
+            f"deployment; add it to {SUPPORTED_CHAIN_IDS_ENV} to enable it"
+        )
+    return info
 
 
 def chain_cache_token(chain: str | int | None) -> str:

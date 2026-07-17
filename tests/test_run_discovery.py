@@ -488,7 +488,9 @@ def _stub_discovery_modules(monkeypatch, *, audit_reports=None, address_contract
             "notes": [],
         }
 
-    def fake_search_protocol_inventory(protocol, chain=None, limit=500, max_queries=4, run_deployer=False, debug=False):
+    def fake_search_protocol_inventory(
+        protocol, chain=None, limit=500, max_queries=4, run_deployer=False, debug=False, declared_chains=None
+    ):
         calls["inventory_run_deployer"] = run_deployer
         return {
             "contracts": list(address_contracts or []),

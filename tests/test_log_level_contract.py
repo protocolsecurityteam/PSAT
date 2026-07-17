@@ -49,7 +49,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        756: "Notifier side-effect; reanalysis already completed before this fired.",
+        797: "Notifier side-effect; reanalysis already completed before this fired.",
     },
 }
 

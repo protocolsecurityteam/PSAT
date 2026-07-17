@@ -702,6 +702,144 @@ class TestResolveUnknownChains:
 
 
 # ---------------------------------------------------------------------------
+# Evidence-based chain membership (invariant 3): probing may CONFIRM membership
+# on the protocol's declared chains, never ORIGINATE it on an arbitrary chain
+# an address merely has code on (Permit2/Multicall3/Safe are everywhere).
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceBasedChainMembership:
+    @staticmethod
+    def _record_probed_chain_ids(monkeypatch) -> list[str]:
+        """Wire-level: record the chain id of every chain that gets probed."""
+        probed: list[str] = []
+
+        def fake_batch_get_code(rpc_url, addresses):
+            probed.append(rpc_url.rsplit("/evm/", 1)[-1])
+            return {a: "0x" for a in addresses}
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
+        return probed
+
+    def test_declared_chains_narrow_the_probe(self, monkeypatch):
+        """(a) An unknown-chain entry is probed ONLY on the declared chains."""
+        probed = self._record_probed_chain_ids(monkeypatch)
+        contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
+        resolve_unknown_chains(contracts, declared_chains=["ethereum"])
+        # No all-chain fan-out: ethereum (chain_id 1) is the only chain touched.
+        assert set(probed) == {"1"}
+
+    def test_uncorroborated_hit_is_candidate_only(self, monkeypatch):
+        """(b) With no declared evidence a probe hit is a candidate, not membership.
+
+        The address has code on arbitrum but nothing declares any chain — so the
+        hit is recorded as a candidate and ``chains`` stays ``["unknown"]``. That
+        keeps it out of the ``contracts`` table on arbitrum and off the job queue.
+        """
+
+        def fake_batch_get_code(rpc_url, addresses):
+            hit = rpc_url.endswith("/evm/42161")
+            return {a: ("0x6001" if hit else "0x") for a in addresses}
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
+
+        contract = {"name": "Ghost", "address": "0x" + "c" * 40, "chains": ["unknown"]}
+        resolve_unknown_chains([contract], declared_chains=[])
+
+        assert contract["chains"] == ["unknown"]
+        assert contract["chain_candidates"] == ["arbitrum"]
+
+    def test_declared_chain_hit_is_written(self, monkeypatch):
+        """(c) A hit on a declared chain is corroborated → written, as today."""
+
+        def fake_batch_get_code(rpc_url, addresses):
+            hit = rpc_url.endswith("/evm/1")
+            return {a: ("0x6001" if hit else "0x") for a in addresses}
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
+
+        contract = {"name": "Real", "address": "0x" + "d" * 40, "chains": ["unknown"]}
+        resolve_unknown_chains([contract], declared_chains=["ethereum"])
+
+        assert contract["chains"] == ["ethereum"]
+        assert "chain_candidates" not in contract
+
+    def test_none_declared_chains_keeps_legacy_all_chain_probe(self, monkeypatch):
+        """Backward compat: ``declared_chains=None`` still runs the legacy probe.
+
+        The existing standalone callers (and the tests above in
+        ``TestResolveUnknownChains``) pass no declared set — they must keep
+        probing every chain and writing hits, unchanged.
+        """
+        probed = self._record_probed_chain_ids(monkeypatch)
+        contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
+        resolve_unknown_chains(contracts, declared_chains=None)
+        # Legacy path fans out across the whole registry, not just one chain.
+        assert len(set(probed)) > 1
+
+    def test_search_inventory_narrows_probe_to_declared(self, monkeypatch):
+        """End-to-end through the orchestrator: a declared set narrows the probe.
+
+        Bridge has code on arbitrum, but the protocol only declares ethereum, so
+        arbitrum is never probed and Bridge is not relabelled onto it.
+        """
+        addr_known = "0x" + "a" * 40
+        addr_unknown = "0x" + "b" * 40
+        fake_entries = [
+            _entry(address=addr_known, name="Vault", chain="ethereum"),
+            _entry(address=addr_unknown, name="Bridge", chain="unknown"),
+        ]
+        monkeypatch.setattr(
+            "services.discovery.inventory._discover_contract_inventory_pages",
+            lambda *_a, **_kw: ([{"url": "https://docs.example.com"}], ["https://docs.example.com"]),
+        )
+        monkeypatch.setattr(
+            "services.discovery.inventory.extract_inventory_entries_from_pages",
+            lambda *_a, **_kw: fake_entries,
+        )
+        monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
+        probed = self._record_probed_chain_ids(monkeypatch)
+
+        result = search_protocol_inventory("docs.example.com", limit=10, declared_chains=["ethereum"])
+
+        assert set(probed) == {"1"}
+        by_name = {c["name"]: c for c in result["contracts"]}
+        assert by_name["Bridge"]["chains"] == ["unknown"]
+        assert "arbitrum" not in by_name["Bridge"].get("chains", [])
+
+    def test_search_inventory_records_candidate_in_artifact(self, monkeypatch):
+        """End-to-end: with no declared evidence, an off-chain hit rides the
+        inventory (discovery artifact) as a candidate, not as a membership."""
+        addr_unknown = "0x" + "b" * 40
+        fake_entries = [_entry(address=addr_unknown, name="Bridge", chain="unknown")]
+        monkeypatch.setattr(
+            "services.discovery.inventory._discover_contract_inventory_pages",
+            lambda *_a, **_kw: ([{"url": "https://docs.example.com"}], ["https://docs.example.com"]),
+        )
+        monkeypatch.setattr(
+            "services.discovery.inventory.extract_inventory_entries_from_pages",
+            lambda *_a, **_kw: fake_entries,
+        )
+        monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
+
+        def fake_batch(rpc_url, addrs):
+            hit = rpc_url.endswith("/evm/42161")
+            return {a: ("0x6001" if hit else "0x") for a in addrs}
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch)
+
+        result = search_protocol_inventory("docs.example.com", limit=10, declared_chains=[])
+
+        bridge = {c["name"]: c for c in result["contracts"]}["Bridge"]
+        assert bridge["chains"] == ["unknown"]
+        assert bridge["chain_candidates"] == ["arbitrum"]
+
+
+# ---------------------------------------------------------------------------
 # enrich_with_activity — mocked Etherscan activity lookups
 # ---------------------------------------------------------------------------
 

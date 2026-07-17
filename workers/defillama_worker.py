@@ -27,6 +27,7 @@ from db.queue import (
 )
 from services.crawlers.defillama.scan import scan_protocol
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -118,8 +119,18 @@ class DefiLlamaWorker(BaseWorker):
             if addr and chain:
                 chain_by_address[addr] = chain
 
-        # Write ALL discovered addresses to contracts table
+        # Write ALL discovered addresses to contracts table. Addresses the scan
+        # couldn't chain-attribute inherit the job's chain (default_chain) rather
+        # than persisting chain=NULL, which would duplicate against a sibling
+        # writer's 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain
+        # — invariants 1/6/12). A chainless company scan is the mainnet edge.
         protocol_id = protocol_row.id
+        chain_id = request.get("chain_id") or 1
+        try:
+            chain_name = chain_by_id(chain_id).name
+        except UnknownChainError:
+            chain_name = None
+        default_chain = request.get("chain") or chain_name
         bulk_entries: list[dict] = []
         for addr in addresses:
             normalized = addr.lower()
@@ -131,7 +142,9 @@ class DefiLlamaWorker(BaseWorker):
                     "new_sources": ["defillama"],
                 }
             )
-        bulk_upsert_discovered_contracts(session, protocol_id=protocol_id, entries=bulk_entries)
+        bulk_upsert_discovered_contracts(
+            session, protocol_id=protocol_id, entries=bulk_entries, default_chain=default_chain
+        )
         session.commit()
         record_stage_metric("contracts_found", len(addresses))
 

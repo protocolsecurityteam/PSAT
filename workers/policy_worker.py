@@ -30,6 +30,7 @@ from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
+from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from services.static.claims import Claim, resolve_claim_precedence
@@ -65,15 +66,25 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 def _make_principal_type_resolver(
     classify_cache: dict[str, tuple[str, dict[str, object]]],
     rpc_url: str | None,
+    cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
 ) -> Callable[[str], tuple[str | None, dict[str, object] | None]]:
     """Build an ``address -> (resolved_type, details)`` classifier for the FP
     writer. Reuses the resolution stage's classify cache, falling back to a
     live (process-cached) ``classify_resolved_address`` probe for misses — the
     same path ``build_principal_labels`` uses, so FunctionPrincipal rows carry
-    the same Safe/Timelock/EOA typing as principal labels."""
+    the same Safe/Timelock/EOA typing as principal labels.
+
+    ``cross_chain_recognizer`` (inv. 15), when supplied, takes priority: an
+    aliased L1 owner / bridge predeploy is labelled ``cross_chain_authority``
+    before the generic classification runs. ``None`` (mainnet and every chain
+    without bridge constants) preserves the prior typing exactly."""
     cache_lc = {k.lower(): v for k, v in classify_cache.items()}
 
     def _resolve(address: str) -> tuple[str | None, dict[str, object] | None]:
+        if cross_chain_recognizer is not None:
+            recognized = cross_chain_recognizer(address)
+            if recognized is not None:
+                return recognized
         cached = cache_lc.get((address or "").lower())
         if cached:
             return cached[0], cached[1]
@@ -83,6 +94,22 @@ def _make_principal_type_resolver(
         return resolved_type, details
 
     return _resolve
+
+
+def _known_addresses_for_scope(resolved_control_graph: Any, target_address: str | None) -> set[str]:
+    """The run's known-address set for cross-chain alias recognition (inv. 15):
+    every resolved control-graph node address plus the target contract. An
+    aliased L1 owner is only labelled when its implied L1 address is one of
+    these — same-address L1/L2 deployments are the case this catches."""
+    known: set[str] = set()
+    if target_address:
+        known.add(target_address.lower())
+    nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
+    for node in nodes or []:
+        addr = str((node or {}).get("address", "")).lower()
+        if addr.startswith("0x") and len(addr) == 42:
+            known.add(addr)
+    return known
 
 
 def _rpc_url_for_job(job: Job) -> str:
@@ -465,6 +492,13 @@ class PolicyWorker(BaseWorker):
                 exc=RuntimeError("no Contract row for job; zero policy rows written"),
                 context={"job_id": str(job.id), "address": job.address or "0x0"},
             )
+        # Cross-chain authority recognizer (inv. 15): None on mainnet and any
+        # chain without bridge constants, so those paths stay byte-identical.
+        # Uses the first-class job chain id (not the local ``chain_id``, which a
+        # later block re-derives from request JSONB and can clobber to 1).
+        cross_chain_recognizer = make_cross_chain_recognizer(
+            _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
+        )
         if contract_row and isinstance(ep_data, dict):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
@@ -476,7 +510,9 @@ class PolicyWorker(BaseWorker):
                     function_records=ep_data.get("functions", []),
                     capability_by_function=capability_resolver_output,
                     safe_address_lookup=safe_lookup or None,
-                    resolve_principal_type=_make_principal_type_resolver(classify_cache, rpc_url),
+                    resolve_principal_type=_make_principal_type_resolver(
+                        classify_cache, rpc_url, cross_chain_recognizer
+                    ),
                     deployment_address=deployment_address,
                 )
                 session.commit()
@@ -603,6 +639,11 @@ class PolicyWorker(BaseWorker):
                 # principal — the dominant cost on big protocols (etherfi LP impl
                 # spent 14+ min here on shared-cpu-2x).
                 classify_cache=classify_cache,
+                # Rebuilt against the refreshed graph so the alias-of-known scope
+                # reflects every node the refresh added (inv. 15).
+                cross_chain_recognizer=make_cross_chain_recognizer(
+                    _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
+                ),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 

@@ -86,13 +86,24 @@ def monitoring_health() -> Any:
     background monitoring daemon goes stale or errors — closing the "web up,
     monitoring dead" blind spot. 200 with an empty ``stale`` list when all
     processes are fresh; 503 with the offending processes otherwise.
+
+    ``chains`` reports per-chain staleness for the chain-scoped subsystems
+    (indexer, monitoring scanner) so a stalled Base indexer degrades health —
+    and names the chain — even while mainnet stays fresh (invariant 4).
     """
-    from services.monitoring.ops_alerts import collect_stale_processes
+    from services.monitoring.ops_alerts import collect_chain_health, collect_stale_processes
 
     with deps.SessionLocal() as session:
         stale = collect_stale_processes(session)
-    body: dict[str, Any] = {"status": "ok" if not stale else "unavailable", "stale": stale}
-    if stale:
+        chains = collect_chain_health(session)
+    stale_chains = [c for c in chains if c["stale"]]
+    ok = not stale and not stale_chains
+    body: dict[str, Any] = {
+        "status": "ok" if ok else "unavailable",
+        "stale": stale,
+        "chains": chains,
+    }
+    if not ok:
         return JSONResponse(body, status_code=503)
     return body
 

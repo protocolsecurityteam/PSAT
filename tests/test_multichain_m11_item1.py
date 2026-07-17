@@ -328,8 +328,38 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _bind_router_session(session, monkeypatch):
+    """Point the router-facing ``deps.SessionLocal`` at this file's own test-DB
+    session.
+
+    The router functions under test open ``deps.SessionLocal()`` themselves,
+    which binds to the app ``DATABASE_URL`` (``psat``) — a different database
+    than this module's local ``session`` fixture, which seeds through
+    ``TEST_DATABASE_URL`` (``psat_test``). Without this rebind the endpoint reads
+    an empty DB and 404s. (In the full suite these passed only incidentally: an
+    earlier test left ``deps.SessionLocal`` rebound at ``psat_test`` — an
+    order-dependency this fixture removes.) Mirrors conftest's documented
+    ``SessionFactory`` wiring, scoped to the seeded session so the endpoint sees
+    exactly the rows the test committed."""
+    from routers import deps
+
+    class _SharedSessionFactory:
+        def __call__(self):
+            return self
+
+        def __enter__(self):
+            return session
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(deps, "SessionLocal", _SharedSessionFactory())
+    return session
+
+
 @requires_postgres
-def test_delete_company_address_chain_qualifies(session):
+def test_delete_company_address_chain_qualifies(session, _bind_router_session):
     from db.models import Contract, Protocol
     from routers.jobs import delete_company_address
 
@@ -357,7 +387,7 @@ def test_delete_company_address_chain_qualifies(session):
 
 
 @requires_postgres
-def test_analysis_artifact_address_lookup_chain_qualified(session):
+def test_analysis_artifact_address_lookup_chain_qualified(session, _bind_router_session):
     from db.models import Job, JobStage, JobStatus
     from db.queue import store_artifact
     from routers.analyses import analysis_artifact

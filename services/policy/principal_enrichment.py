@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
@@ -107,8 +108,22 @@ def _display_from_type(resolved_type: str) -> str:
         "eoa": "Externally owned account",
         "contract": "Contract",
         "zero": "Zero address",
+        "cross_chain_authority": "Cross-chain authority",
         "unknown": "Unknown principal",
     }.get(resolved_type, "Unknown principal")
+
+
+def _cross_chain_display_name(details: dict[str, Any]) -> str:
+    """Human label for a ``cross_chain_authority`` principal, from its role."""
+    role = str(details.get("role") or "")
+    if role == "cross_domain_messenger":
+        return "Cross-domain messenger"
+    if role == "bridge_executor":
+        return "Bridge executor"
+    if role == "aliased_l1_owner":
+        implied = str(details.get("implied_l1_address") or "").strip()
+        return f"Aliased L1 owner ({implied})" if implied else "Aliased L1 owner"
+    return "Cross-chain authority"
 
 
 def _node_display_name(node: dict[str, Any] | None) -> str:
@@ -357,6 +372,7 @@ def build_principal_labels(
     resolved_control_graph: dict | None = None,
     rpc_url: str | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
+    cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
 ) -> PrincipalLabels:
     """Construct principal records for every authority address.
 
@@ -365,6 +381,13 @@ def build_principal_labels(
     are reused and any new classifications discovered here are added to
     the same dict — so a caller threading the same cache through the whole
     job sees fan-out of 6-10 RPCs per address collapse to one lookup.
+
+    ``cross_chain_recognizer`` (inv. 15) is an ``address -> (resolved_type,
+    details) | None`` classifier that takes priority over the generic
+    EOA/contract typing: an aliased L1 owner reads as a codeless EOA and a
+    bridge predeploy as a generic contract, yet both are cross-chain
+    authorities, never anonymous principals. ``None`` (the mainnet path, and
+    every chain without bridge constants) leaves classification byte-identical.
     """
     nodes_by_id = _node_by_id(resolved_control_graph or {})
     nodes_by_address = {node["address"].lower(): node for node in (resolved_control_graph or {}).get("nodes", [])}
@@ -395,6 +418,15 @@ def build_principal_labels(
         node = nodes_by_address.get(address)
         resolved_type = str(node.get("resolved_type", "unknown")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
+
+        # Cross-chain authority (inv. 15) is recognised from the registry +
+        # run scope with no RPC, and overrides the generic classification an
+        # aliased owner / bridge predeploy would otherwise receive.
+        if cross_chain_recognizer is not None:
+            recognized = cross_chain_recognizer(address)
+            if recognized is not None:
+                resolved_type, cc_details = recognized
+                details = {**details, **cc_details}
 
         if resolved_type == "unknown" and rpc_url:
             cache_key = address.lower()
@@ -445,6 +477,12 @@ def build_principal_labels(
             contract_name,
             _node_display_name(node),
         )
+        if resolved_type == "cross_chain_authority":
+            display_name, confidence = _cross_chain_display_name(details), "high"
+            labels.add("cross_chain_authority")
+            role = str(details.get("role") or "")
+            if role:
+                labels.add(role)
 
         return {
             "address": address,

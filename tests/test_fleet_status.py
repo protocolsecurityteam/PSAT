@@ -273,6 +273,69 @@ def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, 
 
 
 @requires_postgres
+def test_build_fleet_status_per_chain_indexer_and_monitoring(db_session, _clean_heartbeats):
+    # Two chains present: mainnet (1) and Base (8453). Per-chain rollups must
+    # separate them so a stalled Base indexer is visible without spelunking.
+    import uuid as _uuid
+    from datetime import timedelta as _td
+
+    from db.models import DaemonLease
+
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    db_session.add(
+        IndexedEventCursor(chain_id=1, event_address=_addr(1), topic0="0x" + "a1" * 32, last_indexed_block=100)
+    )
+    db_session.add(
+        IndexedEventCursor(chain_id=8453, event_address=_addr(2), topic0="0x" + "b2" * 32, last_indexed_block=50)
+    )
+    db_session.add(
+        IndexedEventCursor(chain_id=8453, event_address=_addr(3), topic0="0x" + "c3" * 32, last_indexed_block=60)
+    )
+    db_session.add(MonitoredContract(address=_addr(4), chain="ethereum", last_scanned_block=100))
+    db_session.add(MonitoredContract(address=_addr(5), chain="base", last_scanned_block=50))
+    # A live scanner lease for Base — the per-chain lease naming is what gives
+    # monitoring visibility without a heartbeat schema change.
+    db_session.add(DaemonLease(name="protocol_scanner:base", holder=_uuid.uuid4(), expires_at=now + _td(seconds=60)))
+    db_session.commit()
+
+    out = build_fleet_status(db_session, now=now)
+
+    idx_by_chain = {
+        c["chain_id"]: c
+        for c in next(d for d in out["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)["work"]["by_chain"]
+    }
+    assert set(idx_by_chain) >= {1, 8453}
+    assert idx_by_chain[1]["cursors"] == 1
+    assert idx_by_chain[1]["chain"] == "ethereum"
+    assert idx_by_chain[8453]["cursors"] == 2
+    assert idx_by_chain[8453]["chain"] == "base"
+
+    mon_by_chain = {c["chain"]: c for c in out["watchers"]["by_chain"]}
+    assert set(mon_by_chain) >= {"ethereum", "base"}
+    assert mon_by_chain["ethereum"]["monitored_contracts"] == 1
+    assert mon_by_chain["base"]["monitored_contracts"] == 1
+    # Base holds a live scanner lease; mainnet does not.
+    assert mon_by_chain["base"]["scanner_lease_held"] is True
+    assert mon_by_chain["ethereum"]["scanner_lease_held"] is False
+
+
+@requires_postgres
+def test_fleet_endpoint_exposes_per_chain_breakdowns(api_client, db_session, _clean_heartbeats):
+    db_session.add(
+        IndexedEventCursor(chain_id=8453, event_address=_addr(7), topic0="0x" + "d4" * 32, last_indexed_block=10)
+    )
+    db_session.add(MonitoredContract(address=_addr(8), chain="base"))
+    db_session.commit()
+
+    resp = api_client.get("/api/fleet")
+    assert resp.status_code == 200
+    data = resp.json()
+    idx = next(d for d in data["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)
+    assert any(c["chain_id"] == 8453 for c in idx["work"]["by_chain"])
+    assert any(c["chain"] == "base" for c in data["watchers"]["by_chain"])
+
+
+@requires_postgres
 def test_fleet_endpoint_returns_all_groups(api_client, db_session, _clean_heartbeats):
     resp = api_client.get("/api/fleet")
     assert resp.status_code == 200

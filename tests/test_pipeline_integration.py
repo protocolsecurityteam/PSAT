@@ -1104,6 +1104,83 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
     assert "contract_inventory" in stored_artifacts
 
 
+def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
+    """Evidence-based membership (invariant 3): company discovery READS the
+    protocol's declared chain set (requested chain + prior ``Protocol.chains``)
+    to narrow the probe, and WRITES it back with the chains discovered contracts
+    were confirmed on — excluding candidate-only hits."""
+    from workers.base import JobHandledDirectly
+    from workers.discovery import DiscoveryWorker
+
+    worker = DiscoveryWorker()
+    session = MagicMock()
+    session.commit = MagicMock()
+
+    job = SimpleNamespace(
+        id="parent-2",
+        address=None,
+        company="TestProtocol",
+        name=None,
+        protocol_id=None,
+        request={"company": "TestProtocol", "chain": "ethereum"},
+    )
+    # A prior run recorded this protocol on base — discovery must read it back.
+    prev_job = SimpleNamespace(id="prev-1", protocol_id=7)
+    prev_protocol = SimpleNamespace(id=7, chains=["base"])
+    protocol_row = SimpleNamespace(id=7, chains=["base"])
+
+    monkeypatch.setattr(
+        "workers.discovery.find_previous_company_inventory",
+        lambda _s, _c, exclude_job_id=None, chain=None: prev_job,
+    )
+    session.get = MagicMock(return_value=prev_protocol)
+    monkeypatch.setattr("workers.discovery.get_artifact", lambda _s, _j, _n: None)
+    monkeypatch.setattr("workers.discovery.get_or_create_protocol", lambda *_a, **_kw: protocol_row)
+    monkeypatch.setattr("workers.discovery.resolve_protocol", lambda _c: {})
+    monkeypatch.setattr("workers.discovery.pick_family_slug", lambda _r: None)
+    monkeypatch.setattr("workers.discovery.store_artifact", lambda *_a, **_kw: None)
+    monkeypatch.setattr("workers.discovery.advance_job", lambda *_a, **_kw: None)
+    monkeypatch.setattr("workers.discovery.bulk_upsert_discovered_contracts", lambda *_a, **_kw: None)
+    monkeypatch.setattr("workers.discovery._sync_audit_reports_to_db", lambda *_a, **_kw: None)
+    monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *_a, **_kw: None)
+    monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_discovery(company, *, official_domain=None, chain=None, declared_chains=None):
+        captured["declared_chains"] = declared_chains
+        return {
+            "audits": {"reports": [], "errors": [], "notes": []},
+            "addresses": {
+                "contracts": [
+                    {"address": "0x" + "a" * 40, "name": "Vault", "chains": ["ethereum"]},
+                    # A candidate-only hit — must NOT feed the declared set.
+                    {
+                        "address": "0x" + "c" * 40,
+                        "name": "Ghost",
+                        "chains": ["unknown"],
+                        "chain_candidates": ["optimism"],
+                    },
+                ],
+                "official_domain": "x.io",
+            },
+            "meta": {},
+        }
+
+    monkeypatch.setattr("services.discovery.run_discovery.run_discovery", fake_run_discovery)
+
+    try:
+        worker.process(session, job)  # type: ignore[arg-type]
+    except JobHandledDirectly:
+        pass
+
+    # READ: requested chain + prior Protocol.chains both narrow the probe.
+    assert captured["declared_chains"] == ["ethereum", "base"]
+    # WRITE: declared set grows to include the confirmed chain, never the
+    # candidate (optimism carries no corroborating evidence).
+    assert protocol_row.chains == ["base", "ethereum"]
+
+
 # ===================================================================
 # 17. Static worker: process method reads discovery artifacts correctly
 # ===================================================================
