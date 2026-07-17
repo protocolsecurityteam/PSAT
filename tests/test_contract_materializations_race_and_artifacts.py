@@ -109,7 +109,7 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
     thread B sees ``status='building'`` + recent ``builder_started_at``
     and polls until A flips the row to ``ready``. Builder runs once.
     """
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "ab" * 32
 
     builder_started = threading.Event()
@@ -178,7 +178,7 @@ def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypa
     monkeypatch.setenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "60")
     monkeypatch.setenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "0.05")
 
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "cd" * 32
 
     # Plant a stale building row: claim made 10 minutes ago, no worker
@@ -232,7 +232,7 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
     ``_mapping_writer_specs_from_predicate_trees`` silently returned
     an empty list — mapping-writer enumeration was disabled on every hit.
     """
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "11" * 32
 
     predicate_payload = {
@@ -322,7 +322,7 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
             return self.objects[key]
 
     storage = _StubStorage()
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "22" * 32
 
     predicate_payload = {"schema_version": "semantic", "trees": {"f()": {"op": "LEAF"}}}
@@ -402,7 +402,7 @@ def test_find_by_keccak_filters_on_schema_version(_clean_cm):
     """``find_by_keccak`` serves only a row stamped with the current
     ``ANALYSIS_SCHEMA_VERSION``. An older-version row reads as a miss so
     a bumped analyzer rebuilds instead of serving a stale bundle."""
-    chain = "ethereum"
+    chain = "1"
     keccak_old = "0x" + "a1" * 32
     keccak_cur = "0x" + "a2" * 32
 
@@ -435,7 +435,7 @@ def test_find_by_keccak_filters_on_schema_version(_clean_cm):
 @requires_postgres
 def test_find_by_address_filters_on_schema_version(_clean_cm):
     """Address-keyed lookups apply the same version gate as keccak ones."""
-    chain = "ethereum"
+    chain = "1"
     addr_old = "0x" + "a3" * 20
     addr_cur = "0x" + "a4" * 20
 
@@ -470,7 +470,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
     """A 'ready' row built by an older analyzer must NOT be served — it
     reads as a miss, the builder runs once, and the row is rewritten at
     the current ``ANALYSIS_SCHEMA_VERSION``."""
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "c1" * 32
 
     _clean_cm.add(
@@ -513,7 +513,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
 def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
     """A 'ready' row at the current version is a hit — the builder never
     runs (a re-run would re-pay the forge+Slither cost for nothing)."""
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "c2" * 32
 
     _clean_cm.add(
@@ -551,7 +551,7 @@ def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
     ``server_default`` the migration installed: schema version 1, the launch
     value of ``ANALYSIS_SCHEMA_VERSION``. This keeps a deploy from
     invalidating the whole cache at once."""
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "d1" * 32
     _clean_cm.execute(
         text(
