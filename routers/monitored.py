@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
+from services.monitoring.chain_rpc import rpc_for_chain
 from utils.chains import UnsupportedChainError, require_supported_chain
 from utils.rpc import rpc_request
 
@@ -21,15 +22,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _current_head_block() -> int:
-    """Best-effort current head, used to seed a manually-added contract's scan
-    cursor and enrollment floor. Falls back to 0 on RPC failure — the same
+def _current_head_block(chain: str | None) -> int:
+    """Best-effort current head on the enrolled contract's OWN chain, used to seed
+    a manually-added contract's scan cursor and enrollment floor.
+
+    ``chain`` selects the RPC route: mainnet (and any unresolvable chain) keeps
+    ``deps.DEFAULT_RPC_URL`` verbatim, a second chain resolves its own eRPC route
+    from the registry (same ``rpc_for_chain`` the scanner uses). Without this a
+    non-mainnet enrollment seeded ``enrollment_block`` from the MAINNET head — a
+    wrong, immutable pre-watch floor. Falls back to 0 on RPC failure — the same
     degradation the enrollment path accepts (``enrollment.py``)."""
     try:
-        return int(rpc_request(deps.DEFAULT_RPC_URL, "eth_blockNumber", []), 16)
+        return int(rpc_request(rpc_for_chain(chain, deps.DEFAULT_RPC_URL), "eth_blockNumber", []), 16)
     except Exception as exc:
         logger.warning(
-            "Could not read head block for monitoring upsert: %s", exc, extra={"exc_type": type(exc).__name__}
+            "Could not read head block for monitoring upsert: %s",
+            exc,
+            extra={"exc_type": type(exc).__name__, "chain": chain},
         )
         return 0
 
@@ -106,7 +115,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
             # of history. enrollment_block records the same head as the floor
             # below which the scanner records events as pre-watch history
             # without notifying (consistent with the auto-enrollment inserts).
-            head_block = _current_head_block()
+            head_block = _current_head_block(request.chain)
             existing = MonitoredContract(
                 address=request.address,
                 chain=request.chain,
