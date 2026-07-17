@@ -128,6 +128,9 @@ def find_dependencies(address: str, rpc_url: str | None = None, code_cache: dict
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     from utils.rpc import default_rpc_url
 
+    # The pipeline (static_worker) always passes a chain-resolved rpc_url; this
+    # explicit-mainnet base is only reached from the CLI ``main`` below when no
+    # --rpc is given — a documented dev-tool default (inv. 6), not a silent one.
     effective_rpc = rpc_url or default_rpc_url(chain_id=1)
     if not effective_rpc:
         raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")

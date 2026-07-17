@@ -18,7 +18,19 @@ from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HYPERSYNC_URL = "https://eth.hypersync.xyz"
+
+def _mainnet_hypersync_url() -> str:
+    """Mainnet HyperSync endpoint from the registry (inv. 5), not a hardcoded
+    literal. The signature default for the enumerators below; callers thread the
+    per-chain URL for non-mainnet scans."""
+    from utils.chains import chain_by_id
+
+    url = chain_by_id(1).hypersync_url
+    assert url is not None  # mainnet always has HyperSync coverage
+    return url
+
+
+DEFAULT_HYPERSYNC_URL: str = _mainnet_hypersync_url()
 
 # Pagination bounds (default 60s / 50 pages); without these caps a 2017-deployed contract can wedge a worker for ~80
 # min. Read once at import — bounds aren't expected to change at runtime.
@@ -108,6 +120,28 @@ def _chain_key(chain: str | None) -> str:
     from utils.chains import chain_cache_token
 
     return chain_cache_token(chain)
+
+
+def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
+    """The HyperSync scan endpoint for *chain* (inv. 6).
+
+    ``chain`` is the same name / decimal-id token the cache key uses. A chainless
+    call fails loud (``require_chain`` raises) rather than defaulting the scan to
+    mainnet; a registered chain with no proven HyperSync coverage returns ``None``
+    so the caller reports the scan unavailable instead of scanning the wrong
+    chain. Mainnet resolves to its registry URL — byte-identical to the old
+    ``DEFAULT_HYPERSYNC_URL`` default, so mainnet scans are unchanged.
+    """
+    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+    from utils.chains import require_chain
+
+    if isinstance(chain, int) or (isinstance(chain, str) and chain.strip().isdigit()):
+        info = require_chain(int(chain), context="mapping enumeration hypersync url")
+    else:
+        info = require_chain(
+            chain=chain if isinstance(chain, str) else None, context="mapping enumeration hypersync url"
+        )
+    return _hypersync_url_for_chain(info.chain_id)
 
 
 def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:
@@ -587,6 +621,22 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
+    # Per-chain scan URL (inv. 6): derive from ``chain`` unless the caller pinned
+    # an explicit URL or injected a client (tests). Mainnet is byte-identical to
+    # the old default; an unknown/missing chain fails loud; a no-coverage chain
+    # returns unavailable rather than silently scanning mainnet.
+    if not kwargs.get("client") and not kwargs.get("hypersync_url"):
+        scan_url = _scan_hypersync_url_for_chain(chain)
+        if scan_url is None:
+            return EnumerationResult(
+                principals=[],
+                status="incomplete_no_hypersync_coverage",
+                pages_fetched=0,
+                last_block_scanned=int(kwargs.get("from_block") or 0),
+                error="hypersync_unavailable_for_chain",
+            )
+        kwargs["hypersync_url"] = scan_url
+
     result = asyncio.run(enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs))
 
     if specs_hash is not None:
@@ -805,6 +855,19 @@ def enumerate_mapping_values_sync(
             if now - inserted_at < _cache_ttl_s():
                 return result
             del _VALUE_CACHE[cache_key]
+
+    # Per-chain scan URL (inv. 6): see ``enumerate_mapping_allowlist_sync``.
+    if not kwargs.get("client") and not kwargs.get("hypersync_url"):
+        scan_url = _scan_hypersync_url_for_chain(chain)
+        if scan_url is None:
+            return EnumerationValueResult(
+                entries=[],
+                status="incomplete_no_hypersync_coverage",
+                pages_fetched=0,
+                last_block_scanned=int(kwargs.get("from_block") or 0),
+                error="hypersync_unavailable_for_chain",
+            )
+        kwargs["hypersync_url"] = scan_url
 
     result = asyncio.run(enumerate_mapping_values(contract_address, writer_specs, **kwargs))
 

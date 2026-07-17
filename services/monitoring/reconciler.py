@@ -54,8 +54,9 @@ from typing import NamedTuple
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
-from db.models import MonitoringEnrollmentQueue, Protocol, SessionLocal
+from db.models import Contract, MonitoringEnrollmentQueue, Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
+from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.enrollment import enroll_protocol_contracts, mark_enrollment_dirty
 from utils.logging import configure_logging
 
@@ -67,6 +68,11 @@ logger = logging.getLogger(__name__)
 # unified watcher's scan cadence — same order of magnitude as
 # "MonitoredContract may be stale for up to ten minutes."
 DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL", "600"))
+
+# Daemon-edge fallback chain for the reconciler loop (inv. 6): the base RPC chain
+# and the ambiguous-protocol default handed to ``_protocol_chain``. Explicit and
+# overridable via env rather than a buried ``chain="ethereum"`` signature default.
+RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereum")
 
 # Lease TTL for a claimed queue row — must exceed the worst single-protocol
 # ``enroll_protocol_contracts`` build (a full ``build_governance_view``) so a
@@ -93,6 +99,26 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _protocol_chain(session: Session, protocol_id: int, default: str) -> str:
+    """The chain a protocol's contracts live on (v1 chain-as-island, inv. 15).
+
+    Reads the distinct non-null ``Contract.chain`` values for the protocol and
+    returns the sole chain when unambiguous, else *default*. Used to thread each
+    protocol's own chain (and its eRPC route) into ``enroll_protocol_contracts``
+    instead of the reconciler's mainnet default; ``enroll_protocol_contracts``
+    still resolves each contract's chain independently, so this pins the fallback
+    for NULL-chain rows and the seed RPC.
+    """
+    chains = {
+        c
+        for c in session.execute(
+            select(Contract.chain).where(Contract.protocol_id == protocol_id, Contract.chain.isnot(None)).distinct()
+        ).scalars()
+        if c
+    }
+    return chains.pop() if len(chains) == 1 else default
 
 
 class EnrollmentClaim(NamedTuple):
@@ -200,7 +226,7 @@ def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
 
 def drain_enrollment_queue(
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
     *,
     lease_ttl_s: int | None = None,
     max_claims: int | None = None,
@@ -234,7 +260,14 @@ def drain_enrollment_queue(
     for claim in claims:
         try:
             with SessionLocal() as work_session:
-                enroll_protocol_contracts(work_session, claim.protocol_id, rpc_url, chain, enroll_controllers=True)
+                protocol_chain = _protocol_chain(work_session, claim.protocol_id, chain)
+                enroll_protocol_contracts(
+                    work_session,
+                    claim.protocol_id,
+                    rpc_for_chain(protocol_chain, rpc_url),
+                    protocol_chain,
+                    enroll_controllers=True,
+                )
                 _finish_success(work_session, claim)
             drained += 1
         except Exception:
@@ -289,7 +322,7 @@ def _queue_depth(session: Session) -> int:
 def reconcile_enrollments(
     session: Session,
     rpc_url: str,
-    chain: str = "ethereum",
+    chain: str,
 ) -> int:
     """DEPRECATED — walk-all reconciliation pass; superseded by the dirty-queue
     drain (:func:`drain_enrollment_queue` + :func:`sweep_enqueue_stale`).
@@ -308,7 +341,8 @@ def reconcile_enrollments(
     reconciled = 0
     for pid in protocol_ids:
         try:
-            enroll_protocol_contracts(session, pid, rpc_url, chain)
+            protocol_chain = _protocol_chain(session, pid, chain)
+            enroll_protocol_contracts(session, pid, rpc_for_chain(protocol_chain, rpc_url), protocol_chain)
             reconciled += 1
         except Exception:
             logger.exception("reconciler enrollment failed for protocol %s", pid)
@@ -329,9 +363,9 @@ def reconcile_enrollments(
 
 def run_enrollment_reconciler_loop(
     rpc_url: str,
+    chain: str,
     interval: float = DEFAULT_RECONCILE_INTERVAL_S,
     stop_event: Event | None = None,
-    chain: str = "ethereum",
 ) -> None:
     """Long-running reconciler. Each tick = slow-sweep enqueue + queue drain.
 
@@ -381,8 +415,15 @@ def main() -> None:
 
     from utils.rpc import require_rpc_url
 
-    rpc_url = require_rpc_url(chain="ethereum")
-    run_enrollment_reconciler_loop(rpc_url, stop_event=stop_event)
+    # Daemon edge (inv. 6): the reconciler is one process serving every chain;
+    # ``RECONCILER_FALLBACK_CHAIN`` is the explicit, documented base + ambiguous-
+    # protocol fallback (``_protocol_chain`` still derives each protocol's own
+    # chain, and ``rpc_for_chain`` picks the per-chain URL). Logged so the choice
+    # is visible, not a buried default.
+    fallback_chain = RECONCILER_FALLBACK_CHAIN
+    logger.info("enrollment reconciler daemon starting with fallback chain=%s", fallback_chain)
+    rpc_url = require_rpc_url(chain=fallback_chain)
+    run_enrollment_reconciler_loop(rpc_url, fallback_chain, stop_event=stop_event)
 
 
 if __name__ == "__main__":

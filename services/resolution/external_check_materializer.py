@@ -278,7 +278,7 @@ def _candidate_addresses_from_events(
     return out
 
 
-def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, chain_id: int = 1) -> list[str]:
+def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, chain_id: int) -> list[str]:
     token = os.getenv("ENVIO_API_TOKEN")
     if not token:
         return []
@@ -290,15 +290,20 @@ def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, cha
         return []
 
 
-async def _candidate_addresses_from_hypersync_async(
-    *, checker_address: str, limit: int, chain_id: int = 1
-) -> list[str]:
+async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int, chain_id: int) -> list[str]:
     try:
         import hypersync  # type: ignore
     except Exception:
         return []
 
-    url = os.getenv("PSAT_HYPERSYNC_URL", "https://eth.hypersync.xyz")
+    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+
+    # Per-chain HyperSync endpoint (inv. 5), env override kept for backward compat.
+    # A chain with no registry coverage (or no env override) has no scan surface —
+    # return no candidates rather than silently scanning mainnet.
+    url = os.getenv("PSAT_HYPERSYNC_URL") or _hypersync_url_for_chain(chain_id)
+    if not url:
+        return []
     timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
     max_pages = int(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_MAX_PAGES", "20"))
     from services.resolution.hypersync_bound import build_hypersync_client, hypersync_slot

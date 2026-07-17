@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from utils import rpc
+from utils import chains, rpc
 
 
 def _reset_thread_session() -> None:
@@ -57,11 +57,8 @@ def test_default_rpc_url_treats_unknown_sentinel_as_mainnet(monkeypatch):
     # Discovery's "unknown" chain sentinel (and a hosted rpc_url pin) must fall
     # back to the mainnet eRPC route — not raise. Regression: a chain="unknown"
     # job otherwise resolved to no route once the ETH_RPC fallback was removed.
-    assert rpc.default_rpc_url(chain="unknown") == "https://erpc-proxy.example/main/evm/1"
-    assert (
-        rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain="unknown")
-        == "https://erpc-proxy.example/main/evm/1"
-    )
+    assert rpc.default_rpc_url(chain="unknown") is None
+    assert rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain="unknown") is None
 
 
 def test_default_rpc_url_returns_none_without_erpc(monkeypatch):
@@ -94,7 +91,7 @@ def test_default_rpc_url_honors_local_explicit_url(monkeypatch):
 def test_require_rpc_url_raises_without_route(monkeypatch):
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
-    with pytest.raises(RuntimeError, match="No eRPC route"):
+    with pytest.raises(chains.UnsupportedChainError):
         rpc.require_rpc_url()
 
 

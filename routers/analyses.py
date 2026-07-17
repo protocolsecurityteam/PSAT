@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
 from db.models import Artifact, Contract, Job, JobStatus
 from services.aggregations import build_analysis_detail
 from services.governance.proxies import _merge_proxy_impl_entries
+from utils.chains import UnknownChainError, chain_by_name
 
 from . import deps
 
@@ -149,6 +150,7 @@ def analysis_artifact(
     run_name: str,
     artifact_name: str,
     request: Request,
+    chain: str | None = Query(default=None),
     x_psat_admin_key: str | None = Header(default=None),
 ):
     """Get a specific artifact for an analysis.
@@ -181,12 +183,22 @@ def analysis_artifact(
             except Exception:
                 session.rollback()
         if job is None:
-            job = session.execute(
+            # ``run_name`` is an address here. Two chains can share an address, so
+            # chain-qualify by Job.chain_id when a chain is supplied (inv. 12);
+            # absent a chain we keep the mainnet-preserving address-only lookup
+            # (every prod row is chain 1 today, so output is unchanged).
+            stmt = (
                 select(Job)
                 .where(Job.address == run_name, Job.status == JobStatus.completed)
                 .order_by(Job.updated_at.desc())
                 .limit(1)
-            ).scalar_one_or_none()
+            )
+            if chain is not None:
+                try:
+                    stmt = stmt.where(Job.chain_id == chain_by_name(chain).chain_id)
+                except UnknownChainError:
+                    raise HTTPException(status_code=400, detail=f"Unknown chain: {chain}") from None
+            job = session.execute(stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
 

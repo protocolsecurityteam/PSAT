@@ -529,6 +529,7 @@ def test_recursive_cold_no_floor_does_not_live_scan(monkeypatch):
         depth=0,
         nodes=nodes,
         edges=edges,
+        chain_id=1,
     )
     assert called["n"] == 0
     assert status == "deferred_no_floor"
@@ -566,6 +567,7 @@ def test_recursive_known_floor_scans_from_floor_not_zero(monkeypatch):
         depth=0,
         nodes={},
         edges={},
+        chain_id=1,
     )
     assert captured.get("from_block") == 6_000_000
 

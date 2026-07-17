@@ -134,7 +134,7 @@ def test_etherscan_get_contract_info_errored_fetch_warns_and_degrades(monkeypatc
     try:
         with bind_trace_context(trace_id="t1", job_id="j1", stage="discovery", worker_id="w1"):
             with caplog.at_level(logging.WARNING, logger="utils.etherscan"):
-                name, selectors = etherscan.get_contract_info("0x" + "a" * 40)
+                name, selectors = etherscan.get_contract_info("0x" + "a" * 40, chain_id=1)
     finally:
         degraded_errors_var.reset(token)
 

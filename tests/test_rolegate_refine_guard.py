@@ -427,7 +427,9 @@ def _seed_two_hop(
         seed_hook(session, registry_addr)
     session.commit()
 
-    caps = resolve_contract_capabilities(session, address=caller_addr, chain="ethereum", job_id=caller_job.id)
+    caps = resolve_contract_capabilities(
+        session, address=caller_addr, chain_id=1, chain="ethereum", job_id=caller_job.id
+    )
     key = next(k for k in (caps or {}) if k.startswith("guarded"))
     return (caps or {})[key]
 

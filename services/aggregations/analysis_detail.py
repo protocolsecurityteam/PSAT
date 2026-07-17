@@ -120,9 +120,18 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             # back to job.request['chain'].
             req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
+            # chain_id is required (inv. 6): bind the resolver's live reads to the
+            # job's first-class chain_id, falling back to the registry-backed
+            # derivation from the job's chain string (mirrors the M0.2 backfill).
+            from db.models import derive_job_chain_id
+
+            chain_id = getattr(job, "chain_id", None)
+            if not isinstance(chain_id, int):
+                chain_id = derive_job_chain_id(chain if isinstance(chain, str) else req_chain, job.address) or 1
             semantic_caps = resolve_contract_capabilities(
                 session,
                 address=job.address.lower(),
+                chain_id=chain_id,
                 job_id=job.id,
                 chain=chain if isinstance(chain, str) else None,
             )

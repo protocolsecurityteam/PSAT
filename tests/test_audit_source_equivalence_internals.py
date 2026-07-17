@@ -100,7 +100,7 @@ class TestFetchEtherscanSourceFiles:
         monkeypatch.setattr(etherscan_module, "get", lambda *_a, **_k: captured)
         monkeypatch.setattr(fetch_module, "parse_sources", lambda _res: {"LiquidityPool.sol": content})
 
-        got = fetch_etherscan_source_files("0x" + "a" * 40)
+        got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
         assert got.status == "ok"
         assert got.source is not None
         assert got.source.contract_name == "LiquidityPool"
@@ -121,7 +121,7 @@ class TestFetchEtherscanSourceFiles:
             lambda *_a, **_k: {"result": [{"ContractName": "", "CompilerVersion": "", "SourceCode": ""}]},
         )
         monkeypatch.setattr(fetch_module, "parse_sources", lambda _res: {})
-        got = fetch_etherscan_source_files("0x" + "a" * 40)
+        got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
         assert got.source is None
         assert got.status == "unverified"
 
@@ -136,7 +136,7 @@ class TestFetchEtherscanSourceFiles:
 
         etherscan_module = importlib.import_module("utils.etherscan")
         monkeypatch.setattr(etherscan_module, "get", boom)
-        got = fetch_etherscan_source_files("0x" + "a" * 40)
+        got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
         assert got.source is None
         assert got.status == "fetch_failed"
         assert "etherscan down" in got.detail
@@ -166,7 +166,7 @@ class TestFetchEtherscanSourceFiles:
             "parse_sources",
             lambda _res: {"X.sol": "contract X {}"},
         )
-        got = fetch_etherscan_source_files("0x" + "a" * 40)
+        got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
         assert got.status == "ok"
         assert got.source is not None
         assert got.source.contract_name is None

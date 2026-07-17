@@ -26,7 +26,28 @@ from .event_logs_pg import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HYPERSYNC_URL = "https://eth.hypersync.xyz"
+
+def _hypersync_url_for_chain(chain_id: int) -> str | None:
+    """Per-chain HyperSync endpoint from the registry (inv. 5).
+
+    ``None`` means the chain has no proven HyperSync coverage — the repo is
+    unavailable there (the same class as a missing token: a partial result, never
+    a silent mainnet fallback). Unknown chain ids resolve to ``None`` too; the
+    fail-loud raise is the later kill-the-defaults step, not this one.
+    """
+    from utils.chains import UnknownChainError, chain_by_id
+
+    try:
+        return chain_by_id(chain_id).hypersync_url
+    except UnknownChainError:
+        return None
+
+
+# Mainnet endpoint, sourced from the registry rather than a hardcoded literal.
+# Mainnet always has HyperSync coverage, so this is never ``None``.
+_MAINNET_HYPERSYNC_URL = _hypersync_url_for_chain(1)
+assert _MAINNET_HYPERSYNC_URL is not None
+DEFAULT_HYPERSYNC_URL: str = _MAINNET_HYPERSYNC_URL
 DEFAULT_TIMEOUT_S = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
 DEFAULT_MAX_PAGES = int(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_MAX_PAGES", "50"))
 
@@ -61,11 +82,14 @@ class HyperSyncEventLogRepo:
         direction: str,
         block: int | None = None,
     ) -> EnumerationResult:
-        del chain_id
+        url = _hypersync_url_for_chain(chain_id)
+        if url is None:
+            return EnumerationResult(members=[], confidence="partial", partial_reason="hypersync_unavailable_for_chain")
         if not self.bearer_token:
             return EnumerationResult(members=[], confidence="partial", partial_reason="no_hypersync_token")
         return asyncio.run(
             self._fold_event_writes_async(
+                url=url,
                 event_address=event_address,
                 topic0=topic0,
                 topics_to_keys=topics_to_keys,
@@ -85,11 +109,14 @@ class HyperSyncEventLogRepo:
         key_sources: list[dict[str, Any]],
         block: int | None = None,
     ) -> EnumerationResult:
-        del chain_id
+        url = _hypersync_url_for_chain(chain_id)
+        if url is None:
+            return EnumerationResult(members=[], confidence="partial", partial_reason="hypersync_unavailable_for_chain")
         if not self.bearer_token:
             return EnumerationResult(members=[], confidence="partial", partial_reason="no_hypersync_token")
         return asyncio.run(
             self._fold_event_history_async(
+                url=url,
                 event_address=event_address,
                 event_hints=event_hints,
                 key_sources=key_sources,
@@ -107,7 +134,9 @@ class HyperSyncEventLogRepo:
         key_sources: list[dict[str, Any]],
         direction: str,
         to_block: int | None,
+        url: str | None = None,
     ) -> EnumerationResult:
+        scan_url = url or self.url
         member_key = _caller_key_index(key_sources)
         if member_key is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
@@ -120,7 +149,7 @@ class HyperSyncEventLogRepo:
 
             from services.resolution.hypersync_bound import build_hypersync_client
 
-            client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
+            client = build_hypersync_client(hypersync, url=scan_url, bearer_token=self.bearer_token)
         except Exception as exc:
             reason = f"hypersync_error:{type(exc).__name__}"
             _note_partial_reason(reason, event_address=event_address, repo="hypersync")
@@ -216,7 +245,9 @@ class HyperSyncEventLogRepo:
         event_hints: list[dict[str, Any]],
         key_sources: list[dict[str, Any]],
         to_block: int | None,
+        url: str | None = None,
     ) -> EnumerationResult:
+        scan_url = url or self.url
         member_key = _caller_key_index(key_sources)
         if member_key is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
@@ -233,7 +264,7 @@ class HyperSyncEventLogRepo:
 
             from services.resolution.hypersync_bound import build_hypersync_client
 
-            client = build_hypersync_client(hypersync, url=self.url, bearer_token=self.bearer_token)
+            client = build_hypersync_client(hypersync, url=scan_url, bearer_token=self.bearer_token)
         except Exception as exc:
             reason = f"hypersync_error:{type(exc).__name__}"
             _note_partial_reason(reason, event_address=event_address, repo="hypersync")

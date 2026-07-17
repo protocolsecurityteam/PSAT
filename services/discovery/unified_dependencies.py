@@ -109,6 +109,8 @@ def build_unified_dependencies(
 def enrich_dependency_metadata(
     unified: dict,
     info_cache: dict[str, tuple[str | None, dict[str, str]]] | None = None,
+    *,
+    chain_id: int,
 ) -> dict:
     """Resolve contract names and selectors in-place for a unified dependency output.
 
@@ -140,7 +142,7 @@ def enrich_dependency_metadata(
 
         # Each ``get_contract_info`` call still routes through the shared
         # _rate_lock — parallel_get only stacks the inter-call dead time.
-        calls = {addr: (lambda a=addr: get_contract_info(a)) for addr in missing}
+        calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=chain_id)) for addr in missing}
         results = parallel_get(calls)
         for addr in missing:
             value = results.get(addr)

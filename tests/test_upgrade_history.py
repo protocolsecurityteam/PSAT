@@ -63,7 +63,7 @@ def _mock_no_enrichment(monkeypatch):
     """Stub out get_contract_info so no real Etherscan calls are made."""
     from utils import etherscan
 
-    monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: (None, {}))
+    monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: (None, {}))
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ class TestBuildUpgradeHistory:
         target = ADDR(1)
         impl = ADDR(10)
         deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", impl)
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", lambda addr, t, from_block=0: [])
+        monkeypatch.setattr(uh, "_fetch_logs_etherscan", lambda addr, t, from_block=0, chain_id=1: [])
         _mock_no_enrichment(monkeypatch)
 
         result = uh.build_upgrade_history(deps_path)
@@ -271,7 +271,7 @@ class TestBuildUpgradeHistory:
         impl_v1, impl_v2 = ADDR(10), ADDR(11)
         deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", impl_v2)
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 != uh.UPGRADED_TOPIC0:
                 return []
             return [
@@ -286,7 +286,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
         from utils import etherscan
 
-        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: ("ImplContract", {}))
+        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplContract", {}))
 
         result = uh.build_upgrade_history(deps_path)
 
@@ -339,7 +339,7 @@ class TestBuildUpgradeHistory:
 
         # Any call to fetch would be unexpected — the target isn't a proxy
         # and dependency proxies must be skipped.
-        def fail_fetch(address, topic0, from_block=0):
+        def fail_fetch(address, topic0, from_block=0, chain_id=1):
             pytest.fail(f"_fetch_logs_etherscan should not be called (addr={address})")
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", fail_fetch)
@@ -358,7 +358,7 @@ class TestBuildUpgradeHistory:
         target = ADDR(1)
         deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", ADDR(10))
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 == uh.UPGRADED_TOPIC0:
                 return [_make_log(target, uh.UPGRADED_TOPIC0, _topic_for(ADDR(10)), block="0x64", tx="0xa")]
             if topic0 == uh.ADMIN_CHANGED_TOPIC0:
@@ -402,7 +402,7 @@ class TestBuildUpgradeHistory:
             deps_dict={impl: {"type": "implementation", "contract_name": "KnownImpl"}},
         )
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 == uh.UPGRADED_TOPIC0:
                 return [_make_log(target, uh.UPGRADED_TOPIC0, _topic_for(impl), block="0x64", tx="0xa")]
             return []
@@ -414,7 +414,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(
             etherscan,
             "get_contract_info",
-            lambda addr: pytest.fail(f"get_contract_info should not be called for known address {addr}"),
+            lambda addr, **_kw: pytest.fail(f"get_contract_info should not be called for known address {addr}"),
         )
 
         result = uh.build_upgrade_history(deps_path)
@@ -434,7 +434,7 @@ class TestBuildUpgradeHistory:
             deps_dict={new_impl: {"type": "implementation", "contract_name": "ImplV2"}},
         )
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 == uh.UPGRADED_TOPIC0:
                 return [
                     _make_log(target, uh.UPGRADED_TOPIC0, _topic_for(old_impl), block="0x64", tx="0xa"),
@@ -445,7 +445,7 @@ class TestBuildUpgradeHistory:
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
         from utils import etherscan
 
-        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr: ("ImplV1", {}))
+        monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplV1", {}))
 
         result = uh.build_upgrade_history(deps_path)
         impls = result["proxies"][target]["implementations"]
@@ -460,7 +460,7 @@ class TestBuildUpgradeHistory:
         shared_impl = ADDR(10)
         deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", shared_impl)
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 == uh.UPGRADED_TOPIC0:
                 return [
                     _make_log(target, uh.UPGRADED_TOPIC0, _topic_for(shared_impl), block="0x64", tx="0xa"),
@@ -473,7 +473,7 @@ class TestBuildUpgradeHistory:
 
         call_count = [0]
 
-        def counting_get_info(addr):
+        def counting_get_info(addr, **_kw):
             call_count[0] += 1
             return ("SharedImpl", {})
 
@@ -500,7 +500,7 @@ class TestBuildUpgradeHistory:
             deps_dict={new_impl: {"type": "implementation", "contract_name": "ImplV2"}},
         )
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 == uh.UPGRADED_TOPIC0:
                 return [
                     _make_log(target, uh.UPGRADED_TOPIC0, _topic_for(old_impl), block="0x64", tx="0xa"),
@@ -542,7 +542,7 @@ class TestBuildUpgradeHistory:
             "dependencies": {},
         }
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if address == target and topic0 == uh.UPGRADED_TOPIC0:
                 return [_make_log(target, uh.UPGRADED_TOPIC0, _topic_for(target_impl), block="0x64")]
             return []
@@ -569,7 +569,7 @@ class TestBuildUpgradeHistory:
         impl = ADDR(10)
 
         deps_path = _write_deps_target_proxy(tmp_path, target, proxy_type, impl)
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", lambda addr, t, from_block=0: [])
+        monkeypatch.setattr(uh, "_fetch_logs_etherscan", lambda addr, t, from_block=0, chain_id=1: [])
         _mock_no_enrichment(monkeypatch)
 
         result = uh.build_upgrade_history(deps_path)
@@ -597,7 +597,7 @@ class TestBuildUpgradeHistory:
         def data_for(addr):
             return "0x" + "0" * 24 + addr[2:]
 
-        def mock_fetch(address, topic0, from_block=0):
+        def mock_fetch(address, topic0, from_block=0, chain_id=1):
             if topic0 != uh.UPGRADED_TOPIC0:
                 return []
             # Return logs with NO topic1 — implementation in data only
@@ -645,7 +645,7 @@ def _fetch_events_parity_helper(monkeypatch, fanout: str, tmp_path):
 
     fetch_calls: list[tuple[str, str]] = []
 
-    def mock_fetch(addr, topic0, from_block=0):
+    def mock_fetch(addr, topic0, from_block=0, chain_id=1):
         fetch_calls.append((addr, topic0))
         if addr != target or topic0 != uh.UPGRADED_TOPIC0:
             return []
@@ -683,3 +683,72 @@ def test_fetch_upgrade_events_parity_parallel_vs_sequential(monkeypatch, tmp_pat
     # only the dispatch order across threads differs, which is invisible to
     # the deterministic post-sort.
     assert sorted(seq_calls) == sorted(par_calls)
+
+
+# ---------------------------------------------------------------------------
+# Multichain (M1.1): chain_id threading to the Etherscan getLogs query
+# ---------------------------------------------------------------------------
+
+
+def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
+    """A non-mainnet chain_id reaches the Etherscan getLogs event query."""
+    import utils.etherscan as etherscan_mod
+
+    seen_chain_ids = []
+
+    def fake_get(_module, action, **kwargs):
+        seen_chain_ids.append(kwargs.get("chain_id"))
+        return {"result": []}
+
+    # _fetch_logs_etherscan does `from utils.etherscan import get` at call time,
+    # so patching the module attribute intercepts the real wire call.
+    monkeypatch.setattr(etherscan_mod, "get", fake_get)
+    # Name enrichment goes through the get_contract_info wrapper — stub it so
+    # the test never leaves the machine.
+    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
+
+    target = ADDR(0xABC)
+    deps = {
+        "address": target,
+        "target_classification": {
+            "type": "proxy",
+            "proxy_type": "eip1967",
+            "implementation": ADDR(2),
+        },
+        "dependencies": {},
+    }
+
+    uh.build_upgrade_history(deps, chain_id=8453)
+
+    assert seen_chain_ids, "getLogs was never called"
+    assert set(seen_chain_ids) == {8453}
+
+
+def test_build_upgrade_history_defaults_to_mainnet(monkeypatch):
+    """Absent an explicit chain_id, getLogs carries chain_id=1 (mainnet unchanged)."""
+    import utils.etherscan as etherscan_mod
+
+    seen_chain_ids = []
+
+    def fake_get(_module, action, **kwargs):
+        seen_chain_ids.append(kwargs.get("chain_id"))
+        return {"result": []}
+
+    monkeypatch.setattr(etherscan_mod, "get", fake_get)
+    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
+
+    target = ADDR(0xABC)
+    deps = {
+        "address": target,
+        "target_classification": {
+            "type": "proxy",
+            "proxy_type": "eip1967",
+            "implementation": ADDR(2),
+        },
+        "dependencies": {},
+    }
+
+    uh.build_upgrade_history(deps)
+
+    assert seen_chain_ids, "getLogs was never called"
+    assert set(seen_chain_ids) == {1}

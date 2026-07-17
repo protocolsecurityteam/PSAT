@@ -37,7 +37,7 @@ class DAppCrawler:
     def __init__(
         self,
         wallet: HoneypotWallet,
-        chain_id: int = 1,
+        chain_id: int,
         eth_balance: str = "0x3635C9ADC5DEA00000",
         token_balance: str = "0x84595161401484A000000",
         headless: bool = True,

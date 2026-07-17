@@ -68,16 +68,23 @@ def _source_row_content(row) -> str:
     return ""
 
 
-def _etherscan_sources(address: str) -> dict[str, str]:
+def _etherscan_sources(address: str, chain: str | None) -> dict[str, str]:
     """Live-fetch verified source from Etherscan as a fallback when DB
     rows have no inline content (typical when source bodies live in
     object storage and the storage backend is unreachable).
     Returns ``{path: content}`` (empty on failure)."""
     try:
         from services.discovery.fetch import parse_sources
+        from utils.chains import UnknownChainError, chain_by_name
         from utils.etherscan import get_source
 
-        result = get_source(address)
+        # Chat is a user-facing edge (inv. 6): no/unknown selected chain falls
+        # back to mainnet explicitly rather than failing the whole tool call.
+        try:
+            chain_id = chain_by_name(chain).chain_id if chain else 1
+        except UnknownChainError:
+            chain_id = 1
+        result = get_source(address, chain_id=chain_id)
         return parse_sources(result) or {}
     except Exception as exc:
         logger.warning("etherscan source fetch failed for %s: %s", address, exc)
@@ -120,7 +127,7 @@ def _get_contract_source(
     # empty, fall through to Etherscan.
     db_files: list[tuple[str, str]] = [(r.path, _source_row_content(r)) for r in rows]
     if not db_files or not any(body for _, body in db_files):
-        es_files = _etherscan_sources(addr)
+        es_files = _etherscan_sources(addr, chn or (contract.chain if contract is not None else None))
         files = list(es_files.items())
     else:
         files = db_files

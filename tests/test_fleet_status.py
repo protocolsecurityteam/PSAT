@@ -303,7 +303,7 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
     monkeypatch.setattr(reconciler, "SessionLocal", lambda: nullcontext(MagicMock()))
     monkeypatch.setattr(reconciler, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
 
-    reconciler.run_enrollment_reconciler_loop("rpc://x", interval=0, stop_event=stop)
+    reconciler.run_enrollment_reconciler_loop("rpc://x", "ethereum", interval=0, stop_event=stop)
 
     assert len(beats) == 1
     process, kw = beats[0]
@@ -339,8 +339,8 @@ def test_event_indexer_loop_records_heartbeat(monkeypatch):
     # Fix B: the heartbeat triad is read from the table via _cursor_progress, not
     # the published ScanSummary — stub it (the MagicMock session can't run SQL).
     monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (1, 2))
-    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session: 4)
-    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session: 1)
+    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", lambda _session, *, chain_id=1: 4)
+    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session, *, chain_id=1: 1)
     monkeypatch.setattr(idx, "record_heartbeat", record)
 
     t = Thread(
@@ -413,7 +413,7 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
         release_scan.wait(timeout=10)  # bounded so a wiring bug can't hang the suite
         return idx.ScanSummary()
 
-    def fake_reconcile(_session):
+    def fake_reconcile(_session, *, chain_id=1):
         reconcile_called.set()
         return 0
 
@@ -426,7 +426,7 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
     monkeypatch.setattr(idx, "scan_enrolled_events", blocking_scan)
     monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (0, 0))
     monkeypatch.setattr(idx, "reconcile_deferred_resolutions", fake_reconcile)
-    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session: 0)
+    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session, *, chain_id=1: 0)
     monkeypatch.setattr(idx, "record_heartbeat", record)
 
     t = Thread(

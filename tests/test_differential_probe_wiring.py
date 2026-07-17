@@ -189,7 +189,7 @@ def test_probe_cache_skips_wire_on_second_resolve(monkeypatch):
     cr.clear_probe_cache()
     calls = {"n": 0}
 
-    def fake_wire(rpc_url, batch, block_tag):
+    def fake_wire(rpc_url, batch, block_tag, *, chain_id=1):
         calls["n"] += 1
         return [ok() for _ in batch]
 

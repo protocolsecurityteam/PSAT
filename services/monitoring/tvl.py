@@ -30,6 +30,7 @@ from db.models import (
 )
 from db.queue import record_heartbeat
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
+from services.monitoring.chain_rpc import chain_id_for
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -131,10 +132,12 @@ def refresh_contract_balances(
     if not contracts:
         return {}
 
-    # Fetch ETH price once for all contracts
+    # Fetch ETH price once for all contracts. ETH/USD is an L1-scoped quote, so
+    # the native-ETH USD value uses the mainnet price for every chain's ETH
+    # balance — an explicit, documented mainnet read, not a silent default.
     eth_price: float | None = None
     try:
-        eth_price = get_eth_price()
+        eth_price = get_eth_price(chain_id=1)
     except Exception as exc:
         logger.warning(
             "ETH price fetch failed: %s — ETH balances will not include USD values for %d contract(s)",
@@ -146,17 +149,21 @@ def refresh_contract_balances(
 
     for contract in contracts:
         address = contract.address
+        # Query each contract's balances on its OWN chain (inv. 8). Mainnet
+        # contracts resolve to chain_id 1 — unchanged; a legacy NULL chain also
+        # maps to 1 until the M1.2 fail-loud flip.
+        chain_id = chain_id_for(contract.chain)
         contract_total = 0.0
         tokens: list[dict] = []
 
         try:
-            eth_wei = get_eth_balance(address)
+            eth_wei = get_eth_balance(address, chain_id=chain_id)
         except Exception as exc:
             logger.warning("ETH balance failed for %s: %s", address, exc)
             eth_wei = 0
 
         try:
-            token_list = get_token_balances(address)
+            token_list = get_token_balances(address, chain_id=chain_id)
         except Exception as exc:
             logger.warning("Token balance failed for %s: %s", address, exc)
             token_list = []

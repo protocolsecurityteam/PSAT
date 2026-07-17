@@ -55,6 +55,7 @@ def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts)
         job = Job(
             address=address,
             protocol_id=proto.id,
+            chain_id=1,
             request={"address": address},
             status=JobStatus.completed,
             stage=JobStage.done,

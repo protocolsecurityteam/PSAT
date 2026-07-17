@@ -50,7 +50,9 @@ def _stub_source_equivalence_network(monkeypatch):
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(source=None, status="fetch_failed", detail="default stub"),
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
+            source=None, status="fetch_failed", detail="default stub"
+        ),
     )
 
 
@@ -173,7 +175,7 @@ def _stub_proven_match(monkeypatch, *, content: str = "contract MyPool {}", name
     monkeypatch.setattr(
         source_equivalence,
         "fetch_etherscan_source_files",
-        lambda _addr: source_equivalence.EtherscanFetch(
+        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
                 contract_name=name,
                 compiler_version="0.8",
@@ -272,7 +274,7 @@ def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_p
     # predicate, etc. would all surface as a real call.
     calls = {"github": 0, "etherscan": 0}
 
-    def boom_etherscan(_addr):
+    def boom_etherscan(_addr, **_kw):
         calls["etherscan"] += 1
         raise AssertionError("etherscan called on idle tick (queue should be empty)")
 

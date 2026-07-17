@@ -81,7 +81,7 @@ def test_discovery_worker_cache_miss_runs_fetch(db_session, monkeypatch):
 
     fetch_called = []
 
-    def mock_fetch(addr):
+    def mock_fetch(addr, *, chain_id=1):
         fetch_called.append(addr)
         return {
             "ContractName": "NewContract",

@@ -76,6 +76,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
             "proxy_type": "unknown",
             "discovery_relationship": "implementation",
             "parent_owns_high": False,
+            "chain": "ethereum",
         }
     ]
 
@@ -189,11 +190,11 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
 
     job1 = _job(
         id="proxy-job-A",
-        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-1"},
+        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-1", "chain_id": 1},
     )
     job2 = _job(
         id="proxy-job-B",
-        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-1"},
+        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-1", "chain_id": 1},
     )
 
     worker._resolve_proxy(session, job1, job1.address, job1.name)
@@ -236,11 +237,11 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
 
     job_root_a = _job(
         id="proxy-A",
-        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-A"},
+        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-A", "chain_id": 1},
     )
     job_root_b = _job(
         id="proxy-B",
-        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-B"},
+        request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-B", "chain_id": 1},
     )
 
     worker._resolve_proxy(session, job_root_a, job_root_a.address, job_root_a.name)

@@ -162,7 +162,7 @@ def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
     mark_enrollment_dirty(qsession, proto.id, "policy_complete")
     qsession.commit()
 
-    result = drain_enrollment_queue("http://rpc.invalid")
+    result = drain_enrollment_queue("http://rpc.invalid", "ethereum")
     assert result == {"drained": 1, "failed": 0}
 
     qsession.expire_all()
@@ -205,7 +205,7 @@ def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
         {"pid": proto.id},
     )
     try:
-        fired = maybe_enroll_protocol(qsession, proto.id, "http://rpc")
+        fired = maybe_enroll_protocol(qsession, proto.id, "http://rpc", "ethereum")
         assert fired is False
         # Nothing enrolled yet — but a dirty row was queued by the skip.
         enrolled_now = (
@@ -223,7 +223,7 @@ def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
         holder.close()
         holder_engine.dispose()
 
-    result = drain_enrollment_queue("http://rpc.invalid")
+    result = drain_enrollment_queue("http://rpc.invalid", "ethereum")
     assert result == {"drained": 1, "failed": 0}
 
     qsession.expire_all()
@@ -438,9 +438,10 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
         address="0x" + "b3" * 20,
         name="TestContract",
         protocol_id=proto.id,
+        chain_id=1,
         status=JobStatus.processing,
         stage=JobStage.policy,
-        request={"rpc_url": "https://rpc.example"},
+        request={"rpc_url": "https://rpc.example", "chain": "ethereum"},
     )
     qsession.add(job)
     qsession.commit()
@@ -514,7 +515,7 @@ def test_discovery_adoption_marks_dirty(qsession, monkeypatch):
         "EVMVersion": "shanghai",
         "LicenseType": "MIT",
     }
-    monkeypatch.setattr("workers.discovery.fetch", lambda _addr: etherscan_result)
+    monkeypatch.setattr("workers.discovery.fetch", lambda _addr, **_kw: etherscan_result)
     monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addresses, **kw: {})
     monkeypatch.setattr("workers.discovery.store_source_files", lambda *a, **kw: None)
     monkeypatch.setattr("workers.discovery.store_artifact", lambda *a, **kw: None)
@@ -618,7 +619,7 @@ def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkey
     monkeypatch.setattr("services.monitoring.reconciler.enroll_protocol_contracts", _boom)
 
     # Tick 1: drain fails -> attempts=1, dirty_at pushed ~120s into the future.
-    assert drain_enrollment_queue("http://rpc.invalid") == {"drained": 0, "failed": 1}
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 1}
     before = qsession.execute(
         text("SELECT dirty_at, reason, attempts FROM monitoring_enrollment_queue WHERE protocol_id = :pid"),
         {"pid": proto.id},
@@ -683,7 +684,7 @@ def test_run_loop_single_tick_sweeps_drains_and_heartbeats(monkeypatch):
     )
 
     try:
-        reconciler.run_enrollment_reconciler_loop("http://rpc.invalid", interval=0, stop_event=stop)
+        reconciler.run_enrollment_reconciler_loop("http://rpc.invalid", "ethereum", interval=0, stop_event=stop)
     finally:
         engine.dispose()
 

@@ -24,7 +24,7 @@ _DAPP_CRAWL_TIMEOUT_SECONDS = int(os.environ.get("PSAT_DAPP_CRAWL_TIMEOUT", "300
 async def _crawl_async(
     urls: list[str],
     *,
-    chain_id: int = 1,
+    chain_id: int,
     eth_balance: str = "0x3635C9ADC5DEA00000",
     token_balance: str = "0x84595161401484A000000",
     wait: int = 10,
@@ -51,7 +51,7 @@ async def _crawl_async(
 def crawl_dapp(
     urls: list[str],
     *,
-    chain_id: int = 1,
+    chain_id: int,
     wait: int = 10,
     progress: ProgressCallback | None = None,
 ) -> dict:

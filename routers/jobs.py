@@ -6,15 +6,16 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
+from utils.chains import UnknownChainError, chain_by_name
 
 from . import deps
 
@@ -137,16 +138,26 @@ def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
     "/api/company/{company_name}/addresses/{address}",
     dependencies=[Depends(deps.require_admin_key)],
 )
-def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
+def delete_company_address(
+    company_name: str,
+    address: str,
+    chain: str = Query(default="ethereum"),
+) -> dict[str, Any]:
     """Remove a Contract row from a protocol.
 
-    Scoped to the protocol so unrelated contracts sharing an address (very
-    rare — addresses are chain-global but we key by address only) aren't
-    affected. FK cascades on ``contracts.id`` clean up the audit coverage
-    rows and any upgrade-event attribution.
+    Scoped to the protocol AND chain: the same address can host a contract on
+    two chains within one protocol, so keying by address alone used to raise
+    ``MultipleResultsFound`` (a 500). ``chain`` disambiguates and defaults to
+    mainnet at this admin edge (inv. 12) so existing single-chain callers are
+    unchanged. FK cascades on ``contracts.id`` clean up the audit coverage rows
+    and any upgrade-event attribution.
     """
     if not deps._ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid address")
+    try:
+        chain_name = chain_by_name(chain).name
+    except UnknownChainError:
+        raise HTTPException(status_code=400, detail=f"Unknown chain: {chain}") from None
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
@@ -155,6 +166,9 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
             select(Contract).where(
                 Contract.protocol_id == protocol_row.id,
                 Contract.address == address,
+                # ``Contract.chain`` is nullable; a legacy NULL row is mainnet, so
+                # coalesce keeps the mainnet default matching those rows exactly.
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name,
             )
         ).scalar_one_or_none()
         if contract is None:
@@ -162,7 +176,7 @@ def delete_company_address(company_name: str, address: str) -> dict[str, Any]:
         session.delete(contract)
         session.commit()
     deps.log_admin_mutation("delete_company_address", id=address, company=company_name)
-    return {"company": company_name, "address": address, "deleted": True}
+    return {"company": company_name, "address": address, "chain": chain_name, "deleted": True}
 
 
 @router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin_key)])

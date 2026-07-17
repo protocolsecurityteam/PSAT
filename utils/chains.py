@@ -97,6 +97,19 @@ class UnknownChainError(ValueError):
     """
 
 
+class UnsupportedChainError(ValueError):
+    """Raised by :func:`require_chain` when a chain can no longer be defaulted.
+
+    The single fail-loud signal for the M1.2 default-kill sites (invariant 6):
+    a missing / empty / ``"unknown"`` / unregistered chain at a site where the
+    old code silently resolved to mainnet. Carries the offending value AND the
+    call context so a raise names both what was wrong and where. A subclass of
+    :class:`ValueError` (like :class:`UnknownChainError`) so existing
+    ``ValueError`` handlers still catch it, and never a bare ``TypeError`` from
+    a removed signature default.
+    """
+
+
 @dataclass(frozen=True)
 class ChainInfo:
     """Immutable per-chain facts. The eRPC route is NOT stored — it is derived
@@ -324,6 +337,43 @@ def chain_by_name(name: str) -> ChainInfo:
         if info is not None:
             return info
     raise UnknownChainError(f"unknown chain name: {name!r}")
+
+
+def require_chain(
+    chain_id: int | str | None = None,
+    *,
+    chain: str | None = None,
+    context: str,
+) -> ChainInfo:
+    """Resolve a chain to its :class:`ChainInfo`, or raise :class:`UnsupportedChainError`.
+
+    The single fail-loud mechanism for the M1.2 kill sites (invariant 6): call
+    it wherever a chain used to silently default to mainnet. Resolution order is
+    ``chain_id`` first (int or decimal string), then the ``chain`` name/alias.
+    Anything that cannot be resolved — ``None``, empty, the ``"unknown"``
+    sentinel, an unparseable id, or a name/id absent from the registry — raises
+    with *context* and the offending value, never a bare ``TypeError`` from a
+    removed default and never a silent mainnet fallback.
+    """
+    if chain_id is not None:
+        try:
+            parsed = int(chain_id)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            try:
+                return chain_by_id(parsed)
+            except UnknownChainError:
+                raise UnsupportedChainError(f"{context}: unsupported chain_id {chain_id!r}") from None
+    if isinstance(chain, str) and chain.strip() and chain.strip().lower() != "unknown":
+        try:
+            return chain_by_name(chain)
+        except UnknownChainError:
+            raise UnsupportedChainError(f"{context}: unsupported chain name {chain!r}") from None
+    raise UnsupportedChainError(
+        f"{context}: no chain supplied (chain_id={chain_id!r}, chain={chain!r}); "
+        "chain is required and can no longer default to mainnet"
+    )
 
 
 def chain_cache_token(chain: str | int | None) -> str:

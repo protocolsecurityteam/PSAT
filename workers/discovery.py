@@ -34,6 +34,7 @@ from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, p
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
+from utils.chains import UnknownChainError, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -373,6 +374,18 @@ class DiscoveryWorker(BaseWorker):
         # Spawn DApp crawl
         dapp_url = protocol.get("url")
         if dapp_url:
+            # Seed the crawl with the discovery job's chain (inv. 6): derive
+            # chain_id from the request's chain string via the registry rather
+            # than a bare ``or 1``. A company discovery with no chain defaults to
+            # mainnet — an explicit, documented choice; the crawl worker still
+            # re-resolves each found contract's own chain from crawl results.
+            spawn_chain = request.get("chain")
+            spawn_chain_id = request.get("chain_id")
+            if not spawn_chain_id:
+                try:
+                    spawn_chain_id = chain_by_name(spawn_chain).chain_id if spawn_chain else 1
+                except UnknownChainError:
+                    spawn_chain_id = 1
             dapp_request = {
                 "dapp_urls": [dapp_url],
                 "name": f"{company}_dapp_crawl",
@@ -380,7 +393,8 @@ class DiscoveryWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "analyze_limit": request.get("analyze_limit", 5),
-                "chain_id": request.get("chain_id") or 1,
+                "chain": spawn_chain,
+                "chain_id": spawn_chain_id,
                 "wait": request.get("wait", 10),
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
@@ -440,10 +454,17 @@ class DiscoveryWorker(BaseWorker):
         # Both calls hit Etherscan. parallel_get routes each thunk through
         # _wait_rate_limit, so the 5/sec global limit is preserved while the
         # serial RTT between them goes away.
+        # Address-scoped discovery jobs always carry a chain (Phase-0 dual-write
+        # + backfill); one that can't resolve is a data bug — fail loud (inv. 6).
+        fetch_chain_id = require_chain(
+            getattr(job, "chain_id", None),
+            chain=request.get("chain") if isinstance(request, dict) else None,
+            context=f"discovery source fetch for {address}",
+        ).chain_id
         with log_timed_phase(logger, "source_fetch"):
             fan_out = etherscan.parallel_get(
                 {
-                    "fetch": lambda a=address: fetch(a),
+                    "fetch": lambda a=address: fetch(a, chain_id=fetch_chain_id),
                     "creators": lambda a=address: _batch_get_creators([a]),
                 }
             )

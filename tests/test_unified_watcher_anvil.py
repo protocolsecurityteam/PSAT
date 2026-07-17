@@ -2287,7 +2287,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     )
     test_db.commit()
 
-    enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url)
+    enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
     assert len(enrolled) == 1
 
     mc = enrolled[0]

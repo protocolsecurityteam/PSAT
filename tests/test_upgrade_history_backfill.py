@@ -163,7 +163,7 @@ def stub_etherscan(monkeypatch):
     _RAISE = object()
     names: dict[str, object] = {}
 
-    def fake(address: str):
+    def fake(address: str, **_kw):
         val = names.get(address.lower(), None)
         if val is _RAISE:
             raise RuntimeError("simulated etherscan outage")

@@ -99,12 +99,14 @@ def test_first_walk_then_initial_graph_walk_is_no_op_with_no_new_principals():
         first_graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
         )
         # Second walk with same root, with initial_graph → must be no-op.
         second_graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
             initial_graph=first_graph,
         )
@@ -128,6 +130,7 @@ def test_initial_graph_walk_projects_new_role_principal():
         first_graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
         )
 
@@ -145,6 +148,7 @@ def test_initial_graph_walk_projects_new_role_principal():
             second_graph, _ = resolve_control_graph(
                 root_artifacts=_root_artifacts(with_role_principals=True),
                 rpc_url="https://rpc",
+                chain_id=1,
                 workspace_prefix="test",
                 initial_graph=first_graph,
             )
@@ -212,6 +216,7 @@ def test_initial_graph_skips_re_materialization_of_nested_contracts():
         graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
             initial_graph=seed_graph,
         )
@@ -258,6 +263,7 @@ def test_initial_graph_re_walks_root_so_new_permissions_are_projected():
         graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=True),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
             initial_graph=cast(ResolvedControlGraph, seed_graph),
         )
@@ -317,6 +323,7 @@ def test_initial_graph_dedupes_edges_on_re_walk():
         graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
             initial_graph=cast(ResolvedControlGraph, seed_graph),
         )
@@ -340,6 +347,7 @@ def test_no_initial_graph_preserves_legacy_behavior():
         graph, _ = resolve_control_graph(
             root_artifacts=_root_artifacts(with_role_principals=False),
             rpc_url="https://rpc",
+            chain_id=1,
             workspace_prefix="test",
         )
     # Just the root.

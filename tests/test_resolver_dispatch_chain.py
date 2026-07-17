@@ -30,7 +30,7 @@ def test_event_hint_routes_to_event_indexed():
             }
         ],
     }
-    chosen = _registry().pick(desc, EvaluationContext(contract_address="0x" + "cc" * 20))
+    chosen = _registry().pick(desc, EvaluationContext(chain_id=1, contract_address="0x" + "cc" * 20))
     assert chosen is EventIndexedAdapter
 
 
@@ -40,7 +40,7 @@ def test_no_event_hint_no_match():
         "storage_var": "owners",
         "key_sources": [{"source": "msg_sender"}],
     }
-    assert _registry().pick(desc, EvaluationContext(contract_address="0x" + "cc" * 20)) is None
+    assert _registry().pick(desc, EvaluationContext(chain_id=1, contract_address="0x" + "cc" * 20)) is None
 
 
 def test_value_predicate_set_hint_routes_to_event_indexed():
@@ -60,5 +60,5 @@ def test_value_predicate_set_hint_routes_to_event_indexed():
             }
         ],
     }
-    chosen = _registry().pick(desc, EvaluationContext(contract_address="0x" + "cc" * 20))
+    chosen = _registry().pick(desc, EvaluationContext(chain_id=1, contract_address="0x" + "cc" * 20))
     assert chosen is EventIndexedAdapter

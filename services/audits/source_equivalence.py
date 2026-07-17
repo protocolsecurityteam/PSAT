@@ -290,7 +290,7 @@ class VerifiedSource:
     files: dict[str, str]  # path -> sha256(content)
 
 
-def fetch_etherscan_source_files(address: str) -> EtherscanFetch:
+def fetch_etherscan_source_files(address: str, *, chain_id: int) -> EtherscanFetch:
     """Return parsed verified-source for ``address`` as file-path→sha256.
 
     Delegates parsing to ``services.discovery.fetch.parse_sources`` — the
@@ -302,7 +302,7 @@ def fetch_etherscan_source_files(address: str) -> EtherscanFetch:
     from utils.etherscan import get
 
     try:
-        data = get("contract", "getsourcecode", address=address)
+        data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
         result = data["result"][0]
     except Exception as exc:
         return EtherscanFetch(source=None, status="fetch_failed", detail=f"etherscan api error: {exc}")
@@ -385,7 +385,16 @@ def fetch_contract_source(session: Any, contract_id: int) -> EtherscanFetch:
             status="fetch_failed",
             detail=f"contract {contract_id} has no address",
         )
-    return fetch_etherscan_source_files(contract.address)
+    from utils.chains import require_chain
+
+    # NULL Contract.chain is legacy-mainnet by convention (same coalesce as
+    # routers/jobs.py); a named-but-unknown chain fails loud.
+    return fetch_etherscan_source_files(
+        contract.address,
+        chain_id=require_chain(
+            chain=contract.chain or "ethereum", context="source-equivalence etherscan fetch"
+        ).chain_id,
+    )
 
 
 # Kept for backwards compatibility with callers expecting the old

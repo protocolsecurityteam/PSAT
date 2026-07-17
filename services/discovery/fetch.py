@@ -10,9 +10,9 @@ from pathlib import Path
 from utils.etherscan import get_source
 
 
-def fetch(address: str) -> dict:
+def fetch(address: str, *, chain_id: int) -> dict:
     """Fetch verified source from Etherscan. Returns the raw result dict."""
-    return get_source(address)
+    return get_source(address, chain_id=chain_id)
 
 
 def _parse_source_code(raw: str) -> dict | None:

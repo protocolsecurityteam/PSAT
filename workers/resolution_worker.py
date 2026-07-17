@@ -21,6 +21,7 @@ from db.models import (
     ControllerValue,
     Job,
     JobStage,
+    derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
@@ -41,14 +42,29 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 
 def _rpc_url_for_job(job: Job) -> str:
+    """eRPC URL for the job's own chain, resolved via the first-class
+    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    a chainless ``/api/analyze`` submission carries the mainnet edge default
+    only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
-    chain = request.get("chain")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=request.get("chain_id"),
-        chain=chain if isinstance(chain, str) else None,
+        chain_id=_chain_id_for_job(job),
+        context=f"resolution rpc for job {job.id}",
     )
+
+
+def _chain_id_for_job(job: Job) -> int:
+    """The job's first-class ``chain_id`` (invariant 1). Prefers the populated
+    ``jobs.chain_id`` column and falls back to deriving it from
+    ``request["chain"]`` via the canonical registry; mainnet (1) is the last
+    resort for a chain-less row so behaviour is unchanged there."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        return chain_id
+    request = job.request if isinstance(job.request, dict) else {}
+    return derive_job_chain_id(request.get("chain"), job.address) or 1
 
 
 def _build_root_artifacts(
@@ -78,6 +94,7 @@ class ResolutionWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
+        chain_id = _chain_id_for_job(job)
 
         # Read control_tracking_plan from DB
         tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
@@ -181,7 +198,9 @@ class ResolutionWorker(BaseWorker):
         )
 
         # Fetch token balances
-        self._fetch_balances(session, job, contract_row, heartbeat=lambda: self._heartbeat(session, job))
+        self._fetch_balances(
+            session, job, contract_row, chain_id=chain_id, heartbeat=lambda: self._heartbeat(session, job)
+        )
 
         root_artifacts = _build_root_artifacts(contract_analysis, tracking_plan, snapshot, predicate_trees)
 
@@ -195,6 +214,7 @@ class ResolutionWorker(BaseWorker):
         resolved_graph, nested_artifacts = resolve_control_graph(
             root_artifacts=root_artifacts,
             rpc_url=rpc_url,
+            chain_id=chain_id,
             max_depth=RECURSION_MAX_DEPTH,
             workspace_prefix="recursive",
             classify_cache=classify_cache,
@@ -315,9 +335,14 @@ class ResolutionWorker(BaseWorker):
         job: Job,
         contract_row: Contract | None,
         *,
+        chain_id: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
-        """Fetch ETH + token balances and store in contract_balances table."""
+        """Fetch ETH + token balances and store in contract_balances table.
+
+        ``chain_id`` is required (inv. 6): it scopes every Etherscan v2 read to
+        the job's chain so an L2 job records L2 balances/prices, not mainnet
+        ones. A chainless balance fetch can no longer default to mainnet."""
         from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances, parallel_get
 
         address = job.address
@@ -333,9 +358,9 @@ class ResolutionWorker(BaseWorker):
         # only stacks RTTs — the limiter is preserved.
         results = parallel_get(
             {
-                "eth_wei": (lambda: get_eth_balance(target_address)),
-                "tokens": (lambda: get_token_balances(target_address)),
-                "eth_price": get_eth_price,
+                "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
+                "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
+                "eth_price": (lambda: get_eth_price(chain_id=chain_id)),
             },
             heartbeat=heartbeat,
         )

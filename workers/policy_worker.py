@@ -19,6 +19,7 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
     SessionLocal,
+    derive_job_chain_id,
 )
 from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
@@ -32,7 +33,7 @@ from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status
 from services.static.claims import Claim, resolve_claim_precedence
-from utils.chains import UnknownChainError, chain_by_name
+from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.concurrency import parallel_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -85,14 +86,38 @@ def _make_principal_type_resolver(
 
 
 def _rpc_url_for_job(job: Job) -> str:
+    """eRPC URL for the job's own chain, resolved via the first-class
+    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    a chainless ``/api/analyze`` submission carries the mainnet edge default
+    only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
-    chain = request.get("chain")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=request.get("chain_id"),
-        chain=chain if isinstance(chain, str) else None,
+        chain_id=_chain_id_for_job(job),
+        context=f"policy rpc for job {job.id}",
     )
+
+
+def _chain_id_for_job(job: Job) -> int:
+    """The job's first-class ``chain_id`` (invariant 1): the populated
+    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
+    canonical registry, else mainnet for a chain-less row."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        return chain_id
+    request = job.request if isinstance(job.request, dict) else {}
+    return derive_job_chain_id(request.get("chain"), job.address) or 1
+
+
+def _chain_name_for_job(job: Job) -> str:
+    """Canonical chain name for the job (mainnet → ``"ethereum"``). Used for the
+    ``contract_materializations`` cache key + monitoring enrollment so both agree
+    with the name the resolution stage materialized under."""
+    try:
+        return chain_by_id(_chain_id_for_job(job)).name
+    except UnknownChainError:
+        return "ethereum"
 
 
 def _root_artifacts(
@@ -107,7 +132,7 @@ def _root_artifacts(
     }
 
 
-def _load_nested_artifacts(session: Session, job_id) -> dict[str, LoadedArtifacts]:
+def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str, LoadedArtifacts]:
     """Hydrate ``recursive.*`` artifacts written by the resolution stage.
 
     Resolution writes only the runtime-state slices (snapshot,
@@ -144,10 +169,12 @@ def _load_nested_artifacts(session: Session, job_id) -> dict[str, LoadedArtifact
         bundles.setdefault(address, {})[kind] = payload
 
     # Hydrate analysis + tracking_plan from contract_materializations.
-    # Address-keyed lookup matches the chain default the resolution
-    # writer uses; on a row miss we drop the bundle below since the
-    # downstream consumers can't operate without analysis.
-    chain = os.getenv("PSAT_DEFAULT_CHAIN", "ethereum")
+    # Address-keyed lookup keyed on the job's chain (the same name the resolution
+    # stage materialized under); on a row miss we drop the bundle below since the
+    # downstream consumers can't operate without analysis. ``chain`` is the job's
+    # resolved chain name — a chainless call is a data bug (inv. 6), so fail loud
+    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
+    require_chain(chain=chain, context="policy nested-artifact hydration")
     for address, bundle in bundles.items():
         try:
             mrow = cm.find_by_address(session, chain=chain, address=address)
@@ -174,6 +201,7 @@ def _resolve_semantic_capabilities(
     contract_address: str,
     job_id: Any,
     chain: str | None = None,
+    chain_id: int,
 ) -> dict[str, dict[str, Any]] | None:
     """Run the semantic capability resolver for ``contract_address`` against
     the in-progress job. Returns ``{function_signature: capability_dict}``
@@ -183,7 +211,12 @@ def _resolve_semantic_capabilities(
     ``_load_state_var_values`` so the controller-value lookup is
     scoped by ``(job_id, chain)`` per Wave 4 C.1. The resolver also
     derives this from ``job.request['chain']`` when None is passed,
-    so passing it here is belt-and-suspenders."""
+    so passing it here is belt-and-suspenders.
+
+    ``chain_id`` is required (inv. 6/7): it binds the resolver's RPC/event reads
+    to the job's real chain. Without it the predicate-eval tree would run as
+    chain 1 even for an L2 job; a chainless call is now a hard error, not a
+    silent mainnet default. The caller threads the job's ``chain_id``."""
     try:
         from services.resolution.capability_resolver import resolve_contract_capabilities
     except Exception as exc:  # pragma: no cover — import-error handled defensively
@@ -206,6 +239,7 @@ def _resolve_semantic_capabilities(
             address=contract_address,
             job_id=job_id,
             chain=chain,
+            chain_id=chain_id,
         )
         if result is None:
             exc = RuntimeError("semantic capability resolver produced no output")
@@ -297,6 +331,8 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
+        chain_id = _chain_id_for_job(job)
+        chain_name = _chain_name_for_job(job)
         durations_ms: dict[str, int] = {}
 
         # Load required artifacts from DB
@@ -340,7 +376,7 @@ class PolicyWorker(BaseWorker):
         if not isinstance(control_snapshot, dict):
             raise RuntimeError("control_snapshot artifact not found")
 
-        nested_artifacts = _load_nested_artifacts(session, job.id)
+        nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
 
         # Determine nested controller context for effective-permission enrichment.
         authority_snapshot: dict | None = None
@@ -386,6 +422,7 @@ class PolicyWorker(BaseWorker):
                     contract_address=(job.address or "").lower(),
                     job_id=job.id,
                     chain=job_chain if isinstance(job_chain, str) else None,
+                    chain_id=chain_id,
                 )
                 ph["function_count"] = len(capability_resolver_output or {})
 
@@ -521,6 +558,7 @@ class PolicyWorker(BaseWorker):
             refreshed_graph, refreshed_nested = resolve_control_graph(
                 root_artifacts=root_bundle,
                 rpc_url=rpc_url,
+                chain_id=chain_id,
                 max_depth=RECURSION_MAX_DEPTH,
                 workspace_prefix="recursive",
                 nested_artifacts_override=nested_artifacts,
@@ -632,7 +670,7 @@ class PolicyWorker(BaseWorker):
                         session,
                         job.protocol_id,
                         rpc_url,
-                        chain="ethereum",
+                        chain=chain_name,
                         exclude_job_id=job.id,
                     )
                     record_stage_metric("enrolled", bool(enrolled))

@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
-from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition
+from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
@@ -36,6 +36,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
@@ -72,14 +73,33 @@ def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, 
     )
 
 
-def _request_rpc_url(request: dict) -> str | None:
+def _request_rpc_url(job: Job) -> str | None:
+    """eRPC URL for the job's own chain, resolved via the first-class
+    ``jobs.chain_id`` column (``_parent_chain_name``), not the request JSONB —
+    a chainless ``/api/analyze`` submission carries the mainnet edge default
+    only in the column, so a request-only read comes back None and silently
+    skips classification/deps. The request's local-node override still wins."""
+    request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
-    chain = request.get("chain")
     return default_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=request.get("chain_id"),
-        chain=chain if isinstance(chain, str) else None,
+        chain=_parent_chain_name(job),
     )
+
+
+def _parent_chain_name(job: Job) -> str:
+    """Canonical chain name of the parent job, for stamping onto a spawned impl
+    child so chain never cascades as ``None`` (inv. 6). Uses the first-class
+    ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
+    registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    chain_id = getattr(job, "chain_id", None)
+    if not isinstance(chain_id, int):
+        request = job.request if isinstance(job.request, dict) else {}
+        chain_id = derive_job_chain_id(request.get("chain"), job.address) or 1
+    try:
+        return chain_by_id(chain_id).name
+    except UnknownChainError:
+        return "ethereum"
 
 
 def _redirect_proxy_policy_dependencies(
@@ -795,7 +815,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     if not cached_impl:
         return None
 
-    rpc_url = _request_rpc_url(request)
+    rpc_url = _request_rpc_url(job)
     if not rpc_url:
         return None
 
@@ -1007,7 +1027,7 @@ class StaticWorker(BaseWorker):
         from services.discovery.classifier import ClassificationIncompleteError, classify_single
 
         request = job.request if isinstance(job.request, dict) else {}
-        rpc_url = _request_rpc_url(request)
+        rpc_url = _request_rpc_url(job)
         if not rpc_url:
             logger.info("Job %s: no RPC available for proxy classification", job.id)
             store_artifact(
@@ -1272,8 +1292,11 @@ class StaticWorker(BaseWorker):
                 "discovery_relationship": "implementation",
                 "parent_owns_high": parent_owns_high,
             }
-            if request.get("chain") is not None:
-                child_request["chain"] = request.get("chain")
+            # Always stamp the child's chain from the parent (inv. 6): a None here
+            # used to cascade and let the impl child derive its own default chain,
+            # divorcing it from the proxy's chain. Mainnet parents carry
+            # chain="ethereum", so this is unchanged there.
+            child_request["chain"] = request.get("chain") or _parent_chain_name(job)
             if getattr(job, "protocol_id", None):
                 child_request["protocol_id"] = job.protocol_id
             if force:
@@ -1316,7 +1339,7 @@ class StaticWorker(BaseWorker):
         pointers = (analysis_data or {}).get("secondary_impl_pointers") or []
         if not pointers:
             return
-        rpc_url = _request_rpc_url(request)
+        rpc_url = _request_rpc_url(job)
         if not rpc_url:
             return
         try:
@@ -1426,7 +1449,7 @@ class StaticWorker(BaseWorker):
         self.update_detail(session, job, "Discovering dependencies")
 
         request = job.request if isinstance(job.request, dict) else {}
-        deps_rpc = _request_rpc_url(request)
+        deps_rpc = _request_rpc_url(job)
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
         dynamic_tx_limit = request.get("dynamic_tx_limit", 10)
@@ -1669,7 +1692,11 @@ class StaticWorker(BaseWorker):
                         info_cache[_addr] = (_data.get("name"), _data.get("selectors", {}))
 
             with log_timed_phase(logger, "enrichment"):
-                enrich_dependency_metadata(unified, info_cache=info_cache)
+                enrich_dependency_metadata(
+                    unified,
+                    info_cache=info_cache,
+                    chain_id=require_chain(chain=_parent_chain_name(job), context="dependency enrichment").chain_id,
+                )
 
             # Store updated enrichment cache (includes any newly fetched entries)
             enrichment_data = {

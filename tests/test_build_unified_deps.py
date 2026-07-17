@@ -265,7 +265,7 @@ def test_enrich_dependency_metadata(monkeypatch):
     }
     monkeypatch.setattr(
         "services.discovery.unified_dependencies.get_contract_info",
-        lambda addr: info_map.get(addr, (None, {})),
+        lambda addr, *, chain_id=1: info_map.get(addr, (None, {})),
     )
 
     # Build a unified output with a proxy dep (impl nested) and a dependency graph
@@ -304,7 +304,7 @@ def test_enrich_dependency_metadata(monkeypatch):
         "trace_errors": [],
     }
     unified = build(TARGET, _static([DEP_A, DEP_B]), dyn, cls)
-    enrich(unified)
+    enrich(unified, chain_id=1)
 
     # Contract names resolved
     assert unified["dependencies"][DEP_A]["contract_name"] == "TokenVault"

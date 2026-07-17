@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from db.models import Job, JobStatus, Protocol
+from utils.chains import require_chain
 
 from . import deps
 
@@ -35,7 +36,7 @@ router = APIRouter()
 
 _PROBE_RATE_LIMIT = int(os.environ.get("PSAT_PROBE_RATE_LIMIT", "10"))
 _PROBE_RATE_WINDOW_S = float(os.environ.get("PSAT_PROBE_RATE_WINDOW_S", "60"))
-_probe_rate_state: dict[tuple[str, str], Any] = {}
+_probe_rate_state: dict[tuple[str, str, int], Any] = {}
 
 
 def _prune_probe_rate_state(now: float) -> None:
@@ -46,10 +47,14 @@ def _prune_probe_rate_state(now: float) -> None:
             _probe_rate_state.pop(key, None)
 
 
-def _probe_rate_check(admin_key: str | None, address: str) -> None:
-    """Raise HTTPException(429) when the (admin_key, address) sliding
+def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> None:
+    """Raise HTTPException(429) when the (admin_key, address, chain_id) sliding
     window has hit its limit. No-op when the limit is 0 (env override
-    for testing / disabled-by-default flag use)."""
+    for testing / disabled-by-default flag use).
+
+    The chain is part of the bucket key (inv. 12): the same address on two chains
+    is two distinct contracts, so probing one must not consume the other's budget.
+    Defaults to mainnet so a caller that omits it keeps the mainnet bucket."""
     if _PROBE_RATE_LIMIT <= 0:
         return
     import collections as _collections
@@ -57,7 +62,7 @@ def _probe_rate_check(admin_key: str | None, address: str) -> None:
 
     now = _time.time()
     _prune_probe_rate_state(now)
-    key = (admin_key or "<no-key>", address.lower())
+    key = (admin_key or "<no-key>", address.lower(), chain_id)
     state = _probe_rate_state.get(key)
     if state is None:
         state = _collections.deque()
@@ -207,7 +212,10 @@ def probe_contract_membership(
     from the semantic capability rendering.
     """
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    if "chain_id" not in req.model_fields_set:
+        # Admin API edge (inv. 6): chain_id defaults to mainnet; log when taken.
+        logger.info("probe_membership: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
+    _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
 
     # Lazy-import the resolver bits so the probe route doesn't impose
     # its dependency surface on the rest of the API.
@@ -296,7 +304,10 @@ def probe_contract_signature(
     from services.resolution.repos import PostgresEventLogRepo
 
     addr = deps._normalize_address_or_400(address)
-    _probe_rate_check(x_psat_admin_key, addr)
+    if "chain_id" not in req.model_fields_set:
+        # Admin API edge (inv. 6): chain_id defaults to mainnet; log when taken.
+        logger.info("probe_signature: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
+    _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
         job = session.execute(
             select(Job)
@@ -381,6 +392,9 @@ def get_contract_capabilities(
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     addr = deps._normalize_address_or_400(address)
+    # Admin API edge (inv. 6): chain_id query param defaults to mainnet. Logged so
+    # the mainnet assumption is visible for a chainless admin query.
+    logger.info("get_contract_capabilities: resolving %s on chain_id=%s (default mainnet=1)", addr, chain_id)
     cache_key = (addr, chain_id, block)
     cached = _capabilities_cache_get(cache_key)
     if cached is not None:
@@ -513,9 +527,19 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
                 if isinstance(req_chain, str) and req_chain:
                     chain_str = req_chain
             try:
+                # Job.chain_id is guaranteed for address-scoped jobs (Phase-0
+                # dual-write + backfill); a job that still can't resolve raises
+                # UnsupportedChainError and lands in the warn-and-count-missing
+                # path below rather than 500ing the whole company map.
+                chain_info = require_chain(
+                    latest_job.chain_id if latest_job is not None else None,
+                    chain=chain_str,
+                    context=f"semantic capabilities for {addr}",
+                )
                 caps = resolve_contract_capabilities(
                     session,
                     address=addr,
+                    chain_id=chain_info.chain_id,
                     job_id=latest_job.id if latest_job is not None else None,
                     chain=chain_str,
                 )

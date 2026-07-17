@@ -1207,8 +1207,8 @@ class TestEnrollmentIntegration:
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            first = enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
-            second = enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            first = enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+            second = enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         assert len(first) == 1
         assert len(second) == 1
@@ -1390,7 +1390,7 @@ class TestEnrollmentIntegration:
         assert held is True
         try:
             with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-                fired = maybe_enroll_protocol(pg_session, proto.id, "http://rpc")
+                fired = maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum")
             assert fired is False
             n = pg_session.execute(
                 select(func.count()).select_from(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
@@ -1406,7 +1406,7 @@ class TestEnrollmentIntegration:
             holder_engine.dispose()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            fired2 = maybe_enroll_protocol(pg_session, proto.id, "http://rpc")
+            fired2 = maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum")
         assert fired2 is True
         pg_session.expire_all()
         n2 = pg_session.execute(
@@ -1421,7 +1421,7 @@ class TestEnrollmentIntegration:
 
         proto = self._seed_one_contract_protocol(pg_session)
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            assert maybe_enroll_protocol(pg_session, proto.id, "http://rpc") is True
+            assert maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum") is True
 
         other_engine = create_engine(DATABASE_URL)
         other = Session(other_engine, expire_on_commit=False)
@@ -1472,7 +1472,7 @@ class TestEnrollmentIntegration:
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(1000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         safe_mc = pg_session.execute(
             select(MonitoredContract).where(
@@ -1537,7 +1537,7 @@ class TestEnrollmentIntegration:
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(2000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         real_mc = pg_session.execute(
             select(MonitoredContract).where(MonitoredContract.address == real_safe)
@@ -1598,7 +1598,7 @@ class TestEnrollmentIntegration:
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(3000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         first = pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == safe_addr)).scalar_one()
         assert first.is_active is True
@@ -1621,7 +1621,7 @@ class TestEnrollmentIntegration:
         pg_session.expire_all()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(4000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         demoted = pg_session.execute(
             select(MonitoredContract).where(MonitoredContract.address == safe_addr)
@@ -1677,7 +1677,7 @@ class TestEnrollmentIntegration:
         pg_session.commit()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(5000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         first = pg_session.execute(
             select(MonitoredContract).where(MonitoredContract.address == timelock_addr)
@@ -1702,7 +1702,7 @@ class TestEnrollmentIntegration:
         pg_session.expire_all()
 
         with patch("services.monitoring.enrollment.rpc_request", return_value=hex(6000)):
-            enroll_protocol_contracts(pg_session, proto.id, "http://rpc")
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         zombie = pg_session.execute(
             select(MonitoredContract).where(MonitoredContract.address == timelock_addr)

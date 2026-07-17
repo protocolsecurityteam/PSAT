@@ -27,7 +27,7 @@ pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_classifier_rpc
 def _stub_failed_node_name(monkeypatch):
     """The failed-node name lookup fetches verified source from Etherscan; default
     to None offline (tests that assert a specific name override this in-body)."""
-    monkeypatch.setattr("services.resolution.recursive._contract_name_for_address", lambda address: None)
+    monkeypatch.setattr("services.resolution.recursive._contract_name_for_address", lambda address, chain_id=1: None)
 
 
 def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permissions: dict | None = None) -> dict:
@@ -223,7 +223,7 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
         },
     )
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
         assert address == authority_address
         return authority_bundle
 
@@ -242,6 +242,7 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
     graph, nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=3,
     )
 
@@ -321,7 +322,7 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
 
     materialize_calls: list[str] = []
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
         materialize_calls.append(address)
         return shared_bundle
 
@@ -338,6 +339,7 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
     graph, _nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 
@@ -415,7 +417,7 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
 
     materialize_calls: list[str] = []
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
         materialize_calls.append(address)
         assert address == role_holder_address
         return role_holder_bundle
@@ -439,6 +441,7 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
     resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=3,
     )
 
@@ -461,7 +464,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
     )
     monkeypatch.setattr(
         "services.resolution.recursive.fetch",
-        lambda _address: {"ContractName": "TestContract"},
+        lambda _address, **_kw: {"ContractName": "TestContract"},
     )
     monkeypatch.setattr(
         "services.resolution.recursive.scaffold",
@@ -508,6 +511,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
         address,
         "http://rpc.example",
         workspace_prefix="recursive",
+        chain="ethereum",
     )
 
     assert loaded.get("effective_permissions") is marker
@@ -569,7 +573,7 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
 
     captured: dict = {}
 
-    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix):
+    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
         captured["effective_address"] = effective_address
         analysis = {"subject": {"address": effective_address, "name": "Impl"}}
         plan = {"contract_address": effective_address, "controllers": []}
@@ -598,7 +602,7 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
 
     captured: dict = {}
 
-    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix):
+    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
         captured["effective_address"] = effective_address
         analysis = {"subject": {"address": effective_address, "name": "AsIs"}}
         plan = {"contract_address": effective_address, "controllers": []}
@@ -656,6 +660,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
     graph, nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 
@@ -693,12 +698,15 @@ def test_resolve_control_graph_skips_failed_nested_materialization(monkeypatch):
 
     monkeypatch.setattr(
         "services.resolution.recursive._materialize_contract_artifacts",
-        lambda address, rpc_url, *, workspace_prefix: (_ for _ in ()).throw(RuntimeError("nested compile failed")),
+        lambda address, rpc_url, *, workspace_prefix, chain=None: (_ for _ in ()).throw(
+            RuntimeError("nested compile failed")
+        ),
     )
 
     graph, _nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 
@@ -738,12 +746,13 @@ def test_resolve_control_graph_names_failed_nested_contract_from_metadata(monkey
     )
     monkeypatch.setattr(
         "services.resolution.recursive._contract_name_for_address",
-        lambda address: "GateSeal" if address == nested_address else None,
+        lambda address, chain_id=1: "GateSeal" if address == nested_address else None,
     )
 
     graph, _nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 
@@ -827,6 +836,7 @@ def test_resolve_control_graph_skips_self_referential_role_principal_edges(monke
     graph, _nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 
@@ -904,7 +914,7 @@ def _resolve_parity_helper(monkeypatch, fanout: str):
         auth_b: _make_auth_bundle(auth_b, leaf_b, "eoa"),
     }
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
         return bundles_by_addr[address]
 
     def fake_classify(rpc_url, address, block_tag="latest"):
@@ -920,6 +930,7 @@ def _resolve_parity_helper(monkeypatch, fanout: str):
     graph, nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
     return graph, nested
@@ -985,7 +996,7 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
         },
     )
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
         if address == bad_addr:
             raise RuntimeError("simulated materialize failure")
         return good_bundle
@@ -1003,6 +1014,7 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     graph, nested = resolve_control_graph(
         root_artifacts=cast(LoadedArtifacts, root_bundle),
         rpc_url="http://rpc.example",
+        chain_id=1,
         max_depth=2,
     )
 

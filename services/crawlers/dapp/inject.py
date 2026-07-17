@@ -12,7 +12,7 @@ _JS_TEMPLATE_PATH = Path(__file__).parent / "injected_provider.js"
 
 def build_provider_script(
     wallet: HoneypotWallet,
-    chain_id: int = 1,
+    chain_id: int,
     eth_balance_wei: str = "0x3635C9ADC5DEA00000",  # 1000 ETH
     token_balance: str = "0x84595161401484A000000",  # 10M tokens (18 dec)
 ) -> str:

@@ -48,9 +48,11 @@ from db.models import (
     Protocol,
     TvlSnapshot,
     UpgradeEvent,
+    derive_job_chain_id,
 )
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
+from utils.chains import UnknownChainError, chain_by_name
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -87,6 +89,24 @@ class GovernanceView:
     fund_flows: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
+    """Whether ``job`` and a Contract row (its ``chain`` name) are on the same
+    chain (inv. 12). Both sides resolve to a registry chain id — the job from its
+    first-class ``chain_id`` (else derived from ``request["chain"]``), the
+    contract from its name string — so aliases (``"mainnet"``≡``"ethereum"``) and
+    a NULL contract chain (legacy mainnet) fold to mainnet and agree, keeping
+    mainnet output identical."""
+    job_cid = job.chain_id if isinstance(job.chain_id, int) else None
+    if job_cid is None:
+        request = job.request if isinstance(job.request, dict) else {}
+        job_cid = derive_job_chain_id(request.get("chain"), job.address) or 1
+    try:
+        contract_cid = chain_by_name(contract_chain).chain_id if contract_chain else 1
+    except UnknownChainError:
+        contract_cid = 1
+    return job_cid == contract_cid
+
+
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
     """Find the protocol row + jobs that belong to ``name``.
 
@@ -112,24 +132,31 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
         # Join Jobs to Contracts on the natural key. The address column on
         # contracts is already stored lowercased (see db/queue.py); jobs
         # store the address as-provided, so lowercase the job side for the
-        # join. Chain is not part of the join — a Contract row keyed by
-        # (address, chain) belongs to the protocol regardless of which
-        # chain the job ran on, and adding chain to the join would drop
-        # legitimate rows when chain is NULL on one side.
-        company_jobs = (
-            session.execute(
-                select(Job)
-                .join(Contract, Contract.address == func.lower(Job.address))
-                .where(
-                    Contract.protocol_id == protocol_row.id,
-                    Job.status == JobStatus.completed,
-                    Job.address.isnot(None),
-                )
+        # join. The SQL join stays address-only (a name-string ``Contract.chain``
+        # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
+        # and a raw string compare would drop legitimate rows on alias / NULL
+        # mismatch); chain agreement is enforced in Python below via the registry
+        # so a mainnet job never pairs with a same-address L2 contract (inv. 12).
+        # On mainnet-only data every pair agrees, so output is unchanged.
+        rows = session.execute(
+            select(Job, Contract.chain)
+            .join(Contract, Contract.address == func.lower(Job.address))
+            .where(
+                Contract.protocol_id == protocol_row.id,
+                Job.status == JobStatus.completed,
+                Job.address.isnot(None),
             )
-            .scalars()
-            .all()
-        )
-        return protocol_row, list(company_jobs)
+        ).all()
+        company_jobs: list[Job] = []
+        seen: set[Any] = set()
+        for job, contract_chain in rows:
+            if not _job_matches_contract_chain(job, contract_chain):
+                continue
+            if job.id in seen:
+                continue
+            seen.add(job.id)
+            company_jobs.append(job)
+        return protocol_row, company_jobs
 
     company_job = session.execute(
         select(Job).where(Job.company == name).order_by(Job.updated_at.desc()).limit(1)

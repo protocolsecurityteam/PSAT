@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from tests.live.conftest import WETH_ADDRESS, LiveClient
+from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT, WETH_ADDRESS, LiveClient
 
 EXPECTED_ORDER = ["discovery", "static", "resolution", "policy", "coverage", "done"]
 
@@ -31,7 +31,7 @@ def test_stages_advance_in_order(live_client: LiveClient):
     # Poll every 1s (not default 5s) — cached static stage can be sub-2s.
     job_id = live_client.analyze(WETH_ADDRESS)["job_id"]
     seen_stages: list[str] = []
-    deadline = time.time() + 600
+    deadline = time.time() + DEFAULT_SINGLE_TIMEOUT
 
     while time.time() < deadline:
         snap = live_client.job(job_id)

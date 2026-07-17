@@ -91,6 +91,9 @@ def _job(**overrides: Any) -> SimpleNamespace:
         "request": {"rpc_url": "https://rpc.example"},
     }
     payload.update(overrides)
+    req = payload.get("request")
+    if isinstance(req, dict) and "chain" not in req and "chain_id" not in req:
+        payload["request"] = {**req, "chain": "ethereum"}
     return SimpleNamespace(**payload)
 
 
@@ -304,11 +307,11 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr: 1_000_000_000_000_000_000)  # 1 ETH
-        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 2000.0)
         monkeypatch.setattr(
             "utils.etherscan.get_token_balances",
-            lambda addr: [
+            lambda addr, *a, **k: [
                 {
                     "token_address": "0xtoken1",
                     "token_name": "USDC",
@@ -322,7 +325,7 @@ class TestFetchBalancesHappyPath:
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         # 2 add calls: 1 ETH + 1 token
         assert session.add.call_count == 2
@@ -334,12 +337,12 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr: 1_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", MagicMock(side_effect=Exception("API down")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         # Should still add ETH balance even if price failed
         assert session.add.call_count == 1
@@ -352,10 +355,10 @@ class TestFetchBalancesHappyPath:
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         # No balances stored on exception
         session.add.assert_not_called()
@@ -375,7 +378,7 @@ class TestFetchBalancesEarlyReturn:
         job = _job(address=None)
         fake_contract = SimpleNamespace(id=42)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
         session.add.assert_not_called()
 
     def test_no_contract_row_returns_early(self) -> None:
@@ -383,7 +386,7 @@ class TestFetchBalancesEarlyReturn:
         session = MagicMock()
         job = _job()
 
-        cast(Any, worker)._fetch_balances(session, job, None)
+        cast(Any, worker)._fetch_balances(session, job, None, chain_id=1)
         session.add.assert_not_called()
 
 
@@ -714,11 +717,11 @@ class TestFetchBalancesZeroEth:
         fake_contract = SimpleNamespace(id=42)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr: 0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr: [])
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         session.add.assert_not_called()
         session.commit.assert_called()
@@ -739,16 +742,16 @@ class TestFetchBalancesProxyAddress:
 
         captured_addrs: list[str] = []
 
-        def fake_get_eth(addr: str) -> int:
+        def fake_get_eth(addr: str, *a, **k) -> int:
             captured_addrs.append(addr)
             return 0
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", fake_get_eth)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         job = _job(request={"proxy_address": PROXY_ADDRESS})
-        cast(Any, worker)._fetch_balances(session, job, fake_contract)
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         assert captured_addrs[0] == PROXY_ADDRESS
 

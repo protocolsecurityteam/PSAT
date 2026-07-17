@@ -767,6 +767,8 @@ def main():
 
     from utils.rpc import default_rpc_url
 
+    # CLI dev tool: explicit-mainnet base when no --rpc is given — a documented
+    # default (inv. 6), not a silent one. Pipeline classification passes rpc_url.
     resolved_rpc = args.rpc or default_rpc_url(chain_id=1)
     if not resolved_rpc:
         raise SystemExit("No RPC URL provided (use --rpc or set ERPC_BASE_URL)")

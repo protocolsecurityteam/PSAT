@@ -76,7 +76,7 @@ def _stub_etherscan_source_fallback(monkeypatch):
     """Offline: the contract-source tool falls back to live Etherscan when DB /
     storage bodies are absent. That fallback already returns {} on failure, so
     stub it to {} (the tool tests assert on DB-backed data, not the fallback)."""
-    monkeypatch.setattr("services.chat.tools._etherscan_sources", lambda address: {})
+    monkeypatch.setattr("services.chat.tools._etherscan_sources", lambda address, chain=None: {})
 
 
 @pytest.fixture()

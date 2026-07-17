@@ -494,7 +494,7 @@ def test_classifications_stored_on_first_run(db_session, monkeypatch):
     from db.queue import get_artifact
     from workers.static_worker import StaticWorker
 
-    job = _make_dep_phase_job(db_session)
+    job = _make_dep_phase_job(db_session, extra_request={"chain_id": 1})
 
     captured_kwargs = {}
 
@@ -539,7 +539,7 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     from db.queue import get_artifact, store_artifact
     from workers.static_worker import StaticWorker
 
-    job = _make_dep_phase_job(db_session)
+    job = _make_dep_phase_job(db_session, extra_request={"chain_id": 1})
 
     # Store previous classifications on the job (simulating seed from copy_static_cache)
     store_artifact(db_session, job.id, "classifications", data=FAKE_CLS_OUTPUT)
@@ -827,7 +827,7 @@ def test_enrichment_cache_stored_on_first_run(db_session, monkeypatch):
     fake_info = ("SomeToken", {"0x12345678": "transfer"})
     call_log = []
 
-    def mock_get_contract_info(addr):
+    def mock_get_contract_info(addr, *, chain_id=1):
         call_log.append(addr)
         return fake_info
 
@@ -839,7 +839,7 @@ def test_enrichment_cache_stored_on_first_run(db_session, monkeypatch):
     from services.discovery.unified_dependencies import enrich_dependency_metadata
 
     info_cache: dict = {}
-    enrich_dependency_metadata(unified, info_cache=info_cache)
+    enrich_dependency_metadata(unified, info_cache=info_cache, chain_id=1)
 
     # info_cache was mutated in place
     assert addr_dep in info_cache
@@ -879,7 +879,7 @@ def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
 
     call_log = []
 
-    def mock_get_contract_info(addr):
+    def mock_get_contract_info(addr, *, chain_id=1):
         call_log.append(addr)
         return ("TokenC", {"0xcccccccc": "funcC"})
 
@@ -890,7 +890,7 @@ def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
 
     from services.discovery.unified_dependencies import enrich_dependency_metadata
 
-    enrich_dependency_metadata(unified, info_cache=info_cache)
+    enrich_dependency_metadata(unified, info_cache=info_cache, chain_id=1)
 
     # Only C was fetched
     assert call_log == [addr_c]

@@ -83,7 +83,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     def _classify(_addr, _rpc):
         return {"type": "contract"}
 
-    def _fetch(_addr):
+    def _fetch(_addr, **_kw):
         return {"ContractName": "TestContract", "SourceCode": "// stub"}
 
     def _scaffold(_addr, _result, project_dir):
@@ -139,8 +139,8 @@ def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
         snapshot_calls=snapshot_calls,
     )
 
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(scaffold_calls) == 1, "second call should skip scaffold"
     assert len(collect_calls) == 1, "second call should skip collect_contract_analysis"
@@ -159,9 +159,9 @@ def test_snapshot_always_rebuilt(monkeypatch):
         snapshot_calls=snapshot_calls,
     )
 
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(snapshot_calls) == 3, "snapshot must be built every call (state-dependent)"
 
@@ -179,11 +179,11 @@ def test_cached_artifacts_are_deep_copied(monkeypatch):
         snapshot_calls=snapshot_calls,
     )
 
-    first = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+    first = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
     first["analysis"]["functions"].append({"poisoned": True})  # type: ignore[attr-defined]
     first["tracking_plan"]["controllers"].append({"poisoned": True})
 
-    second = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+    second = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
     assert second["analysis"]["functions"] == []
     assert second["tracking_plan"]["controllers"] == []
 
@@ -209,8 +209,12 @@ def test_cache_keyed_by_effective_address_not_input(monkeypatch):
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _classify_proxy_to_impl)
 
-    _materialize_contract_artifacts("0x" + "AA" * 20, "http://rpc", workspace_prefix="test")  # proxy A → impl
-    _materialize_contract_artifacts("0x" + "BB" * 20, "http://rpc", workspace_prefix="test")  # proxy B → same impl
+    _materialize_contract_artifacts(
+        "0x" + "AA" * 20, "http://rpc", workspace_prefix="test", chain="ethereum"
+    )  # proxy A → impl
+    _materialize_contract_artifacts(
+        "0x" + "BB" * 20, "http://rpc", workspace_prefix="test", chain="ethereum"
+    )  # proxy B → same impl
 
     assert len(scaffold_calls) == 1, "same impl must be scaffolded once even for different proxies"
 
@@ -249,8 +253,8 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
     addr_a = "0x" + "11" * 20
     addr_b = "0x" + "22" * 20
 
-    _materialize_contract_artifacts(addr_a, "http://rpc", workspace_prefix="test")
-    _materialize_contract_artifacts(addr_b, "http://rpc", workspace_prefix="test")
+    _materialize_contract_artifacts(addr_a, "http://rpc", workspace_prefix="test", chain="ethereum")
+    _materialize_contract_artifacts(addr_b, "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(snapshot_calls) == 2
     # First call is a cache MISS — uses the test fixture's _build_plan
@@ -294,11 +298,11 @@ def test_two_processes_materializing_same_bytecode_compile_once(monkeypatch):
         snapshot_calls=snapshot_calls,
     )
 
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="proc-A")
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="proc-A", chain="ethereum")
     assert len(scaffold_calls) == 1
     assert len(collect_calls) == 1
 
-    _materialize_contract_artifacts("0xDEF", "http://rpc", workspace_prefix="proc-B")
+    _materialize_contract_artifacts("0xDEF", "http://rpc", workspace_prefix="proc-B", chain="ethereum")
 
     assert len(scaffold_calls) == 1, "second process must not re-scaffold the same bytecode"
     assert len(collect_calls) == 1, "second process must not re-run Slither on the same bytecode"
@@ -338,7 +342,7 @@ def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
 
     def _materialize_with_barrier(addr: str) -> None:
         barrier.wait()
-        _materialize_contract_artifacts(addr, "http://rpc", workspace_prefix=f"thr-{addr[-4:]}")
+        _materialize_contract_artifacts(addr, "http://rpc", workspace_prefix=f"thr-{addr[-4:]}", chain="ethereum")
 
     t1 = threading.Thread(target=_materialize_with_barrier, args=("0x" + "11" * 20,))
     t2 = threading.Thread(target=_materialize_with_barrier, args=("0x" + "22" * 20,))
@@ -375,7 +379,7 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
     )
 
     addr = "0x" + "33" * 20
-    _materialize_contract_artifacts(addr, "http://rpc", workspace_prefix="row-test")
+    _materialize_contract_artifacts(addr, "http://rpc", workspace_prefix="row-test", chain="ethereum")
 
     # Open a fresh session against the test DB — the autouse fixture
     # already routed ``cm.SessionLocal`` here, so reuse it for the read.
@@ -407,8 +411,8 @@ def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:
-        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
-        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test")
+        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+        _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
     finally:
         stage_metrics_var.reset(token)
 
