@@ -107,4 +107,41 @@ describe("App router smoke tests", () => {
     expectNoCrash();
   });
 
+  it("survives a ?chain= deep link on the surface route (query params round-trip through the router)", async () => {
+    // etherfi is single-chain; an off-protocol ?chain=base must degrade to the
+    // default chain (no chain bar, no blank canvas, no throw) rather than
+    // scoping the page to a chain the protocol doesn't deploy on.
+    navigateTo("/company/etherfi/surface?chain=base");
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".fullscreen-surface")).toBeInTheDocument();
+    });
+    expect(document.querySelector(".ps-chain-bar")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("applies a valid ?chain= deep link, scoping the surface to that chain", async () => {
+    const MULTICHAIN_COMPANY = {
+      protocol_id: 9,
+      contracts: [
+        { address: "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", name: "EthA", role: "governance", is_proxy: true, chain: "ethereum", functions: [] },
+        { address: "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", name: "BaseB", role: "value_handler", is_proxy: true, chain: "base", functions: [] },
+      ],
+      principals: [],
+      fund_flows: [],
+    };
+    setFetchHandler((url) => url.pathname === "/api/company/multichain", () => MULTICHAIN_COMPANY);
+    setFetchHandler((url) => url.pathname === "/api/company/multichain/audit_coverage", () => ({ coverage: [] }));
+    navigateTo("/company/multichain/surface?chain=base");
+    render(<App />);
+    // The switcher renders (2 chains) and the deep-linked Base pill is active.
+    const active = await waitFor(() => {
+      const el = document.querySelector(".ps-chain-bar .ps-chain-chip-on");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(active.textContent).toMatch(/Base/);
+    expectNoCrash();
+  });
+
 });

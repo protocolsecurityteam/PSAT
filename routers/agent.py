@@ -6,13 +6,14 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
 from services.chat.agent import AgentContext, run_agent_stream
+from utils.chains import UnknownChainError, chain_by_name
 
 from . import deps
 
@@ -66,14 +67,31 @@ def agent_chat(req: AgentChatRequest):
 
 
 @router.get("/api/agent/address-touches", dependencies=[Depends(deps.require_admin_key)])
-def agent_address_touches(company: str, address: str) -> dict[str, Any]:
-    """Return contracts an address has function-level authority over."""
+def agent_address_touches(
+    company: str,
+    address: str,
+    chain: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Return contracts an address has function-level authority over.
+
+    ``chain`` scopes the returned contracts to one deployment (inv. 12): the same
+    address can govern contracts on two chains within one protocol, and the
+    chain-scoped Surface page wants only the active chain's touch set. Optional —
+    omitted returns every chain (legacy behavior). Legacy NULL-chain rows are
+    mainnet, so the coalesce keeps a ``chain=ethereum`` filter matching them.
+    """
     addr_lc = (address or "").lower()
+    chain_name: str | None = None
+    if chain is not None:
+        try:
+            chain_name = chain_by_name(chain).name
+        except UnknownChainError:
+            raise HTTPException(status_code=400, detail=f"Unknown chain: {chain}") from None
     with deps.SessionLocal() as session:
         proto = session.execute(select(Protocol).where(Protocol.name == company)).scalar_one_or_none()
         if proto is None:
             return {"address": address, "touches": []}
-        rows = session.execute(
+        stmt = (
             select(
                 Contract.address,
                 Contract.contract_name,
@@ -84,7 +102,10 @@ def agent_address_touches(company: str, address: str) -> dict[str, Any]:
             .where(Contract.protocol_id == proto.id)
             .where(func.lower(FunctionPrincipal.address) == addr_lc)
             .group_by(Contract.address, Contract.contract_name)
-        ).all()
+        )
+        if chain_name is not None:
+            stmt = stmt.where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
+        rows = session.execute(stmt).all()
         return {
             "address": address,
             "touches": [{"address": row[0], "label": row[1], "function_count": int(row[2])} for row in rows],

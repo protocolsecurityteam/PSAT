@@ -239,6 +239,66 @@ describe("ProtocolSurface — empty / loading states", () => {
   });
 });
 
+// A minimal two-chain protocol: 2 ethereum contracts + 1 base contract. Only
+// contracts carry a chain (NULL≡ethereum); principals/flows have none.
+const MULTICHAIN_COMPANY = {
+  company: "multi",
+  contracts: [
+    { address: "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", name: "EthGovA", role: "governance", is_proxy: true, chain: "ethereum", functions: [] },
+    { address: "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2", name: "EthGovB", role: "governance", is_proxy: true, chain: "ethereum", functions: [] },
+    { address: "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3", name: "BaseToken", role: "token", is_proxy: true, chain: "base", functions: [] },
+  ],
+  principals: [],
+  fund_flows: [],
+  ownership_hierarchy: [],
+  all_addresses: [],
+};
+
+function renderMultichain() {
+  return render(<ProtocolSurface companyName="multi" initialData={MULTICHAIN_COMPANY} embedded />);
+}
+
+function scopedMachineCount() {
+  // Sum of the RoleFilterBar per-role counts = number of machines on the active
+  // chain (each machine counts once). A non-canvas signal of chain scoping.
+  return [...document.querySelectorAll(".ps-role-count")].reduce(
+    (n, el) => n + (parseInt(el.textContent, 10) || 0),
+    0,
+  );
+}
+
+describe("ProtocolSurface — multichain chain switcher", () => {
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  it("shows a chain pill row only for a multi-chain protocol", async () => {
+    // Single-chain (the rich fixture has no chains) → no switcher.
+    renderSurface();
+    await waitFor(() => expect(document.querySelector(".ps-surface")).toBeInTheDocument());
+    expect(document.querySelector(".ps-chain-bar")).toBeNull();
+  });
+
+  it("renders Ethereum + Base pills and scopes the page to the active chain", async () => {
+    renderMultichain();
+    const bar = await waitFor(() => {
+      const el = document.querySelector(".ps-chain-bar");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(within(bar).getByText("Ethereum")).toBeTruthy();
+    expect(within(bar).getByText("Base")).toBeTruthy();
+    // Default scope is ethereum → its 2 contracts are the machine set.
+    await waitFor(() => expect(scopedMachineCount()).toBe(2));
+
+    // Switching to Base rescopes to its single contract without crashing.
+    const user = userEvent.setup();
+    await user.click(within(bar).getByText("Base").closest("button"));
+    await waitFor(() => expect(scopedMachineCount()).toBe(1));
+    expectNoCrash();
+  });
+});
+
 describe("ProtocolSurface — function lane categorization (via buildMachines)", () => {
   beforeEach(() => {
     installApiMocks();
