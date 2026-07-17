@@ -55,6 +55,27 @@ export default function ProtocolSurface({
     const ch = new URLSearchParams(window.location.search).get("chain");
     return ch ? coalesceChain(ch) : null;
   });
+
+  // Chains this protocol actually has contracts on — derived from the loaded
+  // payload (only contracts carry a chain; NULL coalesces to ethereum), never a
+  // static list. The switcher offers exactly these; a single-chain protocol
+  // yields one entry and no switcher. See chainScope.js. Declared before
+  // functionData so the inline-functions map can be chain-scoped too.
+  const availableChains = useMemo(
+    () => deriveAvailableChains(companyData?.contracts),
+    [companyData]
+  );
+  // The chain the page falls back to with no explicit pick — kept out of the
+  // URL so single-chain and default-chain views have clean links.
+  const defaultChain = useMemo(() => defaultChainFor(availableChains), [availableChains]);
+  // An unknown/typo'd/off-protocol ?chain= degrades to the default (never a
+  // blank canvas) — pickActiveChain enforces that.
+  const activeChain = useMemo(
+    () => pickActiveChain(availableChains, chosenChain),
+    [availableChains, chosenChain]
+  );
+  const isMultichain = availableChains.length > 1;
+
   // Derive functionData from props so a CompanyOverview-supplied
   // initialFunctions that arrives AFTER mount (its /functions fetch
   // resolves after /api/company) flows in. The previous
@@ -67,12 +88,20 @@ export default function ProtocolSurface({
     if (locallyFetched && Object.keys(locallyFetched).length > 0) return locallyFetched;
     const source = companyData?.contracts || initialData?.contracts;
     if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
+      // Scope to the active chain before keying by bare address: two chains can
+      // share an address, and an unscoped map would last-wins one chain's
+      // functions onto the other (F4). (The /functions endpoint payload —
+      // initialFunctions/locallyFetched above — is keyed by bare address at the
+      // backend and has no chain dimension to scope on; that conflation is a
+      // backend concern, out of this surface fix.)
       return Object.fromEntries(
-        source.filter((c) => c.address).map((c) => [c.address, c.functions || []]),
+        source
+          .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
+          .map((c) => [c.address, c.functions || []]),
       );
     }
     return {};
-  }, [initialFunctions, locallyFetched, companyData, initialData]);
+  }, [initialFunctions, locallyFetched, companyData, initialData, activeChain]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
@@ -271,28 +300,6 @@ export default function ProtocolSurface({
       cancelled = true;
     };
   }, [companyName, initialData, initialFunctions]);
-
-  // Chains this protocol actually has contracts on — derived from the loaded
-  // payload (only contracts carry a chain; NULL coalesces to ethereum), never a
-  // static list. The switcher offers exactly these; a single-chain protocol
-  // yields one entry and no switcher. See chainScope.js.
-  const availableChains = useMemo(
-    () => deriveAvailableChains(companyData?.contracts),
-    [companyData]
-  );
-
-  // The chain the page falls back to with no explicit pick — kept out of the
-  // URL so single-chain and default-chain views have clean links.
-  const defaultChain = useMemo(() => defaultChainFor(availableChains), [availableChains]);
-
-  // An unknown/typo'd/off-protocol ?chain= degrades to the default (never a
-  // blank canvas) — pickActiveChain enforces that.
-  const activeChain = useMemo(
-    () => pickActiveChain(availableChains, chosenChain),
-    [availableChains, chosenChain]
-  );
-
-  const isMultichain = availableChains.length > 1;
 
   // Chain-scope every downstream derivation: only the active chain's contracts
   // build machines, so the canvas/selection/entity-index all operate on a
@@ -736,6 +743,7 @@ export default function ProtocolSurface({
               isAdmin={isAdmin}
               cache={upgradeHistoryCache}
               onCache={cacheUpgradeHistory}
+              chain={activeChain}
             />
           )}
           {/* One universal card for every selection. selectedMachine and

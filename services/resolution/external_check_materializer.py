@@ -301,6 +301,10 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     # Per-chain HyperSync endpoint (inv. 5), env override kept for backward compat.
     # A chain with no registry coverage (or no env override) has no scan surface —
     # return no candidates rather than silently scanning mainnet.
+    # NOTE (F7): PSAT_HYPERSYNC_URL is a single-URL global that outranks the
+    # per-chain registry URL — a SINGLE-CHAIN DEV OVERRIDE only. Do not set it in
+    # a multichain deployment (it would pin every chain to one endpoint);
+    # per-chain routing must come from the registry.
     url = os.getenv("PSAT_HYPERSYNC_URL") or _hypersync_url_for_chain(chain_id)
     if not url:
         return []

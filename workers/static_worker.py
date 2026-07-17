@@ -303,6 +303,9 @@ def _resolve_dynamic_deps(
     """
     prev_dyn = _load_prev_dynamic_deps(session, job, tx_hashes)
     start_block = _start_block_from_prev_dyn(prev_dyn)
+    # Chain from ``jobs.chain_id`` (via ``_parent_chain_name``): the txlist fetch
+    # must run on the contract's own chain, not a mainnet default (F2).
+    chain_id = require_chain(chain=_parent_chain_name(job), context="dynamic deps").chain_id
     try:
         dyn_output = find_dynamic_dependencies(
             address,
@@ -312,6 +315,7 @@ def _resolve_dynamic_deps(
             proxy_address=proxy_addr,
             code_cache=code_cache,
             start_block=start_block,
+            chain_id=chain_id,
         )
     except NoNewTransactionsError:
         if prev_dyn:
@@ -1494,6 +1498,12 @@ class StaticWorker(BaseWorker):
 
         request = job.request if isinstance(job.request, dict) else {}
         deps_rpc = _request_rpc_url(job)
+        # Chain from the first-class ``jobs.chain_id`` column (via
+        # ``_parent_chain_name``), not a mainnet default: the dynamic-dependency
+        # txlist and the upgrade-history getLogs both hit Etherscan and must
+        # query the proxy's own chain, or an L2 proxy's timeline/deps come back
+        # silently empty from mainnet (F1/F2).
+        phase_chain_id = require_chain(chain=_parent_chain_name(job), context="dependency phase").chain_id
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
         dynamic_tx_limit = request.get("dynamic_tx_limit", 10)
@@ -1538,6 +1548,7 @@ class StaticWorker(BaseWorker):
                 proxy_address=proxy_addr,
                 code_cache={},
                 start_block=dyn_start_block,
+                chain_id=phase_chain_id,
             )
 
         def run_upgrade_history() -> dict | None:
@@ -1552,7 +1563,7 @@ class StaticWorker(BaseWorker):
                 "target_classification": target_classification or {},
                 "dependencies": {},
             }
-            return build_upgrade_history(minimal_deps, from_block=uh_from_block)
+            return build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id)
 
         from utils.concurrency import parallel_map
 

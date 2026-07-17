@@ -237,7 +237,7 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(
         "services.discovery.upgrade_history.build_upgrade_history",
-        lambda _p, enrich=True, from_block=0: fake_uh,
+        lambda _p, enrich=True, from_block=0, chain_id=1: fake_uh,
     )
 
     project_dir = tmp_path / "p"

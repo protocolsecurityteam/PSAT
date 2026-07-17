@@ -203,6 +203,67 @@ describe("ActivityPanel — principal selected", () => {
   });
 });
 
+describe("ActivityPanel — multichain (F4)", () => {
+  // One address deployed on two chains. The ethereum row is a plain safe; the
+  // base row is a proxy with upgrade history. The ethereum row is LAST in the
+  // payload, so the old bare-address last-wins map would resolve the WRONG
+  // (ethereum) row for a base selection. The (chain, address) key must pick base.
+  const SHARED = "0x7777000000000000000000000000000000007777";
+  const ETH_SAFE_ROW = {
+    id: "c-eth", address: SHARED, chain: "ethereum", contract_type: "safe",
+    monitoring_config: { watch_safe_signers: true }, last_known_state: { threshold: 2 },
+    last_scanned_block: 400, enrollment_block: 250, is_active: true,
+    created_at: "2025-12-01T00:00:00Z", updated_at: "2026-07-13T00:00:00Z",
+  };
+  const BASE_PROXY_ROW = {
+    id: "c-base", address: SHARED, chain: "base", contract_type: "proxy",
+    monitoring_config: { watch_upgrades: true }, last_known_state: { implementation: CUR },
+    last_scanned_block: 400, enrollment_block: 250, is_active: true,
+    created_at: "2025-12-01T00:00:00Z", updated_at: "2026-07-13T00:00:00Z",
+  };
+  const BASE_HISTORY = {
+    proxies: {
+      [SHARED.toLowerCase()]: {
+        proxy_type: "ERC1967", current_implementation: CUR, upgrade_count: 2,
+        implementations: [
+          { address: I1, block_introduced: 100, block_replaced: 200, timestamp_introduced: 1700000000 },
+          { address: CUR, block_introduced: 300, timestamp_introduced: 1720000000 },
+        ],
+      },
+    },
+  };
+
+  beforeEach(() => {
+    // Order matters: ethereum row LAST so a bare-address map would last-wins it.
+    mockActivity({ contracts: [BASE_PROXY_ROW, ETH_SAFE_ROW], monitoredEvents: [], history: BASE_HISTORY });
+  });
+
+  it("resolves the active chain's monitoring row for a shared address (base row's watch set, not the ethereum row's)", async () => {
+    renderPanel({
+      selectedMachine: { address: SHARED, name: "SharedProxy", is_proxy: true, job_id: "jbase", chain: "base" },
+      chain: "base",
+      isAdmin: true,
+    });
+    // The watched-for summary is derived from the resolved CONTRACT ROW's
+    // monitoring_config (unlike the proxy timeline, which is machine-driven).
+    // The base row watches upgrades; the ethereum row watches safe signers.
+    const watch = await waitFor(() => {
+      const el = document.querySelector(".ps-activity-watch");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(within(watch).getByText("Upgrades")).toBeInTheDocument(); // base row resolved
+    expect(within(watch).queryByText("Safe activity")).toBeNull(); // NOT the ethereum row
+  });
+
+  it("scopes the protocol-wide feed to the active chain (base row only, not ethereum)", async () => {
+    renderPanel({ chain: "base" });
+    await waitFor(() => {
+      expect(screen.getByText(/addresses monitored/i)).toHaveTextContent("1 addresses monitored");
+    });
+  });
+});
+
 describe("ActivityPanel — monitored principal (safe)", () => {
   beforeEach(() => {
     mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });

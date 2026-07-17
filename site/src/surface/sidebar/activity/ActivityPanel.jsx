@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
+import { coalesceChain, entityKey } from "../../entityKey.js";
 import { principalLabel } from "../../format.js";
 import { EntityActivity } from "./EntityActivity.jsx";
 import { ProtocolActivity } from "./ProtocolActivity.jsx";
@@ -24,8 +25,10 @@ export function ActivityPanel({
   isAdmin,
   cache,
   onCache,
+  chain = "ethereum",
 }) {
   const protocolId = companyData?.protocol_id;
+  const activeChain = coalesceChain(chain);
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
   const [savingAddr, setSavingAddr] = useState(null);
@@ -57,14 +60,24 @@ export function ActivityPanel({
     return () => clearInterval(t);
   }, []);
 
+  // The /monitoring payload spans every chain the protocol monitors. Key by
+  // (chain, address) (inv. 13) so a contract selected on the active chain
+  // resolves ITS enrollment row, not the other chain's row at the same address
+  // (F4). Monitoring rows carry their own chain (NULL≡ethereum via entityKey).
   const contractByAddress = useMemo(() => {
     const map = new Map();
     for (const c of contracts) {
-      const a = c.address?.toLowerCase();
-      if (a) map.set(a, c);
+      if (c.address) map.set(entityKey(c.chain, c.address), c);
     }
     return map;
   }, [contracts]);
+
+  // Protocol-wide feed is scoped to the active chain, matching the rest of the
+  // chain-scoped Surface page — the other chain's monitored rows don't leak in.
+  const chainScopedContracts = useMemo(
+    () => contracts.filter((c) => coalesceChain(c.chain) === activeChain),
+    [contracts, activeChain],
+  );
 
   // Attach a Discord delivery target for this contract's watched events. The
   // watch set itself is fixed at enrollment (by contract type + capabilities),
@@ -105,7 +118,7 @@ export function ActivityPanel({
   // show its timeline (the prototype's "Safe selected" column). Only a principal
   // with no monitored row (e.g. an EOA) shows a "monitoring not enabled" notice.
   const principalContract = selectedPrincipal
-    ? contractByAddress.get((selectedPrincipal.address || "").toLowerCase()) || null
+    ? contractByAddress.get(entityKey(activeChain, selectedPrincipal.address || "")) || null
     : null;
   const entityMachine = selectedMachine
     || (principalContract
@@ -118,7 +131,7 @@ export function ActivityPanel({
         }
       : null);
   const entityContract = selectedMachine
-    ? contractByAddress.get((selectedMachine.address || "").toLowerCase()) || null
+    ? contractByAddress.get(entityKey(activeChain, selectedMachine.address || "")) || null
     : principalContract;
 
   if (!entityMachine && selectedPrincipal) {
@@ -137,7 +150,7 @@ export function ActivityPanel({
       <ProtocolActivity
         protocolId={protocolId}
         companyName={companyName}
-        contracts={contracts}
+        contracts={chainScopedContracts}
         machines={machines}
         onSelect={onSelect}
         now={now}

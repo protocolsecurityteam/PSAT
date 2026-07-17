@@ -13,7 +13,7 @@ import logging
 from collections import Counter, defaultdict
 from typing import Any
 
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_name
 from utils.logging import record_degraded
 
 from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
@@ -374,8 +374,18 @@ def search_protocol_inventory(
     if run_deployer and tavily_entries:
         seed_addresses = sorted({e["address"] for e in tavily_entries})
         _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
+        # Trace deployer wallets on the requested chain, not a mainnet default:
+        # the deployer getcontractcreation/txlist calls hit Etherscan and would
+        # otherwise search mainnet for L2 seeds (F3). Genuinely chainless
+        # discovery (chain="any"/unknown) keeps the documented mainnet fallback.
+        deployer_chain_id = 1
+        if requested_chain:
+            try:
+                deployer_chain_id = chain_by_name(requested_chain).chain_id
+            except UnknownChainError:
+                pass
         try:
-            deployer_entries = expand_from_deployers(seed_addresses, debug=debug)
+            deployer_entries = expand_from_deployers(seed_addresses, debug=debug, chain_id=deployer_chain_id)
             notes.append(f"Deployer expansion: {len(deployer_entries)} contract(s)")
         except Exception as exc:
             logger.warning(
