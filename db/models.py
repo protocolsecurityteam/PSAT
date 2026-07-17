@@ -1236,6 +1236,16 @@ class ContractMaterialization(Base):
     analysis_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     tracking_plan_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     predicate_trees_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Content hash of the normalized verified-source file set (+ the compiler
+    # inputs that determine the analysis). The ``(chain, bytecode_keccak)`` key
+    # reuses a bundle only across byte-identical deployments; per-chain immutables
+    # make the same source compile to different bytecode, so keccak misses for a
+    # real cross-chain deployment. This hash is chain- and address-independent, so
+    # the same source analyzed on chain A can be reused for the deployment on
+    # chain B (code plane only — state is still resolved per ``(chain, address)``).
+    # Nullable: rows written before this column existed simply never match a hash
+    # lookup and fall through to a normal build.
+    source_content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     # Analyzer/pipeline schema version this bundle was built under. Read paths in
     # ``db.contract_materializations`` only serve rows matching the current
     # ``ANALYSIS_SCHEMA_VERSION``; bumping that constant makes older rows miss and
@@ -1252,6 +1262,7 @@ class ContractMaterialization(Base):
     __table_args__ = (
         UniqueConstraint("chain", "address", name="uq_contract_materializations_chain_address"),
         Index("ix_contract_materializations_status", "status"),
+        Index("ix_contract_materializations_source_content_hash", "source_content_hash"),
     )
 
 
