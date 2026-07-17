@@ -165,6 +165,16 @@ class Job(Base):
     # rolled to a sibling can't silently corrupt the row.
     lease_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Content hash of this job's verified-source set (services/discovery/fetch.py
+    # source_content_hash) plus the analyzer schema version it was analyzed under.
+    # Together they let the job-level static cache (find_completed_static_cache)
+    # reuse a completed job's code-plane analysis for a NEW (chain, address)
+    # deployment of the same source — the cross-chain analog of the (address,
+    # chain) primary lookup. Both nullable: written only when a job fetches its
+    # own source (a cache-hit job never fetches), and legacy rows stay NULL and so
+    # never act as a reuse donor. State is still resolved per (chain, address).
+    source_content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    analysis_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -191,6 +201,8 @@ class Job(Base):
         # functional-index style used elsewhere (ix_function_principals_lower_address)
         # since the dedup helpers compare ``func.lower(Job.address)``.
         Index("ix_jobs_lower_address_chain_id", text("lower(address)"), "chain_id"),
+        # Serves the cross-chain source-hash fallback in find_completed_static_cache.
+        Index("ix_jobs_source_content_hash", "source_content_hash"),
         # Address-scoped jobs must carry a chain_id; company/root jobs
         # (address IS NULL) legitimately leave it NULL (invariant 1).
         CheckConstraint(
