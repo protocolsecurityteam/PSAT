@@ -2277,7 +2277,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     }
     test_db.add(
         ContractMaterialization(
-            chain="ethereum",
+            chain="1",
             bytecode_keccak=bytecode_keccak,
             address=addr.lower(),
             contract_name="CustomAdminContract",
