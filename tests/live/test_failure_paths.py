@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from tests.live.conftest import LiveClient
+from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT, LiveClient
 
 # Burn address: Etherscan returns "No verified source code"; discovery raises (utils/etherscan.py:182).
 NO_CODE_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -20,7 +20,7 @@ UNVERIFIED_ADDRESS = "0xDeAdBeefDeadBeefDEADbEEFdEadbeEFDEADBeef"
 TERMINAL_STATUSES = ("failed", "failed_terminal")
 
 
-def _wait_for_failure(live_client: LiveClient, job_id: str, timeout: float = 300) -> dict:
+def _wait_for_failure(live_client: LiveClient, job_id: str, timeout: float = DEFAULT_SINGLE_TIMEOUT) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         snap = live_client.job(job_id)

@@ -12,12 +12,20 @@ import requests
 
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
 
-DEFAULT_SINGLE_TIMEOUT = 600
+# These bound job *completion* (worker-side pipeline wall time), not the HTTP
+# calls that poll for it. The CI live runner is a shared-cpu-8x Fly machine:
+# under CPU steal the workers get starved and a job that resolves in ~3 min of
+# real CPU stretches well past the old 10-min ceiling, timing out a healthy
+# pipeline. The raised defaults (single 30 min, company 60 min) absorb that
+# steal; override per-environment via PSAT_LIVE_SINGLE_TIMEOUT /
+# PSAT_LIVE_COMPANY_TIMEOUT. Do NOT bump the per-request `timeout=` on the
+# session calls to match — those guard against a hung HTTP socket, a different
+# failure mode from worker starvation.
+DEFAULT_SINGLE_TIMEOUT = int(os.environ.get("PSAT_LIVE_SINGLE_TIMEOUT", "1800"))
 # Company runs on a cold preview (shared-cpu-2x, 2GB RAM) spend ~2 min
 # in selection alone because ranking calls Etherscan per candidate and
-# inventories grow past 400 rows after the first run. 30 min covers the
-# tail; trim it when preview scaling or cache behaviour improves.
-DEFAULT_COMPANY_TIMEOUT = 1800
+# inventories grow past 400 rows after the first run.
+DEFAULT_COMPANY_TIMEOUT = int(os.environ.get("PSAT_LIVE_COMPANY_TIMEOUT", "3600"))
 DEFAULT_POLL_INTERVAL = 5
 
 
