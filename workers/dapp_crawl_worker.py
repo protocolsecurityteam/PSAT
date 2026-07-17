@@ -137,21 +137,25 @@ class DAppCrawlWorker(BaseWorker):
             if addr:
                 detail_by_addr[addr] = detail
 
+        # Addresses the crawl couldn't chain-attribute inherit the job's chain
+        # (default_chain) via the shared helper rather than persisting chain=NULL
+        # and duplicating against a sibling writer's 'ethereum' stub (inv. 1/6/12).
         bulk_entries: list[dict] = []
         for addr in addresses:
             normalized = addr.lower()
             info = detail_by_addr.get(normalized, {})
-            addr_chain = info.get("chain") or default_chain
             source_urls = info.get("source_urls", [])
             bulk_entries.append(
                 {
                     "address": normalized,
-                    "chain": addr_chain,
+                    "chain": info.get("chain"),
                     "new_sources": ["dapp_crawl"],
                     "discovery_url": source_urls[0] if source_urls else None,
                 }
             )
-        bulk_upsert_discovered_contracts(session, protocol_id=protocol_id, entries=bulk_entries)
+        bulk_upsert_discovered_contracts(
+            session, protocol_id=protocol_id, entries=bulk_entries, default_chain=default_chain
+        )
         session.commit()
         record_stage_metric("contracts_found", len(addresses))
 

@@ -300,11 +300,26 @@ def create_job(
     return job
 
 
+def _mainnet_coalesced_chain(chain: str | None) -> str:
+    """Mainnet-coalesced dedup key (invariants 1/6/12).
+
+    Legacy rows persisted ``chain=NULL`` for mainnet, so coalescing
+    ``NULL``→``'ethereum'`` lets a mainnet write dedup against them while a
+    non-mainnet write (its own name ≠ ``'ethereum'``) stays isolated, and the
+    ``'unknown'`` resolve-later bucket keeps its own identity. Mirrors the
+    ``coalesce(chain,'ethereum')`` predicate in ``workers/discovery.py``'s
+    single-row path so both writers match each other's rows regardless of
+    historical NULLs.
+    """
+    return (chain or "ethereum").lower()
+
+
 def bulk_upsert_discovered_contracts(
     session: Session,
     *,
     protocol_id: int | None,
     entries: list[dict[str, Any]],
+    default_chain: str | None = None,
 ) -> list[Contract]:
     """Bulk variant of :func:`upsert_discovered_contract` with identical first-writer-wins semantics.
 
@@ -315,17 +330,26 @@ def bulk_upsert_discovered_contracts(
     contracts at once. This collapses every SELECT into one ``IN (...)`` and
     keeps the merge logic identical so semantics don't drift.
 
+    *default_chain* is the job's chain (derived from ``Job.chain_id`` via the
+    registry): an entry that carries no evidence chain of its own inherits it
+    so no writer persists ``chain=NULL`` and mints a duplicate against a sibling
+    writer's ``'ethereum'`` stub (NULL ≠ NULL defeats ``uq_contract_address_chain``
+    — invariants 1/6/12). The ``'unknown'`` resolve-later sentinel is a real
+    chain bucket, not absent evidence, so it is preserved, never coerced.
+
     Commit is the caller's responsibility — typical use is one bulk call
     per discovery source followed by a single commit.
     """
     if not entries:
         return []
 
+    resolved_default = canonical_chain(default_chain)
+
     # Normalize once so the lookup map and the merge loop see identical keys.
     norm_entries: list[tuple[str, str | None, dict[str, Any]]] = []
     for entry in entries:
         address = str(entry["address"]).lower()
-        chain = canonical_chain(entry.get("chain"))
+        chain = canonical_chain(entry.get("chain")) or resolved_default
         clean_entry = dict(entry)
         clean_entry["chain"] = chain
         clean_entry["chains"] = canonical_chain_list(entry.get("chains"))
@@ -335,12 +359,17 @@ def bulk_upsert_discovered_contracts(
     # We can't use a single tuple-IN against a composite key efficiently in SQLAlchemy
     # core without raw SQL, so query by address set and filter chain in Python — the
     # set is small (typically 100-300 addresses) and the chain comparison is O(1).
+    # The chain half of the key is mainnet-coalesced so a mainnet writer dedups
+    # against legacy NULL-chain rows instead of minting a duplicate.
     addresses = list({a for a, _c, _e in norm_entries})
     existing_rows = session.execute(select(Contract).where(Contract.address.in_(addresses))).scalars().all()
-    existing_by_key: dict[tuple[str, str | None], Contract] = {(row.address, row.chain): row for row in existing_rows}
+    existing_by_key: dict[tuple[str, str], Contract] = {
+        (row.address, _mainnet_coalesced_chain(row.chain)): row for row in existing_rows
+    }
 
     out: list[Contract] = []
     for address, chain, entry in norm_entries:
+        key = (address, _mainnet_coalesced_chain(chain))
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
         # Only high-confidence sources may assert protocol ownership.
         # Low-confidence sources (dapp_crawl scraping, upgrade_history
@@ -348,7 +377,7 @@ def bulk_upsert_discovered_contracts(
         # but leave protocol_id NULL until a high-confidence source
         # corroborates. See services/discovery/source_confidence.py.
         owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
-        existing = existing_by_key.get((address, chain))
+        existing = existing_by_key.get(key)
         if existing is None:
             row = Contract(
                 address=address,
@@ -361,7 +390,7 @@ def bulk_upsert_discovered_contracts(
                 discovery_url=entry.get("discovery_url"),
             )
             session.add(row)
-            existing_by_key[(address, chain)] = row
+            existing_by_key[key] = row
             out.append(row)
             continue
 

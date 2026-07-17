@@ -325,8 +325,17 @@ class DiscoveryWorker(BaseWorker):
             )
         # One SELECT for all existing rows + a single bulk add for new ones —
         # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
-        # into roughly one round-trip.
-        bulk_upsert_discovered_contracts(session, protocol_id=protocol_row.id, entries=bulk_entries)
+        # into roughly one round-trip. Inventory entries without their own chain
+        # inherit the company discovery's chain (inv. 6, mainnet edge default)
+        # rather than persisting chain=NULL and duplicating against sibling
+        # writers' 'ethereum' stubs.
+        inventory_default_chain = canonical_chain(chain) or "ethereum"
+        bulk_upsert_discovered_contracts(
+            session,
+            protocol_id=protocol_row.id,
+            entries=bulk_entries,
+            default_chain=inventory_default_chain,
+        )
         session.commit()
 
         store_artifact(
@@ -390,6 +399,20 @@ class DiscoveryWorker(BaseWorker):
             protocol.get("url"),
         )
 
+        # Seed both sibling scans with the discovery job's chain (inv. 6): derive
+        # chain_id from the request's chain string via the registry rather than a
+        # bare ``or 1``. A company discovery with no chain defaults to mainnet —
+        # an explicit, documented choice. Each scan still attributes each address's
+        # own chain from its own results; this is only the per-address fallback, so
+        # a non-mainnet company's addresses inherit its chain instead of mainnet.
+        spawn_chain = request.get("chain")
+        spawn_chain_id = request.get("chain_id")
+        if not spawn_chain_id:
+            try:
+                spawn_chain_id = chain_by_name(spawn_chain).chain_id if spawn_chain else 1
+            except UnknownChainError:
+                spawn_chain_id = 1
+
         # Spawn DefiLlama adapter scans — one per sub-protocol
         all_slugs = protocol.get("all_slugs", [])
         if not all_slugs and protocol.get("slug"):
@@ -402,6 +425,8 @@ class DiscoveryWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "root_job_id": root_job_id,
                 "analyze_limit": request.get("analyze_limit", 5),
+                "chain": spawn_chain,
+                "chain_id": spawn_chain_id,
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
             }
@@ -411,18 +436,6 @@ class DiscoveryWorker(BaseWorker):
         # Spawn DApp crawl
         dapp_url = protocol.get("url")
         if dapp_url:
-            # Seed the crawl with the discovery job's chain (inv. 6): derive
-            # chain_id from the request's chain string via the registry rather
-            # than a bare ``or 1``. A company discovery with no chain defaults to
-            # mainnet — an explicit, documented choice; the crawl worker still
-            # re-resolves each found contract's own chain from crawl results.
-            spawn_chain = request.get("chain")
-            spawn_chain_id = request.get("chain_id")
-            if not spawn_chain_id:
-                try:
-                    spawn_chain_id = chain_by_name(spawn_chain).chain_id if spawn_chain else 1
-                except UnknownChainError:
-                    spawn_chain_id = 1
             dapp_request = {
                 "dapp_urls": [dapp_url],
                 "name": f"{company}_dapp_crawl",
