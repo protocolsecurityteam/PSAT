@@ -32,7 +32,7 @@ from services.resolution.capability_resolver import (
 )
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
-from utils.chains import UnknownChainError, chain_by_id
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
@@ -608,7 +608,23 @@ class ResolutionWorker(BaseWorker):
             # Always stamp the child's chain from the job's first-class chain
             # (inv. 6): a chainless parent request must not leave the child
             # chain-less, which would write Contract.chain=NULL and dedup-collide.
-            child_request["chain"] = _chain_name_for_job(job)
+            child_chain = _chain_name_for_job(job)
+            child_request["chain"] = child_chain
+            # Defense in depth (inv. 14): discovered contracts share the parent's
+            # chain (chain-as-island), so a gated parent already implies a gated
+            # child — but a disabled chain must never spawn analysis work, so the
+            # gate is asserted here too.
+            if not chain_enabled(child_chain):
+                logger.info(
+                    "Skipping discovered contract: chain not enabled for this deployment",
+                    extra={
+                        "address": addr,
+                        "chain": child_chain,
+                        "reason": "chain_not_enabled",
+                        "site": "resolution_discovered",
+                    },
+                )
+                continue
             structural_rel = structural_rel_by_addr.get(addr)
             if structural_rel is not None:
                 child_request["discovery_relationship"] = structural_rel
@@ -724,6 +740,21 @@ class ResolutionWorker(BaseWorker):
         # provider_chain and any spawned provider job are chain-stamped even when
         # the request payload carries no chain.
         chain = _chain_name_for_job(job)
+        # Defense in depth (inv. 14): A's chain equals every provider B's chain, so
+        # a gated parent implies gated providers — but a disabled chain must spawn
+        # no provider jobs, so gate the whole emission here. In practice A is always
+        # enabled (it is running), so this never fires on mainnet-only.
+        if not chain_enabled(chain):
+            logger.info(
+                "Skipping dependency-edge emission: chain not enabled for this deployment",
+                extra={
+                    "job_id": str(job.id),
+                    "chain": chain,
+                    "reason": "chain_not_enabled",
+                    "site": "resolution_dependency",
+                },
+            )
+            return
         parent_company = job.company
 
         edges_inserted = 0

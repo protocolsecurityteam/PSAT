@@ -36,7 +36,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-from utils.chains import UnknownChainError, chain_by_id, require_chain
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
@@ -1316,7 +1316,22 @@ class StaticWorker(BaseWorker):
             # used to cascade and let the impl child derive its own default chain,
             # divorcing it from the proxy's chain. Mainnet parents carry
             # chain="ethereum", so this is unchanged there.
-            child_request["chain"] = request.get("chain") or _parent_chain_name(job)
+            impl_chain = request.get("chain") or _parent_chain_name(job)
+            child_request["chain"] = impl_chain
+            # Defense in depth (inv. 14): the impl shares the proxy's chain, so a
+            # gated parent implies a gated impl — but a disabled chain must spawn
+            # no analysis work, so the gate is asserted here too.
+            if not chain_enabled(impl_chain):
+                logger.info(
+                    "Skipping implementation child: chain not enabled for this deployment",
+                    extra={
+                        "address": impl_addr,
+                        "chain": impl_chain,
+                        "reason": "chain_not_enabled",
+                        "site": "static_impl",
+                    },
+                )
+                continue
             if getattr(job, "protocol_id", None):
                 child_request["protocol_id"] = job.protocol_id
             if force:

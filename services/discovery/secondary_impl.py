@@ -131,8 +131,18 @@ def queue_secondary_impl_jobs(
     from sqlalchemy import text as sa_text
 
     from db.queue import create_job, reconcile_impl_job_for_proxy
+    from utils.chains import chain_enabled
 
     if not secondary_addrs:
+        return []
+    # Defense in depth (inv. 14): a secondary impl shares the proxy's chain, so a
+    # gated parent implies a gated child — but a disabled chain must spawn no
+    # analysis work. ``chain`` here is the proxy's chain (None → mainnet).
+    if not chain_enabled(chain):
+        logger.info(
+            "Skipping secondary-impl spawn: chain not enabled for this deployment",
+            extra={"chain": chain, "reason": "chain_not_enabled", "site": "secondary_impl"},
+        )
         return []
     proxy_lc = (proxy_contract.address or "").lower()
 
