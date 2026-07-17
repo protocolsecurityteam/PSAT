@@ -75,7 +75,7 @@ def _row(**kwargs: Any) -> Any:
     """Build a SimpleNamespace mimicking a ContractMaterialization row.
     The hydrate helpers use ``getattr`` so duck-typing is sufficient."""
     defaults = dict(
-        chain="ethereum",
+        chain="1",
         bytecode_keccak="0x" + "ab" * 32,
         analysis=None,
         analysis_blob_key=None,
@@ -215,7 +215,7 @@ def test_materialize_writes_to_blob_when_storage_configured(_route_to_test_db, _
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         row = cm.materialize_or_wait(
-            chain="ethereum",
+            chain="1",
             address="0x" + "1" * 40,
             bytecode_keccak="0x" + "ab" * 32,
             builder=_builder,
@@ -251,7 +251,7 @@ def test_materialize_falls_back_to_inline_when_storage_unconfigured(_route_to_te
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):
         row = cm.materialize_or_wait(
-            chain="ethereum",
+            chain="1",
             address="0x" + "2" * 40,
             bytecode_keccak="0x" + "cd" * 32,
             builder=_builder,
@@ -272,7 +272,7 @@ def test_materialize_rolls_back_when_blob_upload_fails(_route_to_test_db, _clean
     storage = _StubStorage()
     # Pre-compute the blob key that materialize_or_wait will choose so
     # we can mark it as failing.
-    chain = "ethereum"
+    chain = "1"
     keccak = "0x" + "ee" * 32
     bad_key = cm._blob_key(chain, keccak, "tracking_plan")
     storage.fail_put.add(bad_key)
@@ -316,7 +316,7 @@ def test_materialize_blob_path_loser_serves_blob_key(_route_to_test_db, _clean_c
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         first = cm.materialize_or_wait(
-            chain="ethereum",
+            chain="1",
             address="0x" + "4" * 40,
             bytecode_keccak="0x" + "11" * 32,
             builder=_builder,
@@ -330,7 +330,7 @@ def test_materialize_blob_path_loser_serves_blob_key(_route_to_test_db, _clean_c
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         second = cm.materialize_or_wait(
-            chain="ethereum",
+            chain="1",
             address="0x" + "5" * 40,  # different address, same keccak
             bytecode_keccak="0x" + "11" * 32,
             builder=_builder2,
@@ -353,7 +353,7 @@ def test_backfill_skips_already_migrated_rows(_route_to_test_db, _clean_cm, monk
     storage = _StubStorage()
     # Insert a row that's already fully migrated.
     row = ContractMaterialization(
-        chain="ethereum",
+        chain="1",
         bytecode_keccak="0x" + "aa" * 32,
         address="0x" + "1" * 40,
         contract_name="Already",
@@ -392,7 +392,7 @@ def test_backfill_dry_run_writes_nothing(_route_to_test_db, _clean_cm):
 
     keccak = "0x" + ("ff" * 32)[:64]
     row = ContractMaterialization(
-        chain="ethereum",
+        chain="1",
         bytecode_keccak=keccak,
         address="0x" + "1" * 40,
         contract_name="DryRun",
@@ -424,7 +424,7 @@ def test_backfill_dry_run_writes_nothing(_route_to_test_db, _clean_cm):
     # Dry-run writes nothing to the bucket.
     assert storage.put_calls == []
     # And nothing to the DB (the row is unchanged).
-    fresh = cm.find_by_keccak(_clean_cm, chain="ethereum", bytecode_keccak=keccak)
+    fresh = cm.find_by_keccak(_clean_cm, chain="1", bytecode_keccak=keccak)
     assert fresh is not None
     assert fresh.analysis_blob_key is None
     assert fresh.analysis == {"a": 1}

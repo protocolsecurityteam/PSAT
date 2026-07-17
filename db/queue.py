@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.discovery.source_confidence import asserts_ownership
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_id
 
 from .models import (
     Artifact,
@@ -300,6 +300,21 @@ def create_job(
     return job
 
 
+def _job_chain_name(job: Job) -> str:
+    """Canonical chain name of *job*, from the first-class ``chain_id`` column
+    (falling back to the request chain; mainnet when underivable). Used to
+    chain-qualify Contract lookups tied to a specific job so a same-address
+    deployment on another chain can never stand in (inv. 12)."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        try:
+            return chain_by_id(chain_id).name
+        except UnknownChainError:
+            return "ethereum"
+    request = job.request if isinstance(job.request, dict) else {}
+    return canonical_chain(request.get("chain")) or "ethereum"
+
+
 def _mainnet_coalesced_chain(chain: str | None) -> str:
     """Mainnet-coalesced dedup key (invariants 1/6/12).
 
@@ -426,6 +441,7 @@ def upsert_discovered_contract(
     confidence: float | None = None,
     chains: list[str] | None = None,
     discovery_url: str | None = None,
+    default_chain: str | None = None,
 ) -> Contract:
     """Insert or update a discovered contract, unioning ``discovery_sources``.
 
@@ -444,18 +460,35 @@ def upsert_discovered_contract(
           fill them if the stored value is missing, so a later
           lower-quality source doesn't stomp a better one.
 
+    *default_chain* is the job's chain (derived from ``Job.chain_id`` via the
+    registry); an entry carrying no evidence chain inherits it so no writer
+    persists ``chain=NULL`` and mints a duplicate against a sibling writer's
+    ``'ethereum'`` stub. Shares the mainnet-coalesced dedup key with
+    :func:`bulk_upsert_discovered_contracts` (invariants 1/6/12).
+
     Commit is the caller's responsibility — callers usually batch many
     upserts into one transaction.
     """
     normalized = address.lower()
-    chain = canonical_chain(chain)
+    chain = canonical_chain(chain) or canonical_chain(default_chain)
     chains = canonical_chain_list(chains)
-    existing = session.execute(
-        select(Contract).where(
-            Contract.address == normalized,
-            Contract.chain == chain,
+    # Mainnet-coalesced dedup so a mainnet write finds legacy NULL-chain rows
+    # while a non-mainnet write stays isolated. ``first()`` (not
+    # ``scalar_one_or_none``) tolerates pre-existing legacy duplicates without
+    # raising, mirroring the bulk helper's dict-collapse.
+    existing = (
+        session.execute(
+            select(Contract)
+            .where(
+                Contract.address == normalized,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(chain),
+            )
+            .order_by(Contract.id)
+            .limit(1)
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
     clean_sources = [s for s in new_sources if s]
     # See bulk_upsert_discovered_contracts — only high-confidence sources
@@ -1457,7 +1490,12 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
     return new_row
 
 
-def find_completed_static_cache(session: Session, address: str, chain: str | None = None) -> Job | None:
+def find_completed_static_cache(
+    session: Session,
+    address: str,
+    chain: str | None = None,
+    source_content_hash: str | None = None,
+) -> Job | None:
     """Find a previously completed job for *address* (and *chain*) that has all required static data.
 
     Returns the cached :class:`Job` if one exists with:
@@ -1470,7 +1508,14 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
     the cache remains valid even after ``copy_static_cache`` reassigned the
     Contract row to a later target job.
 
-    Returns ``None`` when no suitable cache exists.
+    **Cross-chain fallback (invariant 1):** when the exact ``(address, chain)``
+    lookup misses and *source_content_hash* is supplied, a second lookup finds a
+    completed job that analyzed the *same verified source* under the current
+    analyzer schema version — regardless of its chain or address. That donor's
+    code plane is reusable for this deployment (its state is re-resolved per
+    chain by the copy path). The primary ``(address, chain)`` behaviour is
+    unchanged, so mainnet re-runs are byte-identical; the fallback only fires on
+    a primary miss. Returns ``None`` when no suitable cache exists.
     """
     stmt = (
         select(Job)
@@ -1505,7 +1550,12 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
             .where(func.lower(Contract.address) == address.lower())
         )
         if chain is not None:
-            contract_stmt = contract_stmt.where(Contract.chain == chain)
+            # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain
+            # rows; a non-mainnet lookup stays isolated (invariants 1/6/12).
+            contract_stmt = contract_stmt.where(
+                func.lower(func.coalesce(Contract.chain, "ethereum"))
+                == _mainnet_coalesced_chain(canonical_chain(chain))
+            )
         contract_row = session.execute(contract_stmt.limit(1)).scalar_one_or_none()
         if not contract_row:
             continue
@@ -1532,6 +1582,72 @@ def find_completed_static_cache(session: Session, address: str, chain: str | Non
 
         return candidate
 
+    # Cross-chain fallback: the exact (address, chain) lookup missed; if we know
+    # this deployment's source hash, reuse a completed job that analyzed the same
+    # source on any chain (invariant 1).
+    if source_content_hash:
+        return _find_static_cache_by_source_hash(session, source_content_hash)
+
+    return None
+
+
+def _find_static_cache_by_source_hash(session: Session, source_content_hash: str) -> Job | None:
+    """Most-recent completed job whose verified source hashes to *source_content_hash*
+    under the current analyzer schema version, with a real analyzed root (a
+    ``contract_analysis`` artifact + a summaried contract).
+
+    Version-gated so a bumped analyzer misses stale donors (``jobs`` rows carry
+    the schema version they were analyzed under). Proxies are never donors — they
+    carry ``contract_flags`` rather than ``contract_analysis`` and are analyzed
+    per chain.
+    """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    candidates = (
+        session.execute(
+            select(Job)
+            .where(
+                Job.status == JobStatus.completed,
+                Job.stage == JobStage.done,
+                Job.source_content_hash == source_content_hash,
+                Job.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+            )
+            .order_by(Job.updated_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    for candidate in candidates:
+        if candidate.address is None:
+            continue
+        has_src = session.execute(
+            select(SourceFile).where(SourceFile.job_id == candidate.id).limit(1)
+        ).scalar_one_or_none()
+        if not has_src:
+            continue
+        # A summaried contract at the donor's own (address, chain) proves the
+        # static tables landed; contract_analysis proves the analysis (not a
+        # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
+        # another chain can carry different source, so the donor job must pair
+        # with its own chain's row (inv. 12).
+        donor_contract = session.execute(
+            select(Contract)
+            .join(ContractSummary, ContractSummary.contract_id == Contract.id)
+            .where(
+                func.lower(Contract.address) == candidate.address.lower(),
+                func.lower(func.coalesce(Contract.chain, "ethereum"))
+                == _mainnet_coalesced_chain(_job_chain_name(candidate)),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if not donor_contract:
+            continue
+        has_analysis = session.execute(
+            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_analysis").limit(1)
+        ).scalar_one_or_none()
+        if not has_analysis:
+            continue
+        return candidate
     return None
 
 
@@ -1601,7 +1717,11 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
         Contract.is_proxy.is_(True),
     )
     if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
+        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
+        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        stmt = stmt.where(
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(canonical_chain(chain))
+        )
     return session.execute(stmt.limit(1)).scalar_one_or_none() is not None
 
 
@@ -1646,7 +1766,12 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         .where(func.lower(Contract.address) == src_job.address.lower())
     )
     if src_chain is not None:
-        src_contract_stmt = src_contract_stmt.where(Contract.chain == src_chain)
+        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
+        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        src_contract_stmt = src_contract_stmt.where(
+            func.lower(func.coalesce(Contract.chain, "ethereum"))
+            == _mainnet_coalesced_chain(canonical_chain(src_chain))
+        )
     src_contract = session.execute(src_contract_stmt.limit(1)).scalar_one_or_none()
     if not src_contract:
         return None
@@ -1724,3 +1849,105 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 
     session.commit()
     return new_contract.id  # type: ignore[attr-defined]
+
+
+# Code-plane artifacts safe to reuse across a same-source deployment. Unlike the
+# same-chain ``copy_static_cache`` set, this EXCLUDES ``static_dependencies`` and
+# ``enrichment_cache`` (dependency addresses / Etherscan enrichment differ per
+# chain and are re-derived by the static/discovery stage) and every
+# ``_SEED_ARTIFACT_NAMES`` member (dynamic_dependencies / classifications /
+# upgrade_history are on-chain-derived and MERGED on re-run — cross-chain merge
+# would be wrong). ``contract_analysis`` / ``control_tracking_plan`` carry the one
+# deployment-specific field (the contract address), which is re-stamped on copy.
+_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
+
+
+def copy_static_cache_cross_chain(
+    session: Session,
+    source_job_id: Any,
+    target_job_id: Any,
+    *,
+    target_address: str,
+) -> int | None:
+    """Reuse a donor job's CODE plane for a same-source deployment on another chain.
+
+    Unlike :func:`copy_static_cache` (which reassigns the donor's Contract row —
+    correct only same-chain), this leaves the donor untouched and copies onto the
+    target's OWN Contract row (already created per-chain by discovery, with the
+    right address/chain/deployer/proxy state). It copies only source-derived
+    artifacts, re-stamping the contract address in ``contract_analysis`` /
+    ``control_tracking_plan`` so resolution reads the target deployment's state,
+    and it copies the summary + role definitions (the static worker skips
+    ``_write_analysis_tables`` on a cache hit). The STATE plane (proxy impl,
+    controllers, balances, events, monitoring) is untouched and resolved per
+    ``(chain, address)`` downstream.
+
+    Returns the target ``Contract.id`` on success, or ``None`` if the target has
+    no contract row or the donor lacks the expected artifacts.
+    """
+    from db.models import RoleDefinition
+
+    target_contract = session.execute(
+        select(Contract).where(Contract.job_id == target_job_id).limit(1)
+    ).scalar_one_or_none()
+    if target_contract is None:
+        return None
+
+    src_job = session.get(Job, source_job_id)
+    if src_job is None or not src_job.address:
+        return None
+
+    # Chain-qualified on the donor job's own chain: a CREATE2 same-address
+    # deployment on another chain can carry different source, and its
+    # summary/roles must never be the ones copied (inv. 12).
+    donor_contract = session.execute(
+        select(Contract)
+        .join(ContractSummary, ContractSummary.contract_id == Contract.id)
+        .where(
+            func.lower(Contract.address) == src_job.address.lower(),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(src_job)),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if donor_contract is None:
+        return None
+
+    target_addr_norm = target_address.lower()
+
+    # --- summary + role definitions (source-level; re-linked to target) ---
+    donor_summary = session.execute(
+        select(ContractSummary).where(ContractSummary.contract_id == donor_contract.id).limit(1)
+    ).scalar_one_or_none()
+    if (
+        donor_summary is not None
+        and not session.execute(
+            select(ContractSummary).where(ContractSummary.contract_id == target_contract.id).limit(1)
+        ).scalar_one_or_none()
+    ):
+        copy_row(session, donor_summary, contract_id=target_contract.id)
+
+    existing_roles = session.execute(
+        select(RoleDefinition).where(RoleDefinition.contract_id == target_contract.id).limit(1)
+    ).scalar_one_or_none()
+    if not existing_roles:
+        donor_roles = (
+            session.execute(select(RoleDefinition).where(RoleDefinition.contract_id == donor_contract.id))
+            .scalars()
+            .all()
+        )
+        for rd in donor_roles:
+            copy_row(session, rd, contract_id=target_contract.id)
+
+    # --- code-plane artifacts (re-stamp the deployment address) ---
+    for name in _CROSS_CHAIN_STATIC_ARTIFACTS:
+        payload = get_artifact(session, source_job_id, name)
+        if payload is None:
+            continue
+        if name == "contract_analysis" and isinstance(payload, dict) and isinstance(payload.get("subject"), dict):
+            payload = {**payload, "subject": {**payload["subject"], "address": target_addr_norm}}
+        elif name == "control_tracking_plan" and isinstance(payload, dict):
+            payload = {**payload, "contract_address": target_addr_norm}
+        store_artifact(session, target_job_id, name, data=payload)
+
+    session.commit()
+    return target_contract.id

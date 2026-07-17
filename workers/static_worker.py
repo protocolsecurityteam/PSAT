@@ -36,7 +36,7 @@ from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-from utils.chains import UnknownChainError, chain_by_id, require_chain
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
@@ -852,17 +852,27 @@ class StaticWorker(BaseWorker):
         row not found for this job". Match the address+chain fallback already
         used by ``services.aggregations.company_overview.prefetch_contracts``.
         """
+        from sqlalchemy import func
         from sqlalchemy import select as sa_select
 
         row = session.execute(sa_select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if row is not None or not job.address:
             return row
-        request = job.request if isinstance(job.request, dict) else {}
-        chain = request.get("chain")
-        stmt = sa_select(Contract).where(Contract.address == job.address.lower())
-        if chain is not None:
-            stmt = stmt.where(Contract.chain == chain)
-        return session.execute(stmt.limit(1)).scalar_one_or_none()
+        # Chain comes from the first-class ``jobs.chain_id`` column, not the
+        # request JSONB: a chainless submission has ``request["chain"]=None`` but
+        # a real mainnet ``chain_id``, so a request-only read would drop the
+        # filter and match any chain's row at this address. Coalesce so a mainnet
+        # lookup also finds legacy NULL-chain rows (invariants 1/6/12).
+        chain_name = _parent_chain_name(job)
+        stmt = (
+            sa_select(Contract)
+            .where(
+                Contract.address == job.address.lower(),
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name,
+            )
+            .limit(1)
+        )
+        return session.execute(stmt).scalar_one_or_none()
 
     def process(self, session, job):
         sources = get_source_files(session, job.id)
@@ -1110,6 +1120,7 @@ class StaticWorker(BaseWorker):
         facets = classification.get("facets")
 
         # Update contracts table with proxy info
+        from sqlalchemy import func
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -1144,8 +1155,17 @@ class StaticWorker(BaseWorker):
                 from db.models import ContractDependency
 
                 try:
+                    # Impl shares the proxy's chain (the job's own chain); qualify
+                    # so a same-address impl on another chain can't stand in, and
+                    # coalesce so mainnet still matches legacy NULL-chain rows.
+                    impl_chain_name = _parent_chain_name(job)
                     impl_row = session.execute(
-                        sa_select(Contract).where(Contract.address == impl_address.lower()).limit(1)
+                        sa_select(Contract)
+                        .where(
+                            Contract.address == impl_address.lower(),
+                            func.lower(func.coalesce(Contract.chain, "ethereum")) == impl_chain_name,
+                        )
+                        .limit(1)
                     ).scalar_one_or_none()
                 except Exception as exc:
                     logger.debug("Job %s: structural-adoption impl lookup failed: %s", job.id, exc)
@@ -1296,7 +1316,22 @@ class StaticWorker(BaseWorker):
             # used to cascade and let the impl child derive its own default chain,
             # divorcing it from the proxy's chain. Mainnet parents carry
             # chain="ethereum", so this is unchanged there.
-            child_request["chain"] = request.get("chain") or _parent_chain_name(job)
+            impl_chain = request.get("chain") or _parent_chain_name(job)
+            child_request["chain"] = impl_chain
+            # Defense in depth (inv. 14): the impl shares the proxy's chain, so a
+            # gated parent implies a gated impl — but a disabled chain must spawn
+            # no analysis work, so the gate is asserted here too.
+            if not chain_enabled(impl_chain):
+                logger.info(
+                    "Skipping implementation child: chain not enabled for this deployment",
+                    extra={
+                        "address": impl_addr,
+                        "chain": impl_chain,
+                        "reason": "chain_not_enabled",
+                        "site": "static_impl",
+                    },
+                )
+                continue
             if getattr(job, "protocol_id", None):
                 child_request["protocol_id"] = job.protocol_id
             if force:
@@ -1343,6 +1378,7 @@ class StaticWorker(BaseWorker):
         if not rpc_url:
             return
         try:
+            from sqlalchemy import func
             from sqlalchemy import select as sa_select
 
             from services.discovery.secondary_impl import (
@@ -1350,11 +1386,19 @@ class StaticWorker(BaseWorker):
                 resolve_secondary_impl_addresses,
             )
 
-            chain = request.get("chain")
-            proxy_stmt = sa_select(Contract).where(Contract.address == proxy_address.lower())
-            if chain is not None:
-                proxy_stmt = proxy_stmt.where(Contract.chain == chain)
-            proxy_contract = session.execute(proxy_stmt.limit(1)).scalar_one_or_none()
+            # Chain from the first-class ``jobs.chain_id`` column, coalesced so a
+            # mainnet lookup finds legacy NULL-chain rows while an L2 lookup stays
+            # isolated (invariants 1/6/12).
+            proxy_chain_name = _parent_chain_name(job)
+            proxy_stmt = (
+                sa_select(Contract)
+                .where(
+                    Contract.address == proxy_address.lower(),
+                    func.lower(func.coalesce(Contract.chain, "ethereum")) == proxy_chain_name,
+                )
+                .limit(1)
+            )
+            proxy_contract = session.execute(proxy_stmt).scalar_one_or_none()
             if proxy_contract is None:
                 logger.warning("Job %s: secondary-impl proxy row %s not found; skipping", job.id, proxy_address)
                 return
@@ -1374,7 +1418,7 @@ class StaticWorker(BaseWorker):
                 rpc_url=rpc_url,
                 proxy_type=request.get("proxy_type") or proxy_contract.proxy_type,
                 root_job_id=request.get("root_job_id") or str(job.id),
-                chain=chain,
+                chain=proxy_chain_name,
                 protocol_id=getattr(job, "protocol_id", None),
                 force=bool(request.get("force")),
                 base_name=job.name or proxy_contract.contract_name or "Contract",

@@ -17,9 +17,27 @@ from __future__ import annotations
 import logging
 
 from services.discovery.static_dependencies import normalize_address
-from utils.chains import require_chain
+from utils.chains import canonical_chain, require_chain
 
 logger = logging.getLogger(__name__)
+
+
+def _contract_chain_filter(chain: str | None):
+    """SQLAlchemy predicate matching a ``Contract`` on the mainnet-coalesced
+    chain key.
+
+    Legacy rows persisted ``chain=NULL`` for mainnet, so a mainnet lookup
+    coalesces ``NULL``→``'ethereum'`` to find them while a non-mainnet lookup
+    (its own name ≠ ``'ethereum'``) stays isolated from mainnet/NULL rows at the
+    same address. Same convention as ``routers/jobs.py`` and
+    ``workers/discovery.py`` (invariants 1/6/12).
+    """
+    from sqlalchemy import func
+
+    from db.models import Contract
+
+    return func.lower(func.coalesce(Contract.chain, "ethereum")) == (canonical_chain(chain) or "ethereum")
+
 
 # ---------------------------------------------------------------------------
 # EIP-1967 event topic0 hashes (keccak256 of signature)
@@ -551,11 +569,10 @@ def project_to_events(
         # UpgradeEvent.contract_id must point at the PROXY's row, not the
         # subject's — the artifact can describe any proxy in the dependency
         # graph, not just the subject's own.
-        chain_filter = Contract.chain == subject_chain if subject_chain is not None else Contract.chain.is_(None)
         proxy_contract = session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == proxy_addr.lower(),
-                chain_filter,
+                _contract_chain_filter(subject_chain),
             )
         ).scalar_one_or_none()
         if proxy_contract is None:
@@ -681,11 +698,10 @@ def backfill_historical_impl_contracts(
     # mismatch guard: if the impl belongs to a different protocol, the
     # chain isn't ours — leave the historical impls orphan.
     if not parent_owns and parent_proxy_current_impl_address:
-        chain_filter_impl = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
         impl_row = session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == parent_proxy_current_impl_address.lower(),
-                chain_filter_impl,
+                _contract_chain_filter(chain),
             )
         ).scalar_one_or_none()
         if (
@@ -702,10 +718,11 @@ def backfill_historical_impl_contracts(
     # protocols (rare but real — CREATE2 / deterministic deployments can
     # put the same impl address on Ethereum and Polygon) would otherwise
     # look like cross-protocol collisions and get skipped incorrectly.
-    chain_filter = Contract.chain == chain if chain is not None else Contract.chain.is_(None)
     existing_rows = {
         row.address.lower(): row
-        for row in session.execute(select(Contract).where(Contract.address.in_(impl_addrs), chain_filter))
+        for row in session.execute(
+            select(Contract).where(Contract.address.in_(impl_addrs), _contract_chain_filter(chain))
+        )
         .scalars()
         .all()
     }

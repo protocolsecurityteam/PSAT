@@ -20,6 +20,7 @@ from db.queue import (
     advance_job,
     bulk_upsert_discovered_contracts,
     copy_static_cache,
+    copy_static_cache_cross_chain,
     create_job,
     find_completed_static_cache,
     find_previous_company_inventory,
@@ -30,7 +31,7 @@ from db.queue import (
 )
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
-from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources
+from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils import etherscan
@@ -529,6 +530,16 @@ class DiscoveryWorker(BaseWorker):
         sources = parse_sources(result)
         remappings = parse_remappings(result)
 
+        # Stamp the source content hash + analyzer version so a later same-source
+        # deployment on another chain can reuse this job's code-plane analysis
+        # (invariant 1). Written unconditionally here: a cache-hit job returned
+        # before ever reaching this fetch, so every hashed job did real analysis.
+        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+        this_source_hash = source_content_hash(result)
+        job.source_content_hash = this_source_hash
+        job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
+
         self.update_detail(session, job, "Storing source files")
         store_source_files(session, job.id, sources)
 
@@ -691,6 +702,38 @@ class DiscoveryWorker(BaseWorker):
         if not job.name:
             job.name = f"{contract_name}_{address[2:10]}"
             session.commit()
+
+        # Cross-chain code-plane reuse (invariant 1): the exact (address, chain)
+        # cache missed above (else we'd have returned), but if a completed job
+        # analyzed this same verified source on another chain, reuse its analysis
+        # onto this deployment's own Contract row instead of re-running the static
+        # forge+Slither pass. State (proxy impl, controllers, balances, events) is
+        # still resolved per (chain, address) downstream — reuse is code-plane only.
+        if not request.get("force"):
+            donor = find_completed_static_cache(
+                session, address, chain=request.get("chain"), source_content_hash=this_source_hash
+            )
+            if donor is not None and donor.id != job.id:
+                copied = copy_static_cache_cross_chain(session, donor.id, job.id, target_address=address)
+                if copied is not None:
+                    # ``static_cached`` skips the static worker's forge+Slither pass,
+                    # but deliberately WITHOUT ``cache_source_job_id`` — that key
+                    # drives ``_check_proxy_cache`` to validate the donor's
+                    # implementation address, which is per-chain state. Proxy
+                    # classification must re-resolve on this chain, so we leave it
+                    # unset and record provenance under a distinct key.
+                    job.request = {
+                        **request,
+                        "static_cached": True,
+                        "cross_chain_cache_source_job_id": str(donor.id),
+                    }
+                    session.commit()
+                    logger.info(
+                        "Discovery cross-chain code-plane reuse for %s from job %s (source_hash=%s)",
+                        address,
+                        donor.id,
+                        this_source_hash[:12],
+                    )
 
         record_stage_metric("source_files", len(sources))
         self.update_detail(session, job, f"Discovery complete: {contract_name} ({len(sources)} source files)")

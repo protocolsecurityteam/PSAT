@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import textwrap
@@ -13,6 +14,46 @@ from utils.etherscan import get_source
 def fetch(address: str, *, chain_id: int) -> dict:
     """Fetch verified source from Etherscan. Returns the raw result dict."""
     return get_source(address, chain_id=chain_id)
+
+
+def source_content_hash(result: dict) -> str:
+    """Deterministic content hash of the verified-source *code plane* inputs.
+
+    The static pipeline (``collect_contract_analysis_with_artifacts`` →
+    ``build_control_tracking_plan``) is a pure function of the scaffolded
+    project: it runs Slither over the source AST and never reads chain state or
+    bytecode. So two deployments with the same hash produce a byte-identical
+    analysis / tracking_plan / predicate_trees bundle and can share it, even on
+    different chains and at different addresses.
+
+    The hash therefore covers exactly the inputs that determine that bundle:
+
+      * the verified source file set (``parse_sources`` — normalized paths +
+        contents; the same mapping ``scaffold`` writes to disk), and
+      * the compiler settings ``scaffold`` bakes into ``foundry.toml`` that
+        change Slither's compiled IR: solidity-vs-vyper, EVM version, optimizer
+        on/off, and optimizer runs, plus the import ``remappings``.
+
+    It deliberately EXCLUDES everything deployment-specific — the address,
+    constructor arguments, immutable *values*, and chain id — none of which are
+    inputs to the source-only pipeline (immutable values live in bytecode and
+    are resolved per deployment in the state plane). ``solc`` version is not
+    added separately: ``scaffold`` derives it from the source pragmas, which are
+    part of the hashed source.
+
+    Returns a ``0x``-prefixed sha256 hex digest (66 chars, matching the column).
+    """
+    sources = parse_sources(result)
+    payload = {
+        "sources": sorted(sources.items()),
+        "remappings": sorted(parse_remappings(result)),
+        "language": "vyper" if is_vyper_result(result) else "solidity",
+        "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
+        "optimizer": str(result.get("OptimizationUsed", "") or ""),
+        "runs": str(result.get("Runs", "") or ""),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "0x" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _parse_source_code(raw: str) -> dict | None:

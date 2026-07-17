@@ -37,6 +37,7 @@ from services.discovery.ranking import (
     not_superseded_impl_clause,
     rank_contract_rows,
 )
+from utils.chains import chain_enabled
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
@@ -268,6 +269,18 @@ class SelectionWorker(BaseWorker):
                 break
             addr = entry["__row_address"]
             chain = entry["__row_chain"]
+            # Gate on the deployment allowlist (inv. 14): a company inventory can
+            # carry addresses on chains the protocol declares (DeFiLlama membership
+            # evidence) that this deployment has not enabled. Their discovered-stub
+            # + Protocol.chains evidence is already written; we must not spawn
+            # analysis children for them. Skip without consuming analyze budget;
+            # widening PSAT_SUPPORTED_CHAIN_IDS lets a future scan pick them up.
+            if not chain_enabled(chain):
+                logger.info(
+                    "Skipping candidate: chain not enabled for this deployment",
+                    extra={"address": addr, "chain": chain, "reason": "chain_not_enabled", "site": "selection"},
+                )
+                continue
             existing = find_existing_job_for_address(session, addr, chain=chain)
             if existing is not None:
                 if not is_known_proxy(session, addr, chain=chain):

@@ -19,6 +19,7 @@ from db.models import (
 )
 from db.queue import create_job
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
+from utils.chains import chain_enabled
 
 # Must match _OWNER_CONTROLLER_IDS in unified_watcher.py.
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
@@ -125,6 +126,17 @@ def maybe_queue_reanalysis(
     Returns the created :class:`Job`, or ``None`` if skipped.
     """
     if not should_trigger_reanalysis(event_type, data):
+        return None
+
+    # Defense in depth (inv. 14): enrollment already gates off-allowlist chains, so
+    # a monitored contract on a disabled chain should not exist going forward — but
+    # a legacy row must never re-spawn analysis work on a chain this deployment has
+    # disabled.
+    if not chain_enabled(mc.chain):
+        logger.info(
+            "Skipping re-analysis: chain not enabled for this deployment",
+            extra={"address": mc.address, "chain": mc.chain, "reason": "chain_not_enabled", "site": "reanalysis"},
+        )
         return None
 
     # Deduplicate: skip if a job is already in-flight for this address+chain.

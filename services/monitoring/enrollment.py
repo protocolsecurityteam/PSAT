@@ -26,6 +26,7 @@ from services.governance.control_graph_types import reconcile_control_graph_type
 from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
+from utils.chains import chain_enabled
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,25 @@ def enroll_protocol_contracts(
 
     for contract in contracts:
         contract_chain = contract.chain or chain
+        # Gate on the deployment allowlist (inv. 14): a protocol's analyzed
+        # contracts can span chains this deployment has not enabled. Retain the
+        # analysis/Contract evidence but create no monitoring state — no
+        # MonitoredContract or WatchedProxy row for an off-allowlist chain.
+        # A single protocol legitimately mixes enabled and non-enabled chains,
+        # so this is per-contract, not per-call. Mainnet-only: contract_chain
+        # resolves to "ethereum"/None → mainnet → enabled, unchanged.
+        if not chain_enabled(contract_chain):
+            logger.info(
+                "Skipping enrollment: chain not enabled for this deployment",
+                extra={
+                    "address": contract.address,
+                    "chain": contract_chain,
+                    "protocol_id": protocol_id,
+                    "reason": "chain_not_enabled",
+                    "site": "enrollment",
+                },
+            )
+            continue
         current_block = _block_for(contract_chain)
 
         # Load summary
@@ -372,9 +392,25 @@ def enroll_protocol_contracts(
         # a single one.
         contract_chains = {c.chain for c in contracts if c.chain}
         controller_chain = contract_chains.pop() if len(contract_chains) == 1 else chain
-        _enroll_controller_addresses(session, contracts, protocol_id, controller_chain, _block_for(controller_chain))
-        # Flush so controller rows are visible to the stale-detection query below.
-        session.flush()
+        # Controllers enroll on a single chain (chain-as-island, inv. 15); gate
+        # that chain against the allowlist (inv. 14) so a disabled chain's
+        # controllers get no monitoring state either.
+        if chain_enabled(controller_chain):
+            _enroll_controller_addresses(
+                session, contracts, protocol_id, controller_chain, _block_for(controller_chain)
+            )
+            # Flush so controller rows are visible to the stale-detection query below.
+            session.flush()
+        else:
+            logger.info(
+                "Skipping controller enrollment: chain not enabled for this deployment",
+                extra={
+                    "chain": controller_chain,
+                    "protocol_id": protocol_id,
+                    "reason": "chain_not_enabled",
+                    "site": "enrollment_controllers",
+                },
+            )
 
     # Deactivate stale MonitoredContract rows for this protocol that are no
     # longer in the enrolled set (e.g. inventory addresses that were never

@@ -12,10 +12,12 @@ The module is deliberately small and stateless — every entry point opens
 its own short-lived session so the caller doesn't have to share its DB
 connection with potentially blocking advisory locks.
 
-The "default chain" used when callers don't pass one is "ethereum",
-matching how ``Job.request['chain']`` is populated by the API. NULL
-chains were considered but lose information when an operator inspects
-the table.
+The ``chain`` key is the canonical decimal-string chain id (``"1"``,
+``"8453"``) per invariant 11: callers may pass a chain name, alias, id,
+or ``None``, and :func:`utils.chains.chain_cache_token` collapses them all
+onto the id token so a name-keyed writer and an id-keyed reader hit the
+same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
+how ``Job.request['chain']`` defaults.
 
 Bundle storage: the ``analysis`` and ``tracking_plan`` payloads can be
 multi-megabyte JSON blobs (a Compound-v3-class contract analysis is
@@ -62,10 +64,9 @@ from db.storage import (
     _key_prefix,
     get_storage_client,
 )
+from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_CHAIN = "ethereum"
 
 # Analyzer/pipeline schema version stamped on every materialized row. The read
 # paths (``find_by_keccak``/``find_by_address``/``materialize_or_wait``) only
@@ -118,7 +119,7 @@ def is_enabled() -> bool:
 
 def _normalize(chain: str | None, address: str, bytecode_keccak: str) -> tuple[str, str, str]:
     return (
-        (chain or DEFAULT_CHAIN).lower(),
+        chain_cache_token(chain),
         address.lower(),
         bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower(),
     )
@@ -139,7 +140,7 @@ def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
 def find_by_keccak(
     session: Session,
     *,
-    chain: str | None,
+    chain: str | int | None,
     bytecode_keccak: str,
 ) -> ContractMaterialization | None:
     """Return the row for ``(chain, bytecode_keccak)`` if status='ready'.
@@ -150,7 +151,7 @@ def find_by_keccak(
     ``analysis_schema_version`` are likewise skipped (read as a miss) so
     a bumped analyzer rebuilds rather than serving a stale bundle.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_norm = chain_cache_token(chain)
     keccak_norm = bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower()
     row = session.execute(
         select(ContractMaterialization).where(
@@ -166,7 +167,7 @@ def find_by_keccak(
 def find_by_address(
     session: Session,
     *,
-    chain: str | None,
+    chain: str | int | None,
     address: str,
 ) -> ContractMaterialization | None:
     """Return the row for ``(chain, address)`` if status='ready'.
@@ -177,7 +178,7 @@ def find_by_address(
     different ``analysis_schema_version`` reads as a miss so a bumped
     analyzer rebuilds rather than serving a stale bundle.
     """
-    chain_norm = (chain or DEFAULT_CHAIN).lower()
+    chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
     row = session.execute(
         select(ContractMaterialization).where(
@@ -297,14 +298,119 @@ def _put_blob(client, blob_key: str, payload: dict) -> None:
     client.put(blob_key, body, JSON_CONTENT_TYPE)
 
 
+def find_reusable_by_source_hash(
+    session: Session,
+    *,
+    source_content_hash: str,
+) -> ContractMaterialization | None:
+    """Return any ``status='ready'`` current-version row with this source hash.
+
+    The cross-chain code-plane lookup (invariant 1): the bundle is a pure
+    function of the source, so a ready row for the same ``source_content_hash``
+    on *any* chain/address/keccak carries a bundle the new deployment can reuse.
+    Version-gated like the keccak/address reads so a bumped analyzer rebuilds
+    rather than serving a stale bundle. Returns the first match (all matches are
+    byte-identical bundles by construction).
+    """
+    if not source_content_hash:
+        return None
+    return session.execute(
+        select(ContractMaterialization)
+        .where(
+            ContractMaterialization.source_content_hash == source_content_hash,
+            ContractMaterialization.status == "ready",
+            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _copy_bundle_row(
+    session: Session,
+    donor: ContractMaterialization,
+    *,
+    chain_norm: str,
+    keccak_norm: str,
+    addr_norm: str,
+    source_content_hash: str,
+) -> ContractMaterialization:
+    """Write a ready row for ``(chain_norm, keccak_norm)`` reusing *donor*'s bundle.
+
+    Blob keys are SHARED, not copied: materialization blobs are content-addressed
+    (``contract_materializations/{chain}/{keccak}/{kind}.json``), written once,
+    and never deleted (no delete path touches them — only ``SourceFile`` /
+    ``Artifact`` orphans are cleaned up). Reads always dereference the row's
+    stored ``*_blob_key`` column, never re-derive it from ``(chain, keccak)``, so
+    the new row pointing at the donor's blob is safe and avoids re-uploading a
+    multi-MB payload. Inline JSONB (storage-unconfigured rows) is copied by value.
+    """
+    values = dict(
+        chain=chain_norm,
+        bytecode_keccak=keccak_norm,
+        address=addr_norm,
+        contract_name=donor.contract_name,
+        analysis=donor.analysis,
+        tracking_plan=donor.tracking_plan,
+        predicate_trees=donor.predicate_trees,
+        analysis_blob_key=donor.analysis_blob_key,
+        tracking_plan_blob_key=donor.tracking_plan_blob_key,
+        predicate_trees_blob_key=donor.predicate_trees_blob_key,
+        source_content_hash=source_content_hash,
+        status="ready",
+        error=None,
+        builder_started_at=None,
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+    )
+    stmt = pg_insert(ContractMaterialization).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="contract_materializations_pkey",
+        set_={
+            "address": stmt.excluded.address,
+            "contract_name": stmt.excluded.contract_name,
+            "analysis": stmt.excluded.analysis,
+            "tracking_plan": stmt.excluded.tracking_plan,
+            "predicate_trees": stmt.excluded.predicate_trees,
+            "analysis_blob_key": stmt.excluded.analysis_blob_key,
+            "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
+            "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+            "source_content_hash": stmt.excluded.source_content_hash,
+            "status": "ready",
+            "error": None,
+            "builder_started_at": None,
+            "analysis_schema_version": stmt.excluded.analysis_schema_version,
+            "materialized_at": func.now(),
+            "updated_at": func.now(),
+        },
+    )
+    session.execute(stmt)
+    session.commit()
+    session.expire_all()
+    return session.execute(
+        select(ContractMaterialization).where(
+            ContractMaterialization.chain == chain_norm,
+            ContractMaterialization.bytecode_keccak == keccak_norm,
+        )
+    ).scalar_one()
+
+
 def materialize_or_wait(
     *,
     chain: str | None,
     address: str,
     bytecode_keccak: str,
     builder: Callable[[], Mapping[str, Any]],
+    source_hash_fn: Callable[[], str | None] | None = None,
 ) -> ContractMaterialization:
     """Look up or build the materialization row for the given content key.
+
+    ``source_hash_fn`` enables cross-chain code-plane reuse (invariant 1). It is
+    called at most once, and only on the path where we would otherwise build (a
+    ``(chain, bytecode_keccak)`` miss) — so a cheap keccak hit never pays for
+    it. It returns the deployment's source content hash (see
+    ``services.discovery.fetch.source_content_hash``); if a ready row for that
+    hash already exists on any chain, its bundle is copied into this row and the
+    expensive ``builder()`` is skipped. When ``None`` (or it returns ``None``),
+    behaviour is exactly the pre-reuse keccak cache.
 
     Three phases, each in its own short-lived transaction so no PG
     connection sits idle during ``builder()``:
@@ -351,6 +457,24 @@ def materialize_or_wait(
     staleness_s = _builder_staleness_s()
     poll_interval_s = _wait_poll_interval_s()
 
+    # Computed lazily and at most once, only when we are about to build (a keccak
+    # miss). Kept off the cheap keccak-hit path so a same-chain re-run pays
+    # nothing extra.
+    _src = {"done": False, "hash": None}  # type: dict[str, Any]
+
+    def _get_source_hash() -> str | None:
+        if not _src["done"]:
+            _src["done"] = True
+            if source_hash_fn is not None:
+                try:
+                    _src["hash"] = source_hash_fn()
+                except Exception as exc:
+                    # A hash-computation failure must never fail-stop the build —
+                    # it only disables cross-chain reuse for this call.
+                    logger.debug("contract_materializations: source_hash_fn failed: %s", exc)
+                    _src["hash"] = None
+        return _src["hash"]
+
     # ── Phase 1: ready check / claim under a short-lived lock ──────
     # Loop: a ``status='building'`` row from another caller sends us to
     # sleep+retry until that caller transitions us to ``ready`` (cache
@@ -390,6 +514,34 @@ def materialize_or_wait(
                     age_s,
                 )
 
+            # Cross-chain code-plane reuse: before claiming a build, see whether
+            # an identical verified-source set was already analyzed under any
+            # ``(chain, keccak)``. Per-chain immutables make this deployment's
+            # keccak miss, but the source-derived bundle is reusable, so we copy
+            # it into this ``(chain, keccak)`` row and skip the forge/Slither
+            # build entirely. Runs under our advisory lock (we hold the
+            # ``(chain, keccak)`` lock), so the write races cleanly with siblings.
+            src_hash = _get_source_hash()
+            if src_hash:
+                donor = find_reusable_by_source_hash(session, source_content_hash=src_hash)
+                if donor is not None:
+                    logger.info(
+                        "contract_materializations: cross-chain reuse for %s:%s from %s:%s (source_hash=%s)",
+                        chain_norm,
+                        keccak_norm,
+                        donor.chain,
+                        donor.bytecode_keccak,
+                        src_hash[:12],
+                    )
+                    return _copy_bundle_row(
+                        session,
+                        donor,
+                        chain_norm=chain_norm,
+                        keccak_norm=keccak_norm,
+                        addr_norm=addr_norm,
+                        source_content_hash=src_hash,
+                    )
+
             # Claim: upsert ``status='building'`` and record our start time.
             now_dt = datetime.now(timezone.utc)
             claim_stmt = pg_insert(ContractMaterialization).values(
@@ -399,6 +551,7 @@ def materialize_or_wait(
                 status="building",
                 builder_started_at=now_dt,
                 error=None,
+                source_content_hash=src_hash,
                 analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
             claim_stmt = claim_stmt.on_conflict_do_update(
@@ -408,6 +561,7 @@ def materialize_or_wait(
                     "builder_started_at": now_dt,
                     "address": claim_stmt.excluded.address,
                     "error": None,
+                    "source_content_hash": claim_stmt.excluded.source_content_hash,
                     "updated_at": func.now(),
                 },
             )
@@ -428,6 +582,7 @@ def materialize_or_wait(
                 status="failed",
                 error=err,
                 builder_started_at=None,
+                source_content_hash=_src["hash"],
                 analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
             stmt = stmt.on_conflict_do_update(
@@ -436,6 +591,7 @@ def materialize_or_wait(
                     "status": "failed",
                     "error": err,
                     "builder_started_at": None,
+                    "source_content_hash": stmt.excluded.source_content_hash,
                     "updated_at": func.now(),
                 },
             )
@@ -505,6 +661,7 @@ def materialize_or_wait(
             analysis_blob_key=analysis_blob_key,
             tracking_plan_blob_key=tracking_plan_blob_key,
             predicate_trees_blob_key=predicate_trees_blob_key,
+            source_content_hash=_src["hash"],
             status="ready",
             builder_started_at=None,
             analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
@@ -520,6 +677,7 @@ def materialize_or_wait(
                 "analysis_blob_key": stmt.excluded.analysis_blob_key,
                 "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
                 "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+                "source_content_hash": stmt.excluded.source_content_hash,
                 "address": stmt.excluded.address,
                 "error": None,
                 "builder_started_at": None,

@@ -1004,7 +1004,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     }
     test_db.add(
         ContractMaterialization(
-            chain="ethereum",
+            chain="1",
             bytecode_keccak="0x" + "0" * 64,
             address=addr.lower(),
             contract_name="TestSolmateOwned",
