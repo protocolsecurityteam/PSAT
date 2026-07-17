@@ -14,7 +14,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 from cache_helpers import db_session, requires_postgres  # noqa: F401
 from sqlalchemy import select
 
@@ -158,8 +157,10 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Address re-stamped on the copied code plane.
     ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     tp = get_artifact(db_session, target_job.id, "control_tracking_plan")
+    assert isinstance(tp, dict)
     assert tp["contract_address"] == ADDR_BASE.lower()
 
     # Source-only artifacts reused byte-for-byte.
@@ -186,7 +187,9 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Donor untouched: its analysis still points at its own address, its contract
     # still belongs to the donor job (NOT reassigned like same-chain copy).
-    assert get_artifact(db_session, donor_job.id, "contract_analysis")["subject"]["address"] == ADDR_MAINNET.lower()
+    donor_ca = get_artifact(db_session, donor_job.id, "contract_analysis")
+    assert isinstance(donor_ca, dict)
+    assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
     db_session.refresh(donor_contract)
     assert donor_contract.job_id == donor_job.id
 
@@ -300,6 +303,7 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
 
     db_session.refresh(target_job)
     req = target_job.request
+    assert isinstance(req, dict)
     assert req.get("static_cached") is True
     assert req.get("cross_chain_cache_source_job_id") == str(donor_job.id)
     # No same-chain proxy-cache key: proxy state must re-resolve on Base.
@@ -308,6 +312,7 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
 
     # The reused analysis is re-stamped to the Base deployment.
     ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     # The Base deployment got its own per-chain Contract row.
     base_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()

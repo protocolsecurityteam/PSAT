@@ -140,7 +140,7 @@ def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
 def find_by_keccak(
     session: Session,
     *,
-    chain: str | None,
+    chain: str | int | None,
     bytecode_keccak: str,
 ) -> ContractMaterialization | None:
     """Return the row for ``(chain, bytecode_keccak)`` if status='ready'.
@@ -167,7 +167,7 @@ def find_by_keccak(
 def find_by_address(
     session: Session,
     *,
-    chain: str | None,
+    chain: str | int | None,
     address: str,
 ) -> ContractMaterialization | None:
     """Return the row for ``(chain, address)`` if status='ready'.
