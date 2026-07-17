@@ -23,12 +23,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from db.models import (
     AuditContractCoverage,
     AuditReport,
+    DaemonLease,
     IndexedEventCursor,
     Job,
     JobStatus,
@@ -44,10 +45,17 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_SCANNER,
 )
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
+from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 from .audits_pipeline import build_audits_pipeline
 
 logger = logging.getLogger(__name__)
+
+# Daemon-lease name prefixes for the two chain-scoped monitoring loops. The
+# lease name embeds the chain (``protocol_scanner:ethereum``), so parsing it is
+# the source of per-chain monitoring visibility — no extra schema needed.
+_SCANNER_LEASE_PREFIX = "protocol_scanner:"
+_POLLER_LEASE_PREFIX = "protocol_poller:"
 
 # A cursor more than this many blocks behind the leading cursor is "lagging" —
 # the signature of one still backfilling from its contract's creation block
@@ -94,6 +102,144 @@ def _warn_lagging_cursors(lagging_cursors: int, block_spread: int | None) -> Non
         lagging_cursors,
         extra={"lagging_cursors": lagging_cursors, "block_spread": block_spread},
     )
+
+
+def _chain_name_for_id(chain_id: int) -> str:
+    """Registry canonical name for *chain_id*, or the decimal id as a string for
+    a legacy/unregistered id — an observability read must never raise on a chain
+    the registry doesn't know."""
+    try:
+        return chain_by_id(chain_id).name
+    except UnknownChainError:
+        return str(chain_id)
+
+
+def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
+    """Per-chain event-indexer cursor rollup. The cursor row already carries
+    ``chain_id`` (invariant 4) — a stalled Base indexer shows as its own row
+    with an old ``stalest_run_age_s`` while mainnet stays fresh."""
+    rows = session.execute(
+        select(
+            IndexedEventCursor.chain_id,
+            func.count(),
+            func.min(IndexedEventCursor.last_run_at),
+            func.max(IndexedEventCursor.last_indexed_block),
+            func.min(IndexedEventCursor.last_indexed_block),
+        ).group_by(IndexedEventCursor.chain_id)
+    ).all()
+    # Laggards are measured against each chain's *own* leader, so a chain still
+    # backfilling can't hide behind another chain's head.
+    max_sub = (
+        select(
+            IndexedEventCursor.chain_id,
+            func.max(IndexedEventCursor.last_indexed_block).label("mx"),
+        )
+        .group_by(IndexedEventCursor.chain_id)
+        .subquery()
+    )
+    lagging_by_chain = {
+        chain_id: count
+        for chain_id, count in session.execute(
+            select(IndexedEventCursor.chain_id, func.count())
+            .join(max_sub, max_sub.c.chain_id == IndexedEventCursor.chain_id)
+            .where(IndexedEventCursor.last_indexed_block < max_sub.c.mx - _CURSOR_LAG_BLOCKS)
+            .group_by(IndexedEventCursor.chain_id)
+        ).all()
+    }
+    out: list[dict[str, Any]] = []
+    for chain_id, cursors, oldest_run, max_block, min_block in rows:
+        spread = max_block - min_block if max_block is not None and min_block is not None else None
+        out.append(
+            {
+                "chain_id": chain_id,
+                "chain": _chain_name_for_id(chain_id),
+                "cursors": cursors or 0,
+                "stalest_run_age_s": _age_seconds(oldest_run, now),
+                "max_indexed_block": max_block,
+                "min_indexed_block": min_block,
+                "block_spread": spread,
+                "lagging_cursors": lagging_by_chain.get(chain_id, 0),
+            }
+        )
+    return sorted(out, key=lambda d: d["chain_id"])
+
+
+def _held_lease_chains(session: Session, now: datetime) -> tuple[set[str], set[str]]:
+    """Chain-cache tokens of chains currently holding a live scanner / poller
+    daemon lease. The ``protocol_scanner:{chain}`` naming is the reuse of the
+    existing per-chain lease dimension (invariant 4) — no heartbeat schema
+    change needed to see which chains a monitoring pass is serving."""
+    scanner: set[str] = set()
+    poller: set[str] = set()
+    for name, expires_at in session.execute(select(DaemonLease.name, DaemonLease.expires_at)).all():
+        if expires_at is None:
+            continue
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:  # lease expired → not currently serving this chain
+            continue
+        if name.startswith(_SCANNER_LEASE_PREFIX):
+            scanner.add(chain_cache_token(name[len(_SCANNER_LEASE_PREFIX) :]))
+        elif name.startswith(_POLLER_LEASE_PREFIX):
+            poller.add(chain_cache_token(name[len(_POLLER_LEASE_PREFIX) :]))
+    return scanner, poller
+
+
+def _monitoring_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
+    """Per-chain monitored-contract rollup + live-lease flags. Combines the
+    ``monitored_contracts.chain`` dimension with the per-chain daemon leases so
+    a chain whose scanner has stalled is visible against the ones still fresh."""
+    rows = session.execute(
+        select(
+            MonitoredContract.chain,
+            func.count(),
+            func.sum(case((MonitoredContract.is_active.is_(True), 1), else_=0)),
+            func.max(MonitoredContract.updated_at),
+            func.min(MonitoredContract.last_scanned_block),
+            func.max(MonitoredContract.last_scanned_block),
+        ).group_by(MonitoredContract.chain)
+    ).all()
+    scanner_held, poller_held = _held_lease_chains(session, now)
+    out: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    for chain, total, active, latest, min_block, max_block in rows:
+        token = chain_cache_token(chain)
+        seen_tokens.add(token)
+        spread = max_block - min_block if max_block is not None and min_block is not None else None
+        out.append(
+            {
+                "chain": chain,
+                "chain_id": int(token) if token.isdigit() else None,
+                "monitored_contracts": total or 0,
+                "active": int(active or 0),
+                "last_update_at": latest.isoformat() if latest else None,
+                "last_update_age_s": _age_seconds(latest, now),
+                "min_scanned_block": min_block,
+                "max_scanned_block": max_block,
+                "scan_block_spread": spread,
+                "scanner_lease_held": token in scanner_held,
+                "poller_lease_held": token in poller_held,
+            }
+        )
+    # A chain can hold a lease before its first contract is enrolled — surface it
+    # so an early-enablement pass isn't invisible.
+    for token in (scanner_held | poller_held) - seen_tokens:
+        out.append(
+            {
+                "chain": token,
+                "chain_id": int(token) if token.isdigit() else None,
+                "monitored_contracts": 0,
+                "active": 0,
+                "last_update_at": None,
+                "last_update_age_s": None,
+                "min_scanned_block": None,
+                "max_scanned_block": None,
+                "scan_block_spread": None,
+                "scanner_lease_held": token in scanner_held,
+                "poller_lease_held": token in poller_held,
+            }
+        )
+    return sorted(out, key=lambda d: (d["chain_id"] is None, d["chain_id"] or 0, d["chain"]))
 
 
 def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
@@ -170,6 +316,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
             idx_lagging,
             idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None,
         )
+    idx_by_chain = _indexer_by_chain(session, now)
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
@@ -204,6 +351,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
                 "min_indexed_block": idx_min_block,
                 "block_spread": spread,
                 "lagging_cursors": idx_lagging,
+                "by_chain": idx_by_chain,
             }
         if process == HEARTBEAT_PROTOCOL_SCANNER:
             # The scanner writes its head-lag into its own heartbeat detail
@@ -263,6 +411,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         ),
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
+        "by_chain": _monitoring_by_chain(session, now),
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}

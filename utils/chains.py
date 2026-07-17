@@ -193,12 +193,23 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=8453,
         name="base",
         aliases=(),
-        hypersync_url=None,
+        # Coverage is preview-validated (inv. 14): HyperSync is unreachable from
+        # the dev network, so the $0-cost indexer path for this URL is proven in
+        # the PR preview environment, not here.
+        hypersync_url="https://base.hypersync.xyz",
         explorer_base_url="https://basescan.org",
-        confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
+        # 75 × ~2s ≈ 150s wall-clock, matching/exceeding mainnet finality
+        # (12 × ~12s ≈ 144s). OP-stack unsafe-head reorgs are shallow but
+        # possible until the L1 batch is posted, so we track the L1 window.
+        confirmation_depth=75,
         max_getlogs_range=MAX_GETLOGS_RANGE,
-        bridge_executors=(),
-        cross_domain_messengers=(),
+        # OP-stack L2 predeploys for authority recognition (inv. 15). The
+        # L2StandardBridge *executes* bridged deposits/withdrawals → bridge
+        # executor; the L2CrossDomainMessenger *relays* L1↔L2 messages and is
+        # the contract whose xDomainMessageSender surfaces an aliased L1 owner
+        # → cross-domain messenger.
+        bridge_executors=("0x4200000000000000000000000000000000000010",),
+        cross_domain_messengers=("0x4200000000000000000000000000000000000007",),
     ),
     ChainInfo(
         chain_id=43114,

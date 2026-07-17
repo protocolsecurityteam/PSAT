@@ -88,7 +88,8 @@ jobs:
             ARTIFACT_STORAGE_BUCKET="${{ secrets.ARTIFACT_STORAGE_BUCKET }}" \
             ARTIFACT_STORAGE_ACCESS_KEY="${{ secrets.ARTIFACT_STORAGE_ACCESS_KEY }}" \
             ARTIFACT_STORAGE_SECRET_KEY="${{ secrets.ARTIFACT_STORAGE_SECRET_KEY }}" \
-            ARTIFACT_STORAGE_PREFIX="pr-${PR_NUMBER}/"
+            ARTIFACT_STORAGE_PREFIX="pr-${PR_NUMBER}/" \
+            PSAT_SUPPORTED_CHAIN_IDS="1,8453"
 
       - name: Generate preview-specific fly config
         # Identical to fly.toml except min_machines_running = 0 so idle previews
@@ -172,6 +173,9 @@ jobs:
         env:
           PSAT_LIVE_URL: ${{ needs.deploy.outputs.url }}
           PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}
+          # Runner-side mirror of the preview deploy's PSAT_SUPPORTED_CHAIN_IDS: lets
+          # chain-gated live tests (tests/live/test_base_chain.py) run instead of skip.
+          PSAT_LIVE_SUPPORTED_CHAIN_IDS: "1,8453"
           # Pin to PR head SHA via raw.github — stable in git history regardless of renames.
           PSAT_LIVE_AUDIT_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha }}/tests/fixtures/audits/sample_audit.pdf
         run: uv run pytest -m live -q

@@ -44,6 +44,10 @@ _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL"
 
 _BASE = 8453
 _BASE_HYPERSYNC = "https://base.hypersync.xyz"
+# A registry chain still marked indexer-disabled (hypersync_url=None). Base used
+# to play the "uncovered chain" role here, but Phase 2 enabled it — so the
+# placeholder moves to arbitrum, which stays disabled until it earns its slot.
+_UNCOVERED = 42161  # arbitrum
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
 
@@ -73,9 +77,8 @@ requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL no
 
 
 def _base_chaininfo(**overrides) -> ChainInfo:
-    """A Base ChainInfo with a HyperSync URL set — the registry ships Base with
-    ``hypersync_url=None`` (indexer-disabled until proven per inv. 14), so tests
-    that need a covered second chain construct one explicitly."""
+    """A Base ChainInfo with its HyperSync URL pinned, for tests that need a
+    covered second chain independent of registry state."""
     base = chain_by_id(_BASE)
     return dataclasses.replace(base, hypersync_url=_BASE_HYPERSYNC, **overrides)
 
@@ -88,12 +91,13 @@ def _base_chaininfo(**overrides) -> ChainInfo:
 def test_build_fetchers_mainnet_uses_indexer_rpc_override(monkeypatch):
     monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://127.0.0.1:8545")
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
-    # Registry ships every non-mainnet chain with hypersync_url=None, so only
-    # chain 1 is covered today — and it takes the dedicated-lane override.
-    assert set(fetchers) == {1}
+    # Covered chains today are mainnet + Base (Phase 2). Mainnet takes the
+    # dedicated-lane override; a covered non-mainnet chain reads its registry URL.
+    assert set(fetchers) == {1, _BASE}
     assert _url(fetchers[1]) == "http://127.0.0.1:8545"
     assert _url(head_fetchers[1]) == "http://127.0.0.1:8545"
     assert _url(block_hash_fetchers[1]) == "http://127.0.0.1:8545"
+    assert _url(fetchers[_BASE]) == _BASE_HYPERSYNC
 
 
 def test_build_fetchers_mainnet_falls_back_to_erpc(monkeypatch):
@@ -118,10 +122,10 @@ def test_build_fetchers_second_chain_uses_registry_hypersync_url(monkeypatch):
 
 def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
     monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://127.0.0.1:8545")
-    # Base left at its registry default (hypersync_url=None) → no fetcher.
-    chains = (chain_by_id(1), chain_by_id(_BASE))
+    # An indexer-disabled chain (hypersync_url=None) → no fetcher.
+    chains = (chain_by_id(1), chain_by_id(_UNCOVERED))
     fetchers, _, _ = _build_indexer_fetchers(chains=chains)
-    assert _BASE not in fetchers
+    assert _UNCOVERED not in fetchers
     assert set(fetchers) == {1}
 
 

@@ -66,12 +66,27 @@ def test_all_chain_ids_positive_and_unique():
     assert len(ids) == len(set(ids))
 
 
-def test_only_mainnet_has_hypersync_url():
+def test_indexer_enabled_chains_have_hypersync_url():
     # Conservative default (inv. 10): indexer enabled only where coverage is
-    # demonstrated in the codebase today.
+    # proven. Mainnet is demonstrated in-codebase; Base is preview-validated
+    # (inv. 14, Phase 2). Every other chain stays None until it earns its slot.
     by_name = {c.name: c for c in all_chains()}
     assert by_name["ethereum"].hypersync_url == "https://eth.hypersync.xyz"
-    assert all(c.hypersync_url is None for c in all_chains() if c.name != "ethereum")
+    assert all(c.hypersync_url is None for c in all_chains() if c.name not in ("ethereum", "base"))
+
+
+def test_base_registry_values():
+    # Phase 2 enablement facts for Base (chain 8453). Bridge constants are the
+    # OP-stack L2 predeploys (inv. 15); confirmation depth tracks mainnet's
+    # wall-clock finality window on Base's ~2s blocks.
+    base = chain_by_id(8453)
+    assert base.name == "base"
+    assert base.hypersync_url == "https://base.hypersync.xyz"
+    assert base.explorer_base_url == "https://basescan.org"
+    assert base.confirmation_depth == 75
+    assert base.max_getlogs_range == 2000
+    assert base.cross_domain_messengers == ("0x4200000000000000000000000000000000000007",)
+    assert base.bridge_executors == ("0x4200000000000000000000000000000000000010",)
 
 
 def test_supported_chain_ids_default_is_mainnet(monkeypatch):

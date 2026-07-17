@@ -177,14 +177,45 @@ def _primary_chain(contract: dict[str, Any]) -> str:
     return (canonical_chain(chains[0]) if chains else None) or "unknown"
 
 
+def _within_run_evidence_chains(contracts: list[dict[str, Any]]) -> list[str]:
+    """Registry chains any evidence-bearing entry in this inventory declares.
+
+    These are chain-scoped crawler / deployer-expansion results (invariant 3
+    evidence): a chain another contract in the same run is already placed on.
+    """
+    chains: list[str] = []
+    seen: set[str] = set()
+    for c in contracts:
+        for ch in canonical_chain_list(c.get("chains", [])) or []:
+            if ch not in seen and ch != "unknown" and ch in CHAIN_IDS:
+                chains.append(ch)
+                seen.add(ch)
+    return chains
+
+
 def resolve_unknown_chains(
     contracts: list[dict[str, Any]],
+    declared_chains: list[str] | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode`` across chains.
 
-    Mutates the contract dicts in-place (updates ``chains`` field) and
-    returns the same list.
+    Mutates the contract dicts in-place and returns the same list.
+
+    ``declared_chains`` gates the two behaviours (invariant 3 — "probing may
+    CONFIRM membership, never ORIGINATE it"):
+
+    * ``None`` (default, standalone callers): the legacy all-chain probe —
+      within-run evidence first, then every remaining registry chain — writing
+      every hit onto ``chains``. Kept for backward compatibility.
+    * a list (the discovery pipeline always passes one, possibly empty): the
+      **narrowed** probe. The declared set is the caller's declared chains
+      (``Protocol.chains`` + the requested chain) unioned with within-run
+      evidence. A hit on a declared chain is corroborated → written to
+      ``chains``. When there is no declared evidence at all, no hit can
+      originate membership: chains stay ``["unknown"]`` and hits are recorded
+      as ``chain_candidates`` — surfaced in the discovery artifact, never
+      written to ``chains`` and so never a ``contracts`` row or job.
     """
     if not contracts:
         return contracts
@@ -194,50 +225,83 @@ def resolve_unknown_chains(
         _debug_log(debug, "Chain resolution: no unknown-chain contracts to resolve")
         return contracts
 
-    # Determine which chains this protocol is known to use -- probe these first.
-    known_chains: list[str] = []
-    seen: set[str] = set()
-    for c in contracts:
-        for ch in canonical_chain_list(c.get("chains", [])) or []:
-            if ch not in seen and ch != "unknown" and ch in CHAIN_IDS:
-                known_chains.append(ch)
-                seen.add(ch)
-
-    if not known_chains:
-        known_chains = list(CHAIN_IDS.keys())
-
-    remaining_chains = [ch for ch in CHAIN_IDS if ch not in seen]
-
-    _debug_log(
-        debug,
-        f"Chain resolution: {len(unknowns)} unknown contract(s), "
-        f"probing {len(known_chains)} known chain(s): {known_chains}",
-    )
+    within_run = _within_run_evidence_chains(contracts)
 
     # address -> list of chains where it has code
     matched: dict[str, list[str]] = {c["address"]: [] for c in unknowns}
     all_addrs = list(matched.keys())
 
-    # Phase 1: probe ALL unknowns on ALL known chains in parallel.
-    _probe_chains(all_addrs, known_chains, matched, debug)
+    if declared_chains is None:
+        # Legacy all-chain probe (backward compatibility for standalone callers).
+        known_chains = within_run or list(CHAIN_IDS.keys())
+        seen = set(known_chains)
+        remaining_chains = [ch for ch in CHAIN_IDS if ch not in seen]
 
-    # Phase 2: for addresses that matched NOTHING on known chains, probe the
-    # remaining chains in parallel.
-    unresolved = [addr for addr, chains in matched.items() if not chains]
-    if unresolved and remaining_chains:
-        _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
-        _probe_chains(unresolved, remaining_chains, matched, debug)
+        _debug_log(
+            debug,
+            f"Chain resolution: {len(unknowns)} unknown contract(s), "
+            f"probing {len(known_chains)} known chain(s): {known_chains}",
+        )
 
-    # Apply results.
-    resolved_count = 0
+        _probe_chains(all_addrs, known_chains, matched, debug)
+
+        unresolved = [addr for addr, chains in matched.items() if not chains]
+        if unresolved and remaining_chains:
+            _debug_log(debug, f"Probing {len(remaining_chains)} remaining chain(s) for {len(unresolved)} address(es)")
+            _probe_chains(unresolved, remaining_chains, matched, debug)
+
+        resolved_count = 0
+        for contract in unknowns:
+            chains = matched.get(contract["address"], [])
+            if chains:
+                contract["chains"] = canonical_chain_list(chains)
+                resolved_count += 1
+                _debug_log(debug, f"  {contract['address']}: resolved to {chains}")
+
+        _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
+        return contracts
+
+    # Narrowed probe (invariant 3). Declared set = caller-declared chains ∪
+    # within-run evidence, restricted to the registry.
+    declared_set: list[str] = list(within_run)
+    declared_seen: set[str] = set(within_run)
+    for ch in canonical_chain_list(declared_chains) or []:
+        if ch != "unknown" and ch in CHAIN_IDS and ch not in declared_seen:
+            declared_set.append(ch)
+            declared_seen.add(ch)
+
+    if declared_set:
+        _debug_log(
+            debug,
+            f"Chain resolution (narrowed): {len(unknowns)} unknown contract(s), "
+            f"probing {len(declared_set)} declared chain(s): {declared_set}",
+        )
+        _probe_chains(all_addrs, declared_set, matched, debug)
+        resolved_count = 0
+        for contract in unknowns:
+            chains = matched.get(contract["address"], [])
+            if chains:
+                contract["chains"] = canonical_chain_list(chains)
+                resolved_count += 1
+                _debug_log(debug, f"  {contract['address']}: resolved to {chains}")
+        _debug_log(debug, f"Chain resolution (narrowed): resolved {resolved_count}/{len(unknowns)} contract(s)")
+        return contracts
+
+    # No declared evidence: presence alone can never originate membership.
+    _debug_log(
+        debug,
+        f"Chain resolution (candidates): {len(unknowns)} unknown contract(s) with no declared "
+        "evidence; probing every registry chain for candidates only",
+    )
+    _probe_chains(all_addrs, list(CHAIN_IDS.keys()), matched, debug)
+    candidate_count = 0
     for contract in unknowns:
         chains = matched.get(contract["address"], [])
         if chains:
-            contract["chains"] = canonical_chain_list(chains)
-            resolved_count += 1
-            _debug_log(debug, f"  {contract['address']}: resolved to {chains}")
-
-    _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
+            contract["chain_candidates"] = canonical_chain_list(chains)
+            candidate_count += 1
+            _debug_log(debug, f"  {contract['address']}: candidate chain(s) {chains} (not written)")
+    _debug_log(debug, f"Chain resolution (candidates): recorded {candidate_count}/{len(unknowns)} candidate(s)")
     return contracts
 
 

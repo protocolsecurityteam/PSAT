@@ -6,7 +6,9 @@ from typing import Any, Literal, TypedDict
 
 from typing_extensions import NotRequired
 
-ResolvedAddressType = Literal["zero", "eoa", "safe", "timelock", "proxy_admin", "contract", "unknown"]
+ResolvedAddressType = Literal[
+    "zero", "eoa", "safe", "timelock", "proxy_admin", "contract", "unknown", "cross_chain_authority"
+]
 EffectiveFunctionStatus = Literal["public", "unsupported", "resolved_empty"]
 PrincipalResolutionStatus = Literal[
     "complete",

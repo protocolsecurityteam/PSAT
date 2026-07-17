@@ -25,6 +25,9 @@ ResolvedControllerType = Literal[
     # Signature- and Merkle-gated functions: no finite on-chain
     # principal set (whoever holds the signer key / matching proof).
     "off_chain_witness",
+    # L2 principal that is an aliased L1 owner or an OP-stack bridge predeploy
+    # (inv. 15). A label, not a cross-chain control edge.
+    "cross_chain_authority",
 ]
 
 

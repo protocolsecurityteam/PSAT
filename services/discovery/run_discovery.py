@@ -490,7 +490,13 @@ def _apply_spa_overrides(protocol: str, inventory_result: dict, audit_result: di
         )
 
 
-def run_discovery(protocol: str, *, official_domain: str | None = None, chain: str | None = None) -> dict[str, Any]:
+def run_discovery(
+    protocol: str,
+    *,
+    official_domain: str | None = None,
+    chain: str | None = None,
+    declared_chains: list[str] | None = None,
+) -> dict[str, Any]:
     """Premium+Deps discovery for one protocol.
 
     Returns ``{audits: <search_audit_reports shape>, addresses: <search_protocol_inventory shape>,
@@ -558,6 +564,7 @@ def run_discovery(protocol: str, *, official_domain: str | None = None, chain: s
                 max_queries=4,
                 run_deployer=True,
                 debug=False,
+                declared_chains=declared_chains,
             )
         finally:
             _restore_search(original_search)

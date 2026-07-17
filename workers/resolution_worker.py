@@ -32,6 +32,7 @@ from services.resolution.capability_resolver import (
 )
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
@@ -65,6 +66,19 @@ def _chain_id_for_job(job: Job) -> int:
         return chain_id
     request = job.request if isinstance(job.request, dict) else {}
     return derive_job_chain_id(request.get("chain"), job.address) or 1
+
+
+def _chain_name_for_job(job: Job) -> str:
+    """Canonical chain name for the job's first-class ``chain_id`` (inv. 6).
+
+    Stamped onto spawned child/dependency-provider jobs so a discovered
+    contract inherits the parent's chain instead of cascading as ``None`` when
+    the request payload lacks a chain (a chainless ``/api/analyze`` submission).
+    Mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    try:
+        return chain_by_id(_chain_id_for_job(job)).name
+    except UnknownChainError:
+        return "ethereum"
 
 
 def _build_root_artifacts(
@@ -591,8 +605,10 @@ class ResolutionWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "discovered_by": "resolution",
             }
-            if request.get("chain"):
-                child_request["chain"] = request["chain"]
+            # Always stamp the child's chain from the job's first-class chain
+            # (inv. 6): a chainless parent request must not leave the child
+            # chain-less, which would write Contract.chain=NULL and dedup-collide.
+            child_request["chain"] = _chain_name_for_job(job)
             structural_rel = structural_rel_by_addr.get(addr)
             if structural_rel is not None:
                 child_request["discovery_relationship"] = structural_rel
@@ -703,8 +719,11 @@ class ResolutionWorker(BaseWorker):
         if not target_addresses:
             return
 
-        request = job.request if isinstance(job.request, dict) else {}
-        chain = request.get("chain") if isinstance(request.get("chain"), str) else None
+        # Dependency provider B is on the same chain as A (v1 is chain-as-island,
+        # inv. 15). Derive from the job's first-class chain (inv. 6) so the edge's
+        # provider_chain and any spawned provider job are chain-stamped even when
+        # the request payload carries no chain.
+        chain = _chain_name_for_job(job)
         parent_company = job.company
 
         edges_inserted = 0
@@ -734,9 +753,8 @@ class ResolutionWorker(BaseWorker):
                     "rpc_url": rpc_url,
                     "parent_job_id": str(job.id),
                     "discovered_by": "resolution_dependency",
+                    "chain": chain,
                 }
-                if chain:
-                    provider_request["chain"] = chain
                 provider_job = create_job(session, provider_request, initial_stage=JobStage.discovery)
                 if parent_company:
                     provider_job.company = parent_company

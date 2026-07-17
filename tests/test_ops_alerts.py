@@ -21,11 +21,12 @@ from sqlalchemy.orm import Session as SASession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from db.models import WorkerHeartbeat
+from db.models import IndexedEventCursor, MonitoredContract, WorkerHeartbeat
 from db.queue import HEARTBEAT_PROTOCOL_POLLER, HEARTBEAT_PROTOCOL_SCANNER
 from services.monitoring import ops_alerts, process_meta
 from services.monitoring.ops_alerts import (
     _cas_write,
+    collect_chain_health,
     collect_stale_processes,
     run_ops_alert_tick,
 )
@@ -366,6 +367,120 @@ def test_health_monitoring_503_when_no_heartbeats(api_client, db_session, _clean
     assert resp.status_code == 503
     body = resp.json()
     assert {s["name"] for s in body["stale"]} == set(process_meta.PROCESS_META)
+
+
+def _addr(n: int) -> str:
+    return "0x" + f"{n:040x}"
+
+
+# ── per-chain health (invariant 4) ───────────────────────────────────────────
+
+
+@requires_postgres
+def test_collect_chain_health_flags_one_chain_stale(db_session, _clean_heartbeats):
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    # Mainnet cursor scanned just now; Base cursor stalest run long ago.
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=1,
+            event_address=_addr(1),
+            topic0="0x" + "a1" * 32,
+            last_indexed_block=100,
+            last_run_at=now - timedelta(seconds=5),
+        )
+    )
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=8453,
+            event_address=_addr(2),
+            topic0="0x" + "b2" * 32,
+            last_indexed_block=50,
+            last_run_at=now - timedelta(seconds=100_000),
+        )
+    )
+    db_session.commit()
+
+    by_id = {c["chain_id"]: c for c in collect_chain_health(db_session, now=now)}
+    assert by_id[1]["indexer"] == "fresh"
+    assert by_id[1]["stale"] is False
+    assert by_id[8453]["indexer"] == process_meta.STALE
+    assert by_id[8453]["stale"] is True
+    assert by_id[8453]["name"] == "base"
+
+
+@requires_postgres
+def test_collect_chain_health_all_fresh(db_session, _clean_heartbeats):
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=1,
+            event_address=_addr(1),
+            topic0="0x" + "a1" * 32,
+            last_run_at=now - timedelta(seconds=5),
+        )
+    )
+    db_session.add(
+        MonitoredContract(address=_addr(3), chain="base", is_active=True, updated_at=now - timedelta(seconds=5))
+    )
+    db_session.commit()
+
+    chains = collect_chain_health(db_session, now=now)
+    assert chains  # both chains present
+    assert all(c["stale"] is False for c in chains)
+
+
+@requires_postgres
+def test_health_monitoring_flags_stale_chain(api_client, db_session, _clean_heartbeats):
+    now = datetime.now(timezone.utc)
+    # Every process fresh → process-level check is clean; a per-chain stall is
+    # the only thing that can degrade health here.
+    _seed_all_fresh(db_session, now)
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=1,
+            event_address=_addr(1),
+            topic0="0x" + "a1" * 32,
+            last_run_at=now - timedelta(seconds=5),
+        )
+    )
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=8453,
+            event_address=_addr(2),
+            topic0="0x" + "b2" * 32,
+            last_run_at=now - timedelta(seconds=100_000),
+        )
+    )
+    db_session.commit()
+
+    resp = api_client.get("/api/health/monitoring")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "unavailable"
+    assert body["stale"] == []  # no process-level staleness
+    stale_chains = {c["chain_id"] for c in body["chains"] if c["stale"]}
+    assert stale_chains == {8453}
+
+
+@requires_postgres
+def test_health_monitoring_ok_when_chains_fresh(api_client, db_session, _clean_heartbeats):
+    now = datetime.now(timezone.utc)
+    _seed_all_fresh(db_session, now)
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=8453,
+            event_address=_addr(2),
+            topic0="0x" + "b2" * 32,
+            last_run_at=now - timedelta(seconds=5),
+        )
+    )
+    db_session.commit()
+
+    resp = api_client.get("/api/health/monitoring")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert all(not c["stale"] for c in body["chains"])
 
 
 @requires_postgres
