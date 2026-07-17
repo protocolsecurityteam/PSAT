@@ -426,6 +426,7 @@ def upsert_discovered_contract(
     confidence: float | None = None,
     chains: list[str] | None = None,
     discovery_url: str | None = None,
+    default_chain: str | None = None,
 ) -> Contract:
     """Insert or update a discovered contract, unioning ``discovery_sources``.
 
@@ -444,18 +445,35 @@ def upsert_discovered_contract(
           fill them if the stored value is missing, so a later
           lower-quality source doesn't stomp a better one.
 
+    *default_chain* is the job's chain (derived from ``Job.chain_id`` via the
+    registry); an entry carrying no evidence chain inherits it so no writer
+    persists ``chain=NULL`` and mints a duplicate against a sibling writer's
+    ``'ethereum'`` stub. Shares the mainnet-coalesced dedup key with
+    :func:`bulk_upsert_discovered_contracts` (invariants 1/6/12).
+
     Commit is the caller's responsibility — callers usually batch many
     upserts into one transaction.
     """
     normalized = address.lower()
-    chain = canonical_chain(chain)
+    chain = canonical_chain(chain) or canonical_chain(default_chain)
     chains = canonical_chain_list(chains)
-    existing = session.execute(
-        select(Contract).where(
-            Contract.address == normalized,
-            Contract.chain == chain,
+    # Mainnet-coalesced dedup so a mainnet write finds legacy NULL-chain rows
+    # while a non-mainnet write stays isolated. ``first()`` (not
+    # ``scalar_one_or_none``) tolerates pre-existing legacy duplicates without
+    # raising, mirroring the bulk helper's dict-collapse.
+    existing = (
+        session.execute(
+            select(Contract)
+            .where(
+                Contract.address == normalized,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(chain),
+            )
+            .order_by(Contract.id)
+            .limit(1)
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
     clean_sources = [s for s in new_sources if s]
     # See bulk_upsert_discovered_contracts — only high-confidence sources
@@ -1517,7 +1535,12 @@ def find_completed_static_cache(
             .where(func.lower(Contract.address) == address.lower())
         )
         if chain is not None:
-            contract_stmt = contract_stmt.where(Contract.chain == chain)
+            # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain
+            # rows; a non-mainnet lookup stays isolated (invariants 1/6/12).
+            contract_stmt = contract_stmt.where(
+                func.lower(func.coalesce(Contract.chain, "ethereum"))
+                == _mainnet_coalesced_chain(canonical_chain(chain))
+            )
         contract_row = session.execute(contract_stmt.limit(1)).scalar_one_or_none()
         if not contract_row:
             continue
@@ -1672,7 +1695,11 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
         Contract.is_proxy.is_(True),
     )
     if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
+        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
+        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        stmt = stmt.where(
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(canonical_chain(chain))
+        )
     return session.execute(stmt.limit(1)).scalar_one_or_none() is not None
 
 
@@ -1717,7 +1744,12 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         .where(func.lower(Contract.address) == src_job.address.lower())
     )
     if src_chain is not None:
-        src_contract_stmt = src_contract_stmt.where(Contract.chain == src_chain)
+        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
+        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        src_contract_stmt = src_contract_stmt.where(
+            func.lower(func.coalesce(Contract.chain, "ethereum"))
+            == _mainnet_coalesced_chain(canonical_chain(src_chain))
+        )
     src_contract = session.execute(src_contract_stmt.limit(1)).scalar_one_or_none()
     if not src_contract:
         return None
