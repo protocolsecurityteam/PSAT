@@ -33,6 +33,7 @@ from utils.chains import ChainInfo, UnknownChainError, all_chains, chain_by_id, 
 from utils.etherscan import get_contract_creation_block
 from utils.logging import configure_logging, log_timed_phase
 from utils.rpc import require_rpc_url
+from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
 
@@ -569,6 +570,11 @@ def scan_enrolled_events(
                     "event_address": event_address,
                     "topics": sorted(entry["topics"]),
                     "exc_type": type(exc).__name__,
+                    # Bounded, sanitized message so a swallowed error is still
+                    # attributable without re-enabling per-window traceback storms.
+                    # sanitize_string scrubs any URL the message carries (an eRPC
+                    # URL, say); the ~200-char cap keeps one line, not a stack.
+                    "exc_msg": sanitize_string(str(exc))[:200],
                 },
             )
         caught_up_cursors += group_members_at_target
@@ -1032,26 +1038,32 @@ def _build_indexer_fetchers(
 ) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
     """Build the per-chain fetcher maps the indexer scan loop dispatches on.
 
-    Indexer chain set = registry chains that declare HyperSync coverage (inv. 10):
-    a chain with ``hypersync_url is None`` is deliberately indexer-disabled and
-    gets no fetcher (its cursors are then skipped-and-logged by the scan loop).
+    Indexer chain set = registry chains with proven Envio coverage
+    (``hypersync_url is not None``, inv. 10): a chain without it is deliberately
+    indexer-disabled and gets no fetcher (its cursors are then skipped-and-logged
+    by the scan loop).
 
-    Mainnet keeps its pre-multichain lane exactly: ``PSAT_INDEXER_RPC_URL`` when
-    set (the dedicated lane so the serial indexer doesn't starve on the shared
-    eRPC proxy under job load), else the registry-backed eRPC route. Every other
-    covered chain reads from its registry ``hypersync_url``.
+    Every fetcher — every chain, mainnet included — POSTs plain JSON-RPC through
+    the chain's eRPC route (``require_rpc_url(chain_id=...)``, i.e.
+    ``{ERPC_BASE_URL}/main/evm/{chain_id}``). The indexer is just another eRPC
+    client; chain 1 is not special. Why eRPC and not a direct provider: routing,
+    the per-chain HyperRPC upstreams that make eth_getLogs a $0 read, provider
+    failover, and auth (the eRPC secret header, attached by ``rpc_request``) are
+    all eRPC-deployment config, deliberately NOT in PSAT. The native
+    ``hypersync_url`` (``<chain>.hypersync.xyz``) is the resolution repos' query
+    API and rejects JSON-RPC — here it is only the coverage signal, never a
+    fetcher URL.
     """
     from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
 
     registry_chains = all_chains() if chains is None else chains
-    override = os.getenv("PSAT_INDEXER_RPC_URL")
     fetchers: dict[int, LogFetcher] = {}
     head_fetchers: dict[int, HeadBlockFetcher] = {}
     block_hash_fetchers: dict[int, BlockHashFetcher] = {}
     for info in registry_chains:
         if info.hypersync_url is None:
             continue
-        rpc_url = (override or require_rpc_url(chain_id=1)) if info.chain_id == 1 else info.hypersync_url
+        rpc_url = require_rpc_url(chain_id=info.chain_id)
         fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url)
         head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url)
         block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url)

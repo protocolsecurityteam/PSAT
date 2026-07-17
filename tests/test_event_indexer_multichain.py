@@ -4,9 +4,9 @@ stamping everything chain 1.
 These tests prove a second-chain (Base, 8453) input reaches every threaded path:
 
   * ``_build_indexer_fetchers`` builds one fetcher per registry chain that
-    declares HyperSync coverage — mainnet keeps its ``PSAT_INDEXER_RPC_URL``
-    lane, a covered second chain reads its registry ``hypersync_url``, and a
-    ``hypersync_url is None`` chain gets no fetcher at all;
+    declares HyperSync coverage — every chain, mainnet included, reads its own
+    eRPC route (``{ERPC_BASE_URL}/main/evm/{chain_id}``); a ``hypersync_url is
+    None`` chain gets no fetcher at all;
   * ``enroll_from_completed_jobs`` stamps each cursor with the enrolled job's own
     ``chain_id`` (a Base job → chain 8453 cursors, not chain 1);
   * ``scan_enrolled_events`` derives its confirmation depth per chain from the
@@ -44,6 +44,12 @@ _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL"
 
 _BASE = 8453
 _BASE_HYPERSYNC = "https://base.hypersync.xyz"
+# The indexer routes EVERY covered chain — mainnet included — through its own
+# eRPC route, never the native HyperSync host (that host is the resolution repos'
+# query API and rejects JSON-RPC). A covered chain's fetcher URL is this route.
+_ERPC_BASE = "https://erpc.example"
+_MAINNET_ERPC = f"{_ERPC_BASE}/main/evm/1"
+_BASE_ERPC = f"{_ERPC_BASE}/main/evm/{_BASE}"
 # A registry chain still marked indexer-disabled (hypersync_url=None). Base used
 # to play the "uncovered chain" role here, but Phase 2 enabled it — so the
 # placeholder moves to arbitrum, which stays disabled until it earns its slot.
@@ -84,44 +90,35 @@ def _base_chaininfo(**overrides) -> ChainInfo:
 
 
 # --------------------------------------------------------------------------- #
-# Fetcher map — per-chain, driven by registry hypersync_url
+# Fetcher map — per-chain eRPC routes, gated by registry hypersync_url coverage
 # --------------------------------------------------------------------------- #
 
 
-def test_build_fetchers_mainnet_uses_indexer_rpc_override(monkeypatch):
-    monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://127.0.0.1:8545")
+def test_build_fetchers_mainnet_uses_erpc(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
-    # Covered chains today are mainnet + Base (Phase 2). Mainnet takes the
-    # dedicated-lane override; a covered non-mainnet chain reads its registry URL.
+    # Covered chains today are mainnet + Base (Phase 2). Both read their own eRPC
+    # route — mainnet is not special, there is no dedicated indexer lane.
     assert set(fetchers) == {1, _BASE}
-    assert _url(fetchers[1]) == "http://127.0.0.1:8545"
-    assert _url(head_fetchers[1]) == "http://127.0.0.1:8545"
-    assert _url(block_hash_fetchers[1]) == "http://127.0.0.1:8545"
-    assert _url(fetchers[_BASE]) == _BASE_HYPERSYNC
+    assert _url(fetchers[1]) == _MAINNET_ERPC
+    assert _url(head_fetchers[1]) == _MAINNET_ERPC
+    assert _url(block_hash_fetchers[1]) == _MAINNET_ERPC
 
 
-def test_build_fetchers_mainnet_falls_back_to_erpc(monkeypatch):
-    monkeypatch.delenv("PSAT_INDEXER_RPC_URL", raising=False)
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
-    fetchers, _, _ = _build_indexer_fetchers()
-    # No override → the registry-backed eRPC route for chain 1, unchanged.
-    assert _url(fetchers[1]) == "https://erpc.example/main/evm/1"
-
-
-def test_build_fetchers_second_chain_uses_registry_hypersync_url(monkeypatch):
-    monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://127.0.0.1:8545")
+def test_build_fetchers_second_chain_uses_erpc(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     chains = (chain_by_id(1), _base_chaininfo())
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(chains=chains)
-    # Mainnet keeps its lane; Base reads its registry hypersync_url — NOT the
-    # mainnet override, NOT eRPC.
-    assert _url(fetchers[1]) == "http://127.0.0.1:8545"
-    assert _url(fetchers[_BASE]) == _BASE_HYPERSYNC
-    assert _url(head_fetchers[_BASE]) == _BASE_HYPERSYNC
-    assert _url(block_hash_fetchers[_BASE]) == _BASE_HYPERSYNC
+    # A covered second chain reads its OWN eRPC route — never mainnet's, never the
+    # native HyperSync query host.
+    assert _url(fetchers[1]) == _MAINNET_ERPC
+    assert _url(fetchers[_BASE]) == _BASE_ERPC
+    assert _url(head_fetchers[_BASE]) == _BASE_ERPC
+    assert _url(block_hash_fetchers[_BASE]) == _BASE_ERPC
 
 
 def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
-    monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://127.0.0.1:8545")
+    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     # An indexer-disabled chain (hypersync_url=None) → no fetcher.
     chains = (chain_by_id(1), chain_by_id(_UNCOVERED))
     fetchers, _, _ = _build_indexer_fetchers(chains=chains)
@@ -317,3 +314,38 @@ def test_scan_logs_once_when_chain_has_no_fetcher(session, caplog):
     ]
     # Exactly one warning for the chain, even though two cursor groups were skipped.
     assert len(skip_records) == 1
+
+
+@requires_postgres
+def test_scan_failure_logs_bounded_exc_msg(session, monkeypatch, caplog):
+    # A swallowed group-scan failure must carry a bounded, sanitized exc_msg so the
+    # error is attributable without re-enabling per-window traceback storms.
+    import services.resolution.repos.event_logs_rpc as rpc_repo
+
+    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
+    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(chains=(_base_chaininfo(),))
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("upstream rejected the query: malformed request")
+
+    monkeypatch.setattr(rpc_repo, "rpc_request", _boom)
+
+    enroll_event_cursor(session, chain_id=_BASE, event_address=_AUTHORITY, topic0=_TOPIC, start_block=100)
+    session.commit()
+
+    with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
+        summary = scan_enrolled_events(
+            session,
+            fetchers=fetchers,
+            head_fetchers=head_fetchers,
+            block_hash_fetchers=block_hash_fetchers,
+        )
+
+    assert summary.failed_groups >= 1
+    failed = [r for r in caplog.records if "group scan failed" in r.getMessage()]
+    assert failed
+    # Bounded, present exc_msg carrying the swallowed detail.
+    assert any(
+        isinstance(getattr(r, "exc_msg", None), str) and "malformed" in r.exc_msg and len(r.exc_msg) <= 200
+        for r in failed
+    )

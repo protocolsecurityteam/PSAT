@@ -119,8 +119,16 @@ class ChainInfo:
     chain_id: int
     name: str
     aliases: tuple[str, ...]
-    # Explicit per chain — never pattern-derived. None means the event indexer is
-    # disabled for this chain (inv. 10): no proven HyperSync/HyperRPC coverage.
+    # Explicit per chain — never pattern-derived. Non-None marks a chain with
+    # proven Envio coverage and serves two roles:
+    #   * it is the "event indexer enabled for this chain" signal (inv. 10); and
+    #   * it is the NATIVE HyperSync query endpoint (``<chain>.hypersync.xyz``) that
+    #     the inline resolution repos (``event_logs_hypersync.py``,
+    #     ``mapping_enumerator.py``) POST to directly with an ENVIO_API_TOKEN bearer.
+    # The durable event indexer does NOT read this URL: it goes through the chain's
+    # eRPC route, which fronts a HyperRPC (JSON-RPC) upstream carrying the Envio
+    # token server-side plus provider failover. ``None`` = no proven coverage =
+    # indexer disabled for this chain.
     hypersync_url: str | None
     explorer_base_url: str
     confirmation_depth: int

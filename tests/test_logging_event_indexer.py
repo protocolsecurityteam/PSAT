@@ -114,7 +114,7 @@ def test_main_installs_json_logging(monkeypatch):
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    monkeypatch.setenv("PSAT_INDEXER_RPC_URL", "http://stub.invalid")
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.setattr(signal_mod, "signal", lambda *_a, **_k: None)
     called: dict[str, bool] = {}
     monkeypatch.setattr(indexer, "run_event_log_indexer_loop", lambda **_k: called.setdefault("ran", True))
