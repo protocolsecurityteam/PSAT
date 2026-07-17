@@ -164,11 +164,14 @@ def test_chain_id_column_beats_chainless_request_payload(db_session, monkeypatch
 
 
 @requires_postgres
-def test_resolution_child_job_stamped_from_chain_id_not_request(db_session):
+def test_resolution_child_job_stamped_from_chain_id_not_request(db_session, monkeypatch):
     from db.models import Job
     from db.queue import create_job
     from workers.resolution_worker import ResolutionWorker
 
+    # Models a base-enabled deployment: discovered-child spawns gate off-allowlist
+    # chains (inv. 14), so make the premise explicit rather than relying on {1}.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     parent_addr, child_addr = _addr(), _addr()
     # Chainless payload, first-class chain_id says Base — the P2-pre scenario.
     parent = create_job(db_session, {"address": parent_addr})

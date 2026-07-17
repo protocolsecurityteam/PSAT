@@ -692,7 +692,11 @@ class TestMaybeQueueReanalysis:
         assert job2 is not None
         assert job2.id != job1.id
 
-    def test_dedup_respects_chain(self, db_session):
+    def test_dedup_respects_chain(self, db_session, monkeypatch):
+        # This test models a deployment where base has passed the inv-14
+        # enablement checklist; re-analysis gates off-allowlist chains (inv. 14),
+        # so make the base-enabled premise explicit rather than relying on {1}.
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
         addr = "0x" + "cd" * 20
 
         mc_eth = _make_monitored_contract(db_session, addr, "proxy", chain="ethereum")

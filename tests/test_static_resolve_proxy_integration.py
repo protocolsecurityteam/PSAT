@@ -158,6 +158,9 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
 
 def test_proxy_child_job_inherits_chain(monkeypatch):
     """When request includes 'chain', child job request also includes it."""
+    # Models a base-enabled deployment: impl-child spawns gate off-allowlist
+    # chains (inv. 14), so make the premise explicit rather than relying on {1}.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
