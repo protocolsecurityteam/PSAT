@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.discovery.source_confidence import asserts_ownership
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_id
 
 from .models import (
     Artifact,
@@ -298,6 +298,21 @@ def create_job(
     session.commit()
     session.refresh(job)
     return job
+
+
+def _job_chain_name(job: Job) -> str:
+    """Canonical chain name of *job*, from the first-class ``chain_id`` column
+    (falling back to the request chain; mainnet when underivable). Used to
+    chain-qualify Contract lookups tied to a specific job so a same-address
+    deployment on another chain can never stand in (inv. 12)."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        try:
+            return chain_by_id(chain_id).name
+        except UnknownChainError:
+            return "ethereum"
+    request = job.request if isinstance(job.request, dict) else {}
+    return canonical_chain(request.get("chain")) or "ethereum"
 
 
 def _mainnet_coalesced_chain(chain: str | None) -> str:
@@ -1610,12 +1625,19 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         ).scalar_one_or_none()
         if not has_src:
             continue
-        # A summaried contract at the donor's own address proves the static
-        # tables landed; contract_analysis proves the analysis (not a proxy stub).
+        # A summaried contract at the donor's own (address, chain) proves the
+        # static tables landed; contract_analysis proves the analysis (not a
+        # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
+        # another chain can carry different source, so the donor job must pair
+        # with its own chain's row (inv. 12).
         donor_contract = session.execute(
             select(Contract)
             .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-            .where(func.lower(Contract.address) == candidate.address.lower())
+            .where(
+                func.lower(Contract.address) == candidate.address.lower(),
+                func.lower(func.coalesce(Contract.chain, "ethereum"))
+                == _mainnet_coalesced_chain(_job_chain_name(candidate)),
+            )
             .limit(1)
         ).scalar_one_or_none()
         if not donor_contract:
@@ -1875,10 +1897,16 @@ def copy_static_cache_cross_chain(
     if src_job is None or not src_job.address:
         return None
 
+    # Chain-qualified on the donor job's own chain: a CREATE2 same-address
+    # deployment on another chain can carry different source, and its
+    # summary/roles must never be the ones copied (inv. 12).
     donor_contract = session.execute(
         select(Contract)
         .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-        .where(func.lower(Contract.address) == src_job.address.lower())
+        .where(
+            func.lower(Contract.address) == src_job.address.lower(),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(src_job)),
+        )
         .limit(1)
     ).scalar_one_or_none()
     if donor_contract is None:
