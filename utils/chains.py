@@ -422,6 +422,38 @@ def require_supported_chain(
     return info
 
 
+def chain_enabled(chain: str | int | None) -> bool:
+    """Whether *chain* is in the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist (invariant 14).
+
+    The gate for internal work-origination sites — analysis-job spawns and
+    monitoring enrollment — where an off-allowlist chain is expected input, not
+    an error. Unlike :func:`require_supported_chain` (the fail-loud user-edge
+    guard) this NEVER raises: a chain outside the allowlist, or one that cannot
+    be resolved at all, returns ``False`` so the caller skips-and-logs the one
+    discovery rather than aborting the whole run.
+
+    Accepts a chain id (``int`` or decimal string) or a name/alias. ``None`` /
+    empty coalesces to mainnet (the NULL≡``ethereum`` convention), so a
+    mainnet-only deployment enrolls/spawns legacy chainless rows exactly as
+    before. A non-empty but unresolvable name returns ``False`` — an unknown
+    chain can never be "enabled" — rather than silently coalescing to mainnet.
+    """
+    allow = supported_chain_ids()
+    if chain is None:
+        return 1 in allow
+    if isinstance(chain, int):
+        return chain in allow
+    text = chain.strip()
+    if not text:
+        return 1 in allow
+    if text.isdigit():
+        return int(text) in allow
+    try:
+        return chain_by_name(text).chain_id in allow
+    except UnknownChainError:
+        return False
+
+
 def chain_cache_token(chain: str | int | None) -> str:
     """Canonical cache-key token for a chain (invariant 11): the decimal-string
     chain id (``"1"``, ``"8453"``).
