@@ -276,3 +276,29 @@ class TestResolutionRpcUrlUsesJobChainColumn:
             ),
         )
         assert _rpc_url_for_job(job) == "http://127.0.0.1:8545"
+
+
+class TestWorkerRpcHelpersUseJobChainColumn:
+    """Same regression class as the resolution helper: policy and static
+    workers must resolve RPC via the job's first-class chain, not the
+    request JSONB alone."""
+
+    def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.policy_worker import _rpc_url_for_job
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+        job = cast(Any, SimpleNamespace(id="p1", address="0x" + "ab" * 20, chain_id=1, request={}))
+        assert _rpc_url_for_job(job) == "https://erpc.example/main/evm/1"
+
+    def test_static_rpc_chainless_request_resolves_via_column(self, monkeypatch):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.static_worker import _request_rpc_url
+
+        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+        job = cast(Any, SimpleNamespace(id="s1", address="0x" + "ab" * 20, chain_id=8453, request={}))
+        assert _request_rpc_url(job) == "https://erpc.example/main/evm/8453"

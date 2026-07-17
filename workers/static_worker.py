@@ -73,13 +73,17 @@ def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, 
     )
 
 
-def _request_rpc_url(request: dict) -> str | None:
+def _request_rpc_url(job: Job) -> str | None:
+    """eRPC URL for the job's own chain, resolved via the first-class
+    ``jobs.chain_id`` column (``_parent_chain_name``), not the request JSONB —
+    a chainless ``/api/analyze`` submission carries the mainnet edge default
+    only in the column, so a request-only read comes back None and silently
+    skips classification/deps. The request's local-node override still wins."""
+    request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
-    chain = request.get("chain")
     return default_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=request.get("chain_id"),
-        chain=chain if isinstance(chain, str) else None,
+        chain=_parent_chain_name(job),
     )
 
 
@@ -811,7 +815,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     if not cached_impl:
         return None
 
-    rpc_url = _request_rpc_url(request)
+    rpc_url = _request_rpc_url(job)
     if not rpc_url:
         return None
 
@@ -1023,7 +1027,7 @@ class StaticWorker(BaseWorker):
         from services.discovery.classifier import ClassificationIncompleteError, classify_single
 
         request = job.request if isinstance(job.request, dict) else {}
-        rpc_url = _request_rpc_url(request)
+        rpc_url = _request_rpc_url(job)
         if not rpc_url:
             logger.info("Job %s: no RPC available for proxy classification", job.id)
             store_artifact(
@@ -1335,7 +1339,7 @@ class StaticWorker(BaseWorker):
         pointers = (analysis_data or {}).get("secondary_impl_pointers") or []
         if not pointers:
             return
-        rpc_url = _request_rpc_url(request)
+        rpc_url = _request_rpc_url(job)
         if not rpc_url:
             return
         try:
@@ -1445,7 +1449,7 @@ class StaticWorker(BaseWorker):
         self.update_detail(session, job, "Discovering dependencies")
 
         request = job.request if isinstance(job.request, dict) else {}
-        deps_rpc = _request_rpc_url(request)
+        deps_rpc = _request_rpc_url(job)
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
         dynamic_tx_limit = request.get("dynamic_tx_limit", 10)
