@@ -276,12 +276,22 @@ def _materialize_with_cross_process_cache(
             "predicate_trees": predicate_trees,
         }
 
+    def _source_hash_fn() -> str | None:
+        # Cross-chain code-plane reuse key (inv. 1). ``get_source`` is
+        # in-memory + PG cached, so on the build path this shares the fetch
+        # ``_build_static_artifacts`` makes; on a keccak hit it is never called.
+        from services.discovery.fetch import source_content_hash
+
+        result = fetch(effective_address, chain_id=build_chain_id)
+        return source_content_hash(result)
+
     try:
         row = cm.materialize_or_wait(
             chain=chain,
             address=effective_address,
             bytecode_keccak=bytecode_keccak,
             builder=_builder,
+            source_hash_fn=_source_hash_fn,
         )
     except Exception as exc:
         # ``materialize_or_wait`` re-raises the builder's exception. If

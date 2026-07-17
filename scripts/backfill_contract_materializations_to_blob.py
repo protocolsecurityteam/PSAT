@@ -157,7 +157,11 @@ def main(argv: list[str] | None = None) -> int:
                 ContractMaterialization.status == "ready",
             )
             if args.chain:
-                stmt = stmt.where(ContractMaterialization.chain == args.chain.lower())
+                # Rows are keyed by the canonical decimal-id chain token (inv. 11),
+                # so normalize a name/alias/id filter through the same function.
+                from utils.chains import chain_cache_token
+
+                stmt = stmt.where(ContractMaterialization.chain == chain_cache_token(args.chain))
             if last_chain is not None and last_keccak is not None:
                 stmt = stmt.where(
                     (ContractMaterialization.chain > last_chain)
