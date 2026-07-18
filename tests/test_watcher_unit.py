@@ -179,7 +179,7 @@ class TestCohortScanBlock:
 
     @staticmethod
     def _install(monkeypatch, head, calls):
-        def mock_rpc(url, method, params):
+        def mock_rpc(url, method, params, *, chain_id=None):
             calls.append((method, params))
             if method == "eth_blockNumber":
                 return hex(head)
@@ -797,7 +797,7 @@ class TestBatchTimelockDedupe:
         cd_section = format(4, "x").zfill(64) + "deadbeef" + "0" * 56
         log_data = "0x" + head + cd_section
 
-        def mock_rpc(_url, method, _params):
+        def mock_rpc(_url, method, _params, *, chain_id=None):
             if method == "eth_blockNumber":
                 return hex(200)
             if method == "eth_getLogs":
@@ -885,7 +885,7 @@ class TestBatchTimelockDedupe:
         cd_section = format(4, "x").zfill(64) + "cafef00d" + "0" * 56
         log_data = "0x" + head + cd_section
 
-        def mock_rpc(_url, method, _params):
+        def mock_rpc(_url, method, _params, *, chain_id=None):
             if method == "eth_blockNumber":
                 return hex(300)
             if method == "eth_getLogs":

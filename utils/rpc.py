@@ -93,6 +93,8 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
     if cached is not None:
         return cached
     try:
+        # inv-7 exemption: this IS the call that discovers the chain id, so it has
+        # no independent chain_id to declare — declaring one would be circular.
         raw = rpc_request(rpc_url, "eth_chainId", [], retries=0)
     except Exception:
         return None
@@ -596,7 +598,9 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
             return code, keccak_hex
 
     # RPC outside the lock so concurrent misses for different addresses don't serialize.
-    raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"])
+    # Declare the caller's chain_id (never chain_id_eff, which may be discovered FROM
+    # the URL — that would make the inv-7 guard a tautology).
+    raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"], chain_id=chain_id)
     code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
     # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on odd-length hex.
     if code in {"0x", "0x0"}:
@@ -674,7 +678,9 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
         return out
 
     calls: list[tuple[str, list[Any]]] = [("eth_getCode", [addr, "latest"]) for addr in to_fetch]
-    raw_results = rpc_batch_request_with_status(rpc_url, calls)
+    # Declare the caller's chain_id (not chain_id_eff, which may be discovered
+    # FROM the URL — that would make the inv-7 guard a tautology).
+    raw_results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     pg_writes: list[tuple[str, str, str]] = []
     with _GETCODE_CACHE_LOCK:
         for addr, (raw, had_error) in zip(to_fetch, raw_results):

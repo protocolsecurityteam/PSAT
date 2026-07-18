@@ -160,6 +160,7 @@ class ResolutionWorker(BaseWorker):
             heartbeat=lambda: self._heartbeat(session, job),
             getter_fallback_address=getter_fallback_address,
             beacon_address=beacon_address,
+            chain_id=chain_id,
         )
         logger.info(
             "resolution phase complete: control snapshot",

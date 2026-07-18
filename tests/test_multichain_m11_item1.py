@@ -245,8 +245,8 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
         return ("Name", {"subject": {}}, {"contract_address": effective_address}, None)
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", _fake_cache)
-    monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url: None)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc: {"controller_values": {}})
+    monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url, **_kw: None)
+    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controller_values": {}})
     monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
 
     recursive._materialize_contract_artifacts(

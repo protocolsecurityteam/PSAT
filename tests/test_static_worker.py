@@ -44,7 +44,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "address": address,
             "type": "proxy",
             "proxy_type": "unknown",
@@ -93,7 +93,7 @@ def test_resolve_proxy_marks_regular_contract_without_proxy_flag(monkeypatch):
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"address": address, "type": "regular"},
+        lambda address, rpc_url, **_kw: {"address": address, "type": "regular"},
     )
 
     worker._resolve_proxy(session, job, job.address, job.name)
@@ -180,7 +180,7 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "address": address,
             "type": "proxy",
             "proxy_type": "uups",
@@ -227,7 +227,7 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "address": address,
             "type": "proxy",
             "proxy_type": "uups",
@@ -273,7 +273,7 @@ def test_no_force_uses_global_dedupe(monkeypatch):
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "address": address,
             "type": "proxy",
             "proxy_type": "uups",

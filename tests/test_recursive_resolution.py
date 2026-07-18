@@ -223,11 +223,11 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
         },
     )
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
         assert address == authority_address
         return authority_bundle
 
-    def fake_classify(rpc_url, address, block_tag="latest"):
+    def fake_classify(rpc_url, address, block_tag="latest", *, chain_id=None):
         if address == signer_address:
             return "eoa", {"address": signer_address}
         return "unknown", {"address": address}
@@ -236,7 +236,7 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
     monkeypatch.setattr("services.resolution.recursive.classify_resolved_address", fake_classify)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": (*fake_classify(rpc_url, address, block_tag), True),
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
     )
 
     graph, nested = resolve_control_graph(
@@ -322,7 +322,7 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
 
     materialize_calls: list[str] = []
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
         materialize_calls.append(address)
         return shared_bundle
 
@@ -417,12 +417,12 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
 
     materialize_calls: list[str] = []
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
         materialize_calls.append(address)
         assert address == role_holder_address
         return role_holder_bundle
 
-    def fake_classify(rpc_url, address, block_tag="latest"):
+    def fake_classify(rpc_url, address, block_tag="latest", *, chain_id=None):
         if address == signer_address:
             return "eoa", {"address": signer_address}
         if address == safe_address:
@@ -435,7 +435,7 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
     monkeypatch.setattr("services.resolution.recursive.classify_resolved_address", fake_classify)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": (*fake_classify(rpc_url, address, block_tag), True),
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
     )
 
     resolve_control_graph(
@@ -459,7 +459,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
 
     monkeypatch.setattr(
         "services.resolution.recursive.classify_single",
-        lambda address, rpc_url: {"address": address, "type": "regular"},
+        lambda address, rpc_url, **_kw: {"address": address, "type": "regular"},
         raising=False,
     )
     monkeypatch.setattr(
@@ -493,7 +493,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
     )
     monkeypatch.setattr(
         "services.resolution.recursive.build_control_snapshot",
-        lambda _plan, _rpc: {
+        lambda _plan, _rpc, **_kw: {
             "schema_version": "0.1",
             "contract_address": address,
             "contract_name": "TestContract",
@@ -532,7 +532,7 @@ def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "address": address,
             "type": "proxy",
             "proxy_type": "eip2535",
@@ -551,7 +551,7 @@ def test_materialize_contract_artifacts_propagates_classification_incomplete(mon
     fall-through. This is why the proxy decision lives OUTSIDE the classify
     except block."""
 
-    def _raise(address, rpc_url):
+    def _raise(address, rpc_url, *, chain_id=None):
         raise ClassificationIncompleteError("proxy slots unread")
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)
@@ -568,7 +568,7 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"address": address, "type": "proxy", "implementation": impl},
+        lambda address, rpc_url, **_kw: {"address": address, "type": "proxy", "implementation": impl},
     )
 
     captured: dict = {}
@@ -580,7 +580,7 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
         return "Impl", analysis, plan, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc: {"controllers": []})
+    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
     monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
 
     loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
@@ -595,7 +595,7 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
     analyze-the-address-as-is and never propagates."""
     addr = "0x" + "33" * 20
 
-    def _raise_generic(address, rpc_url):
+    def _raise_generic(address, rpc_url, *, chain_id=None):
         raise RuntimeError("classify hiccup")
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _raise_generic)
@@ -609,7 +609,7 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
         return "AsIs", analysis, plan, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc: {"controllers": []})
+    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
     monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: None)
 
     loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
@@ -650,7 +650,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
 
     # The REAL _materialize_contract_artifacts runs; only classify_single is
     # steered to report the nested controller as a no-impl diamond.
-    def fake_classify(address, rpc_url):
+    def fake_classify(address, rpc_url, *, chain_id=None):
         if address.lower() == diamond_address:
             return {"address": address, "type": "proxy", "proxy_type": "eip2535", "facets": ["0x" + "bb" * 20]}
         return {"address": address, "type": "regular"}
@@ -914,17 +914,17 @@ def _resolve_parity_helper(monkeypatch, fanout: str):
         auth_b: _make_auth_bundle(auth_b, leaf_b, "eoa"),
     }
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
         return bundles_by_addr[address]
 
-    def fake_classify(rpc_url, address, block_tag="latest"):
+    def fake_classify(rpc_url, address, block_tag="latest", *, chain_id=None):
         return "eoa", {"address": address}
 
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr("services.resolution.recursive.classify_resolved_address", fake_classify)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": (*fake_classify(rpc_url, address, block_tag), True),
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
     )
 
     graph, nested = resolve_control_graph(
@@ -996,7 +996,7 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
         },
     )
 
-    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None):
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
         if address == bad_addr:
             raise RuntimeError("simulated materialize failure")
         return good_bundle

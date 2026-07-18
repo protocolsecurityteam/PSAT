@@ -50,10 +50,14 @@ class RpcEventLogFetcher:
         *,
         max_block_range: int = MAX_BLOCK_RANGE,
         min_bisect_span: int = MIN_BISECT_SPAN,
+        chain_id: int | None = None,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
         self.min_bisect_span = max(1, min_bisect_span)
+        # Declared so ``rpc_request`` can assert the eRPC URL routes this chain
+        # (inv. 7). None keeps the guard a no-op for callers that lack a chain.
+        self.chain_id = chain_id
 
     def fetch_logs(
         self,
@@ -103,7 +107,7 @@ class RpcEventLogFetcher:
             }
         ]
         try:
-            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params)
+            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
         except RuntimeError as exc:
             # Result-cap / range-cap / query-timeout from the upstream. Halve and
             # recurse; a span at the floor is a real error, not a sizing problem.
@@ -135,22 +139,24 @@ class RpcEventLogFetcher:
 
 
 class RpcHeadBlockFetcher:
-    def __init__(self, rpc_url: str) -> None:
+    def __init__(self, rpc_url: str, *, chain_id: int | None = None) -> None:
         self.rpc_url = rpc_url
+        self.chain_id = chain_id
 
     def head_block(self) -> int:
-        raw = rpc_request(self.rpc_url, "eth_blockNumber", [])
+        raw = rpc_request(self.rpc_url, "eth_blockNumber", [], chain_id=self.chain_id)
         if not isinstance(raw, str) or not raw.startswith("0x"):
             raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
         return int(raw, 16)
 
 
 class RpcBlockHashFetcher:
-    def __init__(self, rpc_url: str) -> None:
+    def __init__(self, rpc_url: str, *, chain_id: int | None = None) -> None:
         self.rpc_url = rpc_url
+        self.chain_id = chain_id
 
     def block_hash(self, block_number: int) -> bytes | None:
-        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False])
+        raw = rpc_request(self.rpc_url, "eth_getBlockByNumber", [hex(block_number), False], chain_id=self.chain_id)
         if not isinstance(raw, dict):
             return None
         return _hex_to_bytes(raw.get("hash"), 32)

@@ -82,7 +82,7 @@ def test_find_dependencies_uses_explicit_rpc(monkeypatch):
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
     captured: dict[str, str] = {}
 
-    def _fake_discover(rpc_url, _root, code_cache=None):
+    def _fake_discover(rpc_url, _root, code_cache=None, chain_id=None):
         captured["rpc"] = rpc_url
         return ["0x2222222222222222222222222222222222222222"]
 
@@ -104,7 +104,7 @@ def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
     captured: dict[str, str] = {}
 
-    def _fake_discover(rpc_url, _root, code_cache=None):
+    def _fake_discover(rpc_url, _root, code_cache=None, chain_id=None):
         captured["rpc"] = rpc_url
         return []
 
@@ -138,7 +138,7 @@ def test_discover_dependencies_bfs_mocked(monkeypatch):
         dep_c: "0x6000",  # no PUSH20
     }
 
-    def fake_get_code(_rpc, address):
+    def fake_get_code(_rpc, address, chain_id=None):
         return code_map.get(fdc.normalize_address(address), "0x")
 
     monkeypatch.setattr(fdc, "get_code", fake_get_code)
@@ -149,6 +149,6 @@ def test_discover_dependencies_bfs_mocked(monkeypatch):
 
 def test_discover_dependencies_raises_on_empty_root(monkeypatch):
     """discover_dependencies raises if root has no deployed bytecode."""
-    monkeypatch.setattr(fdc, "get_code", lambda _rpc, _addr: "0x")
+    monkeypatch.setattr(fdc, "get_code", lambda _rpc, _addr, chain_id=None: "0x")
     with pytest.raises(RuntimeError, match="no deployed bytecode"):
         fdc.discover_dependencies("https://rpc.example", "0x" + "11" * 20)

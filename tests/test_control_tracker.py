@@ -84,7 +84,7 @@ def test_build_control_snapshot(monkeypatch):
 
     state = {"owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -147,7 +147,7 @@ def test_build_control_snapshot_decodes_projected_struct_address(monkeypatch):
         ],
     }
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -180,7 +180,7 @@ def test_build_control_snapshot_heartbeats_while_reading_latest_block(monkeypatc
         "tracked_controllers": [],
     }
 
-    def slow_current_block(_rpc_url: str) -> int:
+    def slow_current_block(_rpc_url: str, *, chain_id=None) -> int:
         assert release.wait(timeout=2)
         return 16
 
@@ -222,7 +222,7 @@ def test_build_control_snapshot_handles_reverting_getter(monkeypatch):
         ],
     }
 
-    def fake_rpc(_rpc_url, method, _params):
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -284,7 +284,7 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
         ],
     }
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -299,7 +299,7 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
     monkeypatch.setattr(
         "services.resolution.tracking.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     # With the impl fallback, the reverting proxy read recovers from the impl.
@@ -361,7 +361,7 @@ def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch)
     manager = "2093bbb221f1d8c7c932c32ee28be6dee4a37a6a"  # beacon.owner() (AvsOperatorsManager owner)
     plan = _avs_operator_plan(instance)
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -377,7 +377,7 @@ def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch)
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
     monkeypatch.setattr(
         "services.resolution.tracking.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     # Baseline: no beacon attribution -> the instance carries only its own controllers.
@@ -404,7 +404,7 @@ def test_build_control_snapshot_skips_beacon_owner_when_zero_or_reverting(monkey
     plan = _avs_operator_plan(instance)
     mode = {"owner": "zero"}
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -453,7 +453,7 @@ def test_build_control_snapshot_preserves_role_identifier_for_capability_resolve
         ],
     }
 
-    def fake_rpc(_rpc_url, method, _params):
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -476,7 +476,7 @@ def test_build_control_snapshot_preserves_role_identifier_for_capability_resolve
 
 
 def test_classify_resolved_address_detects_safe(monkeypatch):
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_getCode":
             return "0x6000"
         if method == "eth_call":
@@ -513,7 +513,7 @@ def test_classify_resolved_address_detects_safe(monkeypatch):
 
 
 def test_classify_resolved_address_detects_timelock(monkeypatch):
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_getCode":
             return "0x6000"
         if method == "eth_call":
@@ -541,7 +541,7 @@ def test_classify_resolved_address_detects_timelock(monkeypatch):
 
 
 def test_classify_resolved_address_detects_proxy_admin(monkeypatch):
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_getCode":
             return "0x6000"
         if method == "eth_call":
@@ -640,7 +640,7 @@ def _snapshot_parity_helper(monkeypatch, fanout: str):
         ],
     }
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -660,7 +660,7 @@ def _snapshot_parity_helper(monkeypatch, fanout: str):
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
     monkeypatch.setattr(
         "services.resolution.tracking.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     return build_control_snapshot(plan, "https://rpc.example")
 
@@ -772,7 +772,7 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
     word_by_selector = {selector(f"{rs['target']}()"): "0x" + format(val, "064x") for _src, rs, val in scalars}
     word_by_selector[selector("owner()")] = "0x" + "00" * 12 + owner_addr
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -830,7 +830,7 @@ def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch)
         ],
     }
 
-    def fake_rpc(_rpc_url, method, _params):
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -884,7 +884,7 @@ def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
         ],
     }
 
-    def fake_rpc(_rpc_url, method, _params):
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -952,7 +952,7 @@ def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
     plan = _multi_controller_plan(target)
 
     # Per-controller wire (used when prewarm is OFF; also serves eth_blockNumber always).
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -962,7 +962,7 @@ def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
     monkeypatch.setattr(
         "services.resolution.tracking.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     # Multicall3 prewarm wire (used when prewarm is ON) — same getter values.
@@ -1010,7 +1010,7 @@ def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
 
     per_call = {"n": 0}
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
         if method == "eth_call":
@@ -1024,7 +1024,7 @@ def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
     monkeypatch.setattr(
         "services.resolution.tracking.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     def fake_multicall_rpc(_rpc_url, _method, params, **_kw):

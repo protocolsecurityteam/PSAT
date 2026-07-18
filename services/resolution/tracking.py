@@ -63,13 +63,15 @@ _CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "1").lower() 
 _SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() in ("1", "true", "yes")
 
 
-def type_authority_contract(rpc_url: str, address: str, block_tag: str = "latest") -> dict[str, object]:
+def type_authority_contract(
+    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
+) -> dict[str, object]:
     """Compatibility hook for old callers/tests.
 
     Runtime authority expansion is now handled by semantic predicate
     capabilities, not by standard-specific controller probes.
     """
-    del rpc_url, address, block_tag
+    del rpc_url, address, block_tag, chain_id
     return {}
 
 
@@ -165,9 +167,11 @@ def _decode_projected_member_value(raw_value: str, read_spec: ControllerReadSpec
     return str(value)
 
 
-def _eth_call_raw(rpc_url: str, contract_address: str, signature: str, block_tag: str = "latest") -> str:
+def _eth_call_raw(
+    rpc_url: str, contract_address: str, signature: str, block_tag: str = "latest", *, chain_id: int | None = None
+) -> str:
     call = {"to": contract_address, "data": _selector(signature)}
-    raw = _rpc_request(rpc_url, "eth_call", [call, block_tag])
+    raw = _rpc_request(rpc_url, "eth_call", [call, block_tag], chain_id=chain_id)
     if not isinstance(raw, str) or not raw.startswith("0x"):
         raise RuntimeError(f"Unexpected eth_call result for {signature}: {raw!r}")
     return raw
@@ -199,12 +203,18 @@ def _decode_topic_value(raw_value: str, abi_type: str):
 
 
 def _try_eth_call_decoded(
-    rpc_url: str, contract_address: str, signature: str, abi_type: str, block_tag: str = "latest"
+    rpc_url: str,
+    contract_address: str,
+    signature: str,
+    abi_type: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int | None = None,
 ) -> object | None:
     """Decoded value, None (function absent / decode failure), or _PROBE_ERROR (transient RPC issue — caller should not
     cache)."""
     try:
-        raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag)
+        raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag, chain_id=chain_id)
         if _normalize_hex(raw) in {"0x", "0x0"}:
             return None
         try:
@@ -215,8 +225,8 @@ def _try_eth_call_decoded(
         return _PROBE_ERROR
 
 
-def _get_code(rpc_url: str, address: str, block_tag: str = "latest") -> str:
-    raw = _rpc_request(rpc_url, "eth_getCode", [address, block_tag])
+def _get_code(rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None) -> str:
+    raw = _rpc_request(rpc_url, "eth_getCode", [address, block_tag], chain_id=chain_id)
     return _normalize_hex(raw if isinstance(raw, str) else "0x")
 
 
@@ -231,7 +241,7 @@ def _coerce_int(value: object) -> int:
 
 
 def classify_resolved_address_with_status(
-    rpc_url: str, address: str, block_tag: str = "latest"
+    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> tuple[str, dict[str, object], bool]:
     """Like ``classify_resolved_address`` but also returns a ``cacheable`` flag (False if any probe errored)."""
     normalized = _normalize_hex(address)
@@ -247,9 +257,9 @@ def classify_resolved_address_with_status(
             del _CLASSIFY_CACHE[cache_key]
 
     if _CLASSIFY_BATCH_ENABLED:
-        kind, details, had_error = _classify_uncached_batched(rpc_url, normalized, block_tag)
+        kind, details, had_error = _classify_uncached_batched(rpc_url, normalized, block_tag, chain_id=chain_id)
     else:
-        kind, details, had_error = _classify_uncached(rpc_url, normalized, block_tag)
+        kind, details, had_error = _classify_uncached(rpc_url, normalized, block_tag, chain_id=chain_id)
 
     if not had_error:
         with _CLASSIFY_CACHE_LOCK:
@@ -262,10 +272,12 @@ def classify_resolved_address_with_status(
     return kind, details, not had_error
 
 
-def classify_resolved_address(rpc_url: str, address: str, block_tag: str = "latest") -> tuple[str, dict[str, object]]:
+def classify_resolved_address(
+    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
+) -> tuple[str, dict[str, object]]:
     """Backwards-compatible wrapper that drops the cacheable flag; use the ``_with_status`` form if you maintain a
     downstream cache."""
-    kind, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, block_tag)
+    kind, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, block_tag, chain_id=chain_id)
     return kind, details
 
 
@@ -293,10 +305,10 @@ def _decode_probe_result(raw: object, abi_type: str) -> object | None:
         return None
 
 
-def _batch_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
+def _batch_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
     """Fire all 6 classify probes in one JSON-RPC batch; per-slot errors yield _PROBE_ERROR so callers skip caching."""
     calls = [("eth_call", [{"to": address, "data": _selector(sig)}, block_tag]) for sig, _abi in _CLASSIFY_PROBE_SIGS]
-    raw_results = _rpc_batch_request_with_status(rpc_url, calls)
+    raw_results = _rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     decoded: list[object] = []
     for (raw, had_err), (_sig, abi_type) in zip(raw_results, _CLASSIFY_PROBE_SIGS):
         if had_err:
@@ -306,7 +318,7 @@ def _batch_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
     return decoded
 
 
-def _multicall_probe(rpc_url: str, address: str, block_tag: str) -> list[object]:
+def _multicall_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
     """The 6 classify probes as ONE Multicall3 aggregate3 call. These are caller-independent view getters,
     so routing them through Multicall3 (which becomes msg.sender) returns identical values. A reverting probe
     → ``success=False`` → ``_PROBE_ERROR``, the same sentinel a JSON-RPC per-call error yields. Raises on
@@ -314,7 +326,7 @@ def _multicall_probe(rpc_url: str, address: str, block_tag: str) -> list[object]
     from utils.rpc import multicall3_aggregate3
 
     calls = [(address, _selector(sig)) for sig, _abi in _CLASSIFY_PROBE_SIGS]
-    raw_results = multicall3_aggregate3(rpc_url, calls, block_tag)
+    raw_results = multicall3_aggregate3(rpc_url, calls, block_tag, chain_id=chain_id)
     decoded: list[object] = []
     for (success, raw), (_sig, abi_type) in zip(raw_results, _CLASSIFY_PROBE_SIGS):
         if not success:
@@ -324,25 +336,27 @@ def _multicall_probe(rpc_url: str, address: str, block_tag: str) -> list[object]
     return decoded
 
 
-def _probe_classify(rpc_url: str, address: str, block_tag: str) -> list[object]:
+def _probe_classify(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
     """Multicall3 the classify probes when enabled, falling back to the JSON-RPC array batch (identical
     decode) on any failure. The downstream all-``_PROBE_ERROR`` → sequential safety net is unchanged."""
     if _CLASSIFY_MULTICALL_ENABLED:
         try:
-            return _multicall_probe(rpc_url, address, block_tag)
+            return _multicall_probe(rpc_url, address, block_tag, chain_id=chain_id)
         except Exception:
             pass
-    return _batch_probe(rpc_url, address, block_tag)
+    return _batch_probe(rpc_url, address, block_tag, chain_id=chain_id)
 
 
-def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) -> tuple[str, dict[str, object], bool]:
+def _classify_uncached_batched(
+    rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
+) -> tuple[str, dict[str, object], bool]:
     """Same contract as ``_classify_uncached`` but batches the 6 probes upfront, saving 5 RTT in the common generic-
     contract case."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
     try:
-        code = _get_code(rpc_url, normalized, block_tag)
+        code = _get_code(rpc_url, normalized, block_tag, chain_id=chain_id)
     except Exception:
         return "contract", {"address": normalized}, True
     if code in {"0x", "0x0"}:
@@ -353,7 +367,7 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
         try:
             from utils.rpc import get_code_with_keccak
 
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized)
+            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
         except Exception:
             bytecode_keccak = None
         if bytecode_keccak is not None:
@@ -364,11 +378,11 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
                 details.update(partial)
                 return kind, details, False
 
-    probes = _probe_classify(rpc_url, normalized, block_tag)
+    probes = _probe_classify(rpc_url, normalized, block_tag, chain_id=chain_id)
     # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
     # accuracy.
     if all(p is _PROBE_ERROR for p in probes):
-        return _classify_uncached(rpc_url, normalized, block_tag)
+        return _classify_uncached(rpc_url, normalized, block_tag, chain_id=chain_id)
     safe_owners_raw, safe_threshold_raw, min_delay_a, min_delay_b, upgrade_iv, owner_raw = probes
 
     def _ok(v: object) -> object | None:
@@ -414,7 +428,7 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
 
     details = {"address": normalized}
     try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag))
+        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
         had_error = True
     return "contract", details, had_error
@@ -425,13 +439,15 @@ def _classify_uncached_batched(rpc_url: str, normalized: str, block_tag: str) ->
 _KNOWN_BYTECODE_IMPLS: dict[str, tuple[str, dict[str, object]]] = {}
 
 
-def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[str, dict[str, object], bool]:
+def _classify_uncached(
+    rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
+) -> tuple[str, dict[str, object], bool]:
     """The classifier. Returns ``(kind, details, had_rpc_error)``; caller must skip caching on had_rpc_error."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
     try:
-        code = _get_code(rpc_url, normalized, block_tag)
+        code = _get_code(rpc_url, normalized, block_tag, chain_id=chain_id)
     except Exception:
         return "contract", {"address": normalized}, True
     if code in {"0x", "0x0"}:
@@ -442,7 +458,7 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
         try:
             from utils.rpc import get_code_with_keccak
 
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized)
+            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
         except Exception:
             bytecode_keccak = None
         if bytecode_keccak is not None:
@@ -457,7 +473,7 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
 
     def _probe(signature: str, abi_type: str) -> object | None:
         nonlocal had_error
-        result = _try_eth_call_decoded(rpc_url, normalized, signature, abi_type, block_tag)
+        result = _try_eth_call_decoded(rpc_url, normalized, signature, abi_type, block_tag, chain_id=chain_id)
         if result is _PROBE_ERROR:
             had_error = True
             return None
@@ -499,14 +515,14 @@ def _classify_uncached(rpc_url: str, normalized: str, block_tag: str) -> tuple[s
 
     details = {"address": normalized}
     try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag))
+        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
         had_error = True
     return "contract", details, had_error
 
 
-def _current_block_number(rpc_url: str) -> int:
-    raw = _rpc_request(rpc_url, "eth_blockNumber", [])
+def _current_block_number(rpc_url: str, *, chain_id: int | None = None) -> int:
+    raw = _rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
     if not isinstance(raw, str) or not raw.startswith("0x"):
         raise RuntimeError(f"Unexpected eth_blockNumber result: {raw!r}")
     return int(raw, 16)
@@ -533,6 +549,7 @@ def _read_polling_source(
     read_spec: ControllerReadSpec | None = None,
     *,
     prewarm: dict[tuple[str, str], str] | None = None,
+    chain_id: int | None = None,
 ) -> str:
     signature = f"{_getter_target(source, read_spec)}()"
     if prewarm is not None:
@@ -542,11 +559,13 @@ def _read_polling_source(
         cached = prewarm.get((contract_address.lower(), _selector(signature)))
         if cached is not None:
             return _decode_controller_value(cached, controller_kind, read_spec)
-    raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag)
+    raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag, chain_id=chain_id)
     return _decode_controller_value(raw, controller_kind, read_spec)
 
 
-def _prewarm_snapshot_getters(rpc_url: str, plan: ControlTrackingPlan, block_tag: str) -> dict[tuple[str, str], str]:
+def _prewarm_snapshot_getters(
+    rpc_url: str, plan: ControlTrackingPlan, block_tag: str, *, chain_id: int | None = None
+) -> dict[tuple[str, str], str]:
     """Pre-read every tracked controller's ``{target}()`` getter on the contract in ONE Multicall3, at the
     same ``block_tag`` the per-controller path uses.
 
@@ -574,7 +593,9 @@ def _prewarm_snapshot_getters(rpc_url: str, plan: ControlTrackingPlan, block_tag
     from utils.rpc import multicall3_aggregate3
 
     try:
-        results = multicall3_aggregate3(rpc_url, [(contract_address, sel) for sel in selectors], block_tag)
+        results = multicall3_aggregate3(
+            rpc_url, [(contract_address, sel) for sel in selectors], block_tag, chain_id=chain_id
+        )
     except Exception:
         return {}
     key_addr = contract_address.lower()
@@ -593,6 +614,7 @@ def build_control_snapshot(
     heartbeat: Callable[[], None] | None = None,
     getter_fallback_address: str | None = None,
     beacon_address: str | None = None,
+    chain_id: int | None = None,
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
@@ -626,11 +648,15 @@ def build_control_snapshot(
         return outcome
 
     block_number = (
-        _call_with_heartbeat(lambda: _current_block_number(rpc_url)) if block_tag == "latest" else int(block_tag, 16)
+        _call_with_heartbeat(lambda: _current_block_number(rpc_url, chain_id=chain_id))
+        if block_tag == "latest"
+        else int(block_tag, 16)
     )
     # One Multicall3 of all controller getters up front; _read_polling_source consumes it (successful reads
     # only). Empty {} when disabled or on any failure → per-controller reads, identical results.
-    prewarm = _prewarm_snapshot_getters(rpc_url, plan, block_tag) if _SNAPSHOT_MULTICALL_ENABLED else {}
+    prewarm = (
+        _prewarm_snapshot_getters(rpc_url, plan, block_tag, chain_id=chain_id) if _SNAPSHOT_MULTICALL_ENABLED else {}
+    )
     controller_values: dict[str, Any] = {}
 
     def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
@@ -653,7 +679,14 @@ def build_control_snapshot(
 
         def _read_entry(read_address: str, observed_via: str) -> dict[str, Any]:
             value = _read_polling_source(
-                rpc_url, read_address, source, controller["kind"], block_tag, read_spec=spec, prewarm=prewarm
+                rpc_url,
+                read_address,
+                source,
+                controller["kind"],
+                block_tag,
+                read_spec=spec,
+                prewarm=prewarm,
+                chain_id=chain_id,
             )
             if controller["kind"] == "role_identifier":
                 return {
@@ -677,7 +710,7 @@ def build_control_snapshot(
                 "block_number": block_number,
                 "observed_via": observed_via,
             }
-            resolved_type, details = classify_resolved_address(rpc_url, value, block_tag)
+            resolved_type, details = classify_resolved_address(rpc_url, value, block_tag, chain_id=chain_id)
             entry["resolved_type"] = resolved_type
             entry["details"] = details
             return entry
@@ -751,7 +784,7 @@ def build_control_snapshot(
         controller_values[cid] = entry
 
     if beacon_address:
-        beacon_entry = _read_beacon_owner(rpc_url, beacon_address, block_tag, block_number)
+        beacon_entry = _read_beacon_owner(rpc_url, beacon_address, block_tag, block_number, chain_id=chain_id)
         if beacon_entry is not None:
             controller_values["beacon_owner"] = beacon_entry
 
@@ -764,20 +797,22 @@ def build_control_snapshot(
     }
 
 
-def _read_beacon_owner(rpc_url: str, beacon_address: str, block_tag: str, block_number: int) -> dict[str, Any] | None:
+def _read_beacon_owner(
+    rpc_url: str, beacon_address: str, block_tag: str, block_number: int, *, chain_id: int | None = None
+) -> dict[str, Any] | None:
     """Read ``owner()`` on the governing UpgradeableBeacon and shape it as an
     upgrade-authority controller value. Returns ``None`` when the beacon exposes
     no live owner (read reverts or returns the zero address) so no empty row is
     minted."""
     try:
-        raw = _eth_call_raw(rpc_url, beacon_address, "owner()", block_tag)
+        raw = _eth_call_raw(rpc_url, beacon_address, "owner()", block_tag, chain_id=chain_id)
         owner = _decode_controller_value(raw, "external_contract")
     except Exception as exc:
         logger.debug("beacon owner read failed for %s: %s", beacon_address, exc)
         return None
     if not owner or owner in {"0x", "0x0"} or set(owner.replace("0x", "")) <= {"0"}:
         return None
-    resolved_type, details = classify_resolved_address(rpc_url, owner, block_tag)
+    resolved_type, details = classify_resolved_address(rpc_url, owner, block_tag, chain_id=chain_id)
     details = {**details, "source": "beacon", "beacon_address": beacon_address.lower()}
     return {
         "source": "beacon",

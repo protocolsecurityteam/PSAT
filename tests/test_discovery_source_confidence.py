@@ -847,7 +847,7 @@ class TestProxyOfHighImplRuntimeAdoption:
         # verdict with the HIGH impl as its implementation.
         monkeypatch.setattr(
             "services.discovery.classifier.classify_single",
-            lambda address, rpc_url: {
+            lambda address, rpc_url, **_kw: {
                 "address": address,
                 "type": "proxy",
                 "proxy_type": "eip1967",
@@ -927,7 +927,7 @@ class TestProxyOfHighImplRuntimeAdoption:
 
         monkeypatch.setattr(
             "services.discovery.classifier.classify_single",
-            lambda address, rpc_url: {
+            lambda address, rpc_url, **_kw: {
                 "address": address,
                 "type": "proxy",
                 "proxy_type": "eip1967",
@@ -1022,7 +1022,7 @@ class TestProxyOfHighImplRuntimeAdoption:
 
         monkeypatch.setattr(
             "services.discovery.classifier.classify_single",
-            lambda address, rpc_url: {
+            lambda address, rpc_url, **_kw: {
                 "address": address,
                 "type": "proxy",
                 "proxy_type": "eip1967",

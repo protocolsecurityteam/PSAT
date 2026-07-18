@@ -80,7 +80,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     """Wire up the dependency chain with counters so we can assert which
     layers got skipped on cache hit."""
 
-    def _classify(_addr, _rpc):
+    def _classify(_addr, _rpc, **_kw):
         return {"type": "contract"}
 
     def _fetch(_addr, **_kw):
@@ -103,7 +103,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     def _build_plan(_analysis):
         return {"contract_address": "0xabc", "controllers": []}
 
-    def _build_snapshot(_plan, _rpc_url):
+    def _build_snapshot(_plan, _rpc_url, **_kw):
         snapshot_calls.append(_plan)
         return {"controllers": []}
 
@@ -123,7 +123,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     # before this stub).
     monkeypatch.setattr(
         "utils.rpc.get_code_with_keccak",
-        lambda _rpc, _addr: ("0x60", "0x" + "ab" * 32),
+        lambda _rpc, _addr, chain_id=None: ("0x60", "0x" + "ab" * 32),
     )
 
 
@@ -204,7 +204,7 @@ def test_cache_keyed_by_effective_address_not_input(monkeypatch):
 
     impl_addr = "0x" + "11" * 20
 
-    def _classify_proxy_to_impl(_addr, _rpc):
+    def _classify_proxy_to_impl(_addr, _rpc, **_kw):
         return {"type": "proxy", "implementation": impl_addr}
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _classify_proxy_to_impl)
@@ -248,7 +248,7 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
 
     # Both addresses share the same bytecode → same keccak.
     keccak = "0x" + "ab" * 32
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr: ("0x60", keccak))
+    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak))
 
     addr_a = "0x" + "11" * 20
     addr_b = "0x" + "22" * 20

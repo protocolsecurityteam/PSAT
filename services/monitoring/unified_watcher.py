@@ -41,7 +41,7 @@ from services.monitoring import (
     HEARTBEAT_PROTOCOL_SCANNER,
     emit_monitor_cycle,
 )
-from services.monitoring.chain_rpc import rpc_for_chain
+from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
@@ -232,8 +232,8 @@ _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
 _AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
 
 
-def get_latest_block(rpc_url: str) -> int:
-    result = rpc_request(rpc_url, "eth_blockNumber", [])
+def get_latest_block(rpc_url: str, *, chain_id: int | None = None) -> int:
+    result = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
     return int(result, 16)
 
 
@@ -616,7 +616,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
 
     def _head_for(chain: str) -> int:
         if chain not in head_by_chain:
-            head_by_chain[chain] = get_latest_block(rpc_by_chain[chain])
+            head_by_chain[chain] = get_latest_block(rpc_by_chain[chain], chain_id=chain_id_for(chain))
         return head_by_chain[chain]
 
     def _fetcher_for(chain: str) -> RpcEventLogFetcher:
@@ -625,6 +625,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 rpc_by_chain[chain],
                 max_block_range=_max_getlogs_range_for(chain),
                 min_bisect_span=FETCHER_MIN_BISECT_SPAN,
+                chain_id=chain_id_for(chain),
             )
         return fetchers[chain]
 

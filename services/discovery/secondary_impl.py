@@ -49,13 +49,13 @@ def _address_from_storage_word(word: str | None, offset: int = 0) -> str | None:
     return addr
 
 
-def _has_code(rpc_request: Any, rpc_url: str, addr: str, block: str) -> bool:
+def _has_code(rpc_request: Any, rpc_url: str, addr: str, block: str, *, chain_id: int | None = None) -> bool:
     """Whether ``addr`` is a deployed contract (non-empty bytecode). Filters
     candidate slots that decode to a non-logic / garbage address — the safety
     net that makes over-inclusive detection (e.g. a constant read for an
     unrelated reason) harmless."""
     try:
-        code = rpc_request(rpc_url, "eth_getCode", [addr, block])
+        code = rpc_request(rpc_url, "eth_getCode", [addr, block], chain_id=chain_id)
     except Exception as exc:
         logger.warning("secondary-impl getCode failed (addr=%s): %s", addr, exc)
         return False
@@ -70,6 +70,7 @@ def resolve_secondary_impl_addresses(
     block: str = "latest",
     implementation: str | None = None,
     require_code: bool = True,
+    chain_id: int | None = None,
 ) -> list[str]:
     """Read each pointer's slot against the proxy → deduped secondary impl addrs.
 
@@ -96,14 +97,14 @@ def resolve_secondary_impl_addresses(
         except (TypeError, ValueError):
             continue
         try:
-            word = rpc_request(rpc_url, "eth_getStorageAt", [proxy_address, slot_hex, block])
+            word = rpc_request(rpc_url, "eth_getStorageAt", [proxy_address, slot_hex, block], chain_id=chain_id)
         except Exception as exc:
             logger.warning("secondary-impl slot read failed (proxy=%s slot=%s): %s", proxy_address, slot_hex, exc)
             continue
         addr = _address_from_storage_word(word, int(ptr.get("offset") or 0))
         if not addr or addr in (proxy_lc, impl_lc) or addr in seen:
             continue
-        if require_code and not _has_code(rpc_request, rpc_url, addr, block):
+        if require_code and not _has_code(rpc_request, rpc_url, addr, block, chain_id=chain_id):
             continue
         seen.add(addr)
         out.append(addr)

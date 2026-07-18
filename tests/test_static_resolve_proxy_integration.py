@@ -81,7 +81,7 @@ def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"type": "regular"},
+        lambda address, rpc_url, **_kw: {"type": "regular"},
     )
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
@@ -104,7 +104,7 @@ def test_non_proxy_library_type(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"type": "library"},
+        lambda address, rpc_url, **_kw: {"type": "library"},
     )
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
@@ -128,7 +128,7 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "eip1967",
             "implementation": _IMPL_ADDR,
@@ -170,7 +170,7 @@ def test_proxy_child_job_inherits_chain(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "eip1967",
             "implementation": _IMPL_ADDR,
@@ -194,7 +194,7 @@ def test_proxy_uses_job_name_for_child_naming(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "eip1967",
             "implementation": _IMPL_ADDR,
@@ -217,7 +217,7 @@ def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "eip1967",
             "implementation": _IMPL_ADDR,
@@ -258,7 +258,7 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "beacon",
             "implementation": _IMPL_ADDR,
             "owner": "0x2222222222222222222222222222222222222222",
@@ -306,7 +306,7 @@ def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "diamond",
             "implementation": _IMPL_ADDR,
@@ -343,7 +343,7 @@ def test_diamond_proxy_deduplicates_impl_in_facets(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "diamond",
             "implementation": _IMPL_ADDR,
@@ -370,7 +370,7 @@ def test_proxy_facets_only_no_impl(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "diamond",
             "implementation": None,
@@ -424,7 +424,7 @@ def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
     captured_rpc = []
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: (
+        lambda address, rpc_url, **_kw: (
             captured_rpc.append(rpc_url) or {"type": "proxy", "proxy_type": "eip1967", "implementation": _IMPL_ADDR}
         ),
     )
@@ -448,7 +448,7 @@ def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
     captured_rpc = []
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: captured_rpc.append(rpc_url) or {"type": "regular"},
+        lambda address, rpc_url, **_kw: captured_rpc.append(rpc_url) or {"type": "regular"},
     )
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
@@ -472,7 +472,7 @@ def test_classify_exception_stores_classification_error(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: (_ for _ in ()).throw(ConnectionError("RPC timeout")),
+        lambda address, rpc_url, **_kw: (_ for _ in ()).throw(ConnectionError("RPC timeout")),
     )
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
@@ -493,7 +493,7 @@ def test_classify_generic_exception_stores_error(monkeypatch):
 
     store_calls, _ = _capture_store_and_create(monkeypatch)
 
-    def _raise(address, rpc_url):
+    def _raise(address, rpc_url, **_kw):
         raise ValueError("unexpected bytecode format")
 
     monkeypatch.setattr(
@@ -526,7 +526,7 @@ def test_existing_impl_job_skips_child_creation(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "eip1967",
             "implementation": _IMPL_ADDR,
@@ -564,7 +564,7 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
 
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {
+        lambda address, rpc_url, **_kw: {
             "type": "proxy",
             "proxy_type": "diamond",
             "implementation": _IMPL_ADDR,
@@ -596,7 +596,7 @@ def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
 
     store_calls, created_jobs = _capture_store_and_create(monkeypatch)
 
-    def _raise(address, rpc_url):
+    def _raise(address, rpc_url, **_kw):
         raise ClassificationIncompleteError("proxy slots unread")
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)

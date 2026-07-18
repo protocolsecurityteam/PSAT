@@ -48,7 +48,7 @@ def _isolated_cache(monkeypatch):
 def test_repeat_call_hits_cache(monkeypatch):
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         calls["n"] += 1
         return "0x6080604052"  # tiny EVM bytecode
 
@@ -64,7 +64,7 @@ def test_repeat_call_hits_cache(monkeypatch):
 def test_different_addresses_keep_separate_slots(monkeypatch):
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, params, retries=1):
+    def _fake_rpc(_url, _method, params, retries=1, *, chain_id=None):
         calls["n"] += 1
         # Return different bytecode per address so we can detect mixups.
         return "0x" + (params[0][2:4] * 32)
@@ -89,7 +89,7 @@ def test_rpc_error_does_not_cache(monkeypatch):
     classify on this address to misread an EOA / wrong contract."""
     raises = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         raises["n"] += 1
         if raises["n"] == 1:
             raise RuntimeError("RPC down")
@@ -109,7 +109,7 @@ def test_rpc_error_does_not_cache(monkeypatch):
 def test_ttl_expiry_triggers_refetch(monkeypatch):
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         calls["n"] += 1
         return "0x60"
 
@@ -129,7 +129,7 @@ def test_get_code_and_get_code_with_keccak_share_cache(monkeypatch):
     """One call populates the cache; the OTHER getter sees the same hit."""
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         calls["n"] += 1
         return "0xabcd"
 
@@ -160,7 +160,7 @@ def test_empty_bytecode_is_cached_with_correct_keccak(monkeypatch):
     the cache (don't re-probe EOAs every classify)."""
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         calls["n"] += 1
         return "0x"
 
@@ -182,7 +182,7 @@ def test_address_normalization_keys_lowercased(monkeypatch):
     pressure."""
     calls = {"n": 0}
 
-    def _fake_rpc(_url, _method, _params, retries=1):
+    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
         calls["n"] += 1
         return "0x60"
 
@@ -219,7 +219,7 @@ def test_get_code_uses_cached_value_with_unrelated_get_code_with_keccak(monkeypa
     each function its own private cache would silently double RPC load."""
     calls = []
 
-    def _fake_rpc(_url, _method, params, retries=1):
+    def _fake_rpc(_url, _method, params, retries=1, *, chain_id=None):
         calls.append(params[0])
         return "0xdeadbeef"
 
@@ -243,7 +243,7 @@ def test_get_code_batch_single_request_for_n_addresses(monkeypatch):
     rpc.clear_getcode_cache()
     calls = {"n": 0}
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         calls["n"] += 1
         return [(f"0x{i:02x}", False) for i in range(len(calls_list))]
 
@@ -259,7 +259,7 @@ def test_get_code_batch_short_circuits_already_cached(monkeypatch):
     Saves the wire entirely when subsequent batches overlap with prior."""
     rpc.clear_getcode_cache()
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         # Should only ever be called for cache-MISS addresses.
         assert len(calls_list) <= 1, "cached addresses must be filtered before batching"
         return [("0xff00", False) for _ in calls_list]
@@ -294,7 +294,7 @@ def test_get_code_batch_omits_errored_slots(monkeypatch):
     trigger to retry per-address."""
     rpc.clear_getcode_cache()
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         # First call succeeds, second errors, third succeeds.
         return [("0x60", False), (None, True), ("0x80", False)]
 
@@ -313,7 +313,7 @@ def test_get_code_batch_populates_keccak_index(monkeypatch):
     Step 2 / classifier shortcut from Step 3)."""
     rpc.clear_getcode_cache()
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         return [("0xdeadbeef", False) for _ in calls_list]
 
     follow_up_calls = {"n": 0}
@@ -354,7 +354,7 @@ def test_get_code_batch_handles_0x0_provider_response(monkeypatch):
     """Same odd-length protection in the batch path."""
     rpc.clear_getcode_cache()
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         return [("0x0", False) for _ in calls_list]
 
     monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)
@@ -382,7 +382,7 @@ def test_get_code_batch_evicts_when_over_ceiling(monkeypatch):
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 8)
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         return [("0x60", False) for _ in calls_list]
 
     monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)
@@ -405,7 +405,7 @@ def test_get_code_batch_eviction_keeps_recent_entries(monkeypatch):
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 4)
 
-    def _fake_batch(_url, calls_list):
+    def _fake_batch(_url, calls_list, *, chain_id=None):
         return [("0x60", False) for _ in calls_list]
 
     monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)

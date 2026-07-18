@@ -52,7 +52,7 @@ def _stub_get_code(monkeypatch, code: str = "0x60806040"):
 
 def _stub_keccak(monkeypatch, keccak_hex: str):
     """Stub utils.rpc.get_code_with_keccak so the shortcut can read the keccak."""
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr: ("0x60", keccak_hex))
+    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak_hex))
 
 
 def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):

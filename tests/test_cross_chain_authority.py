@@ -167,7 +167,7 @@ def _classify_stub(kind: str):
     """Force the generic classifier to a fixed kind so we can prove the
     cross-chain recognizer overrides it."""
 
-    def _stub(rpc_url, address):
+    def _stub(rpc_url, address, **_kw):
         return (kind, {"address": address}, True)
 
     return _stub

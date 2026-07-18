@@ -1064,9 +1064,9 @@ def _build_indexer_fetchers(
         if info.hypersync_url is None:
             continue
         rpc_url = require_rpc_url(chain_id=info.chain_id)
-        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url)
-        head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url)
-        block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url)
+        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url, chain_id=info.chain_id)
+        head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=info.chain_id)
+        block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=info.chain_id)
     return fetchers, head_fetchers, block_hash_fetchers
 
 

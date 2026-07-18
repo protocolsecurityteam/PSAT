@@ -42,6 +42,11 @@ DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 
 
 def get_latest_block(rpc_url: str) -> int:
+    # No chain_id declared: the only callers are the legacy single-chain
+    # ``run_scan_loop`` / ``run_poll_loop`` CLI scanner, which is handed a bare
+    # ``--rpc-url`` and scans ALL WatchedProxy rows (mixed chains) against it —
+    # there is no single chain in scope to declare. The per-chain scanner is
+    # ``unified_watcher`` (armed). Reported as a finding, not papered over.
     result = rpc_request(rpc_url, "eth_blockNumber", [])
     return int(result, 16)
 
@@ -114,6 +119,10 @@ def scan_for_upgrades(session: Session, rpc_url: str) -> list[ProxyUpgradeEvent]
         }
 
         try:
+            # No chain_id declared: this legacy single-chain scanner (only reached
+            # via run_scan_loop CLI) filters ALL WatchedProxy rows (mixed chains)
+            # against one bare rpc_url — no single chain in scope. Reported as a
+            # finding; the per-chain scanner is unified_watcher (armed).
             logs = rpc_request(rpc_url, "eth_getLogs", [filter_params])
         except Exception as exc:
             logger.warning(
@@ -192,10 +201,12 @@ def scan_for_upgrades(session: Session, rpc_url: str) -> list[ProxyUpgradeEvent]
     return new_events
 
 
-def _read_slot(rpc_url: str, address: str, slot: str, block: str = "latest") -> str | None:
+def _read_slot(
+    rpc_url: str, address: str, slot: str, block: str = "latest", *, chain_id: int | None = None
+) -> str | None:
     """Read a storage slot and return the address if non-zero, else None."""
     try:
-        result = rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block])
+        result = rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block], chain_id=chain_id)
         if result and result != "0x" + "0" * 64:
             addr = "0x" + result[-40:]
             if addr != "0x" + "0" * 40:
@@ -205,10 +216,10 @@ def _read_slot(rpc_url: str, address: str, slot: str, block: str = "latest") -> 
     return None
 
 
-def _call_getter(rpc_url: str, address: str, selector: str) -> str | None:
+def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | None = None) -> str | None:
     """Call a view function that returns a single address.  Returns None on revert."""
     try:
-        result = rpc_request(rpc_url, "eth_call", [{"to": address, "data": selector}, "latest"])
+        result = rpc_request(rpc_url, "eth_call", [{"to": address, "data": selector}, "latest"], chain_id=chain_id)
         if result and result != "0x" + "0" * 64:
             addr = "0x" + result[-40:]
             if addr != "0x" + "0" * 40:
@@ -262,6 +273,8 @@ def resolve_current_implementation(
     rpc_url: str,
     block: str = "latest",
     proxy_type: str | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> str | None:
     """Resolve the current implementation for a proxy.
 
@@ -273,34 +286,37 @@ def resolve_current_implementation(
     When *block* is not ``"latest"`` only the EIP-1967 slot is read —
     this is the fast path used by scan_for_upgrades for Aave V2's
     ``Upgraded(uint256)`` events.
+
+    *chain_id* (the proxy's chain, threaded from the static worker) arms the
+    inv-7 URL↔chain_id guard on every underlying read; None keeps it a no-op.
     """
     # Fast path: historical block lookup (Aave V2 scan loop)
     if block != "latest":
-        return _read_slot(rpc_url, proxy_address, _EIP1967_IMPL_SLOT, block)
+        return _read_slot(rpc_url, proxy_address, _EIP1967_IMPL_SLOT, block, chain_id=chain_id)
 
     # Fast path: known proxy_type → single targeted RPC call
     if proxy_type and proxy_type in _RESOLVE_BY_TYPE:
         method, arg = _RESOLVE_BY_TYPE[proxy_type]
         if method == "slot":
-            return _read_slot(rpc_url, proxy_address, arg)
-        return _call_getter(rpc_url, proxy_address, arg)
+            return _read_slot(rpc_url, proxy_address, arg, chain_id=chain_id)
+        return _call_getter(rpc_url, proxy_address, arg, chain_id=chain_id)
 
     # Fallback: try all methods in priority order (registration, unknown type)
     for slot in (_EIP1967_IMPL_SLOT, _EIP1822_LOGIC_SLOT, _OZ_IMPL_SLOT):
-        addr = _read_slot(rpc_url, proxy_address, slot)
+        addr = _read_slot(rpc_url, proxy_address, slot, chain_id=chain_id)
         if addr:
             return addr
 
-    addr = _call_getter(rpc_url, proxy_address, _IMPLEMENTATION_SEL)
+    addr = _call_getter(rpc_url, proxy_address, _IMPLEMENTATION_SEL, chain_id=chain_id)
     if addr:
         return addr
 
     for sel in (_MASTER_COPY_SEL, _COMPTROLLER_IMPL_SEL, _TARGET_SEL):
-        addr = _call_getter(rpc_url, proxy_address, sel)
+        addr = _call_getter(rpc_url, proxy_address, sel, chain_id=chain_id)
         if addr:
             return addr
 
-    addr = _read_slot(rpc_url, proxy_address, _GNOSIS_SLOT)
+    addr = _read_slot(rpc_url, proxy_address, _GNOSIS_SLOT, chain_id=chain_id)
     if addr:
         return addr
 

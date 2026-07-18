@@ -67,6 +67,8 @@ def _make_principal_type_resolver(
     classify_cache: dict[str, tuple[str, dict[str, object]]],
     rpc_url: str | None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> Callable[[str], tuple[str | None, dict[str, object] | None]]:
     """Build an ``address -> (resolved_type, details)`` classifier for the FP
     writer. Reuses the resolution stage's classify cache, falling back to a
@@ -90,7 +92,7 @@ def _make_principal_type_resolver(
             return cached[0], cached[1]
         if not rpc_url:
             return None, None
-        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address)
+        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, chain_id=chain_id)
         return resolved_type, details
 
     return _resolve
@@ -511,7 +513,7 @@ class PolicyWorker(BaseWorker):
                     capability_by_function=capability_resolver_output,
                     safe_address_lookup=safe_lookup or None,
                     resolve_principal_type=_make_principal_type_resolver(
-                        classify_cache, rpc_url, cross_chain_recognizer
+                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=_chain_id_for_job(job)
                     ),
                     deployment_address=deployment_address,
                 )
@@ -634,6 +636,7 @@ class PolicyWorker(BaseWorker):
                     cast(dict, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None
                 ),
                 rpc_url=rpc_url,
+                chain_id=_chain_id_for_job(job),
                 # Same cache the resolution stage populated. Without this, labeling
                 # re-runs classify_resolved_address (6-10 RPCs each) for every
                 # principal — the dominant cost on big protocols (etherfi LP impl

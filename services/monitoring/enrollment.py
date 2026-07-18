@@ -23,7 +23,7 @@ from db.models import (
     WatchedProxy,
 )
 from services.governance.control_graph_types import reconcile_control_graph_types
-from services.monitoring.chain_rpc import rpc_for_chain
+from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
 from utils.chains import chain_enabled
@@ -228,7 +228,12 @@ def enroll_protocol_contracts(
     def _block_for(contract_chain: str) -> int:
         if contract_chain not in block_by_chain:
             try:
-                result = rpc_request(rpc_for_chain(contract_chain, rpc_url), "eth_blockNumber", [])
+                result = rpc_request(
+                    rpc_for_chain(contract_chain, rpc_url),
+                    "eth_blockNumber",
+                    [],
+                    chain_id=chain_id_for(contract_chain),
+                )
                 block_by_chain[contract_chain] = int(result, 16)
             except Exception:
                 logger.warning("Could not get current block for chain %s, defaulting to 0", contract_chain)

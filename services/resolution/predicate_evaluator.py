@@ -2232,6 +2232,7 @@ def _normalize_operand_for_call_arg(
             callee_contract_address=callee_contract_address,
             rpc_url=rpc_url,
             block=block,
+            chain_id=getattr(outer, "chain_id", None),
             memo=_pass_live_read_memo(outer),
         )
         if constant is not None:
@@ -2269,6 +2270,7 @@ def _resolve_static_external_call_operand(
     callee_contract_address: str | None,
     rpc_url: str | None,
     block: int | None,
+    chain_id: int | None = None,
     memo: dict[Any, Any] | None = None,
 ) -> dict[str, Any] | None:
     signature = operand.get("callee_signature")
@@ -2295,6 +2297,7 @@ def _resolve_static_external_call_operand(
             "eth_call",
             [{"to": callee_contract_address.lower(), "data": selector}, block_tag],
             retries=1,
+            chain_id=chain_id,
         )
     except Exception:
         return None
