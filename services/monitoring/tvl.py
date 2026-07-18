@@ -125,9 +125,12 @@ def refresh_contract_balances(
     """Refresh on-chain balances for all contracts in a protocol.
 
     Updates ``contract_balances`` rows (latest state) and returns
-    ``(breakdown, partial)`` — the per-contract breakdown dict for the snapshot,
-    and whether any contract was skipped because its chain's native coin could
-    not be priced this cycle.
+    ``(breakdown, partial)`` — the per-contract breakdown dict for the snapshot
+    (keyed by the composite ``"<chain>::<address>"`` entity token so a CREATE2
+    twin across two chains keeps a distinct entry), and whether pricing was
+    degraded this cycle: a non-ETH contract skipped for want of its native-coin
+    quote, OR an ETH-native balance written with a NULL price because the upfront
+    mainnet ETH/USD quote failed.
 
     Native-asset USD pricing dispatch (inv. 5): a contract's native gas balance
     is valued in its OWN chain's native coin — a registry fact (``native_asset``)
@@ -139,6 +142,7 @@ def refresh_contract_balances(
     we never quote a non-ETH balance at the ETH price, and one unpriceable chain
     no longer aborts the whole protocol's snapshot.
     """
+    from services.aggregations.company_overview import _entity_key
     from utils.etherscan import get_eth_balance, get_eth_price, get_native_price, get_token_balances
 
     contracts = _get_protocol_addresses(session, protocol_id)
@@ -178,6 +182,13 @@ def refresh_contract_balances(
         if native_asset == "ETH":
             native_price = eth_price
             native_symbol, native_name = "ETH", "Ether"
+            if native_price is None:
+                # Upfront mainnet ETH/USD quote unavailable this cycle. Unlike the
+                # non-ETH branch we do NOT skip — ETH rows are still written with
+                # NULL prices (prior behavior) — but we flag the cycle partial so
+                # the degraded valuation is operator-visible, symmetric with the
+                # non-ETH skip-and-flag path below.
+                partial = True
         else:
             if chain_id not in native_price_by_chain:
                 try:
@@ -261,7 +272,11 @@ def refresh_contract_balances(
                     }
                 )
 
-        breakdown[address.lower()] = {
+        # Composite entity token ("<chain>::<address>") so a CREATE2 twin — the
+        # same address on two of the protocol's chains — keeps a distinct entry
+        # instead of colliding under a bare address (last-wins would drop one
+        # chain's balance and under-count on_chain_total).
+        breakdown[_entity_key(contract.chain, address)] = {
             "name": contract.contract_name,
             "total_usd": round(contract_total, 2),
             "tokens": tokens,
@@ -282,6 +297,8 @@ def _read_existing_balances(session: Session, protocol_id: int) -> dict[str, dic
     Used by the pipeline snapshot to avoid re-fetching from Etherscan —
     the resolution stage already wrote these rows minutes earlier.
     """
+    from services.aggregations.company_overview import _entity_key
+
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
         return {}
@@ -298,7 +315,9 @@ def _read_existing_balances(session: Session, protocol_id: int) -> dict[str, dic
             if usd:
                 contract_total += usd
                 tokens.append({"symbol": b.token_symbol, "usd_value": round(usd, 2)})
-        breakdown[contract.address.lower()] = {
+        # Composite entity token — see the twin-collapse note in
+        # ``refresh_contract_balances``.
+        breakdown[_entity_key(contract.chain, contract.address)] = {
             "name": contract.contract_name,
             "total_usd": round(contract_total, 2),
             "tokens": tokens,

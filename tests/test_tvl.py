@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db.models import Contract, ContractBalance, Protocol, TvlSnapshot
+from services.aggregations.company_overview import _entity_key
 from services.monitoring.tvl import (
     _get_protocol_addresses,
+    _read_existing_balances,
     fetch_defillama_tvl,
     refresh_all_protocols,
     refresh_contract_balances,
@@ -27,6 +29,8 @@ _ADDR_PREFIX = {
     "all_protos": "0x0000000000000000000000000000000000006",
     "native": "0x0000000000000000000000000000000000007",
     "native_fail": "0x0000000000000000000000000000000000008",
+    "twin": "0x0000000000000000000000000000000000009",
+    "ethfail": "0x000000000000000000000000000000000000a",
 }
 
 
@@ -160,9 +164,10 @@ class TestRefreshContractBalances:
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
-        assert addr.lower() in breakdown
-        assert breakdown[addr.lower()]["total_usd"] == 4500.0
-        assert breakdown[addr.lower()]["name"] == "Vault"
+        key = _entity_key("ethereum", addr)
+        assert key in breakdown
+        assert breakdown[key]["total_usd"] == 4500.0
+        assert breakdown[key]["name"] == "Vault"
 
         balances = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
         assert len(balances) == 2
@@ -187,8 +192,9 @@ class TestRefreshContractBalances:
 
         breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
-        assert addr.lower() in breakdown
-        assert breakdown[addr.lower()]["total_usd"] == 0.0
+        key = _entity_key("ethereum", addr)
+        assert key in breakdown
+        assert breakdown[key]["total_usd"] == 0.0
 
 
 @requires_postgres
@@ -462,7 +468,7 @@ class TestNativeAssetPricingDispatch:
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
-        assert breakdown[addr.lower()]["total_usd"] == 4000.0
+        assert breakdown[_entity_key("base", addr)]["total_usd"] == 4000.0
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1
         assert rows[0].token_symbol == "ETH"
@@ -482,7 +488,7 @@ class TestNativeAssetPricingDispatch:
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
-        assert breakdown[addr.lower()]["total_usd"] == 2000.0
+        assert breakdown[_entity_key(None, addr)]["total_usd"] == 2000.0
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
 
@@ -506,7 +512,7 @@ class TestNativeAssetPricingDispatch:
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
-        assert breakdown[addr.lower()]["total_usd"] == 8.26
+        assert breakdown[_entity_key("polygon", addr)]["total_usd"] == 8.26
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1
         assert rows[0].token_symbol == "POL"
@@ -587,3 +593,155 @@ class TestEthPriceDegradationDB:
         assert any("2 contract(s)" in r.message for r in caplog.records), (
             f"Expected log mentioning '2 contract(s)' affected, got: {[r.message for r in caplog.records]}"
         )
+
+
+@requires_postgres
+class TestContractBreakdownCompositeKey:
+    """A CREATE2 twin (same address on ≥2 of a protocol's chains) must not
+    collapse in the snapshot ``contract_breakdown``. The breakdown is keyed by
+    the composite ``"<chain>::<address>"`` entity token so each chain's balance
+    keeps its own entry and ``on_chain_total`` sums both (reviewer finding 1)."""
+
+    @staticmethod
+    def _chain_varying_eth_balance(address, chain_id=1):
+        # ethereum (1) → 1 ETH, base (8453) → 2 ETH: distinct per-chain balances
+        # so a last-wins collapse under-counts detectably.
+        return 1_000_000_000_000_000_000 if chain_id == 1 else 2_000_000_000_000_000_000
+
+    def _two_chain_twin(self, db_session):
+        protocol = Protocol(name="TwinProto")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("twin", "a1")
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="EthVault"))
+        db_session.add(Contract(address=addr, chain="base", protocol_id=protocol.id, contract_name="BaseVault"))
+        db_session.commit()
+        return protocol, addr
+
+    def test_refresh_keeps_both_chains(self, db_session, monkeypatch, _cleanup):
+        protocol, addr = self._two_chain_twin(db_session)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
+
+        assert partial is False
+        eth_key = _entity_key("ethereum", addr)
+        base_key = _entity_key("base", addr)
+        assert set(breakdown) == {eth_key, base_key}
+        assert breakdown[eth_key]["total_usd"] == 2000.0
+        assert breakdown[base_key]["total_usd"] == 4000.0
+        on_chain_total = sum(e.get("total_usd", 0) for e in breakdown.values())
+        assert on_chain_total == 6000.0
+
+    def test_read_existing_keeps_both_chains(self, db_session, _cleanup):
+        protocol, addr = self._two_chain_twin(db_session)
+        contracts = _get_protocol_addresses(db_session, protocol.id)
+        by_chain = {c.chain: c for c in contracts}
+        db_session.add(
+            ContractBalance(
+                contract_id=by_chain["ethereum"].id,
+                token_address=None,
+                token_name="Ether",
+                token_symbol="ETH",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                price_usd=2000.0,
+                usd_value=2000.0,
+            )
+        )
+        db_session.add(
+            ContractBalance(
+                contract_id=by_chain["base"].id,
+                token_address=None,
+                token_name="Ether",
+                token_symbol="ETH",
+                decimals=18,
+                raw_balance="2000000000000000000",
+                price_usd=2000.0,
+                usd_value=4000.0,
+            )
+        )
+        db_session.commit()
+
+        breakdown = _read_existing_balances(db_session, protocol.id)
+
+        eth_key = _entity_key("ethereum", addr)
+        base_key = _entity_key("base", addr)
+        assert set(breakdown) == {eth_key, base_key}
+        assert breakdown[eth_key]["total_usd"] == 2000.0
+        assert breakdown[base_key]["total_usd"] == 4000.0
+
+    def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup):
+        protocol, _addr_unused = self._two_chain_twin(db_session)
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+        snapshot, partial = take_tvl_snapshot(db_session, protocol.id)
+
+        assert snapshot is not None
+        assert partial is False
+        assert snapshot.total_usd is not None and float(snapshot.total_usd) == 6000.0
+        assert snapshot.contract_breakdown is not None and len(snapshot.contract_breakdown) == 2
+
+
+@requires_postgres
+class TestMainnetEthQuoteFailurePartial:
+    """A failed upfront mainnet ETH/USD quote leaves ETH-native balances written
+    with NULL prices; the cycle must be flagged ``partial`` — symmetric with the
+    non-ETH native-quote path (reviewer finding 5)."""
+
+    def test_refresh_flags_partial_when_eth_quote_fails(self, db_session, monkeypatch, _cleanup):
+        protocol = Protocol(name="EthQuoteFailProto")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("ethfail", "a1")
+        contract = Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="Vault")
+        db_session.add(contract)
+        db_session.commit()
+
+        def _raise_price(chain_id=1):
+            raise RuntimeError("stats endpoint down")
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 3_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", _raise_price)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
+
+        # Balance row still written (behavior preserved), but with NULL price...
+        assert _entity_key("ethereum", addr) in breakdown
+        rows = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
+        assert len(rows) == 1 and rows[0].token_symbol == "ETH"
+        assert rows[0].price_usd is None and rows[0].usd_value is None
+        # ...and the cycle is flagged partial.
+        assert partial is True
+
+    def test_cycle_heartbeat_flags_partial(self, db_session, monkeypatch, _cleanup):
+        protocol = Protocol(name="EthQuoteFailCycle")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("ethfail", "c1")
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="Vault"))
+        db_session.commit()
+
+        def _raise_price(chain_id=1):
+            raise RuntimeError("down")
+
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 3_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", _raise_price)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+        cycles: list[dict] = []
+        monkeypatch.setattr("services.monitoring.tvl.emit_monitor_cycle", lambda *a, **k: cycles.append(k))
+
+        count = refresh_all_protocols(db_session)
+
+        assert count == 1
+        assert len(cycles) == 1
+        assert cycles[0]["partial"] is True
+        assert cycles[0]["note"] == "1_partial"
