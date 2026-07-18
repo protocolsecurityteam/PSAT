@@ -1391,26 +1391,41 @@ def build_governance_view(
     #      one hop further, to the terminal Safe/EOA. Only FP (call-authority)
     #      edges are followed, so fund-destination Safes (which hold no FP row)
     #      cannot be re-introduced.
-    contract_addr_by_cid: dict[int, str] = {
-        c.id: c.address.lower() for c in contracts_by_job_id.values() if c is not None and c.address
+    # cid → the composite entity token of the contract's OWN (chain, address).
+    # The impl→proxy fold below keys on this so a same-address twin on another
+    # chain doesn't attribute to this chain's proxy (inv. 13). The RENDERED value
+    # stays a bare address: the attribution plane (primary_for / controls_detail /
+    # other_callers) is bare-address keyed and chain-scoped by the frontend, so a
+    # composite rendered key would break that contract.
+    contract_entity_by_cid: dict[int, str] = {
+        c.id: _entity_key(c.chain, c.address) for c in contracts_by_job_id.values() if c is not None and c.address
     }
-    impl_to_proxy: dict[str, str] = {}
+    impl_entity_to_proxy_addr: dict[str, str] = {}
     for c in contracts:
         if not (c.get("is_proxy") and c.get("address")):
             continue
         proxy_addr_lc = c["address"].lower()
+        # An impl renders under its proxy only on the proxy's own chain.
         if c.get("implementation"):
-            impl_to_proxy[c["implementation"].lower()] = proxy_addr_lc
+            impl_entity_to_proxy_addr[_entity_key(c.get("chain"), c["implementation"])] = proxy_addr_lc
         # Secondary impls render under the proxy too, so their FunctionPrincipal
         # authority (e.g. a governor over admin functions) attributes here.
         for saddr in c.get("secondary_implementations") or []:
-            impl_to_proxy[saddr.lower()] = proxy_addr_lc
+            impl_entity_to_proxy_addr[_entity_key(c.get("chain"), saddr)] = proxy_addr_lc
+
+    def _rendered_addr(cid: int) -> str | None:
+        own_entity = contract_entity_by_cid.get(cid)
+        if not own_entity:
+            return None
+        # Fold onto the proxy (its own chain) if this cid is a proxy's impl; else
+        # render under the contract's own bare address (chain already consumed).
+        return impl_entity_to_proxy_addr.get(own_entity) or own_entity.split("::", 1)[1]
+
     fp_addrs_by_contract_addr: dict[str, set[str]] = {}
     for cid, addrs in fp_all_addrs_by_cid.items():
-        own_addr = contract_addr_by_cid.get(cid)
-        if not own_addr:
+        rendered_addr = _rendered_addr(cid)
+        if not rendered_addr:
             continue
-        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
         fp_addrs_by_contract_addr.setdefault(rendered_addr, set()).update(addrs)
 
     governance_passthrough = {
@@ -1435,10 +1450,9 @@ def build_governance_view(
     # ``services.governance.primary_controller.assign_co_controllers``.
     fp_function_detail_by_addr: dict[str, list[dict[str, Any]]] = {}
     for cid, functions in fp_function_detail_by_cid.items():
-        own_addr = contract_addr_by_cid.get(cid)
-        if not own_addr:
+        rendered_addr = _rendered_addr(cid)
+        if not rendered_addr:
             continue
-        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
         fp_function_detail_by_addr.setdefault(rendered_addr, []).extend(functions)
     co_controls = assign_co_controllers(principals, fp_function_detail_by_addr, primary_for)
 
@@ -2011,9 +2025,11 @@ def all_addresses_for_protocol(
 
     # Prefetch impl-name lookup so proxy rows can expose the implementation
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
-    # template name.
-    impl_name_by_addr = {
-        (c.address or "").lower(): c.contract_name for c in all_contract_rows if c.address and c.contract_name
+    # template name. Keyed by the composite entity token (a proxy's impl is on
+    # the proxy's own chain) so a same-address twin on another chain doesn't
+    # display the other chain's name (inv. 13).
+    impl_name_by_entity = {
+        _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }
     job_ids = {cr.job_id for cr in all_contract_rows if cr.job_id is not None}
     completed_job_ids: set = set()
@@ -2038,7 +2054,7 @@ def all_addresses_for_protocol(
                 "rank_score": (float(cr.rank_score) if cr.rank_score is not None else None),
                 "implementation_address": cr.implementation if cr.is_proxy else None,
                 "implementation_name": (
-                    impl_name_by_addr.get((cr.implementation or "").lower()) if cr.is_proxy else None
+                    impl_name_by_entity.get(_entity_key(cr.chain, cr.implementation)) if cr.is_proxy else None
                 ),
             }
             for cr in all_contract_rows

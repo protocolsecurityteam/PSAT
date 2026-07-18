@@ -28,7 +28,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from db.models import FunctionPrincipal  # noqa: E402
 from services.aggregations.company_overview import (  # noqa: E402
+    all_addresses_for_protocol,
     build_company_overview,
     build_functions_for_protocol,
 )
@@ -305,3 +307,133 @@ def test_nullchain_linkage_preserved(db_session):
     proxy_fns = {f["function"] for f in funcs.get(f"ethereum::{proxy_addr.lower()}", [])}
     assert "legacyFn()" in proxy_fns, f"NULL-chain impl must fold into the ethereum proxy entry, got {proxy_fns}"
     assert f"ethereum::{impl.lower()}" not in funcs, "NULL-chain impl must not also render standalone"
+
+
+def _fp_safe(session, ef, safe_addr):
+    """Attach a Safe FunctionPrincipal (call authority) to an EffectiveFunction so
+    the Safe surfaces as a governing principal (mirrors the real ACL shape)."""
+    session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=safe_addr,
+            resolved_type="safe",
+            origin="governor",
+            principal_type="authority_role",
+            details={"owners": [_addr("owner")], "threshold": 1},
+        )
+    )
+
+
+def test_f1_controller_attribution_no_cross_chain_fold(db_session):
+    """F1: an ethereum proxy with impl ``0xI`` and an UNRELATED base standalone at
+    ``0xI`` (each gated by a different Safe). The base standalone's principal must
+    NOT be folded under the ethereum proxy's rendered address — controller
+    attribution (``impl_to_proxy`` / ``contract_addr_by_cid``) must resolve the
+    impl on the PROXY's own chain.
+
+    Pre-fix (bare ``impl_to_proxy``): the base Safe's FP authority attributes to
+    the ethereum proxy, so the base Safe appears among the ethereum proxy's
+    controllers.
+    """
+    s = db_session
+    p = _add_protocol(s, f"f1-{uuid.uuid4().hex[:8]}")
+    proxy_eth = _addr("pxeth")
+    impl = _addr("impl")
+    eth_safe = _addr("ethsafe")
+    base_safe = _addr("basesafe")
+
+    proxy_job = _add_job(s, address=proxy_eth, protocol_id=p.id, is_proxy=True)
+    _add_contract(
+        s, address=proxy_eth, job=proxy_job, protocol_id=p.id, chain="ethereum", is_proxy=True, implementation=impl
+    )
+    eth_impl_job = _add_job(
+        s, address=impl, protocol_id=p.id, name="EthImpl", request={"address": impl, "proxy_address": proxy_eth}
+    )
+    eth_impl_c = _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum")
+    eth_ef = _ef(s, eth_impl_c, "ethGov", effect_labels=["pause_toggle"])
+    _fp_safe(s, eth_ef, eth_safe)
+
+    base_job = _add_job(
+        s, address=impl, protocol_id=p.id, name="BaseStandalone", request={"address": impl, "chain": "base"}
+    )
+    _newer(base_job)
+    base_c = _add_contract(s, address=impl, job=base_job, protocol_id=p.id, chain="base")
+    base_ef = _ef(s, base_c, "baseGov", effect_labels=["pause_toggle"])
+    _fp_safe(s, base_ef, base_safe)
+    s.commit()
+
+    overview = build_company_overview(s, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in overview["principals"]}
+
+    assert base_safe.lower() in principals, "base standalone's Safe must surface as a principal"
+    base_attr = set(principals[base_safe.lower()].get("primary_for") or []) | set(
+        principals[base_safe.lower()].get("co_controls") or []
+    )
+    assert proxy_eth.lower() not in {a.lower() for a in base_attr}, (
+        f"base standalone's Safe must NOT govern the ethereum proxy (cross-chain fold), got {base_attr}"
+    )
+    # Positive side: each Safe governs its own chain's entity.
+    assert impl.lower() in {a.lower() for a in base_attr}, "base Safe must govern the base standalone (0xI)"
+    eth_attr = {a.lower() for a in (principals.get(eth_safe.lower(), {}).get("primary_for") or [])}
+    assert proxy_eth.lower() in eth_attr, "ethereum Safe must govern the ethereum proxy"
+
+
+def test_f3_implementation_name_chain_scoped(db_session):
+    """F3: a proxy on each of ethereum + base points at impl ``0xI``, whose
+    contract rows carry DIFFERENT names per chain. Each proxy's
+    ``implementation_name`` in the /addresses payload must be its own chain's
+    impl name.
+
+    Pre-fix (bare ``impl_name_by_addr``): both proxies resolve to whichever
+    chain's row won the last-wins dict build — one proxy shows the wrong name.
+    """
+    s = db_session
+    p = _add_protocol(s, f"f3-{uuid.uuid4().hex[:8]}")
+    proxy_eth = _addr("pxeth")
+    proxy_base = _addr("pxbase")
+    impl = _addr("impl")
+
+    proxy_eth_job = _add_job(s, address=proxy_eth, protocol_id=p.id, is_proxy=True)
+    _add_contract(
+        s,
+        address=proxy_eth,
+        job=proxy_eth_job,
+        protocol_id=p.id,
+        chain="ethereum",
+        is_proxy=True,
+        implementation=impl,
+        contract_name="EthProxy",
+    )
+    eth_impl_job = _add_job(s, address=impl, protocol_id=p.id, request={"address": impl, "proxy_address": proxy_eth})
+    _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum", contract_name="EthImplName")
+
+    proxy_base_job = _add_job(
+        s, address=proxy_base, protocol_id=p.id, is_proxy=True, request={"address": proxy_base, "chain": "base"}
+    )
+    _add_contract(
+        s,
+        address=proxy_base,
+        job=proxy_base_job,
+        protocol_id=p.id,
+        chain="base",
+        is_proxy=True,
+        implementation=impl,
+        contract_name="BaseProxy",
+    )
+    base_impl_job = _add_job(
+        s, address=impl, protocol_id=p.id, request={"address": impl, "proxy_address": proxy_base, "chain": "base"}
+    )
+    _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base", contract_name="BaseImplName")
+    s.commit()
+
+    rows = all_addresses_for_protocol(s, p, [])
+    by_key = {(r["address"].lower(), (r.get("chain") or "").lower()): r for r in rows}
+    eth_row = by_key[(proxy_eth.lower(), "ethereum")]
+    base_row = by_key[(proxy_base.lower(), "base")]
+
+    assert eth_row["implementation_name"] == "EthImplName", (
+        f"ethereum proxy must show its own impl name, got {eth_row['implementation_name']}"
+    )
+    assert base_row["implementation_name"] == "BaseImplName", (
+        f"base proxy must show its own impl name, got {base_row['implementation_name']}"
+    )
