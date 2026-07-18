@@ -52,7 +52,7 @@ from db.models import (
 )
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
-from utils.chains import UnknownChainError, chain_by_name
+from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -105,6 +105,24 @@ def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     except UnknownChainError:
         contract_cid = 1
     return job_cid == contract_cid
+
+
+def _job_chain_name(job: Job) -> str:
+    """Coalesced chain NAME for a job — the job side of
+    :func:`_job_matches_contract_chain` resolved to a registry name so it can
+    build a composite entity token (:func:`_entity_key`). First-class
+    ``chain_id``, else derived from ``request["chain"]``/address, else mainnet;
+    an unknown id folds to ``"ethereum"`` (the NULL≡mainnet legacy-read
+    convention). A proxy's impl resolves on this chain, so a same-address twin on
+    another chain no longer collapses last-wins."""
+    job_cid = job.chain_id if isinstance(job.chain_id, int) else None
+    if job_cid is None:
+        request = job.request if isinstance(job.request, dict) else {}
+        job_cid = derive_job_chain_id(request.get("chain"), job.address) or 1
+    try:
+        return chain_by_id(job_cid).name
+    except UnknownChainError:
+        return "ethereum"
 
 
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
@@ -238,7 +256,13 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
 def resolve_implementation_contracts(
     session: Session, jobs: list[Job], contracts_by_job_id: dict[Any, Contract]
 ) -> tuple[dict[str, Job], dict[Any, Contract]]:
-    """Return ``(impl_job_by_addr, contracts_by_job_id)`` with impls resolved.
+    """Return ``(impl_job_by_entity, contracts_by_job_id)`` with impls resolved.
+
+    ``impl_job_by_entity`` is keyed by the composite entity token
+    (:func:`_entity_key`, ``"<chain>::<addr>"``) of the impl job's OWN chain, so
+    a proxy resolves its implementation on the proxy's own chain (inv. 13). A
+    same-address impl twin on two of a protocol's chains no longer collapses
+    last-wins across chains — each chain keeps its own impl job.
 
     Mutates the contracts_by_job_id dict to also include impl-contract rows
     keyed by their own job_id, so downstream code can look up impl
@@ -259,42 +283,44 @@ def resolve_implementation_contracts(
             if impl:
                 impl_addrs_needed.add(impl.lower())
 
-    impl_job_by_addr: dict[str, Job] = {}
+    impl_job_by_entity: dict[str, Job] = {}
     if impl_addrs_needed:
-        # Deterministic pick: newest completed job per impl address, preferring
-        # the one linked to a proxy we're rendering (request.proxy_address points
-        # back at a proxy in this set). Without the ORDER BY a re-analysis that
-        # left >1 completed impl job for an address attached arbitrarily (1C).
+        # Deterministic pick: newest completed job per impl (chain, address),
+        # preferring the one linked to a proxy we're rendering
+        # (request.proxy_address points back at a proxy in this set). Grouping by
+        # the composite token keeps each chain's twin separate; without the
+        # ORDER BY a re-analysis that left >1 completed impl job for one token
+        # attached arbitrarily (1C).
         candidates: dict[str, list[Job]] = {}
         for ij in session.execute(
             select(Job)
             .where(Job.address.in_(list(impl_addrs_needed)), Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
         ).scalars():
-            key = (ij.address or "").lower()
-            if key:
-                candidates.setdefault(key, []).append(ij)
-        for key, addr_jobs in candidates.items():
+            if not ij.address:
+                continue
+            candidates.setdefault(_entity_key(_job_chain_name(ij), ij.address), []).append(ij)
+        for token, addr_jobs in candidates.items():
             linked = [
                 ij
                 for ij in addr_jobs
                 if isinstance(ij.request, dict) and str(ij.request.get("proxy_address") or "").lower() in proxy_addrs
             ]
-            impl_job_by_addr[key] = (linked or addr_jobs)[0]
+            impl_job_by_entity[token] = (linked or addr_jobs)[0]
 
-    impl_job_ids_needed = [ij.id for ij in impl_job_by_addr.values()]
+    impl_job_ids_needed = [ij.id for ij in impl_job_by_entity.values()]
     if impl_job_ids_needed:
         for c in session.execute(
             select(Contract).where(Contract.job_id.in_(impl_job_ids_needed)).options(selectinload(Contract.summary))
         ).scalars():
             contracts_by_job_id[c.job_id] = c
 
-    return impl_job_by_addr, contracts_by_job_id
+    return impl_job_by_entity, contracts_by_job_id
 
 
 def _secondary_impl_contracts(
     contract_row: Contract | None,
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_entity: dict[str, Job],
     contracts_by_job_id: dict[Any, Contract],
 ) -> list[Contract]:
     """Resolved Contract rows for a proxy's secondary implementations (the
@@ -310,7 +336,7 @@ def _secondary_impl_contracts(
         return []
     out: list[Contract] = []
     for saddr in contract_row.secondary_implementations:
-        impl_job = impl_job_by_addr.get((saddr or "").lower())
+        impl_job = impl_job_by_entity.get(_entity_key(contract_row.chain, saddr))
         sc = contracts_by_job_id.get(impl_job.id) if impl_job else None
         if sc is not None:
             out.append(sc)
@@ -1067,7 +1093,7 @@ def build_governance_view(
     session: Session,
     jobs: list[Job],
     contracts_by_job_id: dict[Any, Contract],
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_entity: dict[str, Job],
 ) -> GovernanceView:
     """Build the contracts list + ownership hierarchy + fund flows + principals."""
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
@@ -1091,10 +1117,12 @@ def build_governance_view(
     # a controller of the proxy node.
     for job in jobs:
         cr = contracts_by_job_id.get(job.id)
-        secondaries = _secondary_impl_contracts(cr, impl_job_by_addr, contracts_by_job_id)
+        secondaries = _secondary_impl_contracts(cr, impl_job_by_entity, contracts_by_job_id)
         if not secondaries:
             continue
-        impl_job = impl_job_by_addr.get((cr.implementation or "").lower()) if cr and cr.implementation else None
+        impl_job = (
+            impl_job_by_entity.get(_entity_key(cr.chain, cr.implementation)) if cr and cr.implementation else None
+        )
         primary_impl = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = primary_impl.id if primary_impl else (cr.id if cr else None)
         if primary_cid is None:
@@ -1137,13 +1165,15 @@ def build_governance_view(
         proxy_type = contract_row.proxy_type if contract_row else None
         impl_addr = contract_row.implementation if contract_row else None
 
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
+        impl_job = (
+            impl_job_by_entity.get(_entity_key(contract_row.chain, impl_addr)) if contract_row and impl_addr else None
+        )
         impl_job_id = str(impl_job.id) if impl_job else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
         # Split-proxy secondary logic contracts (admin-impl set). Their
         # functions + principals attribute to this proxy node too.
-        secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+        secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
 
         summary_row = impl_contract.summary if impl_contract else None
         if not summary_row and contract_row:
@@ -1309,13 +1339,17 @@ def build_governance_view(
 
     # Deduplicate: remove standalone impl contracts already represented via a
     # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
-    # latter were analysed standalone in older runs, so drop them by address).
-    impl_addresses = {c["implementation"].lower() for c in contracts if c.get("implementation")}
+    # latter were analysed standalone in older runs). Keyed by the composite
+    # entity token (a proxy's impl is on the proxy's own chain) so a same-address
+    # standalone on ANOTHER chain isn't collapsed away (inv. 13).
+    impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
-            impl_addresses.add(saddr.lower())
+            impl_entities.add(_entity_key(c.get("chain"), saddr))
     contracts = [
-        c for c in contracts if not c["address"] or c["address"].lower() not in impl_addresses or c["is_proxy"]
+        c
+        for c in contracts
+        if not c["address"] or _entity_key(c.get("chain"), c["address"]) not in impl_entities or c["is_proxy"]
     ]
 
     remaining_addrs = {c["address"] for c in contracts if c["address"]}
@@ -1840,13 +1874,15 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     with _time_phase(timings_ms, "prefetch_contracts"):
         contracts_by_job_id = prefetch_contracts(session, jobs)
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
-        impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+        impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
 
-    # Addresses that are a secondary impl of some proxy are absorbed into that
+    # Entities that are a secondary impl of some proxy are absorbed into that
     # proxy node (their functions surface there), so they get no standalone
-    # entry — mirrors the canvas dedup for split-proxy admin impls.
-    secondary_impl_addrs = {
-        s.lower()
+    # entry — mirrors the canvas dedup for split-proxy admin impls. Keyed by the
+    # composite entity token (the secondary is on its proxy's chain) so a
+    # same-address standalone on another chain isn't suppressed (inv. 13).
+    secondary_impl_entities = {
+        _entity_key(cr.chain, s)
         for cr in contracts_by_job_id.values()
         if cr is not None and cr.is_proxy
         for s in (cr.secondary_implementations or [])
@@ -1864,21 +1900,22 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
             continue
         if not job.address:
             continue
-        if job.address.lower() in secondary_impl_addrs:
-            continue
         contract_row = contracts_by_job_id.get(job.id)
+        entity_chain = contract_row.chain if contract_row else None
+        if _entity_key(entity_chain, job.address) in secondary_impl_entities:
+            continue
         impl_addr = contract_row.implementation if (contract_row and contract_row.is_proxy) else None
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
+        impl_job = impl_job_by_entity.get(_entity_key(entity_chain, impl_addr)) if impl_addr else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
         cids = [primary_cid] if primary_cid is not None else []
         cids += [
             sc.id
-            for sc in _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+            for sc in _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
             if sc.id != primary_cid
         ]
         if cids:
-            entity_key_to_ef_cids[_entity_key(contract_row.chain if contract_row else None, job.address)] = cids
+            entity_key_to_ef_cids[_entity_key(entity_chain, job.address)] = cids
 
     relevant_cids = {cid for cids in entity_key_to_ef_cids.values() for cid in cids}
     ef_rows_by_cid: dict[int, list[EffectiveFunction]] = {}
@@ -2063,9 +2100,9 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     with _time_phase(timings_ms, "prefetch_contracts"):
         contracts_by_job_id = prefetch_contracts(session, jobs)
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
-        impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+        impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     with _time_phase(timings_ms, "build_governance_view"):
-        governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
+        governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
     with _time_phase(timings_ms, "assemble_payload"):
         payload = assemble_company_payload(session, name, protocol_row, jobs, governance)
 
@@ -2120,8 +2157,8 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, st
     if not jobs:
         return {}
     contracts_by_job_id = prefetch_contracts(session, jobs)
-    impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
-    governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
+    impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+    governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
 
     controllers: dict[str, str] = {}
     for principal in governance.principals:

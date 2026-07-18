@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal  # noqa: E402
 from services.aggregations.company_overview import (  # noqa: E402
+    _entity_key,
     build_company_overview,
     build_functions_for_protocol,
     prefetch_contracts,
@@ -252,5 +253,6 @@ def test_resolve_implementation_contracts_deterministic_pick(db_session):
 
     jobs = [proxy_job, linked_job, unlinked_job]
     cbj = prefetch_contracts(s, jobs)
-    impl_job_by_addr, _ = resolve_implementation_contracts(s, jobs, cbj)
-    assert impl_job_by_addr[impl_addr.lower()].id == linked_job.id
+    impl_job_by_entity, _ = resolve_implementation_contracts(s, jobs, cbj)
+    # Keyed by the composite entity token now; both candidates default to ethereum.
+    assert impl_job_by_entity[_entity_key("ethereum", impl_addr)].id == linked_job.id

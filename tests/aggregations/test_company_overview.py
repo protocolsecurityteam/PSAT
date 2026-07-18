@@ -35,6 +35,7 @@ from db.models import (  # noqa: E402
 from services.aggregations.company_overview import (  # noqa: E402
     CompanyNotFound,
     _build_principal_lookup,
+    _entity_key,
     _prefetch_child_tables,
     _principal_lookup_meta,
     _trim_control_graph,
@@ -238,12 +239,15 @@ def test_resolve_implementation_contracts_links_proxy_to_impl(db_session):
     )
 
     contracts_by_job = prefetch_contracts(db_session, [proxy_job, impl_job])
-    impl_job_by_addr, contracts_by_job = resolve_implementation_contracts(
+    impl_job_by_entity, contracts_by_job = resolve_implementation_contracts(
         db_session, [proxy_job, impl_job], contracts_by_job
     )
 
-    assert impl_addr.lower() in impl_job_by_addr
-    assert impl_job_by_addr[impl_addr.lower()].id == impl_job.id
+    # impl_job_by_entity is keyed by the composite token of the impl job's own
+    # chain (both proxy and impl default to ethereum here).
+    impl_token = _entity_key("ethereum", impl_addr)
+    assert impl_token in impl_job_by_entity
+    assert impl_job_by_entity[impl_token].id == impl_job.id
     # contracts_by_job_id picked up the impl contract under its own job id.
     assert contracts_by_job[impl_job.id].id == impl_contract.id
 
