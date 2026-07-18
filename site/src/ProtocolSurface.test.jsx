@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import ProtocolSurface from "./ProtocolSurface.jsx";
+import ProtocolSurface, { auditHighlightSet, principalOnChain } from "./ProtocolSurface.jsx";
 import { entityKey } from "./surface/entityKey.js";
 import { setFetchHandler } from "./test/fetchMock.js";
 import {
@@ -367,6 +367,50 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
     expect(await screen.findByText("pauseOnBase")).toBeInTheDocument();
     expect(screen.queryByText("pauseOnEth")).not.toBeInTheDocument();
     expectNoCrash();
+  });
+});
+
+// B2: the audit-coverage highlight set is matched against the chain-scoped
+// canvas's bare node ids. Coverage rows are all-chain, so a CREATE2 twin covered
+// only on base must NOT light the same-address ethereum node (inv. 13).
+describe("auditHighlightSet — chain scope (B2)", () => {
+  const TWIN = "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+  const verified = { audit_id: 7, equivalence_status: "proven", match_type: "reviewed_commit" };
+  // Covered only on base.
+  const COVERAGE = [{ address: TWIN, chain: "base", audits: [verified] }];
+
+  it("does not highlight the ethereum node for a twin covered only on base", () => {
+    expect(auditHighlightSet(COVERAGE, "all", "ethereum")).toBeNull();
+  });
+
+  it("highlights the twin when scoped to the chain it is covered on", () => {
+    const set = auditHighlightSet(COVERAGE, "all", "base");
+    expect(set && set.has(TWIN)).toBe(true);
+  });
+
+  it("keeps chain-less legacy coverage rows on any active chain", () => {
+    const legacy = [{ address: TWIN, audits: [verified] }];
+    const set = auditHighlightSet(legacy, "all", "ethereum");
+    expect(set && set.has(TWIN)).toBe(true);
+  });
+});
+
+// B4c: a principal governs only on the chain(s) in its ``chains`` list. On a
+// chain it was never observed on, it must not attach to a same-address twin.
+describe("principalOnChain — chain scope (B4c)", () => {
+  it("excludes a principal observed only on another chain", () => {
+    expect(principalOnChain({ chains: ["base"] }, "ethereum")).toBe(false);
+    expect(principalOnChain({ chains: ["ethereum"] }, "ethereum")).toBe(true);
+  });
+
+  it("keeps a multi-chain principal on each of its chains", () => {
+    expect(principalOnChain({ chains: ["ethereum", "base"] }, "base")).toBe(true);
+  });
+
+  it("keeps legacy principals with no chains, and any principal when unscoped", () => {
+    expect(principalOnChain({}, "ethereum")).toBe(true);
+    expect(principalOnChain({ chains: [] }, "ethereum")).toBe(true);
+    expect(principalOnChain({ chains: ["base"] }, null)).toBe(true);
   });
 });
 

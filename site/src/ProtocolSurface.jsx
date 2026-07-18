@@ -30,6 +30,36 @@ import { ActivityPanel } from "./surface/sidebar/activity/ActivityPanel.jsx";
 import { SearchModesBar } from "./surface/sidebar/search/SearchModesBar.jsx";
 import { SearchNavigator } from "./surface/sidebar/search/SearchNavigator.jsx";
 
+// Audit-coverage highlight set: the bytecode-verified-covered contracts for the
+// active audit pick (or the whole proven set when ``all``). Returns a Set of
+// bare lowercased addresses matched against the canvas's bare node ids. Coverage
+// rows are all-chain; only the active chain's rows contribute, so a twin covered
+// solely on another chain does NOT light this chain's same-address node (inv. 13).
+export function auditHighlightSet(coverage, activeAuditId, activeChain) {
+  const showAll = activeAuditId === "all";
+  const out = new Set();
+  for (const entry of coverage || []) {
+    const addr = (entry.address || "").toLowerCase();
+    if (!addr) continue;
+    if (activeChain && coalesceChain(entry.chain) !== activeChain) continue;
+    if ((entry.audits || []).some((a) => isBytecodeVerifiedAudit(a) && (showAll || a.audit_id === activeAuditId))) {
+      out.add(addr);
+    }
+  }
+  return out.size ? out : null;
+}
+
+// Whether a principal governs on ``activeChain``. Principals carry a ``chains``
+// list (the chains they were observed governing on); a same-address entity seen
+// only on another chain is excluded so it never attaches to this chain's twin
+// (inv. 13). A principal with no ``chains`` (legacy payload) is always kept.
+export function principalOnChain(principal, activeChain) {
+  if (!activeChain) return true;
+  const chains = principal?.chains;
+  if (!Array.isArray(chains) || chains.length === 0) return true;
+  return chains.some((c) => coalesceChain(c) === activeChain);
+}
+
 export default function ProtocolSurface({
   companyName,
   initialData = null,
@@ -208,21 +238,8 @@ export default function ProtocolSurface({
     // highlight; a numeric id is one audit's covered set. Both are one radio —
     // see AuditsListPanel. A committed selection clears activeAuditId (below).
     if (activeAuditId == null || !coverageData || sidebarMode !== "audits") return null;
-    const showAll = activeAuditId === "all";
-    const out = new Set();
-    for (const entry of coverageData.coverage || []) {
-      const addr = (entry.address || "").toLowerCase();
-      if (!addr) continue;
-      if (
-        (entry.audits || []).some(
-          (a) => isBytecodeVerifiedAudit(a) && (showAll || a.audit_id === activeAuditId),
-        )
-      ) {
-        out.add(addr);
-      }
-    }
-    return out.size ? out : null;
-  }, [activeAuditId, coverageData, sidebarMode]);
+    return auditHighlightSet(coverageData.coverage, activeAuditId, activeChain);
+  }, [activeAuditId, coverageData, sidebarMode, activeChain]);
 
   const setHighlightedAddresses = setAgentHighlights;
   const [enabledRoles, setEnabledRoles] = useState(() => {
@@ -303,8 +320,9 @@ export default function ProtocolSurface({
 
   // Chain-scope every downstream derivation: only the active chain's contracts
   // build machines, so the canvas/selection/entity-index all operate on a
-  // single-chain dataset. Principals and fund_flows carry no chain, but they
-  // cascade-scope for free — visiblePrincipals keeps only principals that
+  // single-chain dataset. Principals (chains) and fund_flows (from_chain/
+  // to_chain) carry their own chain fields, consumed by principalOnChain and
+  // buildControlAdjacency; visiblePrincipals keeps only principals that
   // control a visible (now chain-scoped) machine, and elkLayout keeps only
   // flows whose endpoints are visible contracts.
   const scopedCompanyData = useMemo(() => {
@@ -358,20 +376,26 @@ export default function ProtocolSurface({
   // build the "governance path for" list of a machine-only authority (one with
   // no principal.controls to read). Built once, never per-render inside the card.
   const controlAdjacency = useMemo(
-    () => buildControlAdjacency(companyData?.fund_flows || []),
-    [companyData]
+    () => buildControlAdjacency(companyData?.fund_flows || [], activeChain),
+    [companyData, activeChain]
   );
 
   // Principal facet by address — lets a dual-facet contract card render its
   // principal strip + capability tags. Most contracts have no entry (null).
+  // Chain-scoped: a principal governs on the chain(s) in its ``chains`` list
+  // (backend-added), so one observed only on another chain must not attach to a
+  // same-address contract card here (inv. 13). Legacy principals without
+  // ``chains`` are kept as before.
   const principalsByAddress = useMemo(() => {
     const map = new Map();
     for (const p of companyData?.principals || []) {
       const addr = (p.address || "").toLowerCase();
-      if (addr) map.set(addr, p);
+      if (!addr) continue;
+      if (!principalOnChain(p, activeChain)) continue;
+      map.set(addr, p);
     }
     return map;
-  }, [companyData]);
+  }, [companyData, activeChain]);
 
   // Address-keyed entity index over ALL machines + ALL principals (no
   // visibility filtering). Selection state stores addresses only and resolves
@@ -559,11 +583,15 @@ export default function ProtocolSurface({
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
+    // Chain-scope first: a principal observed only on another chain must not
+    // ride in on a same-address twin among the (chain-scoped) visible machines
+    // (inv. 13). Legacy principals without ``chains`` behave as before.
     return (companyData?.principals || []).filter((p) =>
       !isRoleIdAddress(p.address || "") &&
+      principalOnChain(p, activeChain) &&
       (p.controls || []).some((a) => visibleAddrs.has(a.toLowerCase()))
     );
-  }, [machines, companyData]);
+  }, [machines, companyData, activeChain]);
 
   // Highlighted addresses on the canvas: union of agent highlights (Agent tab)
   // and the audit-coverage set (Audits tab). Either source drives the green

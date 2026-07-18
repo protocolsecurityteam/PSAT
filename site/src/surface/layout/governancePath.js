@@ -8,16 +8,26 @@
 // has no such list, so we reconstruct the same reachability client-side by
 // walking the payload's control-relation fund_flows edges.
 
+import { coalesceChain } from "../entityKey.js";
+
 // Control-relation edge types the walk follows. Value movement (controls_value)
 // is deliberately excluded — that is the Inflows/Outflows dimension, not
 // governance.
 const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls"]);
 
 // from-address (lc) → Set<to-address (lc)> over control-relation edges only.
-export function buildControlAdjacency(fundFlows = []) {
+//
+// The Surface page is chain-scoped, so when ``activeChain`` is given only flows
+// on that chain feed the adjacency: a control edge carries its own
+// ``from_chain``/``to_chain`` (control is intra-chain, so they agree), and a
+// same-address twin's edge on another chain must not enter this chain's walk
+// (inv. 13). Legacy payloads whose flows carry no chain fields behave as before
+// — every flow is kept.
+export function buildControlAdjacency(fundFlows = [], activeChain = null) {
   const adjacency = new Map();
   for (const flow of fundFlows || []) {
     if (!flow || !CONTROL_EDGE_TYPES.has(flow.type)) continue;
+    if (activeChain && flow.to_chain != null && coalesceChain(flow.to_chain) !== activeChain) continue;
     const from = String(flow.from || "").toLowerCase();
     const to = String(flow.to || "").toLowerCase();
     if (!from || !to || from === to) continue;

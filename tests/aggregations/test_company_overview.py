@@ -1611,3 +1611,140 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
         "the FP-typed Safe must own the Vault proxy through the Timelock pass-through. "
         f"Got primary_for={sorted(gov_primary)}"
     )
+
+
+def test_standalone_twins_do_not_merge_controller_attribution(db_session):
+    """Two standalone (non-proxy) CREATE2 twins deployed at the SAME address on
+    ethereum and base, each governed by a DIFFERENT Safe, must not have their
+    controller attribution merged (multichain invariant 13).
+
+    The attribution fold used to render every contract to a BARE address before
+    ``assign_primary_controllers`` ran, so the two twins collapsed onto one key
+    and their ``FunctionPrincipal`` authority sets unioned. The primary-controller
+    contest then saw both Safes competing for one contract and one lost — its
+    ``primary_for`` came back empty even though it is the sole controller of its
+    own chain's twin. Keying the fold on the composite ``<chain>::<address>``
+    entity keeps the two contests separate: each Safe primary-controls its own
+    twin, so BOTH surface as a primary controller.
+    """
+    p = _add_protocol(db_session, f"twin-attr-{uuid.uuid4().hex[:8]}")
+    vault_addr = _addr("twinvault")
+    eth_safe = _addr("ethsafe").lower()
+    base_safe = _addr("basesafe").lower()
+
+    eth_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="Vault")
+    eth_contract = _add_contract(
+        db_session, address=vault_addr, job=eth_job, protocol_id=p.id, chain="ethereum", contract_name="Vault"
+    )
+    base_job = _add_job(
+        db_session,
+        address=vault_addr,
+        protocol_id=p.id,
+        name="Vault",
+        request={"address": vault_addr, "chain": "base"},
+    )
+    base_contract = _add_contract(
+        db_session, address=vault_addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
+    )
+
+    # Each chain's twin has its OWN owner-gated setFee, controlled by a
+    # chain-local Safe (different address per chain).
+    for contract, safe, selector in (
+        (eth_contract, eth_safe, "0x44444441"),
+        (base_contract, base_safe, "0x44444442"),
+    ):
+        ef = EffectiveFunction(
+            contract_id=contract.id,
+            function_name="setFee",
+            selector=selector,
+            abi_signature="setFee(uint256)",
+            effect_labels=["pause_toggle"],
+            authority_public=False,
+        )
+        db_session.add(ef)
+        db_session.flush()
+        db_session.add(
+            FunctionPrincipal(
+                function_id=ef.id,
+                address=safe,
+                resolved_type="safe",
+                origin="semantic_capability:finite_set",
+                principal_type="controller",
+            )
+        )
+        db_session.add(ControlGraphNode(contract_id=contract.id, address=safe, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+
+    assert eth_safe in principals and base_safe in principals, (
+        f"both chain-local Safes should surface as principals; got {sorted(principals)}"
+    )
+
+    eth_primary = {a.lower() for a in (principals[eth_safe].get("primary_for") or [])}
+    base_primary = {a.lower() for a in (principals[base_safe].get("primary_for") or [])}
+    assert vault_addr.lower() in eth_primary, (
+        "the ethereum Safe must primary-control the ethereum twin; a merged fold lets the "
+        f"base Safe win the shared bare key and empties this one. Got primary_for={sorted(eth_primary)}"
+    )
+    assert vault_addr.lower() in base_primary, (
+        "the base Safe must primary-control the base twin; a merged fold lets the ethereum "
+        f"Safe win the shared bare key and empties this one. Got primary_for={sorted(base_primary)}"
+    )
+
+    # Additive chain axis (B4a): each principal reports the chain(s) it governs on.
+    assert principals[eth_safe].get("chains") == ["ethereum"], principals[eth_safe].get("chains")
+    assert principals[base_safe].get("chains") == ["base"], principals[base_safe].get("chains")
+
+
+def test_flows_and_principals_carry_chain_fields(db_session):
+    """Single-chain byte-compat pin for the additive chain axis (B4a): every
+    ``fund_flows`` edge gains ``from_chain``/``to_chain`` and every principal
+    gains ``chains`` — and NOTHING else about their shape changes. A mainnet-only
+    protocol keeps its previous keys verbatim, with the new fields coalesced to
+    ``"ethereum"``.
+    """
+    p = _add_protocol(db_session, f"chain-fields-{uuid.uuid4().hex[:8]}")
+    vault_addr = _addr("cfvault").lower()
+    safe_addr = _addr("cfsafe").lower()
+
+    vault_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="Vault")
+    vault_contract = _add_contract(
+        db_session, address=vault_addr, job=vault_job, protocol_id=p.id, contract_name="Vault"
+    )
+    ef = EffectiveFunction(
+        contract_id=vault_contract.id,
+        function_name="setFee",
+        selector="0x55555555",
+        abi_signature="setFee(uint256)",
+        authority_public=False,
+    )
+    db_session.add(ef)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=safe_addr,
+            resolved_type="safe",
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+    db_session.add(ControlGraphNode(contract_id=vault_contract.id, address=safe_addr, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+
+    fund_flows = payload["fund_flows"]
+    assert fund_flows, "expected at least one control-relation flow (safe -> vault)"
+    for flow in fund_flows:
+        assert set(flow.keys()) == {"from", "to", "type", "lane", "capabilities", "from_chain", "to_chain"}, (
+            f"fund_flow shape drifted beyond the additive chain fields: {sorted(flow.keys())}"
+        )
+        assert flow["from_chain"] == "ethereum" and flow["to_chain"] == "ethereum", flow
+
+    principals = payload["principals"]
+    assert principals, "expected the FP-backed Safe to surface as a principal"
+    for pr in principals:
+        assert pr.get("chains") == ["ethereum"], (pr.get("address"), pr.get("chains"))

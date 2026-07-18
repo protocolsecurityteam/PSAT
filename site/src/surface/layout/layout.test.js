@@ -14,6 +14,7 @@ import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
 import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
+import { buildControlAdjacency } from "./governancePath.js";
 import { entityKey } from "../entityKey.js";
 
 // buildMachines reads functions by the composite (chain, address) token; the
@@ -379,5 +380,39 @@ describe("aggregateEdges", () => {
     expect(aggregated).toHaveLength(1);
     expect(aggregated[0].label).toBeUndefined();
     expect(aggregated[0].data.samples).toHaveLength(1);
+  });
+});
+
+describe("buildControlAdjacency — chain scope (inv. 13)", () => {
+  const CTRL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const TWIN = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  // Same control edge (CTRL -> TWIN) exists on both chains — the classic CREATE2
+  // twin. Scoped to ethereum, only ethereum's edge may enter the walk.
+  const FLOWS = [
+    { from: CTRL, to: TWIN, type: "controller", from_chain: "ethereum", to_chain: "ethereum" },
+    { from: CTRL, to: TWIN, type: "controller", from_chain: "base", to_chain: "base" },
+  ];
+
+  it("keeps only the active chain's flow edges", () => {
+    const eth = buildControlAdjacency(FLOWS, "ethereum");
+    expect(eth.get(CTRL) && [...eth.get(CTRL)]).toEqual([TWIN]);
+
+    // A base-only control edge must NOT enter the ethereum adjacency.
+    const baseOnly = buildControlAdjacency(
+      [{ from: CTRL, to: TWIN, type: "controller", from_chain: "base", to_chain: "base" }],
+      "ethereum",
+    );
+    expect(baseOnly.has(CTRL)).toBe(false);
+  });
+
+  it("keeps legacy chain-less flows regardless of active chain", () => {
+    const adj = buildControlAdjacency([{ from: CTRL, to: TWIN, type: "controller" }], "ethereum");
+    expect(adj.get(CTRL) && [...adj.get(CTRL)]).toEqual([TWIN]);
+  });
+
+  it("is identical to the unscoped build when no active chain is given", () => {
+    const adj = buildControlAdjacency(FLOWS);
+    expect([...adj.get(CTRL)]).toEqual([TWIN]);
   });
 });
