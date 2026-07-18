@@ -70,6 +70,24 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
         # ignored in favor of eRPC, so a pinned provider can't shadow the
         # proxy. Stored verbatim and sanitized by ``Job.to_dict`` at output.
         req_dict = request.model_dump()
+        # Optional protocol context: an address submission that also names a
+        # company links to the EXISTING protocol row — lookup-only, so a typo'd
+        # name 404s instead of minting a duplicate protocol (company-only
+        # submissions keep resolving/creating theirs during discovery). The
+        # ``"inventory"`` source records the admin's explicit membership
+        # assertion so the fetched contract row passes the ownership gate and
+        # adopts the protocol. Address-only submissions stay standalone.
+        if request.address and request.company:
+            protocol_row = session.execute(
+                select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
+            ).scalar_one_or_none()
+            if protocol_row is None:
+                raise HTTPException(status_code=404, detail="Company not found")
+            req_dict["protocol_id"] = protocol_row.id
+            sources = list(req_dict.get("discovery_sources") or [])
+            if "inventory" not in sources:
+                sources.append("inventory")
+            req_dict["discovery_sources"] = sources
         if request.dapp_urls:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
         elif request.defillama_protocol:
