@@ -124,11 +124,13 @@ def _seed_role_logs(session, authority: str) -> None:
         )
 
 
-def _seed_role_cursors(session, authority: str, *, backfill_complete: bool, last_block: int = 10_000) -> None:
+def _seed_role_cursors(
+    session, authority: str, *, backfill_complete: bool, last_block: int = 10_000, chain_id: int = 1
+) -> None:
     for topic0 in _ROLE_TOPICS:
         session.add(
             IndexedEventCursor(
-                chain_id=1,
+                chain_id=chain_id,
                 event_address=authority.lower(),
                 topic0=topic0.lower(),
                 last_indexed_block=last_block,
@@ -262,7 +264,7 @@ def _deferred_cap(authority: str) -> dict:
     )
 
 
-def _seed_completed_job_with_cap(db_session, *, address: str, capability_expr: dict) -> Job:
+def _seed_completed_job_with_cap(db_session, *, address: str, capability_expr: dict, chain: str = "ethereum") -> Job:
     # Isolation: the conftest ``db_session`` teardown clears Contract (cascading
     # EffectiveFunction) + cursors but NOT Job rows. Since these tests re-enqueue
     # a job to status=queued, a prior run's leaked job would trip the reconciler's
@@ -271,10 +273,10 @@ def _seed_completed_job_with_cap(db_session, *, address: str, capability_expr: d
     db_session.query(Contract).filter(func.lower(Contract.address) == address.lower()).delete()
     db_session.query(Job).filter(func.lower(Job.address) == address.lower()).delete()
     db_session.commit()
-    job = Job(address=address, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
+    job = Job(address=address, status=JobStatus.completed, stage=JobStage.done, request={"chain": chain})
     db_session.add(job)
     db_session.flush()
-    contract = Contract(address=address, chain="ethereum", job_id=job.id)
+    contract = Contract(address=address, chain=chain, job_id=job.id)
     db_session.add(contract)
     db_session.flush()
     db_session.add(
@@ -351,6 +353,45 @@ def test_reconciler_ignores_non_deferred_external_check(db_session):
 
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
+
+
+@requires_postgres
+def test_reconciler_does_not_select_off_chain_twin(db_session):
+    # A base deployment's deferred authority must not be re-enqueued by a chain-1
+    # pass merely because the SAME authority address is warm on chain 1. The base
+    # index (chain 8453) is still cold, so re-resolving now would just re-defer —
+    # premature churn. The row-select must be scoped to the pass's chain.
+    authority = "0x" + "e5" * 20
+    addr = "0x" + "f6" * 20
+    base_job = _seed_completed_job_with_cap(
+        db_session, address=addr, capability_expr=_deferred_cap(authority), chain="base"
+    )
+    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)  # warm on ethereum
+    _seed_role_cursors(db_session, authority, backfill_complete=False, chain_id=8453)  # still cold on base
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
+
+
+@requires_postgres
+def test_reconciler_active_job_check_is_chain_scoped(db_session):
+    # Same address deployed on two chains. The ethereum job's authority is warm on
+    # chain 1 and should re-resolve; a base twin re-analysis is in flight
+    # (processing). A chain-1 pass must not treat that base in-flight job as
+    # blocking the ethereum re-enqueue — the active-job guard is per chain.
+    authority = "0x" + "c1" * 20
+    addr = "0x" + "d2" * 20
+    eth_job = _seed_completed_job_with_cap(
+        db_session, address=addr, capability_expr=_deferred_cap(authority), chain="ethereum"
+    )
+    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)
+    # A base twin re-analysis already in flight for the same address.
+    db_session.add(Job(address=addr, status=JobStatus.processing, stage=JobStage.policy, request={"chain": "base"}))
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
+    assert eth_job.status == JobStatus.queued and eth_job.stage == JobStage.policy
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +505,24 @@ def test_drift_requires_backfill_complete(db_session):
 
     assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
+
+
+@requires_postgres
+def test_drift_row_select_is_chain_scoped(db_session):
+    # A base job's enumerated role store must not be re-enqueued by a chain-1
+    # drift pass. The post-frontier grant + warm cursor live on chain 1; the base
+    # job's own index is unrelated, so a chain-1 pass must not select it.
+    authority = "0x" + "ac" * 20
+    addr = "0x" + "bd" * 20
+    base_job = _seed_completed_job_with_cap(
+        db_session, address=addr, capability_expr=_role_store_cap(authority, 100), chain="base"
+    )
+    _seed_role_store_cursor(db_session, authority, backfill_complete=True)  # chain_id=1
+    _seed_role_set_row(db_session, authority, block=200)  # chain_id=1 grant past frontier
+    db_session.commit()
+
+    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
+    assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
 
 
 @requires_postgres

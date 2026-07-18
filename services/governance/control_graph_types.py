@@ -54,7 +54,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal
+from db.models import Contract, ControlGraphNode, EffectiveFunction, FunctionPrincipal
 
 # FP ``resolved_type`` values folded back into CGN. These spellings are shared
 # with the CGN vocabulary verbatim. EOA / contract are intentionally excluded:
@@ -75,6 +75,17 @@ _TYPE_PRIORITY = {"safe": 3, "timelock": 2, "proxy_admin": 1}
 # excluded: they describe a per-function authority edge, not the principal
 # address, and carry no meaning on a CGN node.
 _INTRINSIC_DETAIL_KEYS = ("owners", "threshold", "delay", "delay_seconds", "min_delay")
+
+
+def _chain_key(chain: str | None) -> str:
+    """Normalize a contract's chain-name for keying: a NULL/blank chain is a
+    legacy mainnet row, folded to the same key as an explicit ``ethereum`` so
+    the two never split a mainnet principal across two buckets."""
+    # Lazy import: the canonical coalesce lives in the aggregation layer and
+    # must stay the single source of the NULL≡ethereum convention.
+    from services.aggregations.company_overview import _coalesce_chain
+
+    return _coalesce_chain(chain)
 
 
 def _merge_intrinsic(into: dict[str, Any], src: Mapping[str, Any]) -> None:
@@ -107,16 +118,22 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     if not contract_ids:
         return 0
 
-    # Per address: every (type, details) the protocol's FP rows assign it, so we
-    # can pick the best type AND pull intrinsic config from the rows of that type.
-    rows_by_addr: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-    for addr, resolved_type, details in session.execute(
+    # Per (chain, address): every (type, details) the protocol's FP rows assign
+    # it, so we can pick the best type AND pull intrinsic config from the rows of
+    # that type. Keyed by chain too — the same address is a distinct principal on
+    # each chain (a Safe on ethereum, a Timelock on base), and control edges never
+    # cross chains (inv. 15), so a per-address fold would let one chain's higher-
+    # priority type overwrite the twin's node on another chain.
+    rows_by_key: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    for chain, addr, resolved_type, details in session.execute(
         select(
+            Contract.chain,
             func.lower(FunctionPrincipal.address),
             FunctionPrincipal.resolved_type,
             FunctionPrincipal.details,
         )
         .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .where(
             EffectiveFunction.contract_id.in_(contract_ids),
             FunctionPrincipal.address.is_not(None),
@@ -125,13 +142,14 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     ).all():
         if not addr or not resolved_type:
             continue
-        rows_by_addr.setdefault(addr, []).append((resolved_type, details if isinstance(details, dict) else {}))
+        key = (_chain_key(chain), addr)
+        rows_by_key.setdefault(key, []).append((resolved_type, details if isinstance(details, dict) else {}))
 
-    best_by_addr: dict[str, str] = {}
-    intrinsic_by_addr: dict[str, dict[str, Any]] = {}
-    for addr, rows in rows_by_addr.items():
+    best_by_key: dict[tuple[str, str], str] = {}
+    intrinsic_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, rows in rows_by_key.items():
         best = max((rt for rt, _ in rows), key=lambda rt: _TYPE_PRIORITY.get(rt, 0))
-        best_by_addr[addr] = best
+        best_by_key[key] = best
         # Intrinsic config comes only from the rows of the winning type — a
         # safe's owners must not bleed onto a timelock-typed write, and vice
         # versa.
@@ -140,34 +158,34 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
             if rtype == best:
                 _merge_intrinsic(intrinsic, det)
         if intrinsic:
-            intrinsic_by_addr[addr] = intrinsic
+            intrinsic_by_key[key] = intrinsic
 
-    if not best_by_addr:
+    if not best_by_key:
         return 0
 
     # Load the nodes for these addresses that are either still untyped OR
     # already one of the governance types — the latter lets a re-run backfill
     # intrinsic config onto rows a prior type-only reconcile already upgraded.
-    cgn_rows = (
-        session.execute(
-            select(ControlGraphNode).where(
-                ControlGraphNode.contract_id.in_(contract_ids),
-                func.lower(ControlGraphNode.address).in_(list(best_by_addr.keys())),
-                or_(
-                    ControlGraphNode.resolved_type.is_(None),
-                    ControlGraphNode.resolved_type == "unknown",
-                    ControlGraphNode.resolved_type.in_(_RECONCILABLE_TYPES),
-                ),
-            )
+    # ControlGraphNode has no chain column; the chain comes from the node's own
+    # parent Contract, so join it in and key the fold lookup on (chain, address).
+    cgn_rows = session.execute(
+        select(ControlGraphNode, Contract.chain)
+        .join(Contract, Contract.id == ControlGraphNode.contract_id)
+        .where(
+            ControlGraphNode.contract_id.in_(contract_ids),
+            func.lower(ControlGraphNode.address).in_([addr for _, addr in best_by_key]),
+            or_(
+                ControlGraphNode.resolved_type.is_(None),
+                ControlGraphNode.resolved_type == "unknown",
+                ControlGraphNode.resolved_type.in_(_RECONCILABLE_TYPES),
+            ),
         )
-        .scalars()
-        .all()
-    )
+    ).all()
 
     updated = 0
-    for node in cgn_rows:
-        key = (node.address or "").lower()
-        new_type = best_by_addr.get(key)
+    for node, node_chain in cgn_rows:
+        key = (_chain_key(node_chain), (node.address or "").lower())
+        new_type = best_by_key.get(key)
         if not new_type:
             continue
         changed = False
@@ -181,7 +199,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
         # type matches the folded one (so we never attach a safe's owners to a
         # timelock), without clobbering config the resolution stage already
         # wrote. JSONB isn't a MutableDict, so reassign to mark it dirty.
-        node_intrinsic = intrinsic_by_addr.get(key)
+        node_intrinsic = intrinsic_by_key.get(key)
         if node_intrinsic and node.resolved_type == new_type:
             current = dict(node.details) if isinstance(node.details, dict) else {}
             missing = {k: v for k, v in node_intrinsic.items() if k not in current}

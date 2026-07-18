@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -421,15 +421,19 @@ def enroll_protocol_contracts(
     # longer in the enrolled set (e.g. inventory addresses that were never
     # analyzed).  We keep them (is_active=False) rather than deleting so
     # historical events are preserved.
-    enrolled_addrs = {mc.address for mc in enrolled}
-    # Also include controller-discovered addresses so the stale-detection
+    # Membership is per (address, chain): the same address is a distinct
+    # deployment on each chain (inv. 15), so a stale base twin must not be
+    # shadowed by its enrolled ethereum twin — nor a live base row deactivated
+    # because only its eth twin is enrolled.
+    enrolled_keys = {(mc.address, mc.chain) for mc in enrolled}
+    # Also include controller-discovered (address, chain) so the stale-detection
     # query below doesn't deactivate rows that ``_enroll_controller_addresses``
     # just enrolled or kept active. Must mirror ``_CONTROLLER_MONITORED_TYPES``
     # — leaving 'proxy' out caused a ping-pong where Pass 1 re-promoted a
     # CGN-discovered proxy admin and the stale check then immediately
     # deactivated it because 'proxy' wasn't in this subset.
-    enrolled_addrs |= {
-        mc.address
+    enrolled_keys |= {
+        (mc.address, mc.chain)
         for mc in session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
@@ -452,7 +456,7 @@ def enroll_protocol_contracts(
             select(MonitoredContract).where(
                 MonitoredContract.protocol_id == protocol_id,
                 MonitoredContract.enrollment_source == "auto",
-                MonitoredContract.address.notin_(enrolled_addrs),
+                tuple_(MonitoredContract.address, MonitoredContract.chain).notin_(list(enrolled_keys)),
             )
         )
         .scalars()
