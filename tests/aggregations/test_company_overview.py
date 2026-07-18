@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -143,6 +143,22 @@ def test_resolve_company_jobs_protocol_path(db_session):
     assert protocol is not None and protocol.id == p.id
     # Only completed + has-address + has owned-Contract jobs are returned
     assert {j.id for j in jobs} == {j1.id}
+
+
+def test_resolve_company_jobs_collapses_duplicate_entity_jobs(db_session):
+    """Two completed jobs at the same (chain, address) — a re-analysis, or a
+    cascade child that raced the spawn dedup — must yield ONE job (the newest),
+    so the overview renders one card per entity, never per job."""
+    p = _add_protocol(db_session, f"dupent-{uuid.uuid4().hex[:8]}")
+    addr = _addr("dupentity")
+    older = _add_job(db_session, address=addr[:2] + addr[2:].upper(), protocol_id=p.id, name="older")
+    older.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    db_session.commit()
+    newer = _add_job(db_session, address=addr, protocol_id=p.id, name="newer")
+    _add_contract(db_session, address=addr, job=newer, protocol_id=p.id, contract_name="Dup")
+
+    _protocol, jobs = resolve_company_jobs(db_session, p.name)
+    assert [j.id for j in jobs] == [newer.id]
 
 
 def test_resolve_company_jobs_excludes_orphan_contracts(db_session):

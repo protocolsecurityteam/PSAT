@@ -76,6 +76,20 @@ def test_analyze_address_only_stays_unlinked(api_client, db_session):
 
 
 @requires_postgres
+def test_analyze_normalizes_address_case(api_client, db_session):
+    """A checksummed submission stores the lowercase address, so every exact-
+    match consumer (spawn dedup, listing joins) sees one canonical form."""
+    from db.models import Job
+
+    lower = _addr()
+    resp = api_client.post("/api/analyze", json={"address": lower[:2] + lower[2:].upper(), "name": "t"})
+    assert resp.status_code == 200, resp.text
+    job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
+    assert job.address == lower
+    assert job.request["address"] == lower
+
+
+@requires_postgres
 def test_analyze_company_only_submission_unaffected(api_client, db_session):
     """Company-only submissions mint/resolve their protocol during discovery —
     no ingress lookup, no 404 for a company that doesn't exist yet."""

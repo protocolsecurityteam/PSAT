@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -125,6 +126,11 @@ def _job_chain_name(job: Job) -> str:
         return "ethereum"
 
 
+def _job_recency(job: Job) -> datetime:
+    """Sort key for picking the surviving job of a duplicated entity."""
+    return job.updated_at or job.created_at or datetime.min.replace(tzinfo=timezone.utc)
+
+
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
     """Find the protocol row + jobs that belong to ``name``.
 
@@ -165,16 +171,19 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
                 Job.address.isnot(None),
             )
         ).all()
-        company_jobs: list[Job] = []
-        seen: set[Any] = set()
+        # One job per (chain, address) entity — newest wins. Duplicate jobs at
+        # one entity are legal (an admin re-analysis, or a cascade child that
+        # raced the spawn dedup); every downstream pass renders per JOB, so
+        # collapsing here is what keeps the surface at one card per entity.
+        best_by_entity: dict[str, Job] = {}
         for job, contract_chain in rows:
             if not _job_matches_contract_chain(job, contract_chain):
                 continue
-            if job.id in seen:
-                continue
-            seen.add(job.id)
-            company_jobs.append(job)
-        return protocol_row, company_jobs
+            key = _entity_key(contract_chain, job.address)
+            prev = best_by_entity.get(key)
+            if prev is None or _job_recency(job) > _job_recency(prev):
+                best_by_entity[key] = job
+        return protocol_row, list(best_by_entity.values())
 
     company_job = session.execute(
         select(Job).where(Job.company == name).order_by(Job.updated_at.desc()).limit(1)
@@ -201,7 +210,16 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
             current = jobs_by_id.get(parent_id)
         return False
 
-    return None, [j for j in all_completed if j.address and belongs_to_company(j)]
+    # Same one-job-per-entity collapse as the protocol path (newest wins).
+    legacy_best: dict[str, Job] = {}
+    for j in all_completed:
+        if not j.address or not belongs_to_company(j):
+            continue
+        key = _entity_key(_job_chain_name(j), j.address)
+        prev = legacy_best.get(key)
+        if prev is None or _job_recency(j) > _job_recency(prev):
+            legacy_best[key] = j
+    return None, list(legacy_best.values())
 
 
 def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]:
