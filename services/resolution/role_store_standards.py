@@ -252,7 +252,7 @@ def _impl_via_slot(address: str, chain_id: int, rpc_url: str | None) -> str | No
     if not rpc_url:
         return None
     try:
-        raw = rpc_request(rpc_url, "eth_getStorageAt", [address, EIP1967_IMPL_SLOT, "latest"])
+        raw = rpc_request(rpc_url, "eth_getStorageAt", [address, EIP1967_IMPL_SLOT, "latest"], chain_id=chain_id)
     except Exception:
         return None
     resolved = parse_address_result(raw)

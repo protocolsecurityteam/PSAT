@@ -3,6 +3,7 @@
 
 import ELK from "elkjs/lib/elk.bundled.js";
 
+import { entityKey } from "../entityKey.js";
 import { principalBadge } from "../format.js";
 
 const elk = new ELK();
@@ -218,21 +219,23 @@ export function assignGroups(machines, principals) {
 // (the shared _EFFECT_CAPABILITY vocabulary: pause / upgrade / fund-out / …)
 // and unioned per row — never remapped, so a row reads the same word the
 // per-contract chips do.
-function buildGroupControllers(primary, kids, principalList, nameByAddr) {
+function buildGroupControllers(primary, kids, principalList, nameByAddr, chain = "ethereum") {
   const childOrder = kids; // group's child addresses (lc), in owned order
   const childSet = new Set(kids);
 
   const rowFor = (principal, isPrimary) => {
+    // Keyed by (chain, address) (inv. 13). The group's kids all belong to the
+    // page's active chain, so `chain` is that; the composite key keeps a
+    // controls_detail row for the same address on another chain from aliasing in.
     const detailByAddr = new Map();
     for (const d of principal.controls_detail || []) {
-      const a = d?.address?.toLowerCase();
-      if (a) detailByAddr.set(a, d);
+      if (d?.address) detailByAddr.set(entityKey(chain, d.address), d);
     }
     const governs = [];
     const caps = new Set();
     const funcs = new Set();
     for (const childLc of childOrder) {
-      const d = detailByAddr.get(childLc);
+      const d = detailByAddr.get(entityKey(chain, childLc));
       if (!d) continue;
       const functions = Array.isArray(d.functions) ? d.functions : [];
       const capabilities = Array.isArray(d.capabilities) ? d.capabilities : [];
@@ -289,7 +292,7 @@ function buildGroupControllers(primary, kids, principalList, nameByAddr) {
 // reports it per group; we reserve that exact height so ELK packs the canvas
 // to fit (rather than a wrapped row overflowing / overlapping cards). Until a
 // group is measured we fall back to a constant estimate.
-export function buildGraphLayout(machines, fundFlows, principals, bandHeights = {}) {
+export function buildGraphLayout(machines, fundFlows, principals, bandHeights = {}, chain = "ethereum") {
   const sorted = [...machines].sort((a, b) => b.totalFunctions - a.totalFunctions);
   const principalList = principals || [];
   const principalByAddr = new Map();
@@ -360,7 +363,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     // the header height it reserves, so layoutGroupInterior can start the
     // cards below it and GroupNode can pin the rendered band to the same
     // number. See buildGroupControllers / groupHeaderHeight.
-    const controllers = buildGroupControllers(p, kids, principalList, nameByAddr);
+    const controllers = buildGroupControllers(p, kids, principalList, nameByAddr, chain);
     // Reserve this group's measured band height so the cards — and everything
     // ELK packs below — start below it instead of being overlapped. Falls back
     // to a constant estimate until GroupNode reports the real height.
@@ -962,8 +965,8 @@ export function layoutGroupInterior(kids, machines, headerHeight = GROUP_PADDING
   return { positions, width: totalWidth, height: totalHeight };
 }
 
-export async function elkLayout(machines, fundFlows, principals, bandHeights = {}) {
-  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, bandHeights);
+export async function elkLayout(machines, fundFlows, principals, bandHeights = {}, chain = "ethereum") {
+  const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, bandHeights, chain);
 
   // Split nodes into top-level vs grouped-children. ELK only sees the
   // top level now: each group is handed to it as a single sized box.

@@ -120,7 +120,7 @@ def test_pg_miss_writes_back(monkeypatch):
     writes: list[tuple] = []
     monkeypatch.setattr(rpc, "_pg_bytecode_put", lambda c, a, b, k: writes.append((c, a, b, k)))
 
-    def _wire(_url, method, _params, retries=1):
+    def _wire(_url, method, _params, retries=1, *, chain_id=None):
         assert method == "eth_getCode"
         return "0x60806040"
 
@@ -181,7 +181,7 @@ def test_chain_id_resolved_via_eth_chainid_once(monkeypatch):
     rpc._chain_id_cache.clear()
     calls = {"chain_id": 0, "code": 0}
 
-    def _wire(_url, method, _params, retries=1):
+    def _wire(_url, method, _params, retries=1, *, chain_id=None):
         if method == "eth_chainId":
             calls["chain_id"] += 1
             return "0x1"
@@ -270,7 +270,7 @@ def test_batch_mixed_pg_hits_and_misses(monkeypatch):
 
     wire_calls: list[list] = []
 
-    def _wire_batch(_url, calls):
+    def _wire_batch(_url, calls, chain_id=None):
         wire_calls.append([c[1][0] for c in calls])
         return [("0xbeef", False), ("0xfeed", False)]
 
@@ -296,7 +296,7 @@ def test_batch_no_db_falls_through_to_wire(monkeypatch):
     monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
     monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: None)
 
-    def _wire_batch(_url, calls):
+    def _wire_batch(_url, calls, chain_id=None):
         return [("0x60", False) for _ in calls]
 
     monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _wire_batch)
@@ -367,7 +367,7 @@ def test_getcode_inmem_key_dedups_url_aliases(monkeypatch):
 
     wire = {"n": 0}
 
-    def _wire(_url, _method, _params, retries=1):
+    def _wire(_url, _method, _params, retries=1, *, chain_id=None):
         wire["n"] += 1
         return "0x6080"
 
@@ -387,7 +387,7 @@ def test_getcode_inmem_key_falls_back_to_url_when_no_chain_id(monkeypatch):
 
     wire = {"n": 0}
 
-    def _wire(_url, _method, _params, retries=1):
+    def _wire(_url, _method, _params, retries=1, *, chain_id=None):
         wire["n"] += 1
         return "0x6080"
 

@@ -132,7 +132,7 @@ def db_session():
 def _run_scan_with_logs(session, logs: list[dict]) -> list[ProxyUpgradeEvent]:
     """Run scan_for_upgrades with mocked RPC returning the given logs."""
 
-    def mock_rpc(rpc_url, method, params):
+    def mock_rpc(rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(BLOCK_INT + 5)
         if method == "eth_getLogs":
@@ -456,7 +456,7 @@ class TestSupportedProxyTypes:
         AAVE_V2_TOPIC0 = "0x65a5e70879738a94a00f00947edae8111ae0aed9175ce342db680bf1e0fb87fc"
         log = _make_log(PROXY_ADDR, [AAVE_V2_TOPIC0], data="0x" + "0" * 63 + "3")
 
-        def mock_rpc(rpc_url, method, params):
+        def mock_rpc(rpc_url, method, params, *, chain_id=None):
             if method == "eth_blockNumber":
                 return hex(BLOCK_INT + 5)
             if method == "eth_getLogs":

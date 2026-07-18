@@ -100,7 +100,10 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
                 continue
-            existing = deps.find_existing_job_for_address(session, contract.address, chain=contract.chain)
+            # Coalesce NULL→"ethereum" (legacy convention): a NULL-chain contract
+            # must still dedup within mainnet, not skip chain filtering entirely
+            # and match a job on any chain at the same address (F8).
+            existing = deps.find_existing_job_for_address(session, contract.address, chain=contract.chain or "ethereum")
             if existing is not None:
                 contract.job_id = existing.id
                 session.commit()

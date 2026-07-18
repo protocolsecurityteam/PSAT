@@ -351,6 +351,7 @@ def _materialize_contract_artifacts(
     *,
     workspace_prefix: str,
     chain: str | None = None,
+    chain_id: int | None = None,
 ) -> LoadedArtifacts:
     """Build analysis + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
     # Proxy check — analyze the implementation but read storage from the proxy.
@@ -367,7 +368,7 @@ def _materialize_contract_artifacts(
     try:
         from services.discovery.classifier import classify_single
 
-        classification = classify_single(address, rpc_url)
+        classification = classify_single(address, rpc_url, chain_id=chain_id)
     except ClassificationIncompleteError:
         # #121: the proxy-detection slots could not be read (transient RPC).
         # Refuse to analyze this address as a confident clean contract; propagate
@@ -437,7 +438,7 @@ def _materialize_contract_artifacts(
     if snapshot_address != effective_address:
         plan = {**plan, "contract_address": snapshot_address}
 
-    snapshot = build_control_snapshot(cast(Any, plan), rpc_url)
+    snapshot = build_control_snapshot(cast(Any, plan), rpc_url, chain_id=chain_id)
     effective_permissions = _build_effective_permissions(cast(dict, analysis), snapshot)
 
     return {
@@ -878,9 +879,10 @@ def _add_nested_principals(
     depth: int,
     max_depth: int,
     classify_fn: Any | None = None,
+    chain_id: int | None = None,
 ) -> None:
     for nested_address, relation, label in _nested_principals_for_details(resolved_type, details):
-        classify = classify_fn or (lambda addr: classify_resolved_address(rpc_url, addr))
+        classify = classify_fn or (lambda addr: classify_resolved_address(rpc_url, addr, chain_id=chain_id))
         nested_type, nested_details = classify(nested_address)
         nested_node_type = "contract" if nested_type in ANALYZABLE_TYPES else "principal"
         nested_node_id = _ensure_node(
@@ -952,7 +954,7 @@ def resolve_control_graph(
             classify_stats["hits"] += 1
             return _classify_cache[key]
         classify_stats["misses"] += 1
-        kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr)
+        kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr, chain_id=chain_id)
         # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
         # classified_addresses artifact.
         if cacheable:
@@ -1004,6 +1006,7 @@ def resolve_control_graph(
                 rpc_url,
                 workspace_prefix=workspace_prefix,
                 chain=chain_name,
+                chain_id=chain_id,
             )
             return artifacts, None
         except Exception as exc:
@@ -1175,6 +1178,7 @@ def resolve_control_graph(
                     depth=depth + 1,
                     max_depth=max_depth,
                     classify_fn=_cached_classify,
+                    chain_id=chain_id,
                 )
 
             for principal_value in _role_principals_from_effective_permissions(effective_permissions or {}):
@@ -1227,6 +1231,7 @@ def resolve_control_graph(
                     depth=depth + 1,
                     max_depth=max_depth,
                     classify_fn=_cached_classify,
+                    chain_id=chain_id,
                 )
 
     # Aggregate profile for the BFS orchestration. The per-contract static cost

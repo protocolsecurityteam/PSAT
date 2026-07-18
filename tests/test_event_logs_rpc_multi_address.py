@@ -71,7 +71,7 @@ def test_multi_address_filter_shape_and_attribution(monkeypatch):
     (normalized lowercase, independent of the checksum casing the node returns)."""
     calls: list[list] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         calls.append(params)
         return [
             _raw_log(address=_ADDR_A.upper(), topic0=_TOPIC_A, block=100),
@@ -109,7 +109,7 @@ def test_multi_address_bisects_on_rejection(monkeypatch):
     single-address path, exercised through the list branch."""
     calls: list[tuple[int, int]] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         assert params[0]["address"] == [_ADDR_A, _ADDR_B]
         from_block = int(params[0]["fromBlock"], 16)
         to_block = int(params[0]["toBlock"], 16)
@@ -160,7 +160,7 @@ def test_multi_address_bisect_floor_re_raises(monkeypatch):
     a sizing problem — it propagates on the address-list path too."""
     calls: list[int] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         assert params[0]["address"] == [_ADDR_A, _ADDR_B]
         span = int(params[0]["toBlock"], 16) - int(params[0]["fromBlock"], 16) + 1
         calls.append(span)
@@ -179,7 +179,7 @@ def test_single_address_request_shape_unchanged(monkeypatch):
     that bare string (not a one-element list), identical to today."""
     calls: list[dict] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         calls.append(params[0])
         return [_raw_log(address=_ADDR_A, topic0=_TOPIC_A, block=42)]
 
@@ -217,7 +217,7 @@ def test_raw_dict_decodes_through_governance_parser(monkeypatch):
         data="0x",
     )
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         return [raw]
 
     monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)

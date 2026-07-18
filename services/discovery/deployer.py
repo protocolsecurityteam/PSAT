@@ -35,8 +35,22 @@ from typing import Any
 from services.discovery.inventory_domain import _debug_log
 from services.discovery.static_dependencies import normalize_address
 from utils import etherscan
+from utils.chains import chain_by_id
 
 logger = logging.getLogger(__name__)
+
+
+def _explorer_base(chain_id: int) -> str:
+    """Explorer origin for ``chain_id`` from the registry (display links only).
+
+    Falls back to Etherscan for a chain the registry doesn't carry so a link is
+    never broken — the value is cosmetic, not a chain-membership claim.
+    """
+    try:
+        return chain_by_id(chain_id).explorer_base_url.rstrip("/")
+    except Exception:  # noqa: BLE001 - display-only, never fail loud
+        return "https://etherscan.io"
+
 
 # A deployer must have created at least this many seed contracts.
 _MIN_SEED_COUNT = 3
@@ -247,7 +261,9 @@ def expand_from_deployers(
     if resolve_names and new_addresses:
         names = _batch_get_names(new_addresses, debug=debug, chain_id=chain_id)
 
-    # Step 5 — build inventory entries
+    # Step 5 — build inventory entries. Explorer links point at the chain the
+    # expansion actually ran on (chain_id), not a hardcoded etherscan.io.
+    explorer_base = _explorer_base(chain_id)
     entries: list[dict[str, Any]] = []
     for address, deployers in sorted(all_deployed.items()):
         deployer = sorted(deployers)[0]  # deterministic pick
@@ -257,8 +273,8 @@ def expand_from_deployers(
                 "address": address,
                 "chain": "unknown",
                 "kind": "deployer_expansion",
-                "url": f"https://etherscan.io/address/{deployer}",
-                "explorer_url": f"https://etherscan.io/address/{address}",
+                "url": f"{explorer_base}/address/{deployer}",
+                "explorer_url": f"{explorer_base}/address/{address}",
                 "chain_from_hint": False,
             }
         )

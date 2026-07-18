@@ -87,17 +87,25 @@ def _request_rpc_url(job: Job) -> str | None:
     )
 
 
+def _parent_chain_id(job: Job) -> int:
+    """The parent job's first-class ``chain_id`` (inv. 6): the populated
+    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
+    registry, else mainnet. Threaded into RPC reads so the inv-7 URL↔chain_id
+    guard is armed."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        return chain_id
+    request = job.request if isinstance(job.request, dict) else {}
+    return derive_job_chain_id(request.get("chain"), job.address) or 1
+
+
 def _parent_chain_name(job: Job) -> str:
     """Canonical chain name of the parent job, for stamping onto a spawned impl
     child so chain never cascades as ``None`` (inv. 6). Uses the first-class
     ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
     registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
-    chain_id = getattr(job, "chain_id", None)
-    if not isinstance(chain_id, int):
-        request = job.request if isinstance(job.request, dict) else {}
-        chain_id = derive_job_chain_id(request.get("chain"), job.address) or 1
     try:
-        return chain_by_id(chain_id).name
+        return chain_by_id(_parent_chain_id(job)).name
     except UnknownChainError:
         return "ethereum"
 
@@ -303,6 +311,9 @@ def _resolve_dynamic_deps(
     """
     prev_dyn = _load_prev_dynamic_deps(session, job, tx_hashes)
     start_block = _start_block_from_prev_dyn(prev_dyn)
+    # Chain from ``jobs.chain_id`` (via ``_parent_chain_name``): the txlist fetch
+    # must run on the contract's own chain, not a mainnet default (F2).
+    chain_id = require_chain(chain=_parent_chain_name(job), context="dynamic deps").chain_id
     try:
         dyn_output = find_dynamic_dependencies(
             address,
@@ -312,6 +323,7 @@ def _resolve_dynamic_deps(
             proxy_address=proxy_addr,
             code_cache=code_cache,
             start_block=start_block,
+            chain_id=chain_id,
         )
     except NoNewTransactionsError:
         if prev_dyn:
@@ -663,6 +675,8 @@ _PROXY_FIELDS = _MUTABLE_CONTRACT_FIELDS
 def _validate_cached_dep_classifications(
     prev_cls: dict,
     rpc_url: str,
+    *,
+    chain_id: int | None = None,
 ) -> dict[str, dict]:
     """Validate cached dependency proxy classifications against live on-chain state.
 
@@ -708,7 +722,7 @@ def _validate_cached_dep_classifications(
 
         # Single RPC call to check current implementation
         try:
-            current_impl = resolve_current_implementation(addr, rpc_url, proxy_type=proxy_type)
+            current_impl = resolve_current_implementation(addr, rpc_url, proxy_type=proxy_type, chain_id=chain_id)
             if not current_impl:
                 continue  # can't verify — re-classify to be safe
             if normalize_hex(current_impl) != normalize_hex(cached_impl):
@@ -822,7 +836,9 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     # Single RPC call — resolve_current_implementation handles all proxy types
     # (slot reads, getter calls, fallback discovery).
     try:
-        current_impl = resolve_current_implementation(contract_row.address, rpc_url, proxy_type=proxy_type)
+        current_impl = resolve_current_implementation(
+            contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=_parent_chain_id(job)
+        )
         if not current_impl:
             return None
         current_impl = normalize_hex(current_impl)
@@ -1049,7 +1065,7 @@ class StaticWorker(BaseWorker):
             return None
 
         try:
-            classification = classify_single(address, rpc_url)
+            classification = classify_single(address, rpc_url, chain_id=_parent_chain_id(job))
         except ClassificationIncompleteError as exc:
             # #121: the proxy-detection slots could not be read (transient RPC).
             # Storing is_proxy=False here and analyzing the address as-is would
@@ -1248,7 +1264,12 @@ class StaticWorker(BaseWorker):
         force = bool(request.get("force"))
         # Within-cascade dedupe under --force: same impl reached via multiple proxy paths must not spawn N copies.
         root_job_id = request.get("root_job_id") or str(job.id)
-        chain = request.get("chain")
+        # Coalesce a chainless request via the job's first-class chain (same
+        # derivation as the child stamp below): reconcile_impl_job_for_proxy
+        # disables its chain filter for chain=None, and impl singletons share
+        # addresses across chains (CREATE2), so an unfiltered lookup could
+        # adopt or backpatch another chain's impl job.
+        chain = request.get("chain") or _parent_chain_name(job)
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
@@ -1407,6 +1428,7 @@ class StaticWorker(BaseWorker):
                 proxy_address,
                 pointers,
                 implementation=proxy_contract.implementation,
+                chain_id=_parent_chain_id(job),
             )
             if not secondary_addrs:
                 return
@@ -1494,6 +1516,12 @@ class StaticWorker(BaseWorker):
 
         request = job.request if isinstance(job.request, dict) else {}
         deps_rpc = _request_rpc_url(job)
+        # Chain from the first-class ``jobs.chain_id`` column (via
+        # ``_parent_chain_name``), not a mainnet default: the dynamic-dependency
+        # txlist and the upgrade-history getLogs both hit Etherscan and must
+        # query the proxy's own chain, or an L2 proxy's timeline/deps come back
+        # silently empty from mainnet (F1/F2).
+        phase_chain_id = require_chain(chain=_parent_chain_name(job), context="dependency phase").chain_id
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
         dynamic_tx_limit = request.get("dynamic_tx_limit", 10)
@@ -1527,7 +1555,7 @@ class StaticWorker(BaseWorker):
         def run_static() -> dict:
             if cached_static_deps is not None:
                 return cached_static_deps
-            return find_dependencies(address, deps_rpc, code_cache={})
+            return find_dependencies(address, deps_rpc, code_cache={}, chain_id=_parent_chain_id(job))
 
         def run_dynamic() -> dict:
             return find_dynamic_dependencies(
@@ -1538,6 +1566,7 @@ class StaticWorker(BaseWorker):
                 proxy_address=proxy_addr,
                 code_cache={},
                 start_block=dyn_start_block,
+                chain_id=phase_chain_id,
             )
 
         def run_upgrade_history() -> dict | None:
@@ -1552,7 +1581,7 @@ class StaticWorker(BaseWorker):
                 "target_classification": target_classification or {},
                 "dependencies": {},
             }
-            return build_upgrade_history(minimal_deps, from_block=uh_from_block)
+            return build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id)
 
         from utils.concurrency import parallel_map
 
@@ -1679,7 +1708,9 @@ class StaticWorker(BaseWorker):
                 # state so upgraded dependencies get re-classified.
                 prev_cls = get_artifact(session, job.id, "classifications")
                 if isinstance(prev_cls, dict):
-                    validated_cls = _validate_cached_dep_classifications(prev_cls, resolved_rpc)
+                    validated_cls = _validate_cached_dep_classifications(
+                        prev_cls, resolved_rpc, chain_id=_parent_chain_id(job)
+                    )
                     for cls_addr, cls_info in validated_cls.items():
                         if cls_addr not in pre_classified:
                             pre_classified[cls_addr] = cls_info
@@ -1691,6 +1722,7 @@ class StaticWorker(BaseWorker):
                         resolved_rpc,
                         dynamic_edges=(dyn_output or {}).get("dependency_graph"),
                         code_cache=None,
+                        chain_id=_parent_chain_id(job),
                         pre_classified=pre_classified or None,
                     )
                     # Store classifications artifact for future cache hits

@@ -98,7 +98,7 @@ def wire(monkeypatch):
 
     getcode_addrs: list[str] = []
 
-    def fake_rpc(rpc_url, method, params):
+    def fake_rpc(rpc_url, method, params, *, chain_id=None):
         if method == "eth_getCode":
             addr = str(params[0]).lower()
             getcode_addrs.append(addr)

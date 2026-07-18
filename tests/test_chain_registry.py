@@ -89,6 +89,34 @@ def test_base_registry_values():
     assert base.bridge_executors == ("0x4200000000000000000000000000000000000010",)
 
 
+def test_every_chain_has_a_native_asset():
+    # inv. 5: the native gas-token symbol is an explicit registry fact for every
+    # chain — TVL native-asset pricing dispatches on it (services/monitoring/tvl.py).
+    for info in all_chains():
+        assert info.native_asset, f"{info.name} is missing a native_asset symbol"
+        assert info.native_asset == info.native_asset.strip()
+
+
+def test_native_asset_eth_native_chains():
+    # ETH-native chains are the only ones TVL can price at the ETH/USD quote.
+    by_name = {c.name: c for c in all_chains()}
+    for name in ("ethereum", "base", "arbitrum", "optimism", "linea", "scroll", "zksync", "blast", "mode"):
+        assert by_name[name].native_asset == "ETH", name
+
+
+def test_native_asset_non_eth_chains():
+    # These chains carry their own native gas token — never ETH — so TVL must
+    # refuse to quote their native balance at the ETH price.
+    by_name = {c.name: c for c in all_chains()}
+    # POL is the current canonical symbol (renamed from MATIC).
+    assert by_name["polygon"].native_asset == "POL"
+    assert by_name["bsc"].native_asset == "BNB"
+    assert by_name["avalanche"].native_asset == "AVAX"
+    assert by_name["berachain"].native_asset == "BERA"
+    for name in ("polygon", "bsc", "avalanche", "berachain"):
+        assert by_name[name].native_asset != "ETH", name
+
+
 def test_supported_chain_ids_default_is_mainnet(monkeypatch):
     monkeypatch.delenv("PSAT_SUPPORTED_CHAIN_IDS", raising=False)
     assert supported_chain_ids() == frozenset({1})

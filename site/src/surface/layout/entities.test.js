@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { buildEntityIndex, resolveEntity } from "./entities.js";
+import { entityKey } from "../entityKey.js";
 
 const PRIMARY = "0x1111111111111111111111111111111111111111"; // group owner
 const VAULT = "0x3333333333333333333333333333333333333333";
@@ -14,10 +15,21 @@ describe("buildEntityIndex", () => {
       [{ address: VAULT }, { address: PRIMARY }],
       [{ address: PRIMARY, type: "timelock" }],
     );
-    expect(idx.get(VAULT).machine).toBeTruthy();
-    expect(idx.get(VAULT).principal).toBeNull();
-    expect(idx.get(PRIMARY).machine).toBeTruthy();
-    expect(idx.get(PRIMARY).principal).toBeTruthy();
+    expect(idx.get(entityKey("ethereum", VAULT)).machine).toBeTruthy();
+    expect(idx.get(entityKey("ethereum", VAULT)).principal).toBeNull();
+    expect(idx.get(entityKey("ethereum", PRIMARY)).machine).toBeTruthy();
+    expect(idx.get(entityKey("ethereum", PRIMARY)).principal).toBeTruthy();
+  });
+
+  it("keys by (chain, address) so one address on two chains is two entities", () => {
+    const idx = buildEntityIndex([{ address: VAULT }], [], "base");
+    // The mainnet key must miss; the base key must hit.
+    expect(idx.get(entityKey("ethereum", VAULT))).toBeUndefined();
+    expect(idx.get(entityKey("base", VAULT)).machine).toBeTruthy();
+    // Legacy NULL chain coalesces to ethereum, never colliding with base.
+    const legacy = buildEntityIndex([{ address: VAULT }], [], null);
+    expect(legacy.get(entityKey("ethereum", VAULT)).machine).toBeTruthy();
+    expect(legacy.get(entityKey("base", VAULT))).toBeUndefined();
   });
 });
 
@@ -25,7 +37,15 @@ describe("resolveEntity", () => {
   const idx = buildEntityIndex([{ address: VAULT, owner: OFF_INDEX }], []);
 
   it("returns the index hit as-is when the address is known", () => {
-    expect(resolveEntity(idx, VAULT)).toBe(idx.get(VAULT));
+    expect(resolveEntity(idx, VAULT)).toBe(idx.get(entityKey("ethereum", VAULT)));
+  });
+
+  it("resolves against the passed chain, missing an entry on another chain", () => {
+    expect(resolveEntity(idx, VAULT, { chain: "base" })).not.toBe(
+      idx.get(entityKey("ethereum", VAULT)),
+    );
+    // base is off-index → synthesized principal, not the mainnet machine hit.
+    expect(resolveEntity(idx, VAULT, { chain: "base" }).machine).toBeNull();
   });
 
   it("returns null for a null/empty address", () => {

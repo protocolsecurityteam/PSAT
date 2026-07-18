@@ -93,7 +93,7 @@ def test_scan_detects_upgrade(mock_rpc, db_session):
         tx="0x" + "de" * 32,
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(latest_block)
         if method == "eth_getLogs":
@@ -141,7 +141,7 @@ def test_scan_detects_admin_changed(mock_rpc, db_session):
         tx="0x" + "a" * 64,
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(100)
         if method == "eth_getLogs":
@@ -182,7 +182,7 @@ def test_scan_detects_beacon_upgraded(mock_rpc, db_session):
         tx="0x" + "bc" * 32,
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(100)
         if method == "eth_getLogs":
@@ -219,7 +219,7 @@ def test_scan_multiple_proxies_single_call(mock_rpc, db_session):
 
     get_logs_call_count = 0
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         nonlocal get_logs_call_count
         if method == "eth_blockNumber":
             return hex(latest_block)
@@ -257,7 +257,7 @@ def test_scan_chunks_large_ranges(mock_rpc, db_session):
 
     get_logs_calls = []
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(latest_block)
         if method == "eth_getLogs":
@@ -305,7 +305,7 @@ def test_scan_ignores_unrelated_events(mock_rpc, db_session):
         tx="0x" + "99" * 32,
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(100)
         if method == "eth_getLogs":
@@ -336,7 +336,7 @@ def test_scan_idempotent_on_restart(mock_rpc, db_session):
 
     call_count = {"block_number": 0, "get_logs": 0}
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             call_count["block_number"] += 1
             return hex(latest_block)
@@ -390,6 +390,7 @@ def test_resolve_current_implementation(mock_rpc):
         "http://localhost:8545",
         "eth_getStorageAt",
         [ADDR(1), EIP1967_IMPL_SLOT, "latest"],
+        chain_id=None,
     )
 
 
@@ -463,7 +464,7 @@ def test_no_duplicate_events_with_mixed_last_scanned_block(mock_rpc, db_session)
         log_index="0x0",
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(latest_block)
         if method == "eth_getLogs":
@@ -518,7 +519,7 @@ def test_error_recovery_resumes_from_last_successful_block(mock_rpc, db_session)
 
     chunk_calls = []
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(latest_block)
         if method == "eth_getLogs":
@@ -569,7 +570,7 @@ def test_multiple_upgrades_same_block(mock_rpc, db_session):
     log1 = _make_log(proxy_addr, UPGRADED_TOPIC0, _topic_for(impl_v2), block=block, tx=tx, log_index="0x0")
     log2 = _make_log(proxy_addr, UPGRADED_TOPIC0, _topic_for(impl_v3), block=block, tx=tx, log_index="0x1")
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(100)
         if method == "eth_getLogs":
@@ -633,7 +634,7 @@ def test_multiple_events_same_transaction(mock_rpc, db_session):
         log_index="0x1",
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(100)
         if method == "eth_getLogs":
@@ -690,7 +691,7 @@ def test_rapid_successive_upgrades(mock_rpc, db_session):
         log_index="0x0",
     )
 
-    def rpc_side_effect(url, method, params):
+    def rpc_side_effect(url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(105)
         if method == "eth_getLogs":
@@ -915,7 +916,7 @@ def test_resolve_falls_back_to_slot_zero(mock_rpc):
     gnosis_padded = "0x" + "0" * 24 + gnosis_impl[2:]
     zero = "0x" + "0" * 64
 
-    def rpc_side_effect(rpc_url, method, params):
+    def rpc_side_effect(rpc_url, method, params, *, chain_id=None):
         if method == "eth_getStorageAt":
             slot = params[1]
             # Only slot 0 has a value
@@ -952,6 +953,7 @@ def test_resolve_historical_block_uses_eip1967_only(mock_rpc):
         "http://localhost:8545",
         "eth_getStorageAt",
         [ADDR(1), EIP1967_IMPL_SLOT, "0x100"],
+        chain_id=None,
     )
 
 

@@ -74,7 +74,7 @@ def test_classifier_fallback_records_degraded_and_metric(monkeypatch):
 def test_classifier_no_fallback_metric_is_zero(monkeypatch):
     from services.discovery import classifier
 
-    def _ok(addr, rpc_url, code_cache=None):
+    def _ok(addr, rpc_url, code_cache=None, *, chain_id=None):
         return {"address": addr, "type": "regular"}
 
     monkeypatch.setattr(classifier, "classify_single", _ok)

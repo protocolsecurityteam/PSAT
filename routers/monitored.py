@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
-from services.monitoring.chain_rpc import rpc_for_chain
+from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from utils.chains import UnsupportedChainError, require_supported_chain
 from utils.rpc import rpc_request
 
@@ -33,7 +33,15 @@ def _current_head_block(chain: str | None) -> int:
     wrong, immutable pre-watch floor. Falls back to 0 on RPC failure — the same
     degradation the enrollment path accepts (``enrollment.py``)."""
     try:
-        return int(rpc_request(rpc_for_chain(chain, deps.DEFAULT_RPC_URL), "eth_blockNumber", []), 16)
+        return int(
+            rpc_request(
+                rpc_for_chain(chain, deps.DEFAULT_RPC_URL),
+                "eth_blockNumber",
+                [],
+                chain_id=chain_id_for(chain),
+            ),
+            16,
+        )
     except Exception as exc:
         logger.warning(
             "Could not read head block for monitoring upsert: %s",

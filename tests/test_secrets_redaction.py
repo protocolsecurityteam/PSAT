@@ -377,7 +377,9 @@ def test_static_dependencies_artifact_drops_rpc_field(monkeypatch):
     from services.discovery import static_dependencies as sd
 
     monkeypatch.setattr(sd, "load_dotenv", lambda _path: None)
-    monkeypatch.setattr(sd, "discover_dependencies", lambda _rpc, _root, code_cache=None: ["0x" + "11" * 20])
+    monkeypatch.setattr(
+        sd, "discover_dependencies", lambda _rpc, _root, code_cache=None, chain_id=None: ["0x" + "11" * 20]
+    )
 
     out = sd.find_dependencies("0x" + "aa" * 20, rpc_url=_ALCHEMY)
     assert "rpc" not in out
@@ -401,7 +403,7 @@ def test_dynamic_dependencies_artifact_drops_rpc_field(monkeypatch):
 
     monkeypatch.setattr(dd, "trace_transaction", _fake_trace)
     monkeypatch.setattr(dd, "has_deployed_code", lambda _code: True)
-    monkeypatch.setattr(dd, "get_code", lambda _rpc, _addr: "0xff")
+    monkeypatch.setattr(dd, "get_code", lambda _rpc, _addr, chain_id=None: "0xff")
 
     out = dd.find_dynamic_dependencies(
         "0x" + "aa" * 20,

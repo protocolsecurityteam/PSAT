@@ -930,7 +930,7 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
 
     rpc_calls = []
 
-    def fake_rpc_request(_rpc_url, method, params, retries=1):
+    def fake_rpc_request(_rpc_url, method, params, retries=1, *, chain_id=None):
         rpc_calls.append((method, params, retries))
         assert method == "eth_call"
         assert params[0]["to"] == authority_addr

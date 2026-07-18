@@ -69,12 +69,12 @@ class Wire:
         self.getlogs_calls: list[dict] = []
         self.empty_address_seen = False
 
-    def head_rpc(self, url, method, params):
+    def head_rpc(self, url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(self.head)
         raise AssertionError(f"unexpected head-path method {method}")
 
-    def getlogs_rpc(self, url, method, params):
+    def getlogs_rpc(self, url, method, params, *, chain_id=None):
         assert method == "eth_getLogs", method
         p = params[0]
         self.getlogs_calls.append(p)
@@ -287,7 +287,7 @@ def test_failure_isolates_to_its_cohort(db_session, monkeypatch):
 
     # Fail only bad's address by failing all getLogs whose address set is {bad}.
     class TwoCohortWire(Wire):
-        def getlogs_rpc(self, url, method, params):
+        def getlogs_rpc(self, url, method, params, *, chain_id=None):
             p = params[0]
             self.getlogs_calls.append(p)
             assert p["address"]

@@ -15,7 +15,10 @@ import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import { buildControlAdjacency } from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
+import { coalesceChain, entityKey } from "./surface/entityKey.js";
+import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "./surface/chainScope.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
+import { ChainSwitcher } from "./surface/sidebar/ChainSwitcher.jsx";
 import { EntityCard } from "./surface/lanes/EntityCard.jsx";
 import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
@@ -41,6 +44,38 @@ export default function ProtocolSurface({
   // (vitest, e2e) still embed functions on each contract entry, so
   // fall back to those when neither prop is provided.
   const [companyData, setCompanyData] = useState(initialData);
+  // Active-chain scope for the whole page (multichain inv. 13). The Surface
+  // renders exactly one chain at a time; `chosenChain` is the user's explicit
+  // pick (via the switcher), seeded once from the shareable ?chain= URL param.
+  // null = follow the default chain. Read synchronously at mount so the first
+  // render is already scoped correctly (no effect race with the selection
+  // restore, which is gated on the resulting machines).
+  const [chosenChain, setChosenChain] = useState(() => {
+    if (embedded || typeof window === "undefined") return null;
+    const ch = new URLSearchParams(window.location.search).get("chain");
+    return ch ? coalesceChain(ch) : null;
+  });
+
+  // Chains this protocol actually has contracts on — derived from the loaded
+  // payload (only contracts carry a chain; NULL coalesces to ethereum), never a
+  // static list. The switcher offers exactly these; a single-chain protocol
+  // yields one entry and no switcher. See chainScope.js. Declared before
+  // functionData so the inline-functions map can be chain-scoped too.
+  const availableChains = useMemo(
+    () => deriveAvailableChains(companyData?.contracts),
+    [companyData]
+  );
+  // The chain the page falls back to with no explicit pick — kept out of the
+  // URL so single-chain and default-chain views have clean links.
+  const defaultChain = useMemo(() => defaultChainFor(availableChains), [availableChains]);
+  // An unknown/typo'd/off-protocol ?chain= degrades to the default (never a
+  // blank canvas) — pickActiveChain enforces that.
+  const activeChain = useMemo(
+    () => pickActiveChain(availableChains, chosenChain),
+    [availableChains, chosenChain]
+  );
+  const isMultichain = availableChains.length > 1;
+
   // Derive functionData from props so a CompanyOverview-supplied
   // initialFunctions that arrives AFTER mount (its /functions fetch
   // resolves after /api/company) flows in. The previous
@@ -53,12 +88,20 @@ export default function ProtocolSurface({
     if (locallyFetched && Object.keys(locallyFetched).length > 0) return locallyFetched;
     const source = companyData?.contracts || initialData?.contracts;
     if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
+      // Scope to the active chain before keying by bare address: two chains can
+      // share an address, and an unscoped map would last-wins one chain's
+      // functions onto the other (F4). (The /functions endpoint payload —
+      // initialFunctions/locallyFetched above — is keyed by bare address at the
+      // backend and has no chain dimension to scope on; that conflation is a
+      // backend concern, out of this surface fix.)
       return Object.fromEntries(
-        source.filter((c) => c.address).map((c) => [c.address, c.functions || []]),
+        source
+          .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
+          .map((c) => [c.address, c.functions || []]),
       );
     }
     return {};
-  }, [initialFunctions, locallyFetched, companyData, initialData]);
+  }, [initialFunctions, locallyFetched, companyData, initialData, activeChain]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
   // Search mode lives on the parent so the mode-pill bar can render at
   // top-left while the rest of SearchNavigator stays in the centre overlay.
@@ -258,9 +301,26 @@ export default function ProtocolSurface({
     };
   }, [companyName, initialData, initialFunctions]);
 
+  // Chain-scope every downstream derivation: only the active chain's contracts
+  // build machines, so the canvas/selection/entity-index all operate on a
+  // single-chain dataset. Principals and fund_flows carry no chain, but they
+  // cascade-scope for free — visiblePrincipals keeps only principals that
+  // control a visible (now chain-scoped) machine, and elkLayout keeps only
+  // flows whose endpoints are visible contracts.
+  const scopedCompanyData = useMemo(() => {
+    if (!companyData) return null;
+    if (!isMultichain) return companyData; // single chain: no filtering, identical to before
+    return {
+      ...companyData,
+      contracts: (companyData.contracts || []).filter(
+        (c) => coalesceChain(c.chain) === activeChain,
+      ),
+    };
+  }, [companyData, isMultichain, activeChain]);
+
   const allMachines = useMemo(
-    () => (companyData ? buildMachines(companyData, functionData, { functionsLoading }) : []),
-    [companyData, functionData, functionsLoading]
+    () => (scopedCompanyData ? buildMachines(scopedCompanyData, functionData, { functionsLoading }) : []),
+    [scopedCompanyData, functionData, functionsLoading]
   );
 
   // computeProtocolScore (used by DetailEmptyState) iterates
@@ -269,15 +329,15 @@ export default function ProtocolSurface({
   // the score-only consumer. The buildMachines call above already
   // consumes the keyed map directly.
   const companyDataWithFunctions = useMemo(() => {
-    if (!companyData) return null;
-    if (!functionData || Object.keys(functionData).length === 0) return companyData;
+    if (!scopedCompanyData) return null;
+    if (!functionData || Object.keys(functionData).length === 0) return scopedCompanyData;
     return {
-      ...companyData,
-      contracts: (companyData.contracts || []).map((c) =>
+      ...scopedCompanyData,
+      contracts: (scopedCompanyData.contracts || []).map((c) =>
         c.address && functionData[c.address] ? { ...c, functions: functionData[c.address] } : c
       ),
     };
-  }, [companyData, functionData]);
+  }, [scopedCompanyData, functionData]);
 
   const machines = useMemo(
     () => allMachines.filter((m) => enabledRoles.has(m.role || "utility")),
@@ -317,8 +377,8 @@ export default function ProtocolSurface({
   // entities through this index per render, so denormalized snapshots can
   // never go stale and role-filtered-off targets still resolve.
   const entityIndex = useMemo(
-    () => buildEntityIndex(allMachines, companyData?.principals || []),
-    [allMachines, companyData]
+    () => buildEntityIndex(allMachines, companyData?.principals || [], activeChain),
+    [allMachines, companyData, activeChain]
   );
 
   const {
@@ -333,7 +393,7 @@ export default function ProtocolSurface({
     guard,
     radar,
     focusPreview,
-  } = useSurfaceSelection({ entityIndex, machines, companyName });
+  } = useSurfaceSelection({ entityIndex, machines, companyName, chain: activeChain });
 
   // Restore a persisted selection from the URL on initial data load. Reads
   // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
@@ -352,7 +412,7 @@ export default function ProtocolSurface({
     const addr = params.get("sel") || params.get("focus");
     if (!addr) return;
     restoredSelection.current = true;
-    if (entityIndex.get(addr.toLowerCase())) {
+    if (entityIndex.get(entityKey(activeChain, addr))) {
       select(addr);
       syncUrl({ sel: addr });
     } else {
@@ -360,7 +420,27 @@ export default function ProtocolSurface({
       // synthesized junk selection card.
       focusPreview(addr);
     }
-  }, [embedded, machines, entityIndex, select, focusPreview, syncUrl]);
+  }, [embedded, machines, entityIndex, activeChain, select, focusPreview, syncUrl]);
+
+  // Switching chains rescopes the entire page: clear the selection (the same
+  // address can be a different contract — or absent — on the new chain), drop
+  // overlay highlights, and write the shareable ?chain= param (omitted for the
+  // default chain so those links stay clean). The URL selection params are
+  // cleared alongside since they refer to the old chain's entity.
+  const handleSelectChain = useCallback((name) => {
+    setChosenChain(name);
+    setAgentHighlights(null);
+    setActiveAuditId(null);
+    select(null);
+    if (embedded || typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (name && name !== defaultChain) url.searchParams.set("chain", name);
+    else url.searchParams.delete("chain");
+    url.searchParams.delete("sel");
+    url.searchParams.delete("score");
+    url.searchParams.delete("fn");
+    window.history.replaceState({}, "", url.toString());
+  }, [embedded, defaultChain, select]);
 
   const handleToggleRole = useCallback((role) => {
     setEnabledRoles((prev) => {
@@ -562,6 +642,8 @@ export default function ProtocolSurface({
         governsIndex={governsIndex}
         controlAdjacency={controlAdjacency}
         machines={machines}
+        chain={activeChain}
+        showChain={isMultichain}
         principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
       />
       <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
@@ -588,6 +670,9 @@ export default function ProtocolSurface({
             syncUrl({ sel: item.address });
           }}
         >
+          {/* Chain row renders only for multi-chain protocols (inv. 13);
+              single-chain pages show no chain UI at all. */}
+          <ChainSwitcher chains={availableChains} active={activeChain} onSelect={handleSelectChain} />
           <div className="ps-filter-row">
             <span className="ps-filter-gutter">Type</span>
             <SearchModesBar mode={searchMode} setMode={setSearchMode} />
@@ -605,6 +690,7 @@ export default function ProtocolSurface({
             machines={machines}
             fundFlows={companyData?.fund_flows}
             principals={visiblePrincipals}
+            chain={activeChain}
             selectedAddress={selection?.address}
             focusAddress={focus}
             focusedAddress={focusedAddress}
@@ -657,6 +743,7 @@ export default function ProtocolSurface({
               isAdmin={isAdmin}
               cache={upgradeHistoryCache}
               onCache={cacheUpgradeHistory}
+              chain={activeChain}
             />
           )}
           {/* One universal card for every selection. selectedMachine and
@@ -687,6 +774,8 @@ export default function ProtocolSurface({
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}
+              chain={activeChain}
+              showChain={isMultichain}
             />
           )}
           {sidebarMode === "detail" && selectedMachine && !radarSelection && (
@@ -725,7 +814,7 @@ export default function ProtocolSurface({
                 // audit-overlay dim path then dims everything else.
                 focusPreview(addr);
                 api(
-                  `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}`,
+                  `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}${isMultichain ? `&chain=${encodeURIComponent(activeChain)}` : ""}`,
                 )
                   .then((data) => {
                     const set = new Set([lc]);

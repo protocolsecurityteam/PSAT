@@ -693,7 +693,7 @@ def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
 
     captured_kwargs = {}
 
-    def mock_build_uh(deps_path, *, enrich=True, from_block=0):
+    def mock_build_uh(deps_path, *, enrich=True, from_block=0, chain_id=1):
         captured_kwargs["from_block"] = from_block
         return FAKE_UH_NEW
 
@@ -743,7 +743,7 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
     job = _make_dep_phase_job(db_session)
     store_artifact(db_session, job.id, "upgrade_history", data=FAKE_UH_PREV)
 
-    def mock_build_uh(deps_path, *, enrich=True, from_block=0):
+    def mock_build_uh(deps_path, *, enrich=True, from_block=0, chain_id=1):
         return {
             "schema_version": "0.1",
             "target_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
@@ -1247,3 +1247,47 @@ def test_merge_dynamic_deps_trace_errors():
     assert len(merged["trace_errors"]) == 2
     error_hashes = {e["tx_hash"] for e in merged["trace_errors"]}
     assert error_hashes == {"0x111", "0x222"}
+
+
+# ---------------------------------------------------------------------------
+# F1/F2 — the dependency phase threads the job's chain into the Etherscan-bound
+# upgrade-history and dynamic-dependency fetches (not a mainnet default).
+# ---------------------------------------------------------------------------
+
+
+def test_dependency_phase_threads_job_chain_id_to_subphases(db_session, monkeypatch):
+    """For a Base job, both the dynamic-dependency (F2) and upgrade-history (F1)
+    sub-phases must receive chain_id=8453 — the txlist/getLogs Etherscan calls
+    would otherwise silently run on mainnet and return empty for L2 contracts."""
+    from workers.static_worker import StaticWorker
+
+    captured: dict[str, int | None] = {}
+
+    def fake_find_dyn(*_a, **kw):
+        captured["dyn_chain_id"] = kw.get("chain_id")
+        return None
+
+    def fake_build_upgrade_history(*_a, **kw):
+        captured["uh_chain_id"] = kw.get("chain_id")
+        return {"schema_version": "0.1", "target_address": ADDR_A, "proxies": {}}
+
+    _patch_dep_phase_helpers(monkeypatch, fake_find_dyn)
+    # build_upgrade_history is imported locally inside run_upgrade_history, so
+    # patch it at its source module.
+    monkeypatch.setattr("services.discovery.upgrade_history.build_upgrade_history", fake_build_upgrade_history)
+
+    # A Base submission: create_job dual-writes jobs.chain_id=8453 from the chain
+    # string, and _parent_chain_name reads that first-class column.
+    job = _make_dep_phase_job(db_session, extra_request={"chain": "base"})
+
+    worker = StaticWorker()
+    monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
+    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+
+    worker.process(db_session, job)
+
+    assert captured.get("dyn_chain_id") == 8453  # F2
+    assert captured.get("uh_chain_id") == 8453  # F1

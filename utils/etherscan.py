@@ -402,7 +402,7 @@ def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str
             from utils.rpc import default_rpc_url, rpc_request
 
             url = rpc_url or default_rpc_url(chain_id=chain_id)
-            tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash]) if url else None
+            tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash], chain_id=chain_id) if url else None
             block = tx.get("blockNumber") if isinstance(tx, dict) else None
             if isinstance(block, str) and block.startswith("0x"):
                 return int(block, 16)

@@ -348,7 +348,7 @@ def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
         "get",
         lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
     )
-    monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params: {"blockNumber": hex(18_500_000)})
+    monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params, chain_id=None: {"blockNumber": hex(18_500_000)})
     assert es.get_contract_creation_block("0x" + "ab" * 20, rpc_url="http://stub") == 18_500_000
 
 

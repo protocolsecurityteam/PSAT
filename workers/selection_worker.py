@@ -268,7 +268,11 @@ class SelectionWorker(BaseWorker):
             if len(selected) >= remaining:
                 break
             addr = entry["__row_address"]
-            chain = entry["__row_chain"]
+            # Coalesce NULL→"ethereum" (legacy convention): the dedup helpers
+            # below skip chain filtering entirely for chain=None, so a legacy
+            # NULL-chain row would dedup against a job on ANY chain at this
+            # address. chain_enabled already coalesces None the same way.
+            chain = entry["__row_chain"] or "ethereum"
             # Gate on the deployment allowlist (inv. 14): a company inventory can
             # carry addresses on chains the protocol declares (DeFiLlama membership
             # evidence) that this deployment has not enabled. Their discovered-stub
@@ -320,7 +324,10 @@ class SelectionWorker(BaseWorker):
         company = job.company
         for entry in selected:
             addr = entry["__row_address"]
-            chain = entry["__row_chain"]
+            # Same NULL→"ethereum" coalesce as the dedup loop above, so the
+            # child request never carries chain=None (inv. 6 — None must not
+            # cascade into spawned jobs).
+            chain = entry["__row_chain"] or "ethereum"
             name = entry.get("name") or (f"{company}_{addr[2:10]}" if company else f"sel_{addr[2:10]}")
             sources = entry.get("discovery_sources") or []
             child_request = {

@@ -8,6 +8,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 
+import { entityKey } from "../entityKey.js";
 import { principalBadge } from "../format.js";
 import { elkLayout } from "../layout/elkLayout.js";
 import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
@@ -48,7 +49,14 @@ function SelectionLegend({ onClear }) {
   );
 }
 
-export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress, focusAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal }) {
+// Multichain (inv. 13): every entity this canvas receives — machines,
+// principals, fund-flow endpoints — belongs to the single active `chain` (the
+// page is chain-scoped upstream in ProtocolSurface). So bare-address keys in
+// the graph-topology sets below (connectedNodes, edge endpoint comparisons) are
+// collision-free by construction: two chains never share this dataset. The
+// entity-identity lookups (principal resolution, per-entity detail maps) key by
+// (chain, address) via entityKey so they carry chain explicitly regardless.
+export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
@@ -63,14 +71,14 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
-    elkLayout(machines, fundFlows, principals, bandHeights).then(({ nodes: n, edges: e }) => {
+    elkLayout(machines, fundFlows, principals, bandHeights, chain).then(({ nodes: n, edges: e }) => {
       if (!cancelled) {
         setInitNodes(n);
         setInitEdges(e);
       }
     });
     return () => { cancelled = true; };
-  }, [machines, fundFlows, principals, bandHeights]);
+  }, [machines, fundFlows, principals, bandHeights, chain]);
 
   const measureBand = useCallback((groupId, height) => {
     setBandHeights((cur) => {
@@ -86,10 +94,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
   // when it owns no node. Looks the full principal up from the list so the
   // sidebar gets every field.
   const selectController = useCallback((addr) => {
-    const lc = addr?.toLowerCase();
-    const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
+    const key = entityKey(chain, addr);
+    const p = (principals || []).find((x) => entityKey(chain, x.address) === key);
     if (p && onSelectPrincipal) onSelectPrincipal(p);
-  }, [principals, onSelectPrincipal]);
+  }, [principals, onSelectPrincipal, chain]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -198,7 +206,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       // parent/child hierarchy instead, with cap text derived from the
       // principal's type (safe-controlled / timelock-controlled / ...).
       const selPrincipal = (principals || []).find(
-        (p) => p.address?.toLowerCase() === sel,
+        (p) => entityKey(chain, p.address) === entityKey(chain, sel),
       );
       // Per-contract capability detail for the selected principal
       // (server-computed principal.controls_detail, passthrough-resolved), so a
@@ -207,10 +215,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
       // Used for both the group children (primary) and the co-controlled set.
       const detailByContract = new Map();
       for (const d of selPrincipal?.controls_detail || []) {
-        if (d?.address) detailByContract.set(d.address.toLowerCase(), d);
+        if (d?.address) detailByContract.set(entityKey(chain, d.address), d);
       }
       const capsTextFor = (addrLc) => {
-        const d = detailByContract.get(addrLc);
+        const d = detailByContract.get(entityKey(chain, addrLc));
         const caps = d?.capabilities || [];
         const fns = d?.functions || [];
         return caps.length
@@ -312,16 +320,17 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     let browseFallback = null;
     let browseChips = null;
     if (browseLc) {
+      const browseKey = entityKey(chain, browseLc);
       const hasNode = initNodes.some((n) => n.id?.toLowerCase() === browseLc);
       const hasRow =
         !hasNode &&
         initNodes.some(
           (n) =>
             n.type === "group" &&
-            (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc),
+            (n.data.controllers || []).some((c) => entityKey(chain, c.address) === browseKey),
         );
       if (!hasNode && !hasRow) {
-        const bp = (principals || []).find((p) => p.address?.toLowerCase() === browseLc);
+        const bp = (principals || []).find((p) => entityKey(chain, p.address) === browseKey);
         const touched = [...(bp?.controls || []), ...(bp?.co_controls || [])]
           .map((a) => String(a).toLowerCase());
         if (touched.length) {
@@ -329,14 +338,14 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
           browseChips = new Map();
           const detailByAddr = new Map();
           for (const d of bp?.controls_detail || []) {
-            if (d?.address) detailByAddr.set(d.address.toLowerCase(), d);
+            if (d?.address) detailByAddr.set(entityKey(chain, d.address), d);
           }
           // Identity is the badge only — the search preview card is already
           // naming the browsed principal (with address) while this chip is
           // visible, so repeating the address just stretches the line.
           const who = principalBadge(bp);
           for (const t of browseFallback) {
-            const d = detailByAddr.get(t);
+            const d = detailByAddr.get(entityKey(chain, t));
             const fns = d?.functions || [];
             let what;
             if (fns.length) {
@@ -463,7 +472,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, selectedAddress
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">

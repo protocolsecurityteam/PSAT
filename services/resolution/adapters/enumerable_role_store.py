@@ -496,7 +496,7 @@ def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
         return memo[key]
     pinned: int | None = None
     try:
-        raw = rpc_request(rpc_url, "eth_blockNumber", [])
+        raw = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=ctx.chain_id)
         pinned = int(raw, 16) if isinstance(raw, str) else None
     except Exception:
         pinned = None

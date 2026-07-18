@@ -384,7 +384,7 @@ def test_rpc_fetcher_sends_one_request_per_window(monkeypatch):
     budget meters."""
     calls: list[tuple[str, list]] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         calls.append((method, params))
         return [_raw_log(_TOPIC_A, 42)]
 
@@ -410,7 +410,7 @@ def test_rpc_fetcher_bisects_on_loud_range_errors(monkeypatch):
     range on error and merges the sub-results in block order."""
     calls: list[tuple[int, int]] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         from_block = int(params[0]["fromBlock"], 16)
         to_block = int(params[0]["toBlock"], 16)
         calls.append((from_block, to_block))
@@ -432,7 +432,7 @@ def test_rpc_fetcher_bisect_floor_propagates_the_error(monkeypatch):
     must propagate instead of recursing forever."""
     calls: list[int] = []
 
-    def fake_rpc(url, method, params):
+    def fake_rpc(url, method, params, *, chain_id=None):
         span = int(params[0]["toBlock"], 16) - int(params[0]["fromBlock"], 16) + 1
         calls.append(span)
         raise RuntimeError("{'code': -32603, 'message': 'Internal error: Query timed out'}")

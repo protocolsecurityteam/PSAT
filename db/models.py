@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -863,21 +864,58 @@ class AddressLabel(Base):
     """Admin-curated human-readable name for an arbitrary address.
 
     Exists to give Safe signers and EOA principals — which are just raw
-    addresses with no on-chain metadata — a legible name in the UI. Keyed
-    by the lowercased address so it applies everywhere the address appears
-    (signer list, EOA card, function guard, etc.), independent of any
-    specific contract context. Distinct from ``PrincipalLabel`` which is
-    worker-populated and scoped per-contract.
+    addresses with no on-chain metadata — a legible name in the UI. Distinct
+    from ``PrincipalLabel`` which is worker-populated and scoped per-contract.
+
+    Global-plus-override model (invariant 12): ``chain`` is a nullable
+    chain-NAME string (``'ethereum'``, ``'base'`` — entity tables key on chain
+    names, not ids, per invariant 11).
+
+      * ``chain IS NULL`` is a **global** label that applies on every chain.
+        This is the right semantics for EOA/Safe-signer labels — the same key
+        controls the same off-chain account everywhere — and is this table's
+        entire legacy population, so those rows stay untouched and behave
+        exactly as before (no backfill).
+      * A row with a concrete ``chain`` **overrides** the global label on that
+        chain only. This is what makes *contract* labels safe cross-chain: the
+        same address is a different contract on each chain and can carry a
+        different name per network.
+
+    Identity is a surrogate ``id`` (the bare-address PK collided for contracts
+    at the same address on two chains). Uniqueness is enforced by two PARTIAL
+    unique indexes rather than a plain ``UNIQUE(address, chain)`` — Postgres
+    treats NULL ≠ NULL, so a plain composite unique would admit duplicate
+    global rows (this codebase was already bitten by exactly that on
+    ``uq_contract_address_chain``). A sentinel chain value was also rejected
+    because the sentinel would leak into API semantics.
     """
 
     __tablename__ = "address_labels"
 
-    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    address: Mapped[str] = mapped_column(String(42), nullable=False)
+    chain: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_address_labels_address_chain",
+            "address",
+            "chain",
+            unique=True,
+            postgresql_where=text("chain IS NOT NULL"),
+        ),
+        Index(
+            "uq_address_labels_address_global",
+            "address",
+            unique=True,
+            postgresql_where=text("chain IS NULL"),
+        ),
     )
 
 

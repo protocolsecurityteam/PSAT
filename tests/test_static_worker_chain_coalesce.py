@@ -140,7 +140,7 @@ def test_resolve_proxy_adopts_when_impl_on_same_chain(db_session, proto_id, monk
     job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="ethereum")
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
+        lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
     )
 
     StaticWorker()._resolve_proxy(db_session, job, proxy_addr, "Proxy")
@@ -165,7 +165,7 @@ def test_resolve_proxy_does_not_adopt_when_impl_only_on_other_chain(
     job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="base")
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
-        lambda address, rpc_url: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
+        lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
     )
 
     StaticWorker()._resolve_proxy(db_session, job, proxy_addr, "Proxy")

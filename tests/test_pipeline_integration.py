@@ -150,7 +150,7 @@ def _patch_dep_phase(monkeypatch, worker, static=None, dynamic=None, classify=No
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         "workers.static_worker.find_dependencies",
-        lambda addr, rpc_url, code_cache=None: static or _static_deps(addr),
+        lambda addr, rpc_url, code_cache=None, chain_id=None: static or _static_deps(addr),
     )
     monkeypatch.setattr(
         "workers.static_worker.find_dynamic_dependencies",
@@ -237,7 +237,7 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(
         "services.discovery.upgrade_history.build_upgrade_history",
-        lambda _p, enrich=True, from_block=0: fake_uh,
+        lambda _p, enrich=True, from_block=0, chain_id=1: fake_uh,
     )
 
     project_dir = tmp_path / "p"
@@ -1354,7 +1354,7 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         "workers.static_worker.find_dependencies",
-        lambda addr, rpc_url, code_cache=None: (_ for _ in ()).throw(RuntimeError("static dep error")),
+        lambda addr, rpc_url, code_cache=None, chain_id=None: (_ for _ in ()).throw(RuntimeError("static dep error")),
     )
     monkeypatch.setattr(
         "workers.static_worker.find_dynamic_dependencies",

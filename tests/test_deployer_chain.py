@@ -54,3 +54,23 @@ def test_expand_from_deployers_defaults_to_mainnet(monkeypatch):
     deployer.expand_from_deployers(_SEEDS, resolve_names=False)
 
     assert {c for _, c in seen} == {1}
+
+
+def test_explorer_links_follow_the_expansion_chain(monkeypatch):
+    """Display links point at the searched chain's explorer, not a hardcoded
+    etherscan.io (P3: the deployer-hardcode row in Appendix A)."""
+    monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory([]))
+
+    base = deployer.expand_from_deployers(_SEEDS, resolve_names=False, chain_id=8453)
+    assert base and all("basescan.org/address/" in e["explorer_url"] for e in base)
+    assert all("basescan.org/address/" in e["url"] for e in base)
+
+    eth = deployer.expand_from_deployers(_SEEDS, resolve_names=False, chain_id=1)
+    assert eth and all("etherscan.io/address/" in e["explorer_url"] for e in eth)
+
+
+def test_explorer_base_falls_back_for_unknown_chain():
+    """An off-registry chain_id degrades to Etherscan rather than raising."""
+    assert deployer._explorer_base(1) == "https://etherscan.io"
+    assert deployer._explorer_base(8453) == "https://basescan.org"
+    assert deployer._explorer_base(999999999) == "https://etherscan.io"

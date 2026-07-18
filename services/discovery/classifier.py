@@ -109,9 +109,9 @@ _KNOWN_EVENT_PROXY_TYPES = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def get_storage_at(rpc_url: str, address: str, slot: str) -> str:
+def get_storage_at(rpc_url: str, address: str, slot: str, *, chain_id: int | None = None) -> str:
     """Read a single 32-byte storage slot."""
-    return rpc_call(rpc_url, "eth_getStorageAt", [address, slot, "latest"], retries=1)
+    return rpc_call(rpc_url, "eth_getStorageAt", [address, slot, "latest"], retries=1, chain_id=chain_id)
 
 
 def _slot_to_address(slot_value: str) -> str | None:
@@ -189,7 +189,7 @@ def _extract_delegatecall_target_parity(result) -> str | None:
     return None
 
 
-def _probe_delegatecall(rpc_url: str, address: str) -> str | None | bool:
+def _probe_delegatecall(rpc_url: str, address: str, *, chain_id: int | None = None) -> str | None | bool:
     """Send a synthetic eth_call with tracing to check if DELEGATECALL fires
     in the fallback path.
 
@@ -209,7 +209,7 @@ def _probe_delegatecall(rpc_url: str, address: str) -> str | None | bool:
         [call_obj, "latest", {"tracer": "callTracer"}],
     ]:
         try:
-            result = rpc_call(rpc_url, "debug_traceCall", params, retries=0)
+            result = rpc_call(rpc_url, "debug_traceCall", params, retries=0, chain_id=chain_id)
             target = _extract_delegatecall_target_geth(result)
             return target if target is not None else False
         except RuntimeError:
@@ -217,7 +217,7 @@ def _probe_delegatecall(rpc_url: str, address: str) -> str | None | bool:
 
     # Try trace_call (Parity / OpenEthereum / Erigon-style)
     try:
-        result = rpc_call(rpc_url, "trace_call", [call_obj, ["trace"], "latest"], retries=0)
+        result = rpc_call(rpc_url, "trace_call", [call_obj, ["trace"], "latest"], retries=0, chain_id=chain_id)
         target = _extract_delegatecall_target_parity(result)
         return target if target is not None else False
     except RuntimeError:
@@ -226,7 +226,9 @@ def _probe_delegatecall(rpc_url: str, address: str) -> str | None | bool:
     return None  # tracing unavailable
 
 
-def _try_implementation_call(rpc_url: str, address: str, selector: str = IMPLEMENTATION_SELECTOR) -> str | None:
+def _try_implementation_call(
+    rpc_url: str, address: str, selector: str = IMPLEMENTATION_SELECTOR, *, chain_id: int | None = None
+) -> str | None:
     """Call an address-returning getter on a contract.
     Returns the address on success, or None."""
     try:
@@ -235,6 +237,7 @@ def _try_implementation_call(rpc_url: str, address: str, selector: str = IMPLEME
             "eth_call",
             [{"to": address, "data": selector}, "latest"],
             retries=0,
+            chain_id=chain_id,
         )
         return _slot_to_address(result)
     except RuntimeError:
@@ -267,7 +270,7 @@ def _decode_address_array(hex_data: str) -> list[str] | None:
     return addresses or None
 
 
-def _try_facet_addresses_call(rpc_url: str, address: str) -> list[str] | None:
+def _try_facet_addresses_call(rpc_url: str, address: str, *, chain_id: int | None = None) -> list[str] | None:
     """Call ``facetAddresses()`` (EIP-2535) on a contract.
     Returns a list of facet addresses on success, or None."""
     try:
@@ -276,6 +279,7 @@ def _try_facet_addresses_call(rpc_url: str, address: str) -> list[str] | None:
             "eth_call",
             [{"to": address, "data": FACET_ADDRESSES_SELECTOR}, "latest"],
             retries=0,
+            chain_id=chain_id,
         )
         return _decode_address_array(result)
     except RuntimeError:
@@ -296,7 +300,9 @@ _PROXY_SLOT_BATCH = (
 )
 
 
-def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[tuple[str | None, ...], bool]:
+def _read_proxy_slots_batched(
+    rpc_url: str, address: str, *, chain_id: int | None = None
+) -> tuple[tuple[str | None, ...], bool]:
     """Read the five proxy-detection slots in one JSON-RPC batch.
 
     Returns ``((impl, beacon, admin, uups, oz), any_read_failed)``. Each slot is
@@ -311,7 +317,7 @@ def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[tuple[str | N
     """
     calls = [("eth_getStorageAt", [address, slot, "latest"]) for slot in _PROXY_SLOT_BATCH]
     try:
-        results = rpc_batch_request_with_status(rpc_url, calls)
+        results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     except Exception:
         results = [(None, True)] * len(_PROXY_SLOT_BATCH)
 
@@ -320,7 +326,7 @@ def _read_proxy_slots_batched(rpc_url: str, address: str) -> tuple[tuple[str | N
     for idx, (raw, had_error) in enumerate(results):
         if had_error or raw is None:
             try:
-                raw = get_storage_at(rpc_url, address, _PROXY_SLOT_BATCH[idx])
+                raw = get_storage_at(rpc_url, address, _PROXY_SLOT_BATCH[idx], chain_id=chain_id)
             except RuntimeError:
                 raw = None
                 any_read_failed = True
@@ -333,19 +339,24 @@ def classify_single(
     rpc_url: str,
     bytecode: str | None = None,
     code_cache: dict[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> dict:
     """Classify one contract via bytecode patterns and storage slot inspection.
 
     Returns a dict with ``address``, ``type``, and type-specific metadata.
     When *code_cache* is provided, bytecode lookups are cached to avoid
     duplicate ``eth_getCode`` RPC calls across pipeline stages.
+
+    *chain_id* (the analyzed contract's chain) arms the inv-7 URL↔chain_id guard
+    on every underlying read; None keeps it a no-op.
     """
     address = normalize_address(address)
     if bytecode is None:
         if code_cache is not None and address in code_cache:
             bytecode = code_cache[address]
         else:
-            bytecode = get_code(rpc_url, address)
+            bytecode = get_code(rpc_url, address, chain_id=chain_id)
             if code_cache is not None:
                 code_cache[address] = bytecode
 
@@ -364,7 +375,7 @@ def classify_single(
     # the first slot (rare: the contract is more often non-proxy, where we'd have read all five
     # anyway), and trades five sequential RTTs for one. Order matches the historical sequential
     # reads so downstream branch logic is unchanged.
-    slot_addrs, proxy_slots_unread = _read_proxy_slots_batched(rpc_url, address)
+    slot_addrs, proxy_slots_unread = _read_proxy_slots_batched(rpc_url, address, chain_id=chain_id)
     impl, beacon, admin, uups, oz = slot_addrs
     logger.debug("%s EIP-1967 slots: impl=%s beacon=%s admin=%s", address, impl, beacon, admin)
 
@@ -374,7 +385,7 @@ def classify_single(
             info["implementation"] = impl
         else:
             # Resolve implementation through the beacon contract
-            beacon_impl = _try_implementation_call(rpc_url, beacon)
+            beacon_impl = _try_implementation_call(rpc_url, beacon, chain_id=chain_id)
             logger.debug("%s beacon %s → resolved impl=%s", address, beacon, beacon_impl)
             if beacon_impl:
                 info["implementation"] = beacon_impl
@@ -402,7 +413,7 @@ def classify_single(
         return info
 
     # 5. EIP-2535 diamond proxy — facetAddresses() call
-    facets = _try_facet_addresses_call(rpc_url, address)
+    facets = _try_facet_addresses_call(rpc_url, address, chain_id=chain_id)
     if facets:
         logger.debug("%s → eip2535 diamond, %d facets", address, len(facets))
         info.update(type="proxy", proxy_type="eip2535", facets=facets)
@@ -421,7 +432,7 @@ def classify_single(
         # Loads implementation from slot 0 and delegates.  Covers v1.0-1.3+
         # including minimal proxies where masterCopy()/singleton() revert.
         if GNOSIS_SLOT0_PATTERN in raw_bc:
-            slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0"))
+            slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0", chain_id=chain_id))
             if slot0_impl:
                 logger.debug("%s → gnosis_safe proxy (slot0 pattern), impl=%s", address, slot0_impl)
                 info.update(type="proxy", proxy_type="gnosis_safe", implementation=slot0_impl)
@@ -429,21 +440,21 @@ def classify_single(
 
         # GnosisSafe fallback — masterCopy() getter (older implementations
         # that expose the variable but don't use the slot-0 bytecode pattern).
-        master = _try_implementation_call(rpc_url, address, MASTER_COPY_SELECTOR)
+        master = _try_implementation_call(rpc_url, address, MASTER_COPY_SELECTOR, chain_id=chain_id)
         if master:
             logger.debug("%s → gnosis_safe proxy (masterCopy), impl=%s", address, master)
             info.update(type="proxy", proxy_type="gnosis_safe", implementation=master)
             return info
 
         # Compound — comptrollerImplementation()
-        comp_impl = _try_implementation_call(rpc_url, address, COMPTROLLER_IMPL_SELECTOR)
+        comp_impl = _try_implementation_call(rpc_url, address, COMPTROLLER_IMPL_SELECTOR, chain_id=chain_id)
         if comp_impl:
             logger.debug("%s → compound proxy, impl=%s", address, comp_impl)
             info.update(type="proxy", proxy_type="compound", implementation=comp_impl)
             return info
 
         # Synthetix — target()
-        target_addr = _try_implementation_call(rpc_url, address, TARGET_SELECTOR)
+        target_addr = _try_implementation_call(rpc_url, address, TARGET_SELECTOR, chain_id=chain_id)
         if target_addr:
             logger.debug("%s → synthetix proxy, impl=%s", address, target_addr)
             info.update(type="proxy", proxy_type="synthetix", implementation=target_addr)
@@ -459,9 +470,9 @@ def classify_single(
     #    keeps the static worker analysing the beacon itself so its owner() —
     #    the upgrade authority of every governed instance — is discovered.
     if not _bytecode_has_delegatecall(bytecode):
-        beacon_impl = _try_implementation_call(rpc_url, address)
+        beacon_impl = _try_implementation_call(rpc_url, address, chain_id=chain_id)
         if beacon_impl:
-            beacon_owner = _try_implementation_call(rpc_url, address, OWNER_SELECTOR)
+            beacon_owner = _try_implementation_call(rpc_url, address, OWNER_SELECTOR, chain_id=chain_id)
             if beacon_owner:
                 logger.debug("%s → beacon (implementation()+owner(), no delegatecall), impl=%s", address, beacon_impl)
                 info.update(type="beacon", implementation=beacon_impl, owner=beacon_owner)
@@ -477,7 +488,7 @@ def classify_single(
     #    soft signal is the last resort.
     raw_bc = bytecode[2:] if bytecode.startswith("0x") else bytecode
     if len(raw_bc) // 2 <= GENERIC_IMPL_PROXY_MAX_BYTES:
-        impl_call = _try_implementation_call(rpc_url, address)
+        impl_call = _try_implementation_call(rpc_url, address, chain_id=chain_id)
         if impl_call:
             logger.debug("%s → custom proxy (implementation() call), impl=%s", address, impl_call)
             info.update(type="proxy", proxy_type="custom", implementation=impl_call)
@@ -497,7 +508,7 @@ def classify_single(
     raw = bytecode[2:] if bytecode.startswith("0x") else bytecode
     if 10 <= len(raw) <= SHORT_BYTECODE_THRESHOLD and _bytecode_has_delegatecall(bytecode):
         logger.debug("%s short bytecode (%d chars) with DELEGATECALL, probing", address, len(raw))
-        probe = _probe_delegatecall(rpc_url, address)
+        probe = _probe_delegatecall(rpc_url, address, chain_id=chain_id)
         if probe is False:
             # DELEGATECALL exists but isn't triggered by arbitrary calldata —
             # this is a library or utility, not a proxy.
@@ -562,6 +573,8 @@ def classify_contracts(
     dynamic_edges: list[dict] | None = None,
     code_cache: dict[str, str] | None = None,
     pre_classified: dict[str, dict] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> dict:
     """Classify the target contract and all its dependencies.
 
@@ -594,7 +607,7 @@ def classify_contracts(
     # serialises bytecode reads safely.
     addrs_to_classify = [addr for addr in all_addrs if not (pre_classified and addr in pre_classified)]
     parallel_results = parallel_map(
-        lambda addr: classify_single(addr, rpc_url, code_cache=None),
+        lambda addr: classify_single(addr, rpc_url, code_cache=None, chain_id=chain_id),
         addrs_to_classify,
         max_workers=8,
     )
@@ -643,7 +656,7 @@ def classify_contracts(
     # any already covered by Phase 1.
     discovered_to_classify = sorted(addr for addr in discovered if addr not in classifications)
     discovered_results = parallel_map(
-        lambda addr: classify_single(addr, rpc_url, code_cache=None),
+        lambda addr: classify_single(addr, rpc_url, code_cache=None, chain_id=chain_id),
         discovered_to_classify,
         max_workers=8,
     )
@@ -681,7 +694,7 @@ def classify_contracts(
             info["type"] = "beacon"
             info["proxies"] = sorted(beacon_to_proxies[addr])
             if "implementation" not in info:
-                impl = _try_implementation_call(rpc_url, addr)
+                impl = _try_implementation_call(rpc_url, addr, chain_id=chain_id)
                 if impl:
                     info["implementation"] = impl
             logger.debug("Phase 2: %s reclassified %s → beacon (proxies: %s)", addr, old_type, info["proxies"])

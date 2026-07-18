@@ -83,12 +83,12 @@ class Wire:
         self.getlogs_calls: list[dict] = []
         self.on_first_getlogs = on_first_getlogs
 
-    def head_rpc(self, url, method, params):
+    def head_rpc(self, url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return hex(self.head)
         raise AssertionError(f"unexpected head-path method {method}")
 
-    def getlogs_rpc(self, url, method, params):
+    def getlogs_rpc(self, url, method, params, *, chain_id=None):
         assert method == "eth_getLogs", method
         p = params[0]
         if not self.getlogs_calls and self.on_first_getlogs is not None:

@@ -120,12 +120,12 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
     """Wire the sequential code path: _get_code returns `code`,
     _try_eth_call_decoded routes to `probe_map`."""
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         if get_code_raises:
             raise RuntimeError("getCode failed")
         return code
 
-    def _fake_eth_call_raw(_rpc_url, _addr, signature, _block):
+    def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         raw = probe_map.get(signature, "0x")
         return raw
 
@@ -151,12 +151,12 @@ def _mock_batched(
     """Wire the batched code path. ``probe_map`` is keyed by selector;
     we synthesize a list aligned with _CLASSIFY_PROBE_SIGS."""
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         if get_code_raises:
             raise RuntimeError("getCode failed")
         return code
 
-    def _fake_batch_with_status(_rpc_url, calls):
+    def _fake_batch_with_status(_rpc_url, calls, chain_id=None):
         if batch_errors:
             return [(None, True)] * len(calls)
         out = []
@@ -270,10 +270,10 @@ def test_whole_batch_failure_marks_had_error(monkeypatch):
     every probe → also lands in 'contract', had_error=True via the
     type_authority fallback). We compare structurally."""
 
-    def _seq_all_raise(_rpc_url, _addr, _signature, _block):
+    def _seq_all_raise(_rpc_url, _addr, _signature, _block, chain_id=None):
         raise RuntimeError("RPC down")
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"  # contract present
 
     def _fake_type_authority(*_a, **_kw):
@@ -303,13 +303,13 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
     classify as Safe. had_error must still be True so the result is
     not cached — even though the kind classification was correct."""
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
     def _fake_type_authority(*_a, **_kw):
         return {}
 
-    def _fake_batch(_rpc_url, calls):
+    def _fake_batch(_rpc_url, calls, chain_id=None):
         # Slot 0 (getOwners), 1 (getThreshold) success → Safe.
         # Slot 2 (getMinDelay) errors. Wouldn't affect Safe dispatch.
         out = [
@@ -392,7 +392,7 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
     Safe classification."""
     sequential_called = {"count": 0}
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
     def _fake_type_authority(*_a, **_kw):
@@ -404,7 +404,7 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
 
     # Sequential helper: simulates a Safe contract responding correctly to
     # individual eth_calls.
-    def _safe_seq_eth_call(_rpc_url, _addr, signature, _block):
+    def _safe_seq_eth_call(_rpc_url, _addr, signature, _block, chain_id=None):
         sequential_called["count"] += 1
         if signature == "getOwners()":
             return _abi_encode_address_array([ADDR_OWNER])
@@ -436,7 +436,7 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
     getOwners and a real value for getMinDelay)."""
     sequential_called = {"count": 0}
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
     def _fake_type_authority(*_a, **_kw):
@@ -500,7 +500,7 @@ def _run_multicall(
     revert_selectors = {tracking._selector(sig) for sig in revert_sigs}
     sel_to_sig = {tracking._selector(sig): sig for sig, _abi in tracking._CLASSIFY_PROBE_SIGS}
 
-    def _fake_get_code(_rpc_url, _addr, _block):
+    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         if get_code_raises:
             raise RuntimeError("getCode failed")
         return code
@@ -555,7 +555,7 @@ def test_multicall_eoa_short_circuits_without_aggregate3(monkeypatch):
     import utils.rpc as rpc_mod
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
-    monkeypatch.setattr(tracking, "_get_code", lambda *_a: "0x")
+    monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x")
     monkeypatch.setattr(
         rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("aggregate3 should not run"))
     )
@@ -579,11 +579,11 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
     import utils.rpc as rpc_mod
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
-    monkeypatch.setattr(tracking, "_get_code", lambda *_a: "0x60")
+    monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))
 
-    def _safe_batch(_rpc_url, _calls):
+    def _safe_batch(_rpc_url, _calls, chain_id=None):
         return [
             (_abi_encode_address_array([ADDR_OWNER]), False),
             (_abi_encode_uint256(1), False),

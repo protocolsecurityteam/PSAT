@@ -115,7 +115,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
 
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        lambda rpc_url, address: ("eoa", {"address": address}, True),
+        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
     payload = build_principal_labels(
@@ -221,7 +221,7 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
 
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        lambda rpc_url, address: ("eoa", {"address": address}, True),
+        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
     payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
@@ -264,7 +264,7 @@ def test_build_principal_labels_legacy_hook_update_not_admin(monkeypatch):
 
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        lambda rpc_url, address: ("eoa", {"address": address}, True),
+        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
     payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
@@ -427,7 +427,7 @@ def test_build_principal_labels_includes_generic_controller_principals(monkeypat
 
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        lambda rpc_url, address: ("eoa", {"address": address}, True),
+        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
     payload = build_principal_labels(
@@ -762,7 +762,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
     # race may cost at most one extra call per address).
     call_counter = {"n": 0}
 
-    def fake_classify(rpc_url, address):
+    def fake_classify(rpc_url, address, **_kw):
         call_counter["n"] += 1
         return "eoa", {"address": address}, True
 
@@ -853,7 +853,7 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
         "edges": [],
     }
 
-    def fake_classify(rpc_url, address):
+    def fake_classify(rpc_url, address, **_kw):
         if address == bad_address:
             raise RuntimeError("classify boom")
         return "eoa", {"address": address}, True

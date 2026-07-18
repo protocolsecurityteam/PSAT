@@ -23,9 +23,9 @@ def has_deployed_code(bytecode_hex: str) -> bool:
     return bytecode_hex not in EMPTY_CODE_VALUES
 
 
-def rpc_call(rpc_url: str, method: str, params: list, retries: int = 1) -> Any:
+def rpc_call(rpc_url: str, method: str, params: list, retries: int = 1, *, chain_id: int | None = None) -> Any:
     """Backward-compatible wrapper. Prefer utils.rpc.rpc_request for new code."""
-    return rpc_request(rpc_url, method, params, retries=retries) or "0x"
+    return rpc_request(rpc_url, method, params, retries=retries, chain_id=chain_id) or "0x"
 
 
 def extract_push20_addresses(bytecode_hex: str) -> set[str]:
@@ -56,6 +56,8 @@ def discover_dependencies(
     rpc_url: str,
     root: str,
     code_cache: dict[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
 ) -> list[str]:
     """BFS-traverse embedded PUSH20 addresses and return deployed contract dependencies.
 
@@ -76,7 +78,7 @@ def discover_dependencies(
     def cached_get_code(address: str) -> str:
         normalized = normalize_address(address)
         if normalized not in code_cache:
-            code_cache[normalized] = get_code(rpc_url, normalized)
+            code_cache[normalized] = get_code(rpc_url, normalized, chain_id=chain_id)
         return code_cache[normalized]
 
     def batch_fill_cache(addrs: list[str]) -> None:
@@ -84,7 +86,7 @@ def discover_dependencies(
         to_fetch = [a for a in addrs if a not in code_cache]
         if not to_fetch:
             return
-        results = get_code_batch(rpc_url, to_fetch)
+        results = get_code_batch(rpc_url, to_fetch, chain_id=chain_id)
         for addr in to_fetch:
             # get_code_batch omits errored slots; backfill with single-call
             # so the per-cascade contract still gets evaluated (will raise
@@ -92,7 +94,7 @@ def discover_dependencies(
             if addr in results:
                 code_cache[addr] = results[addr]
             else:
-                code_cache[addr] = get_code(rpc_url, addr)
+                code_cache[addr] = get_code(rpc_url, addr, chain_id=chain_id)
 
     if not has_deployed_code(cached_get_code(root)):
         raise RuntimeError(f"Address {root} has no deployed bytecode.")
@@ -123,8 +125,18 @@ def discover_dependencies(
     return sorted(deps)
 
 
-def find_dependencies(address: str, rpc_url: str | None = None, code_cache: dict[str, str] | None = None) -> dict:
-    """Resolve an RPC endpoint and return discovered static contract dependencies."""
+def find_dependencies(
+    address: str,
+    rpc_url: str | None = None,
+    code_cache: dict[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
+) -> dict:
+    """Resolve an RPC endpoint and return discovered static contract dependencies.
+
+    *chain_id* (the job's chain, threaded from the static worker) arms the inv-7
+    URL↔chain_id guard on every ``eth_getCode`` read; None keeps it a no-op for
+    the CLI ``main`` path below (which has no chain in scope)."""
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     from utils.rpc import default_rpc_url
 
@@ -136,7 +148,7 @@ def find_dependencies(address: str, rpc_url: str | None = None, code_cache: dict
         raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")
 
     address = normalize_address(address)
-    deps = discover_dependencies(effective_rpc, address, code_cache=code_cache)
+    deps = discover_dependencies(effective_rpc, address, code_cache=code_cache, chain_id=chain_id)
     return {"address": address, "dependencies": deps}
 
 

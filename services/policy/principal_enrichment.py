@@ -371,6 +371,7 @@ def build_principal_labels(
     *,
     resolved_control_graph: dict | None = None,
     rpc_url: str | None = None,
+    chain_id: int | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
 ) -> PrincipalLabels:
@@ -442,7 +443,9 @@ def build_principal_labels(
             else:
                 with classify_cache_lock:
                     classify_stats["misses"] += 1
-                resolved_type, details, cacheable = classify_resolved_address_with_status(rpc_url, address)
+                resolved_type, details, cacheable = classify_resolved_address_with_status(
+                    rpc_url, address, chain_id=chain_id
+                )
                 # Skip per-job cache write if any underlying probe errored —
                 # otherwise a transient blip during labeling would persist
                 # a wrong "contract" classification for the rest of the job.

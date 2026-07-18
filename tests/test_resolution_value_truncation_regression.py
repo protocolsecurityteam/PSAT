@@ -191,7 +191,7 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
     clear_classify_cache()
     plan = _struct_controller_plan()
 
-    def fake_rpc(_rpc_url, method, params):
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x1801f29"  # 25_173_801 — arbitrary recent block
         if method == "eth_call":

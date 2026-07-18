@@ -6,19 +6,28 @@
 // can never go stale.
 
 import { isRoleIdAddress } from "../format.js";
+import { entityKey } from "../entityKey.js";
 
 // Build from ALL machines and ALL principals — visibility (role filter,
 // canvas culling) stays a canvas/search concern, not an index concern.
 // Role-id pseudo addresses (mapping keys coerced to addresses) are excluded;
 // they are never real selectable entities.
-export function buildEntityIndex(allMachines = [], principals = []) {
+//
+// Keyed by (chain, address) (inv. 13), not bare address: the Surface page is
+// chain-scoped, so `chain` is the active chain and every entity in one index
+// shares it — but the composite key means the same address on a different chain
+// can never alias into this index. `chain` defaults to mainnet so legacy
+// single-chain callers/tests are unaffected. Each entity still stores its bare
+// `address` for display; the key is identity only.
+export function buildEntityIndex(allMachines = [], principals = [], chain = "ethereum") {
   const index = new Map();
   const put = (address, patch) => {
     if (!address) return;
     const lc = String(address).toLowerCase();
     if (isRoleIdAddress(lc)) return;
-    const existing = index.get(lc) || { address: lc, machine: null, principal: null };
-    index.set(lc, { ...existing, ...patch });
+    const key = entityKey(chain, lc);
+    const existing = index.get(key) || { address: lc, machine: null, principal: null };
+    index.set(key, { ...existing, ...patch });
   };
   for (const machine of allMachines) put(machine?.address, { machine });
   for (const principal of principals) put(principal?.address, { principal });
@@ -33,10 +42,10 @@ export function buildEntityIndex(allMachines = [], principals = []) {
 // { type, label, details } from the navigate target; `type` defaults to
 // 'unknown' (the entity card falls back to TYPE_META.unknown). `controls` is
 // derived from the machines that name this address as owner.
-export function resolveEntity(index, address, { machines = [], hint = null } = {}) {
+export function resolveEntity(index, address, { machines = [], hint = null, chain = "ethereum" } = {}) {
   if (!address) return null;
   const lc = String(address).toLowerCase();
-  const hit = index?.get(lc);
+  const hit = index?.get(entityKey(chain, lc));
   if (hit) return hit;
 
   // A role-id pseudo address is never a real entity — buildEntityIndex already

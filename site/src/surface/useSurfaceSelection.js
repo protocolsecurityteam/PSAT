@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { machineFunctions } from "./lane.js";
+import { entityKey } from "./entityKey.js";
 import { resolveEntity } from "./layout/entities.js";
 
 const INITIAL = { selection: null, guardKey: null, radar: null, focus: null };
@@ -74,12 +75,12 @@ function reducer(state, action) {
 // owning contract is the key's prefix — look it up in the index and scan its
 // functions. Addresses never contain ':' and neither do selectors/signatures,
 // so splitting on the first ':' is unambiguous.
-function guardFromKey(index, guardKey) {
+function guardFromKey(index, guardKey, chain = "ethereum") {
   if (!guardKey || !index) return null;
   const sep = guardKey.indexOf(":");
   if (sep < 0) return null;
   const contractAddress = guardKey.slice(0, sep).toLowerCase();
-  const machine = index.get(contractAddress)?.machine;
+  const machine = index.get(entityKey(chain, contractAddress))?.machine;
   if (!machine) return null;
   return machineFunctions(machine).find((fn) => fn.key === guardKey) || null;
 }
@@ -88,7 +89,7 @@ function guardFromKey(index, guardKey) {
 //   buildEntityIndex). machines: the machine list resolveEntity uses to
 //   synthesize controls for off-index navigate targets. companyName: switching
 //   it clears ALL selection state.
-export function useSurfaceSelection({ entityIndex, machines = [], companyName } = {}) {
+export function useSurfaceSelection({ entityIndex, machines = [], companyName, chain = "ethereum" } = {}) {
   const [state, dispatch] = useReducer(reducer, INITIAL);
 
   // Clear everything on a real company change. Skip the first mount so a
@@ -123,9 +124,10 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName } 
         ? resolveEntity(entityIndex, state.selection.address, {
             machines,
             hint: state.selection.hint,
+            chain,
           })
         : null,
-    [entityIndex, machines, state.selection],
+    [entityIndex, machines, state.selection, chain],
   );
 
   // At most one facet is ever non-null: the machine card is strictly richer, so
@@ -134,8 +136,8 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName } 
   const selectedMachine = selectedEntity?.machine ?? null;
   const selectedPrincipal = selectedEntity?.machine ? null : selectedEntity?.principal ?? null;
   const selectedGuard = useMemo(
-    () => guardFromKey(entityIndex, state.guardKey),
-    [entityIndex, state.guardKey],
+    () => guardFromKey(entityIndex, state.guardKey, chain),
+    [entityIndex, state.guardKey, chain],
   );
 
   return {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
@@ -27,9 +28,16 @@ export function EntityCard({
   governsIndex,
   controlAdjacency,
   machines = [],
+  chain = "ethereum",
+  showChain = false,
 }) {
   const isMachine = Boolean(machine);
   const address = (machine?.address || principal?.address || "").toLowerCase();
+  // Deployment chain of this entity. A machine carries its own chain; a
+  // principal has none, so it falls back to the page's active chain. Only
+  // surfaced (showChain) for multi-chain protocols — a badge on every card of a
+  // single-chain protocol would be noise.
+  const entityChain = machine?.chain || chain;
 
   const machineByAddr = useMemo(() => {
     const map = new Map();
@@ -123,6 +131,12 @@ export function EntityCard({
           </div>
         </div>
         <div className="ps-machine-badges">
+          {showChain && (
+            <span className="ps-badge ps-badge-chain" style={{ "--badge-accent": chainColor(entityChain), "--chain-color": chainColor(entityChain) }}>
+              <span className="ps-chain-dot" />
+              {chainLabel(entityChain)}
+            </span>
+          )}
           {isMachine && (
             <>
               <span className="ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>

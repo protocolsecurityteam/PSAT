@@ -1649,6 +1649,11 @@ def _observed_event_key_words_from_hypersync(
         # meta override, then env override, then the registry URL. A chain with no
         # registry coverage has no scan surface — skip the live scan (no members)
         # rather than silently scanning mainnet.
+        # NOTE (F7): PSAT_HYPERSYNC_URL is a single-URL global — it outranks the
+        # per-chain registry URL, so it is a SINGLE-CHAIN DEV OVERRIDE only. Never
+        # set it in a multichain deployment or every chain's scan is pinned to one
+        # endpoint; multichain routing must come from the registry (or per-eval
+        # meta.hypersync_url), not this env var.
         registry_url = _hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
         if not url:
@@ -2227,6 +2232,7 @@ def _normalize_operand_for_call_arg(
             callee_contract_address=callee_contract_address,
             rpc_url=rpc_url,
             block=block,
+            chain_id=getattr(outer, "chain_id", None),
             memo=_pass_live_read_memo(outer),
         )
         if constant is not None:
@@ -2264,6 +2270,7 @@ def _resolve_static_external_call_operand(
     callee_contract_address: str | None,
     rpc_url: str | None,
     block: int | None,
+    chain_id: int | None = None,
     memo: dict[Any, Any] | None = None,
 ) -> dict[str, Any] | None:
     signature = operand.get("callee_signature")
@@ -2290,6 +2297,7 @@ def _resolve_static_external_call_operand(
             "eth_call",
             [{"to": callee_contract_address.lower(), "data": selector}, block_tag],
             retries=1,
+            chain_id=chain_id,
         )
     except Exception:
         return None

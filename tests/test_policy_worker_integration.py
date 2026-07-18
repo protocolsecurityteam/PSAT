@@ -527,7 +527,7 @@ class TestProcessFanoutParity:
         # leak through the parallel path.
         classify_calls: list[str] = []
 
-        def fake_classify(_rpc, address):
+        def fake_classify(_rpc, address, *, chain_id=None):
             classify_calls.append(address)
             return "eoa", {"address": address}, True
 
