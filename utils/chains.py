@@ -142,6 +142,15 @@ class ChainInfo:
     # Populated at Phase 2 chain enablement (inv. 15); empty until then.
     bridge_executors: tuple[str, ...]
     cross_domain_messengers: tuple[str, ...]
+    # Etherscan v2 stats action that returns this chain's native-coin USD price
+    # (utils.etherscan.get_native_price). Defaults to "ethprice", which the v2
+    # endpoint serves for every chain whose native coin is priced under that
+    # action — including the L2s whose native asset is ETH and the EVM L1s whose
+    # native asset is not (polygon/avalanche return their own coin's price via
+    # ethprice). BSC is the exception: it rejects "ethprice" and prices BNB under
+    # "bnbprice". The field is which ACTION to call, never what asset comes back —
+    # native_asset above is the source of truth for the asset that was priced.
+    native_price_action: str = "ethprice"
 
     @property
     def supported(self) -> bool:
@@ -254,6 +263,8 @@ _CHAINS: tuple[ChainInfo, ...] = (
         max_getlogs_range=MAX_GETLOGS_RANGE,
         bridge_executors=(),
         cross_domain_messengers=(),
+        # BSC rejects the default "ethprice" action; BNB is priced under "bnbprice".
+        native_price_action="bnbprice",
     ),
     ChainInfo(
         chain_id=59144,

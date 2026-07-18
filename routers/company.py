@@ -137,7 +137,10 @@ def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
 
 @router.get("/api/company/{company_name}/functions")
 def company_functions(company_name: str, response: Response) -> dict[str, Any]:
-    """Per-contract function entries for a protocol, keyed by address.
+    """Per-contract function entries for a protocol, keyed by the composite
+    ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
+    cross-chain pair keeps each chain's own analysis. The frontend indexes this
+    map with the matching ``entityKey(chain, address)``.
 
     Split out of the main ``/api/company/{name}`` payload — the
     ``EffectiveFunction`` table accounts for ~2.13 MB of payload and
@@ -150,7 +153,7 @@ def company_functions(company_name: str, response: Response) -> dict[str, Any]:
     started = time.monotonic()
     with deps.SessionLocal() as session:
         try:
-            functions_by_address = build_functions_for_protocol(session, company_name)
+            functions_by_entity = build_functions_for_protocol(session, company_name)
         except CompanyNotFound:
             _log_endpoint("/api/company/{name}/functions", company=company_name, started=started, outcome="not_found")
             raise HTTPException(status_code=404, detail="Company not found")
@@ -159,10 +162,10 @@ def company_functions(company_name: str, response: Response) -> dict[str, Any]:
         company=company_name,
         started=started,
         outcome="success",
-        contract_count=len(functions_by_address),
-        function_count=sum(len(v) for v in functions_by_address.values()),
+        contract_count=len(functions_by_entity),
+        function_count=sum(len(v) for v in functions_by_entity.values()),
     )
-    return {"functions": functions_by_address}
+    return {"functions": functions_by_entity}
 
 
 @router.get("/api/company/{company_name}/audits")

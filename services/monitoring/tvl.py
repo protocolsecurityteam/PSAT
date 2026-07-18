@@ -121,22 +121,33 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
 def refresh_contract_balances(
     session: Session,
     protocol_id: int,
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], bool]:
     """Refresh on-chain balances for all contracts in a protocol.
 
-    Updates ``contract_balances`` rows (latest state) and returns a
-    per-contract breakdown dict for the snapshot.
+    Updates ``contract_balances`` rows (latest state) and returns
+    ``(breakdown, partial)`` — the per-contract breakdown dict for the snapshot,
+    and whether any contract was skipped because its chain's native coin could
+    not be priced this cycle.
+
+    Native-asset USD pricing dispatch (inv. 5): a contract's native gas balance
+    is valued in its OWN chain's native coin — a registry fact (``native_asset``)
+    — never assumed to be ETH. ETH-native chains (mainnet, the OP-stack L2s, and
+    a legacy NULL chain that coalesces to mainnet) reuse a single mainnet ETH/USD
+    quote fetched once below. A non-ETH-native chain (POL, BNB, AVAX, ...) is
+    priced per-chain via ``get_native_price``; if that quote is unavailable the
+    contract is SKIPPED (its prior balances left intact, ``partial`` flagged) —
+    we never quote a non-ETH balance at the ETH price, and one unpriceable chain
+    no longer aborts the whole protocol's snapshot.
     """
-    from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances
+    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price, get_token_balances
 
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
-        return {}
+        return {}, False
 
-    # Fetch ETH price once for all contracts. ETH/USD is an L1-scoped quote, so
-    # every ETH-native chain's ETH balance is valued at this mainnet price — an
-    # explicit, documented mainnet read, not a silent default. Non-ETH-native
-    # chains never reach this quote (see the per-contract dispatch below).
+    # Fetch the mainnet ETH/USD quote once for every ETH-native contract. ETH/USD
+    # is an L1-scoped quote reused for the ETH-native L2s too (their ETH balance
+    # is L1 ETH); an explicit, documented mainnet read, not a silent default.
     eth_price: float | None = None
     try:
         eth_price = get_eth_price(chain_id=1)
@@ -147,7 +158,11 @@ def refresh_contract_balances(
             len(contracts),
         )
 
+    # Non-ETH native quotes are fetched at most once per chain and cached; a cached
+    # None marks a chain whose native coin could not be priced this cycle.
+    native_price_by_chain: dict[int, float | None] = {}
     breakdown: dict[str, dict] = {}
+    partial = False
 
     for contract in contracts:
         address = contract.address
@@ -155,26 +170,35 @@ def refresh_contract_balances(
         # contracts resolve to chain_id 1 — unchanged; a legacy NULL chain also
         # maps to 1 until the M1.2 fail-loud flip.
         chain_id = chain_id_for(contract.chain)
-
-        # Native-asset USD pricing dispatch (inv. 5): the chain's native gas
-        # token — a registry fact — decides whether the native balance can be
-        # priced here. INVARIANT: only ETH-native chains are priceable. The sole
-        # native-price source (utils.etherscan.get_eth_price → stats.ethprice)
-        # quotes ETH/USD only; a non-ETH native balance (POL, BNB, AVAX, ...)
-        # has no correct USD source, so we fail loud rather than mis-quote it at
-        # the ETH price or write a ContractBalance row with the wrong quote.
-        # NULL chain coalesces to mainnet (chain_id 1 → ETH), so legacy rows keep
-        # ETH pricing. Raised before any balance fetch/delete/write for this
-        # contract, so nothing is staged at the wrong quote; it propagates out to
-        # take_tvl_snapshot → refresh_all_protocols (per-protocol warning +
-        # partial heartbeat).
         native_asset = chain_by_id(chain_id).native_asset
-        if native_asset != "ETH":
-            raise ValueError(
-                f"native-asset pricing unsupported for chain {contract.chain!r} "
-                f"(chain_id={chain_id}): native asset {native_asset} is not ETH — "
-                "refusing to quote at the ETH price"
-            )
+
+        # Resolve the native-coin USD quote and the symbol/name to record it under
+        # BEFORE touching this contract's stored balances, so an unpriceable chain
+        # is skipped with its prior rows intact rather than wiped-and-unwritten.
+        if native_asset == "ETH":
+            native_price = eth_price
+            native_symbol, native_name = "ETH", "Ether"
+        else:
+            if chain_id not in native_price_by_chain:
+                try:
+                    native_price_by_chain[chain_id] = get_native_price(chain_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Native price fetch failed for chain %s (%s): %s — skipping %s",
+                        chain_id,
+                        native_asset,
+                        exc,
+                        address,
+                    )
+                    native_price_by_chain[chain_id] = None
+            native_price = native_price_by_chain[chain_id]
+            if native_price is None:
+                # No USD quote for this non-ETH native coin this cycle. Refuse to
+                # quote its balance at any other asset's price; skip the contract
+                # (prior balances untouched) and flag the cycle partial.
+                partial = True
+                continue
+            native_symbol, native_name = native_asset, native_asset
 
         contract_total = 0.0
         tokens: list[dict] = []
@@ -194,24 +218,24 @@ def refresh_contract_balances(
         # Clear old balances for this contract
         session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).delete()
 
-        # Native ETH
+        # Native coin (ETH / POL / BNB / ... — symbol is the chain's native_asset)
         if eth_wei > 0:
-            eth_usd = (eth_wei / 1e18) * eth_price if eth_price else None
+            eth_usd = (eth_wei / 1e18) * native_price if native_price else None
             session.add(
                 ContractBalance(
                     contract_id=contract.id,
                     token_address=None,
-                    token_name="Ether",
-                    token_symbol="ETH",
+                    token_name=native_name,
+                    token_symbol=native_symbol,
                     decimals=18,
                     raw_balance=str(eth_wei),
-                    price_usd=eth_price,
+                    price_usd=native_price,
                     usd_value=round(eth_usd, 2) if eth_usd else None,
                 )
             )
             if eth_usd:
                 contract_total += eth_usd
-                tokens.append({"symbol": "ETH", "usd_value": round(eth_usd, 2)})
+                tokens.append({"symbol": native_symbol, "usd_value": round(eth_usd, 2)})
 
         # ERC-20 tokens
         for tok in token_list:
@@ -244,7 +268,7 @@ def refresh_contract_balances(
         }
 
     session.commit()
-    return breakdown
+    return breakdown, partial
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +310,7 @@ def take_tvl_snapshot(
     session: Session,
     protocol_id: int,
     refresh_balances: bool = True,
-) -> TvlSnapshot | None:
+) -> tuple[TvlSnapshot | None, bool]:
     """Take a combined TVL snapshot for a protocol.
 
     1. Fetches DefiLlama TVL (non-fatal if unavailable).
@@ -296,14 +320,17 @@ def take_tvl_snapshot(
        fetched them).
     3. Writes a ``TvlSnapshot`` row.
 
-    Returns ``None`` (and skips work) if a snapshot for this protocol
-    already exists within the last ``MIN_SNAPSHOT_INTERVAL`` seconds.
+    Returns ``(snapshot, partial)``. ``snapshot`` is ``None`` (and no work is
+    done) when a snapshot for this protocol already exists within the last
+    ``MIN_SNAPSHOT_INTERVAL`` seconds. ``partial`` is True when the snapshot
+    completed but some contract was skipped because its chain's native coin
+    could not be priced (see :func:`refresh_contract_balances`).
     """
     from datetime import datetime, timedelta, timezone
 
     protocol = session.get(Protocol, protocol_id)
     if protocol is None:
-        return None
+        return None, False
 
     # Dedup guard — skip if a recent snapshot already exists
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=MIN_SNAPSHOT_INTERVAL)
@@ -322,7 +349,7 @@ def take_tvl_snapshot(
             recent.timestamp,
             MIN_SNAPSHOT_INTERVAL,
         )
-        return None
+        return None, False
 
     # Tier 1: DefiLlama
     dl_result = fetch_defillama_tvl(protocol.name)
@@ -331,9 +358,10 @@ def take_tvl_snapshot(
 
     # Tier 2: on-chain per-contract
     if refresh_balances:
-        contract_breakdown = refresh_contract_balances(session, protocol_id)
+        contract_breakdown, partial = refresh_contract_balances(session, protocol_id)
     else:
         contract_breakdown = _read_existing_balances(session, protocol_id)
+        partial = False
     on_chain_total = sum(entry.get("total_usd", 0) for entry in contract_breakdown.values())
 
     # Determine source and headline number
@@ -368,7 +396,7 @@ def take_tvl_snapshot(
         dl_tvl,
         len(contract_breakdown),
     )
-    return snapshot
+    return snapshot, partial
 
 
 def refresh_all_protocols(session: Session) -> int:
@@ -400,11 +428,14 @@ def refresh_all_protocols(session: Session) -> int:
     )
     count = 0
     failures = 0
+    partials = 0
     for protocol in protocols:
         try:
-            snapshot = take_tvl_snapshot(session, protocol.id)
+            snapshot, snapshot_partial = take_tvl_snapshot(session, protocol.id)
             if snapshot:
                 count += 1
+            if snapshot_partial:
+                partials += 1
         except Exception as exc:
             failures += 1
             # Discard any partial writes the failed snapshot staged on the shared
@@ -419,15 +450,22 @@ def refresh_all_protocols(session: Session) -> int:
     # One unconditional per-cycle summary even when nothing snapshotted, so a
     # wedged TVL tracker is detectable. ``contracts_scanned`` carries the
     # protocol count (TVL has no block range -> ``blocks_scanned=0``);
-    # ``events_found`` is snapshots written; any per-protocol failure -> partial.
+    # ``events_found`` is snapshots written. Cycle is partial if a protocol
+    # raised OR a snapshot completed with a contract skipped for want of a
+    # native-coin price.
+    notes = []
+    if failures:
+        notes.append(f"{failures}_failed")
+    if partials:
+        notes.append(f"{partials}_partial")
     emit_monitor_cycle(
         HEARTBEAT_PROTOCOL_TVL,
         started=started,
         contracts_scanned=len(protocols),
         blocks_scanned=0,
         events_found=count,
-        partial=failures > 0,
-        note=f"{failures}_failed" if failures else None,
+        partial=failures > 0 or partials > 0,
+        note=",".join(notes) if notes else None,
     )
     return count
 

@@ -415,8 +415,9 @@ def test_controls_detail_capabilities_from_claims(db_session):
 
 
 def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
-    """``build_functions_for_protocol`` returns ``{address: [function_entries]}``
-    using the same shape that previously lived on each contract entry.
+    """``build_functions_for_protocol`` returns
+    ``{"<chain>::<address>": [function_entries]}`` using the same per-function
+    shape that previously lived on each contract entry.
     """
     p = _add_protocol(db_session, f"functions-{uuid.uuid4().hex[:8]}")
     addr = _addr("fn1")
@@ -448,8 +449,9 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
     db_session.commit()
 
     out = build_functions_for_protocol(db_session, p.name)
-    assert addr in out
-    entries = out[addr]
+    key = f"ethereum::{addr.lower()}"
+    assert key in out
+    entries = out[key]
     assert len(entries) == 1
     entry = entries[0]
     assert entry["function"] == "transfer(address,uint256)"
@@ -503,10 +505,81 @@ def test_build_functions_for_protocol_proxy_uses_impl(db_session):
     db_session.commit()
 
     out = build_functions_for_protocol(db_session, p.name)
-    # Function is keyed to the proxy's address (what the user sees), not
-    # the impl's address.
-    assert proxy_addr in out
-    assert any(entry["function"] == "upgradeTo(address)" for entry in out[proxy_addr])
+    # Function is keyed to the proxy's (chain, address) — what the user sees —
+    # not the impl's address.
+    proxy_key = f"ethereum::{proxy_addr.lower()}"
+    assert proxy_key in out
+    assert any(entry["function"] == "upgradeTo(address)" for entry in out[proxy_key])
+
+
+def test_build_functions_for_protocol_two_chains_shared_address(db_session):
+    """Same address on two chains under one protocol keeps BOTH chains'
+    function analyses, keyed by the composite ``<chain>::<address>`` token
+    (invariant 13).
+
+    A CREATE2 twin deployed at the same address on ethereum and base can carry
+    a different per-chain authority verdict — ``pause()`` gated on mainnet,
+    earned-public on base. The flat ``{address: functions}`` map collapsed the
+    two last-wins while building the response, so the second chain's analysis
+    never left the server. Composite keying keeps both.
+    """
+    p = _add_protocol(db_session, f"twochain-{uuid.uuid4().hex[:8]}")
+    addr = _addr("dual")
+
+    eth_job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    eth_contract = _add_contract(
+        db_session, address=addr, job=eth_job, protocol_id=p.id, chain="ethereum", contract_name="Vault"
+    )
+    base_job = _add_job(
+        db_session,
+        address=addr,
+        protocol_id=p.id,
+        name="Vault",
+        request={"address": addr, "chain": "base"},
+    )
+    base_contract = _add_contract(
+        db_session, address=addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
+    )
+    # Same selector, opposite verdict: gated on ethereum, earned-public on base.
+    db_session.add(
+        EffectiveFunction(
+            contract_id=eth_contract.id,
+            function_name="pause",
+            selector="0x8456cb59",
+            abi_signature="pause()",
+            effect_labels=["pause_toggle"],
+            effect_targets=[],
+            action_summary="pause",
+            authority_public=False,
+            authority_roles=[],
+        )
+    )
+    db_session.add(
+        EffectiveFunction(
+            contract_id=base_contract.id,
+            function_name="pause",
+            selector="0x8456cb59",
+            abi_signature="pause()",
+            effect_labels=["pause_toggle"],
+            effect_targets=[],
+            action_summary="pause",
+            authority_public=True,
+            authority_roles=[],
+        )
+    )
+    db_session.commit()
+
+    out = build_functions_for_protocol(db_session, p.name)
+    eth_key = f"ethereum::{addr.lower()}"
+    base_key = f"base::{addr.lower()}"
+    assert eth_key in out, sorted(out.keys())
+    assert base_key in out, sorted(out.keys())
+    eth_entries = out[eth_key]
+    base_entries = out[base_key]
+    assert len(eth_entries) == 1 and len(base_entries) == 1
+    # Both chains' verdicts survive, distinct — the whole point of the fix.
+    assert eth_entries[0]["authority_public"] is False
+    assert base_entries[0]["authority_public"] is True
 
 
 def test_build_company_overview_proxy_uses_impl_name(db_session):

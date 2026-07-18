@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
 import { proxyDisplayName } from "../../../displayName.js";
+import { coalesceChain, entityKey } from "../../entityKey.js";
 import { shortenAddress } from "../../../graph.js";
 import { decodeEvent, eventKind, eventKindLabel, relativeTime, scannerHealth } from "../../../monitoring/format.js";
 
@@ -21,9 +22,10 @@ function earliestEnrollment(contracts) {
 // summary, and the newest events across every monitored address. Absorbs the
 // standalone monitoring page's overview. The canvas is the spatial protocol map;
 // clicking a recent row selects that contract → the panel switches to entity mode.
-export function ProtocolActivity({ protocolId, companyName, contracts, machines, onSelect, now }) {
+export function ProtocolActivity({ protocolId, companyName, contracts, machines, onSelect, now, chain = "ethereum" }) {
   const [events, setEvents] = useState([]);
   const [labelMap, setLabelMap] = useState({});
+  const activeChain = coalesceChain(chain);
 
   const refresh = useCallback(async () => {
     if (!protocolId) return;
@@ -46,10 +48,13 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
     api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
       .then((addrs) => {
         if (cancelled) return;
+        // The /addresses payload spans every chain, so key by (chain, address)
+        // (inv. 13): a same-address cross-chain pair otherwise last-wins one
+        // chain's display name onto the other. Rows carry their own chain.
         const map = {};
         for (const a of addrs?.all_addresses || []) {
           if (!a?.address) continue;
-          map[a.address.toLowerCase()] = {
+          map[entityKey(a.chain, a.address)] = {
             name: a.name || null,
             implName: a.implementation_name || null,
             isProxy: !!a.is_proxy,
@@ -76,9 +81,14 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
     return map;
   }, [contracts]);
 
-  const friendlyName = useCallback((addr) => {
+  // Event/contract rows carry no first-class chain field, and this panel is
+  // rendered per active chain (its contracts + machines are already scoped), so
+  // resolve the label with the row's own chain when known, else the active
+  // chain (never a raw bare-address lookup that could cross chains). Cosmetic —
+  // this drives the display name, not identity.
+  const friendlyName = useCallback((addr, rowChain) => {
     if (!addr) return "Unknown";
-    const entry = labelMap[addr.toLowerCase()];
+    const entry = labelMap[entityKey(rowChain ?? activeChain, addr)];
     const machine = machineByAddress.get(addr.toLowerCase());
     const pretty = proxyDisplayName({
       name: entry?.name || machine?.name,
@@ -87,7 +97,7 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
     });
     if (pretty && !/^0x/i.test(pretty)) return pretty;
     return shortenAddress(addr);
-  }, [labelMap, machineByAddress]);
+  }, [labelMap, machineByAddress, activeChain]);
 
   const health = scannerHealth(contracts, now);
   const headBlock = (contracts || []).reduce((max, c) => Math.max(max, c.last_scanned_block || 0), 0);
@@ -142,7 +152,7 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
                   <div className="ps-activity-recent-main">
                     <div className="ps-activity-recent-id">
                       <span className={`ps-activity-badge ${type}`}>{type}</span>
-                      <span className="ps-activity-recent-name">{friendlyName(addr)}</span>
+                      <span className="ps-activity-recent-name">{friendlyName(addr, contract?.chain)}</span>
                     </div>
                     <div className="ps-activity-recent-line">
                       <span className={`ps-activity-kind k-${kind}`}>{eventKindLabel(ev)}</span>

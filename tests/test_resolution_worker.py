@@ -27,7 +27,7 @@ def _stub_etherscan_balances(monkeypatch):
     override these in-body (monkeypatch order lets the later setattr win).
     """
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
     monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
 
 
@@ -308,7 +308,7 @@ class TestFetchBalancesHappyPath:
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
-        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 2000.0)
         monkeypatch.setattr(
             "utils.etherscan.get_token_balances",
             lambda addr, *a, **k: [
@@ -338,7 +338,7 @@ class TestFetchBalancesHappyPath:
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
-        monkeypatch.setattr("utils.etherscan.get_eth_price", MagicMock(side_effect=Exception("API down")))
+        monkeypatch.setattr("utils.etherscan.get_native_price", MagicMock(side_effect=Exception("API down")))
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
@@ -362,6 +362,29 @@ class TestFetchBalancesHappyPath:
 
         # No balances stored on exception
         session.add.assert_not_called()
+
+    def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A BSC job records its native gas balance under BNB at the BNB quote,
+        never an ETH label — the native asset comes from the chain registry."""
+        worker = ResolutionWorker()
+        session = MagicMock()
+        fake_contract = SimpleNamespace(id=42)
+        job = _job(request={"chain": "bsc", "chain_id": 56})
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000)  # 2 BNB
+        monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 600.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
+
+        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=56)
+
+        native_rows = [c.args[0] for c in session.add.call_args_list if c.args[0].token_address is None]
+        assert len(native_rows) == 1
+        row = native_rows[0]
+        assert row.token_symbol == "BNB"
+        assert row.token_name == "BNB"
+        assert row.price_usd == 600.0
+        assert row.usd_value == 1200.0
 
 
 # ---------------------------------------------------------------------------

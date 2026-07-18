@@ -44,7 +44,7 @@ def _stub_etherscan_balances(monkeypatch):
     balances via Etherscan; benign defaults (these tests assert on address
     rewriting / handoff, not balances)."""
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
     monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
 
 

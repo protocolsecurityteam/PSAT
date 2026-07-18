@@ -88,16 +88,16 @@ export default function ProtocolSurface({
     if (locallyFetched && Object.keys(locallyFetched).length > 0) return locallyFetched;
     const source = companyData?.contracts || initialData?.contracts;
     if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
-      // Scope to the active chain before keying by bare address: two chains can
-      // share an address, and an unscoped map would last-wins one chain's
-      // functions onto the other (F4). (The /functions endpoint payload —
-      // initialFunctions/locallyFetched above — is keyed by bare address at the
-      // backend and has no chain dimension to scope on; that conflation is a
-      // backend concern, out of this surface fix.)
+      // Key by the composite (chain, address) token — uniform with the
+      // /functions endpoint payload (initialFunctions/locallyFetched), which is
+      // now composite-keyed too. Two chains can share an address, so a bare key
+      // would last-wins one chain's functions onto the other (inv. 13). The
+      // per-chain filter is redundant given the composite key but kept so the
+      // inline fixture map stays scoped to what the canvas renders.
       return Object.fromEntries(
         source
           .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
-          .map((c) => [c.address, c.functions || []]),
+          .map((c) => [entityKey(c.chain, c.address), c.functions || []]),
       );
     }
     return {};
@@ -333,9 +333,10 @@ export default function ProtocolSurface({
     if (!functionData || Object.keys(functionData).length === 0) return scopedCompanyData;
     return {
       ...scopedCompanyData,
-      contracts: (scopedCompanyData.contracts || []).map((c) =>
-        c.address && functionData[c.address] ? { ...c, functions: functionData[c.address] } : c
-      ),
+      contracts: (scopedCompanyData.contracts || []).map((c) => {
+        const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
+        return fns ? { ...c, functions: fns } : c;
+      }),
     };
   }, [scopedCompanyData, functionData]);
 

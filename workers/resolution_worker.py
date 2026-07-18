@@ -358,7 +358,7 @@ class ResolutionWorker(BaseWorker):
         ``chain_id`` is required (inv. 6): it scopes every Etherscan v2 read to
         the job's chain so an L2 job records L2 balances/prices, not mainnet
         ones. A chainless balance fetch can no longer default to mainnet."""
-        from utils.etherscan import get_eth_balance, get_eth_price, get_token_balances, parallel_get
+        from utils.etherscan import get_eth_balance, get_native_price, get_token_balances, parallel_get
 
         address = job.address
         if not address or not contract_row:
@@ -375,7 +375,7 @@ class ResolutionWorker(BaseWorker):
             {
                 "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
                 "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
-                "eth_price": (lambda: get_eth_price(chain_id=chain_id)),
+                "native_price": (lambda: get_native_price(chain_id)),
             },
             heartbeat=heartbeat,
         )
@@ -407,32 +407,41 @@ class ResolutionWorker(BaseWorker):
         # Clear old balances
         session.query(ContractBalance).filter(ContractBalance.contract_id == contract_row.id).delete()
 
-        # Native ETH balance
+        # Native gas balance, valued in this chain's OWN native coin (inv. 5):
+        # the symbol/name are the registry's native_asset, and the USD quote is
+        # that coin's price — an L2/alt-L1 balance is never labeled or priced as
+        # mainnet ETH.
         if eth_wei > 0:
-            eth_price_raw = results.get("eth_price")
-            eth_price: float | None
-            eth_usd: float | None = None
-            if isinstance(eth_price_raw, BaseException):
-                record_degraded(
-                    phase="eth_price_fetch",
-                    exc=eth_price_raw,
-                    context={"address": target_address},
-                )
-                logger.warning("Job %s: ETH price fetch failed: %s", job.id, eth_price_raw)
-                eth_price = None
+            native_asset = chain_by_id(chain_id).native_asset
+            if native_asset == "ETH":
+                native_symbol, native_name = "ETH", "Ether"
             else:
-                eth_price = cast(float, eth_price_raw)
-                eth_usd = (eth_wei / 1e18) * eth_price
+                native_symbol, native_name = native_asset, native_asset
+
+            native_price_raw = results.get("native_price")
+            native_price: float | None
+            native_usd: float | None = None
+            if isinstance(native_price_raw, BaseException):
+                record_degraded(
+                    phase="native_price_fetch",
+                    exc=native_price_raw,
+                    context={"address": target_address, "chain_id": chain_id},
+                )
+                logger.warning("Job %s: native price fetch failed: %s", job.id, native_price_raw)
+                native_price = None
+            else:
+                native_price = cast(float, native_price_raw)
+                native_usd = (eth_wei / 1e18) * native_price
             session.add(
                 ContractBalance(
                     contract_id=contract_row.id,
                     token_address=None,
-                    token_name="Ether",
-                    token_symbol="ETH",
+                    token_name=native_name,
+                    token_symbol=native_symbol,
                     decimals=18,
                     raw_balance=str(eth_wei),
-                    price_usd=eth_price,
-                    usd_value=round(eth_usd, 2) if eth_usd else None,
+                    price_usd=native_price,
+                    usd_value=round(native_usd, 2) if native_usd else None,
                 )
             )
 

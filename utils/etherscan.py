@@ -17,6 +17,7 @@ import requests
 from dotenv import load_dotenv
 from eth_utils.crypto import keccak
 
+from utils.chains import chain_by_id
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -538,10 +539,37 @@ def get_eth_balance(address: str, chain_id: int) -> int:
     return int(data["result"])
 
 
+def get_native_price(chain_id: int) -> float:
+    """Return the USD price of *chain_id*'s native gas coin.
+
+    Etherscan v2's stats module serves every chain's native-coin price through
+    the same client and key; only the action name varies per chain
+    (:attr:`ChainInfo.native_price_action` — ``"ethprice"`` for most,
+    ``"bnbprice"`` on BSC). The response labels the value with a ``*usd`` key
+    that does NOT name the asset — polygon's POL and BSC's BNB both come back
+    under ``"ethusd"`` — so the price is read from whichever field ends in
+    ``usd`` and the asset it represents is the registry's ``native_asset``,
+    never the response key. Raises if the response carries no ``*usd`` field.
+    """
+    info = chain_by_id(chain_id)
+    data = get("stats", info.native_price_action, chain_id=chain_id)
+    result = data["result"]
+    for field, value in result.items():
+        if field.lower().endswith("usd"):
+            return float(value)
+    raise RuntimeError(
+        f"Etherscan {info.native_price_action} (chain {chain_id}) returned no USD price field: {result!r}"
+    )
+
+
 def get_eth_price(chain_id: int) -> float:
-    """Return the current ETH price in USD via Etherscan's ethprice endpoint."""
-    data = get("stats", "ethprice", chain_id=chain_id)
-    return float(data["result"]["ethusd"])
+    """Return the current ETH price in USD.
+
+    Thin wrapper over :func:`get_native_price` for the mainnet-quote call sites
+    that predate the multichain native-price path; on chain 1 (and any ETH-native
+    chain) it is exactly the ETH/USD quote it always was.
+    """
+    return get_native_price(chain_id)
 
 
 _token_balance_lock = threading.Lock()

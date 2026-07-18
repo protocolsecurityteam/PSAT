@@ -3,6 +3,7 @@
 // the canvas + sidebar consume. Pure — no React.
 
 import { functionName, isRoleConstant } from "../format.js";
+import { entityKey } from "../entityKey.js";
 import {
   compactActionSummary,
   laneForFunction,
@@ -18,7 +19,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
   const { nodeInfo } = buildControlGraphIndex(companyData);
   return companyData.contracts
     .map((contract) => {
-      const rawFunctions = (functionData[contract.address] || [])
+      const rawFunctions = (functionData[entityKey(contract.chain, contract.address)] || [])
         .filter((fn) => !isRoleConstant(functionName(fn.function)));
       const lanes = { top: [], left: [], right: [], ops: [] };
 

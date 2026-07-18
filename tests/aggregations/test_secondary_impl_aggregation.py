@@ -131,9 +131,9 @@ def test_secondary_impl_absorbed_into_proxy(db_session):
     # Functions payload: the proxy exposes BOTH the impl's and the secondary
     # impl's functions; the admin address has no separate entry.
     funcs = build_functions_for_protocol(s, p.name)
-    proxy_fns = {f["function"] for f in funcs.get(proxy_addr, [])}
+    proxy_fns = {f["function"] for f in funcs.get(f"ethereum::{proxy_addr.lower()}", [])}
     assert {"deposit()", "setPauser()"} <= proxy_fns
-    assert admin_addr not in funcs
+    assert f"ethereum::{admin_addr.lower()}" not in funcs
 
 
 def test_secondary_impl_fp_all_addrs_folds_into_primary_gate(db_session):

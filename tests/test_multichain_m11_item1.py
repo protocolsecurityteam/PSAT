@@ -202,13 +202,13 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
         captured["token_chain"] = chain_id
         return []
 
-    def _price(*, chain_id=1):
+    def _price(chain_id=1):
         captured["price_chain"] = chain_id
         return 0.0
 
     monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
     monkeypatch.setattr("utils.etherscan.get_token_balances", _tokens)
-    monkeypatch.setattr("utils.etherscan.get_eth_price", _price)
+    monkeypatch.setattr("utils.etherscan.get_native_price", _price)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
     worker = ResolutionWorker()

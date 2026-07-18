@@ -1791,9 +1791,36 @@ def _build_flows_and_principals(
     return fund_flows, list(principal_map.values())
 
 
+def _coalesce_chain(chain: str | None) -> str:
+    """Chain token matching the frontend's ``coalesceChain`` (site/src/surface/
+    entityKey.js): NULL/empty/``"mainnet"`` fold to ``"ethereum"`` (the
+    NULL≡ethereum legacy-read convention), everything else lowercases as-is.
+
+    Deliberately NOT :func:`utils.chains.canonical_chain` — that folds extra
+    aliases (``eth``→``ethereum``, ``avax``→``avalanche``) the frontend key does
+    not, so a token built here must mirror the JS exactly or the frontend's
+    lookup can never match it. Contract ``chain`` strings are already stored
+    canonical, so the two agree in practice.
+    """
+    c = str(chain or "").strip().lower()
+    if not c or c == "mainnet":
+        return "ethereum"
+    return c
+
+
+def _entity_key(chain: str | None, address: str | None) -> str:
+    """Composite ``"<chain>::<address>"`` entity key, byte-identical to the
+    frontend ``entityKey`` (site/src/surface/entityKey.js) so a backend-built
+    functions map aligns with the frontend's per-(chain, address) lookups
+    (multichain invariant 13). ``"::"`` appears in neither a chain name nor a
+    ``0x`` address, so the composite is collision-free."""
+    return f"{_coalesce_chain(chain)}::{str(address or '').lower()}"
+
+
 def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[dict[str, Any]]]:
-    """Return ``{address: [function_entries]}`` for every contract in the
-    protocol.
+    """Return ``{"<chain>::<address>": [function_entries]}`` for every contract
+    in the protocol, keyed by the composite entity token (:func:`_entity_key`,
+    mirroring the frontend's ``entityKey``).
 
     Split out of ``build_company_overview`` so the heavy
     ``effective_functions`` query (1469 rows × per-function principal
@@ -1825,10 +1852,12 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
         for s in (cr.secondary_implementations or [])
     }
 
-    # Map each job's address to the contract_ids whose EF rows it should show —
-    # for a proxy: its EIP-1967 impl plus any split-proxy secondary impls; for a
-    # plain contract: its own row.
-    job_addr_to_ef_cids: dict[str, list[int]] = {}
+    # Map each job's (chain, address) to the contract_ids whose EF rows it
+    # should show — for a proxy: its EIP-1967 impl plus any split-proxy secondary
+    # impls; for a plain contract: its own row. The key is the composite entity
+    # token so a CREATE2 twin at the same address on two chains keeps each
+    # chain's own analysis instead of collapsing last-wins (inv. 13).
+    entity_key_to_ef_cids: dict[str, list[int]] = {}
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
         if request.get("proxy_address"):
@@ -1849,9 +1878,9 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
             if sc.id != primary_cid
         ]
         if cids:
-            job_addr_to_ef_cids[job.address] = cids
+            entity_key_to_ef_cids[_entity_key(contract_row.chain if contract_row else None, job.address)] = cids
 
-    relevant_cids = {cid for cids in job_addr_to_ef_cids.values() for cid in cids}
+    relevant_cids = {cid for cids in entity_key_to_ef_cids.values() for cid in cids}
     ef_rows_by_cid: dict[int, list[EffectiveFunction]] = {}
     if relevant_cids:
         with _time_phase(timings_ms, "effective_functions"):
@@ -1884,9 +1913,9 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
 
     out: dict[str, list[dict[str, Any]]] = {}
     with _time_phase(timings_ms, "serialize"):
-        for addr, ef_cids in job_addr_to_ef_cids.items():
+        for key, ef_cids in entity_key_to_ef_cids.items():
             ef_rows = [ef for cid in ef_cids for ef in ef_rows_by_cid.get(cid, [])]
-            out[addr] = [
+            out[key] = [
                 _build_company_function_entry(ef, ef.principals or [], principal_lookup=principal_lookup)
                 for ef in ef_rows
             ]

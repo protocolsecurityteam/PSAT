@@ -11,21 +11,23 @@
 // principal.controls_detail.
 
 import { functionName, isRoleConstant } from "../format.js";
+import { entityKey } from "../entityKey.js";
 import { collectDirectCallers } from "./controlGraph.js";
 
 export function buildGovernsIndex(machines = [], functionData = {}) {
-  const nameByAddr = new Map();
-  for (const machine of machines) {
-    const addr = String(machine?.address || "").toLowerCase();
-    if (addr) nameByAddr.set(addr, machine.name || null);
-  }
-
   // authority addr (lc) → (governed contract addr (lc) → {contractAddress,
   // contractName, functions: Set<name>})
+  //
+  // Iterate the machines (already scoped to the active chain) and read each
+  // one's functions by its (chain, address) key, rather than walking the raw
+  // functionData map — that map is composite-keyed across every chain, so a
+  // bare walk would fold another chain's same-address authority in (inv. 13).
   const byAuthority = new Map();
-  for (const [contractAddress, fns] of Object.entries(functionData)) {
-    const contractLc = String(contractAddress || "").toLowerCase();
-    const contractName = nameByAddr.get(contractLc) || null;
+  for (const machine of machines) {
+    const contractLc = String(machine?.address || "").toLowerCase();
+    if (!contractLc) continue;
+    const contractName = machine.name || null;
+    const fns = functionData[entityKey(machine.chain, machine.address)];
     for (const fn of fns || []) {
       const signature = fn.function || fn.abi_signature || "";
       const name = functionName(signature);
