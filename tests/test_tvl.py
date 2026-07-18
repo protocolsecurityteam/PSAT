@@ -157,8 +157,9 @@ class TestRefreshContractBalances:
             ],
         )
 
-        breakdown = refresh_contract_balances(db_session, protocol.id)
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
+        assert partial is False
         assert addr.lower() in breakdown
         assert breakdown[addr.lower()]["total_usd"] == 4500.0
         assert breakdown[addr.lower()]["name"] == "Vault"
@@ -184,7 +185,7 @@ class TestRefreshContractBalances:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances", _raise)
 
-        breakdown = refresh_contract_balances(db_session, protocol.id)
+        breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
         assert addr.lower() in breakdown
         assert breakdown[addr.lower()]["total_usd"] == 0.0
@@ -210,7 +211,7 @@ class TestTakeTvlSnapshot:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 3000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
 
-        snapshot = take_tvl_snapshot(db_session, protocol.id)
+        snapshot, _ = take_tvl_snapshot(db_session, protocol.id)
 
         assert snapshot is not None
         assert snapshot.source == "both"
@@ -234,14 +235,16 @@ class TestTakeTvlSnapshot:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
 
-        snapshot = take_tvl_snapshot(db_session, protocol.id)
+        snapshot, _ = take_tvl_snapshot(db_session, protocol.id)
 
         assert snapshot is not None
         assert snapshot.source == "on_chain"
         assert snapshot.defillama_tvl is None
 
     def test_returns_none_for_missing_protocol(self, db_session):
-        assert take_tvl_snapshot(db_session, 999999) is None
+        snapshot, partial = take_tvl_snapshot(db_session, 999999)
+        assert snapshot is None
+        assert partial is False
 
 
 @requires_postgres
@@ -345,8 +348,8 @@ class TestSnapshotDedup:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
 
-        s1 = take_tvl_snapshot(db_session, protocol.id)
-        s2 = take_tvl_snapshot(db_session, protocol.id)
+        s1, _ = take_tvl_snapshot(db_session, protocol.id)
+        s2, _ = take_tvl_snapshot(db_session, protocol.id)
 
         assert s1 is not None
         # Second call within the minimum interval should be skipped
@@ -356,19 +359,97 @@ class TestSnapshotDedup:
         assert len(rows) == 1
 
 
+class TestGetNativePrice:
+    """``get_native_price`` picks the per-chain stats action and reads the price
+    from the ``*usd`` field, never inferring the asset from the response key."""
+
+    def test_eth_native_uses_ethprice_action(self, monkeypatch):
+        import utils.etherscan as es
+
+        captured: dict[str, object] = {}
+
+        def _fake_get(module, action, chain_id, **params):
+            captured.update(module=module, action=action, chain_id=chain_id)
+            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only the
+            # bare ``*usd`` field is the price.
+            return {
+                "result": {
+                    "ethbtc": "0.05",
+                    "ethbtc_timestamp": "1",
+                    "ethusd": "1841.99",
+                    "ethusd_timestamp": "2",
+                }
+            }
+
+        monkeypatch.setattr(es, "get", _fake_get)
+        price = es.get_native_price(1)
+
+        assert price == 1841.99
+        assert captured == {"module": "stats", "action": "ethprice", "chain_id": 1}
+
+    def test_polygon_pol_priced_under_lying_ethusd_key(self, monkeypatch):
+        # Polygon's POL price comes back under "ethusd"; generic *usd parse must
+        # read it without inferring "ETH" from the key.
+        import utils.etherscan as es
+
+        captured: dict[str, object] = {}
+
+        def _fake_get(module, action, chain_id, **params):
+            captured.update(action=action, chain_id=chain_id)
+            return {"result": {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"}}
+
+        monkeypatch.setattr(es, "get", _fake_get)
+        price = es.get_native_price(137)
+
+        assert price == 0.0826
+        assert captured == {"action": "ethprice", "chain_id": 137}
+
+    def test_bsc_uses_bnbprice_action(self, monkeypatch):
+        # BSC rejects "ethprice": the registry override must drive the call to
+        # "bnbprice", whose value is (mislabeled) under "ethusd".
+        import utils.etherscan as es
+
+        captured: dict[str, object] = {}
+
+        def _fake_get(module, action, chain_id, **params):
+            captured.update(module=module, action=action, chain_id=chain_id)
+            return {"result": {"ethusd": "567.97"}}
+
+        monkeypatch.setattr(es, "get", _fake_get)
+        price = es.get_native_price(56)
+
+        assert price == 567.97
+        assert captured == {"module": "stats", "action": "bnbprice", "chain_id": 56}
+
+    def test_missing_usd_field_raises(self, monkeypatch):
+        import utils.etherscan as es
+
+        monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethbtc": "0.05"}})
+        with pytest.raises(RuntimeError):
+            es.get_native_price(1)
+
+    def test_get_eth_price_delegates_to_native(self, monkeypatch):
+        import utils.etherscan as es
+
+        monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethusd": "2000.0"}})
+        assert es.get_eth_price(1) == 2000.0
+
+
 @requires_postgres
 class TestNativeAssetPricingDispatch:
     """Native-asset USD pricing dispatches on the contract's chain (inv. 5):
-    ETH-native chains price at the ETH quote; a non-ETH-native chain fails loud
-    rather than mis-quoting its native balance at the ETH price."""
+    each contract's native balance is valued in its OWN chain's coin. ETH-native
+    chains reuse the mainnet ETH/USD quote; a non-ETH chain is priced per-chain
+    via ``get_native_price`` and is skipped (partial-flagged) — never ETH-quoted
+    — when that price is unavailable."""
 
-    def _mock_prices(self, monkeypatch, *, wei: int) -> None:
+    def _mock_eth_native(self, monkeypatch, *, wei: int) -> None:
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: wei)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
 
     def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup):
-        # Base is ETH-native → unchanged pricing behavior.
+        # Base is ETH-native → byte-identical to mainnet pricing.
         protocol = Protocol(name="BaseNativeProto")
         db_session.add(protocol)
         db_session.flush()
@@ -377,9 +458,10 @@ class TestNativeAssetPricingDispatch:
         db_session.add(Contract(address=addr, chain="base", protocol_id=protocol.id, contract_name="BaseVault"))
         db_session.commit()
 
-        self._mock_prices(monkeypatch, wei=2_000_000_000_000_000_000)  # 2 ETH
-        breakdown = refresh_contract_balances(db_session, protocol.id)
+        self._mock_eth_native(monkeypatch, wei=2_000_000_000_000_000_000)  # 2 ETH
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
+        assert partial is False
         assert breakdown[addr.lower()]["total_usd"] == 4000.0
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1
@@ -396,16 +478,17 @@ class TestNativeAssetPricingDispatch:
         db_session.add(Contract(address=addr, chain=None, protocol_id=protocol.id, contract_name="LegacyVault"))
         db_session.commit()
 
-        self._mock_prices(monkeypatch, wei=1_000_000_000_000_000_000)  # 1 ETH
-        breakdown = refresh_contract_balances(db_session, protocol.id)
+        self._mock_eth_native(monkeypatch, wei=1_000_000_000_000_000_000)  # 1 ETH
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
+        assert partial is False
         assert breakdown[addr.lower()]["total_usd"] == 2000.0
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
 
-    def test_non_eth_native_chain_fails_loud(self, db_session, monkeypatch, _cleanup):
-        # Polygon (native POL) exists in the registry but is not ETH-native:
-        # refresh must raise, name the chain, and write NO balance row.
+    def test_polygon_contract_priced_at_pol_quote(self, db_session, monkeypatch, _cleanup):
+        # Regression: polygon (native POL) must be priced at its OWN coin's USD
+        # quote and recorded under the POL symbol — never raised, never ETH-quoted.
         protocol = Protocol(name="PolygonProto")
         db_session.add(protocol)
         db_session.flush()
@@ -414,55 +497,60 @@ class TestNativeAssetPricingDispatch:
         db_session.add(Contract(address=addr, chain="polygon", protocol_id=protocol.id, contract_name="PolyVault"))
         db_session.commit()
 
-        self._mock_prices(monkeypatch, wei=5_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 100_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)  # mainnet quote, unused here
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        # POL/USD (probed value); the balance is 100 POL → $8.26.
+        monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 0.0826)
 
-        with pytest.raises(ValueError) as exc:
-            refresh_contract_balances(db_session, protocol.id)
-        msg = str(exc.value)
-        assert "polygon" in msg
-        assert "POL" in msg
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
-        db_session.rollback()
-        assert db_session.query(ContractBalance).count() == 0
+        assert partial is False
+        assert breakdown[addr.lower()]["total_usd"] == 8.26
+        rows = db_session.query(ContractBalance).all()
+        assert len(rows) == 1
+        assert rows[0].token_symbol == "POL"
+        assert float(rows[0].price_usd) == 0.0826
 
-    def test_refresh_all_protocols_continues_past_non_eth_failure(self, db_session, monkeypatch, _cleanup):
-        # A failing (non-ETH) protocol must not wedge the fleet: the loop logs a
-        # warning, emits a partial heartbeat, and keeps snapshotting the rest.
-        p_eth = Protocol(name="EthProtoOK")
-        p_poly = Protocol(name="PolyProtoFail")
-        db_session.add_all([p_eth, p_poly])
+    def test_unpriceable_chain_skips_contract_and_flags_partial(self, db_session, monkeypatch, _cleanup):
+        # A non-ETH chain whose native price can't be fetched must not wedge the
+        # protocol: the failing contract is skipped (no row, no wrong quote), the
+        # ETH sibling still snapshots, and the cycle is flagged partial.
+        protocol = Protocol(name="MixedChainProto")
+        db_session.add(protocol)
         db_session.flush()
 
-        db_session.add(
-            Contract(address=_addr("native", "e9"), chain="ethereum", protocol_id=p_eth.id, contract_name="EthV")
-        )
-        db_session.add(
-            Contract(address=_addr("native_fail", "p9"), chain="polygon", protocol_id=p_poly.id, contract_name="PolyV")
-        )
+        eth_addr = _addr("native", "e5")
+        poly_addr = _addr("native_fail", "p5")
+        db_session.add(Contract(address=eth_addr, chain="ethereum", protocol_id=protocol.id, contract_name="EthV"))
+        db_session.add(Contract(address=poly_addr, chain="polygon", protocol_id=protocol.id, contract_name="PolyV"))
         db_session.commit()
 
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
-        self._mock_prices(monkeypatch, wei=1_000_000_000_000_000_000)
+        self._mock_eth_native(monkeypatch, wei=1_000_000_000_000_000_000)  # 1 ETH each
+
+        def _price_down(chain_id):
+            raise RuntimeError("stats endpoint down")
+
+        monkeypatch.setattr("utils.etherscan.get_native_price", _price_down)
 
         cycles: list[dict] = []
-        monkeypatch.setattr(
-            "services.monitoring.tvl.emit_monitor_cycle",
-            lambda *a, **k: cycles.append(k),
-        )
+        monkeypatch.setattr("services.monitoring.tvl.emit_monitor_cycle", lambda *a, **k: cycles.append(k))
 
         count = refresh_all_protocols(db_session)
 
-        # The ETH protocol snapshotted; the polygon one did not.
+        # Snapshot still written (the protocol completed with its ETH contract).
         assert count == 1
-        eth_snaps = db_session.query(TvlSnapshot).filter(TvlSnapshot.protocol_id == p_eth.id).count()
-        poly_snaps = db_session.query(TvlSnapshot).filter(TvlSnapshot.protocol_id == p_poly.id).count()
-        assert eth_snaps == 1
-        assert poly_snaps == 0
+        rows = db_session.query(ContractBalance).all()
+        # Only the ETH contract got a balance row; the polygon one was skipped.
+        assert len(rows) == 1
+        assert rows[0].token_symbol == "ETH"
+        assert {r.token_symbol for r in rows} == {"ETH"}
 
         # Operator-visible degraded cycle: exactly one partial heartbeat emitted.
         assert len(cycles) == 1
         assert cycles[0]["partial"] is True
-        assert cycles[0]["note"] == "1_failed"
+        assert cycles[0]["note"] == "1_partial"
 
 
 @requires_postgres
@@ -490,7 +578,7 @@ class TestEthPriceDegradationDB:
         monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
 
         with caplog.at_level(logging.WARNING, logger="services.monitoring.tvl"):
-            breakdown = refresh_contract_balances(db_session, protocol.id)
+            breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
         # All contracts should still appear but with $0 ETH value
         assert len(breakdown) == 2
