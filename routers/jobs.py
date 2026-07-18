@@ -43,6 +43,15 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
     # default is unaffected and an address-less company/dapp/defillama submission
     # (no chain identity; it fans out to the protocol's declared chains during
     # discovery, an internal derivation not gated here) is left alone.
+    # An address-scoped submission that *names* a chain must name a registered
+    # one. ``derive_job_chain_id``'s unknown-chain fallback (warn + mainnet) is
+    # an internal-writer edge, not an ingress contract — the string is stored
+    # verbatim on the job, so it must resolve here or be rejected.
+    if request.address and request.chain and request.chain.strip():
+        try:
+            chain_by_name(request.chain)
+        except UnknownChainError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved_chain_id = derive_job_chain_id(request.chain, request.address)
     if resolved_chain_id is not None:
         try:

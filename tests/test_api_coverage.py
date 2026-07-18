@@ -1844,6 +1844,9 @@ def test_analyses_chain_populated_from_contracts_table(mock_session_cls):
 
     company_job.status = JobStatus.completed
     child_job.status = JobStatus.completed
+    # The job and its Contract row must agree on chain for the listing to pair
+    # them (inv. 12): an arbitrum contract belongs to an arbitrum job.
+    child_job.chain_id = 42161
 
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)

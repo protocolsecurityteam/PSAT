@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from db.models import Job, JobStatus, Protocol
 from utils.chains import require_chain
@@ -225,13 +225,19 @@ def probe_contract_membership(
     from services.resolution.repos import PostgresEventLogRepo
 
     with deps.SessionLocal() as session:
-        job = session.execute(
+        job_stmt = (
             select(Job)
             .where(Job.address == addr)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
-        ).scalar_one_or_none()
+        )
+        # An explicit chain_id scopes to that chain's job (inv. 12): a CREATE2
+        # twin's trees must not cross-load. Absent, the mainnet-default edge
+        # (logged above) keeps the address-only most-recent pick.
+        if "chain_id" in req.model_fields_set:
+            job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
+        job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
@@ -309,13 +315,18 @@ def probe_contract_signature(
         logger.info("probe_signature: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
-        job = session.execute(
+        job_stmt = (
             select(Job)
             .where(Job.address == addr)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
-        ).scalar_one_or_none()
+        )
+        # An explicit chain_id scopes to that chain's job (inv. 12); absent,
+        # the mainnet-default edge (logged above) keeps the most-recent pick.
+        if "chain_id" in req.model_fields_set:
+            job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
+        job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
         artifact = deps.get_artifact(session, job.id, "predicate_trees")
@@ -407,11 +418,19 @@ def get_contract_capabilities(
         # job's request when chain is None, but doing it here too keeps
         # cache and direct resolver lookups aligned.
         chain_str: str | None = None
+        # Prefer the job on the requested chain_id so the derived chain_str
+        # agrees with the chain_id passed to the resolver (inv. 12) — a twin's
+        # most-recent job may be on the other chain. Ordering (not a filter)
+        # keeps NULL-chain_id legacy (mainnet) jobs eligible as the fallback.
         latest_job = session.execute(
             select(Job)
             .where(Job.address == addr)
             .where(Job.status == JobStatus.completed)
-            .order_by(Job.updated_at.desc(), Job.created_at.desc())
+            .order_by(
+                case((Job.chain_id == chain_id, 0), else_=1),
+                Job.updated_at.desc(),
+                Job.created_at.desc(),
+            )
             .limit(1)
         ).scalar_one_or_none()
         if latest_job is not None and isinstance(latest_job.request, dict):

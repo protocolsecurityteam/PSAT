@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
-from sqlalchemy import distinct, func, select, text
+from sqlalchemy import distinct, func, select, text, tuple_
 
 from db.models import Job, JobStatus
 
@@ -126,8 +126,13 @@ def config() -> dict[str, str]:
 def pipeline_stats() -> dict[str, Any]:
     """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:
+        # Count entities as (chain_id, address): a CREATE2 twin is one address
+        # on two chains, i.e. two distinct entities (inv. 12).
         unique_addresses = (
-            session.execute(select(func.count(distinct(Job.address))).where(Job.address.isnot(None))).scalar() or 0
+            session.execute(
+                select(func.count(distinct(tuple_(Job.chain_id, Job.address)))).where(Job.address.isnot(None))
+            ).scalar()
+            or 0
         )
         total_jobs = session.execute(select(func.count(Job.id))).scalar() or 0
         completed_jobs = (

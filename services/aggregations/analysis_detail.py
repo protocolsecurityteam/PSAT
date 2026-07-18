@@ -127,7 +127,10 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
 
             chain_id = getattr(job, "chain_id", None)
             if not isinstance(chain_id, int):
-                chain_id = derive_job_chain_id(chain if isinstance(chain, str) else req_chain, job.address) or 1
+                chain_id = derive_job_chain_id(chain if isinstance(chain, str) else req_chain, job.address)
+                # ``job.address`` is truthy here (guarded above), so the
+                # derivation never hits its address-less ``None`` case.
+                assert chain_id is not None
             semantic_caps = resolve_contract_capabilities(
                 session,
                 address=job.address.lower(),

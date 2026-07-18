@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -61,17 +61,21 @@ def _seed_completed_job_with_artifact(
     *,
     address: str,
     predicate_trees: dict | None,
+    chain_id: int | None = None,
+    updated_at: datetime | None = None,
 ):
     from db.models import Job, JobStage, JobStatus
     from db.queue import store_artifact
 
+    ts = updated_at or datetime.now(timezone.utc)
     job = Job(
         address=address,
+        chain_id=chain_id,
         request={"address": address, "name": "T"},
         status=JobStatus.completed,
         stage=JobStage.done,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=ts,
+        updated_at=ts,
     )
     db_session.add(job)
     db_session.flush()
@@ -83,6 +87,73 @@ def _seed_completed_job_with_artifact(
 
 def _address_topic(address: str) -> str:
     return "0x" + address.lower()[2:].rjust(64, "0")
+
+
+_MEMBERSHIP_TREE = {
+    "op": "LEAF",
+    "leaf": {
+        "kind": "membership",
+        "operator": "truthy",
+        "authority_role": "caller_authority",
+        "operands": [{"source": "msg_sender"}],
+        "set_descriptor": {
+            "kind": "mapping_membership",
+            "key_sources": [
+                {"source": "constant", "constant_value": "0x" + "01" * 32},
+                {"source": "msg_sender"},
+            ],
+            "storage_var": "_roles",
+        },
+        "references_msg_sender": True,
+        "parameter_indices": [],
+        "expression": "_roles[ROLE][msg.sender]",
+        "basis": [],
+    },
+}
+
+
+@requires_postgres
+def test_probe_membership_uses_explicit_chain_id_job(api_client, db_session):
+    """A CREATE2 twin has one completed job per chain, each with its own
+    predicate_trees. An explicit ``chain_id`` must load *that* chain's trees,
+    not the most-recently-updated job's (inv. 12)."""
+    import api as api_module
+
+    _no_auth(api_module)
+    address = "0x" + "ab" * 20
+    now = datetime.now(timezone.utc)
+    # ethereum job is the most recent; without chain scoping the address-only
+    # ORDER BY updated_at DESC would always pick it. It guards f(); the base
+    # job leaves f() unguarded — so the two are distinguishable by response.
+    _seed_completed_job_with_artifact(
+        db_session,
+        address=address,
+        chain_id=1,
+        updated_at=now,
+        predicate_trees={"schema_version": "semantic", "contract_name": "EthC", "trees": {"f()": _MEMBERSHIP_TREE}},
+    )
+    _seed_completed_job_with_artifact(
+        db_session,
+        address=address,
+        chain_id=8453,
+        updated_at=now - timedelta(hours=1),
+        predicate_trees={"schema_version": "semantic", "contract_name": "BaseC", "trees": {}},
+    )
+
+    resp = api_client.post(
+        f"/api/contract/{address}/probe/membership",
+        json={
+            "function_signature": "f()",
+            "predicate_index": 0,
+            "member": "0x" + "11" * 20,
+            "chain_id": 8453,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Base job leaves f() unguarded; the ethereum job would report a
+    # membership leaf. The explicit chain_id=8453 must select the base job.
+    assert body.get("reason") == "function_unguarded", body
 
 
 # ---------------------------------------------------------------------------

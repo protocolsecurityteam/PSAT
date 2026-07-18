@@ -37,13 +37,18 @@ def _display_name(entry: dict[str, Any]) -> str:
 
 
 def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    impl_by_proxy: dict[str, dict[str, Any]] = {}
-    merged_proxies: set[str] = set()
+    # Key the proxy↔impl fold by (coalesced-chain, address) so a CREATE2 twin's
+    # impl folds only into the proxy on its own chain (inv. 12) — a bare address
+    # match would attach one chain's impl to the other chain's proxy.
+    from services.aggregations.company_overview import _coalesce_chain
+
+    impl_by_proxy: dict[tuple[str, str], dict[str, Any]] = {}
+    merged_proxies: set[tuple[str, str]] = set()
 
     for entry in entries:
         proxy_address = str(entry.get("proxy_address") or "").lower()
         if proxy_address:
-            impl_by_proxy[proxy_address] = entry
+            impl_by_proxy[(_coalesce_chain(entry.get("chain")), proxy_address)] = entry
 
     merged: list[dict[str, Any]] = []
     for entry in entries:
@@ -52,7 +57,8 @@ def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
             continue
 
         address = str(entry.get("address") or "").lower()
-        impl = impl_by_proxy.get(address)
+        chain_key = _coalesce_chain(entry.get("chain"))
+        impl = impl_by_proxy.get((chain_key, address))
         if entry.get("is_proxy") and entry.get("implementation_address") and impl:
             merged.append(
                 {
@@ -68,14 +74,14 @@ def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
                     "display_name": impl.get("contract_name") or _display_name(entry),
                 }
             )
-            merged_proxies.add(address)
+            merged_proxies.add((chain_key, address))
             continue
 
         merged.append({**entry, "display_name": _display_name(entry)})
 
     for entry in entries:
         proxy_address = str(entry.get("proxy_address") or "").lower()
-        if proxy_address and proxy_address not in merged_proxies:
+        if proxy_address and (_coalesce_chain(entry.get("chain")), proxy_address) not in merged_proxies:
             merged.append({**entry, "display_name": _display_name(entry)})
 
     return merged

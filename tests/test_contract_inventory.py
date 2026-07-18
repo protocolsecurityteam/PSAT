@@ -896,8 +896,10 @@ class TestEnrichWithActivity:
         assert result[0]["activity"]["score"] == 0.5
         assert result[0]["activity"]["last_active"] is None
 
-    def test_unsupported_chain_uses_ethereum_fallback(self, monkeypatch):
-        """Contracts on unknown chains fall back to ethereum chain_id."""
+    def test_unknown_chain_skips_fetch_and_floors_rank(self, monkeypatch):
+        """A contract on an unregistered chain must NOT be ranked by mainnet
+        activity — querying mainnet's explorer would score it by an unrelated
+        address's activity (inv. 12). Instead: no fetch, activity score 0."""
         contracts = [{"name": "X", "address": "0x" + "a" * 40, "chains": ["unknown"], "confidence": 0.5}]
         called_with_chain_id = []
 
@@ -907,9 +909,13 @@ class TestEnrichWithActivity:
 
         monkeypatch.setattr("services.discovery.activity.etherscan.get", fake_get)
 
-        enrich_with_activity(contracts)
-        # Should fall back to ethereum (chain_id=1)
-        assert called_with_chain_id[0] == 1
+        result = enrich_with_activity(contracts)
+        # No explorer fetch for the unregistered chain.
+        assert called_with_chain_id == []
+        # Ranked at the floor: activity score 0 (not the mainnet-fetched score,
+        # not the 0.5 neutral used for a supported chain with no data).
+        assert result[0]["activity"]["score"] == 0.0
+        assert result[0]["activity"]["last_active"] is None
 
 
 # ---------------------------------------------------------------------------

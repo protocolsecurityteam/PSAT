@@ -366,7 +366,7 @@ def get(module: str, action: str, chain_id: int, **params) -> dict:
     raise exhausted
 
 
-def get_contract_creation_block(address: str, *, chain_id: int = 1, rpc_url: str | None = None) -> int | None:
+def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | None = None) -> int | None:
     """Block in which *address* was deployed, or ``None`` if it can't be
     determined.
 
