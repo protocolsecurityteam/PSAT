@@ -31,6 +31,7 @@ from db.models import (
 from db.queue import record_heartbeat
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
 from services.monitoring.chain_rpc import chain_id_for
+from utils.chains import chain_by_id
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -133,8 +134,9 @@ def refresh_contract_balances(
         return {}
 
     # Fetch ETH price once for all contracts. ETH/USD is an L1-scoped quote, so
-    # the native-ETH USD value uses the mainnet price for every chain's ETH
-    # balance — an explicit, documented mainnet read, not a silent default.
+    # every ETH-native chain's ETH balance is valued at this mainnet price — an
+    # explicit, documented mainnet read, not a silent default. Non-ETH-native
+    # chains never reach this quote (see the per-contract dispatch below).
     eth_price: float | None = None
     try:
         eth_price = get_eth_price(chain_id=1)
@@ -153,6 +155,27 @@ def refresh_contract_balances(
         # contracts resolve to chain_id 1 — unchanged; a legacy NULL chain also
         # maps to 1 until the M1.2 fail-loud flip.
         chain_id = chain_id_for(contract.chain)
+
+        # Native-asset USD pricing dispatch (inv. 5): the chain's native gas
+        # token — a registry fact — decides whether the native balance can be
+        # priced here. INVARIANT: only ETH-native chains are priceable. The sole
+        # native-price source (utils.etherscan.get_eth_price → stats.ethprice)
+        # quotes ETH/USD only; a non-ETH native balance (POL, BNB, AVAX, ...)
+        # has no correct USD source, so we fail loud rather than mis-quote it at
+        # the ETH price or write a ContractBalance row with the wrong quote.
+        # NULL chain coalesces to mainnet (chain_id 1 → ETH), so legacy rows keep
+        # ETH pricing. Raised before any balance fetch/delete/write for this
+        # contract, so nothing is staged at the wrong quote; it propagates out to
+        # take_tvl_snapshot → refresh_all_protocols (per-protocol warning +
+        # partial heartbeat).
+        native_asset = chain_by_id(chain_id).native_asset
+        if native_asset != "ETH":
+            raise ValueError(
+                f"native-asset pricing unsupported for chain {contract.chain!r} "
+                f"(chain_id={chain_id}): native asset {native_asset} is not ETH — "
+                "refusing to quote at the ETH price"
+            )
+
         contract_total = 0.0
         tokens: list[dict] = []
 
@@ -384,6 +407,9 @@ def refresh_all_protocols(session: Session) -> int:
                 count += 1
         except Exception as exc:
             failures += 1
+            # Discard any partial writes the failed snapshot staged on the shared
+            # session so they can't ride the next protocol's commit.
+            session.rollback()
             logger.warning(
                 "TVL snapshot failed for protocol %s: %s",
                 protocol.name,

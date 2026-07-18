@@ -119,6 +119,12 @@ class ChainInfo:
     chain_id: int
     name: str
     aliases: tuple[str, ...]
+    # The chain's native gas-token symbol ("ETH", "POL", "BNB", ...). Makes "is
+    # this chain's native balance an ETH balance" an explicit registry fact
+    # rather than an implicit assumption: native-asset USD pricing keys on this
+    # (services/monitoring/tvl.py) and refuses to quote a non-ETH native balance
+    # at the ETH price.
+    native_asset: str
     # Explicit per chain — never pattern-derived. Non-None marks a chain with
     # proven Envio coverage and serves two roles:
     #   * it is the "event indexer enabled for this chain" signal (inv. 10); and
@@ -157,6 +163,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=1,
         name="ethereum",
         aliases=("mainnet",),
+        native_asset="ETH",
         hypersync_url="https://eth.hypersync.xyz",
         explorer_base_url="https://etherscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -168,6 +175,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=42161,
         name="arbitrum",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://arbiscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -179,6 +187,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=10,
         name="optimism",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://optimistic.etherscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -190,6 +199,8 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=137,
         name="polygon",
         aliases=(),
+        # POL is the current canonical native token (renamed from MATIC, 2024).
+        native_asset="POL",
         hypersync_url=None,
         explorer_base_url="https://polygonscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -201,6 +212,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=8453,
         name="base",
         aliases=(),
+        native_asset="ETH",
         # Coverage is preview-validated (inv. 14): HyperSync is unreachable from
         # the dev network, so the $0-cost indexer path for this URL is proven in
         # the PR preview environment, not here.
@@ -223,6 +235,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=43114,
         name="avalanche",
         aliases=(),
+        native_asset="AVAX",
         hypersync_url=None,
         explorer_base_url="https://snowtrace.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -234,6 +247,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=56,
         name="bsc",
         aliases=(),
+        native_asset="BNB",
         hypersync_url=None,
         explorer_base_url="https://bscscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -245,6 +259,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=59144,
         name="linea",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://lineascan.build",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -256,6 +271,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=534352,
         name="scroll",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://scrollscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -267,6 +283,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=324,
         name="zksync",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://era.zksync.network",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -278,6 +295,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=81457,
         name="blast",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://blastscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -289,6 +307,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=34443,
         name="mode",
         aliases=(),
+        native_asset="ETH",
         hypersync_url=None,
         explorer_base_url="https://explorer.mode.network",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
@@ -300,6 +319,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         chain_id=80094,
         name="berachain",
         aliases=("bera",),
+        native_asset="BERA",
         hypersync_url=None,
         explorer_base_url="https://berascan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,

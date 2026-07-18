@@ -25,6 +25,8 @@ _ADDR_PREFIX = {
     "snap_both": "0x0000000000000000000000000000000000004",
     "snap_onchain": "0x0000000000000000000000000000000000005",
     "all_protos": "0x0000000000000000000000000000000000006",
+    "native": "0x0000000000000000000000000000000000007",
+    "native_fail": "0x0000000000000000000000000000000000008",
 }
 
 
@@ -352,6 +354,115 @@ class TestSnapshotDedup:
 
         rows = db_session.query(TvlSnapshot).filter(TvlSnapshot.protocol_id == protocol.id).all()
         assert len(rows) == 1
+
+
+@requires_postgres
+class TestNativeAssetPricingDispatch:
+    """Native-asset USD pricing dispatches on the contract's chain (inv. 5):
+    ETH-native chains price at the ETH quote; a non-ETH-native chain fails loud
+    rather than mis-quoting its native balance at the ETH price."""
+
+    def _mock_prices(self, monkeypatch, *, wei: int) -> None:
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: wei)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+
+    def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup):
+        # Base is ETH-native → unchanged pricing behavior.
+        protocol = Protocol(name="BaseNativeProto")
+        db_session.add(protocol)
+        db_session.flush()
+
+        addr = _addr("native", "b1")
+        db_session.add(Contract(address=addr, chain="base", protocol_id=protocol.id, contract_name="BaseVault"))
+        db_session.commit()
+
+        self._mock_prices(monkeypatch, wei=2_000_000_000_000_000_000)  # 2 ETH
+        breakdown = refresh_contract_balances(db_session, protocol.id)
+
+        assert breakdown[addr.lower()]["total_usd"] == 4000.0
+        rows = db_session.query(ContractBalance).all()
+        assert len(rows) == 1
+        assert rows[0].token_symbol == "ETH"
+        assert float(rows[0].price_usd) == 2000.0
+
+    def test_null_chain_contract_priced_as_eth(self, db_session, monkeypatch, _cleanup):
+        # Legacy NULL chain coalesces to mainnet → ETH pricing preserved.
+        protocol = Protocol(name="NullChainProto")
+        db_session.add(protocol)
+        db_session.flush()
+
+        addr = _addr("native", "n1")
+        db_session.add(Contract(address=addr, chain=None, protocol_id=protocol.id, contract_name="LegacyVault"))
+        db_session.commit()
+
+        self._mock_prices(monkeypatch, wei=1_000_000_000_000_000_000)  # 1 ETH
+        breakdown = refresh_contract_balances(db_session, protocol.id)
+
+        assert breakdown[addr.lower()]["total_usd"] == 2000.0
+        rows = db_session.query(ContractBalance).all()
+        assert len(rows) == 1 and rows[0].token_symbol == "ETH"
+
+    def test_non_eth_native_chain_fails_loud(self, db_session, monkeypatch, _cleanup):
+        # Polygon (native POL) exists in the registry but is not ETH-native:
+        # refresh must raise, name the chain, and write NO balance row.
+        protocol = Protocol(name="PolygonProto")
+        db_session.add(protocol)
+        db_session.flush()
+
+        addr = _addr("native_fail", "p1")
+        db_session.add(Contract(address=addr, chain="polygon", protocol_id=protocol.id, contract_name="PolyVault"))
+        db_session.commit()
+
+        self._mock_prices(monkeypatch, wei=5_000_000_000_000_000_000)
+
+        with pytest.raises(ValueError) as exc:
+            refresh_contract_balances(db_session, protocol.id)
+        msg = str(exc.value)
+        assert "polygon" in msg
+        assert "POL" in msg
+
+        db_session.rollback()
+        assert db_session.query(ContractBalance).count() == 0
+
+    def test_refresh_all_protocols_continues_past_non_eth_failure(self, db_session, monkeypatch, _cleanup):
+        # A failing (non-ETH) protocol must not wedge the fleet: the loop logs a
+        # warning, emits a partial heartbeat, and keeps snapshotting the rest.
+        p_eth = Protocol(name="EthProtoOK")
+        p_poly = Protocol(name="PolyProtoFail")
+        db_session.add_all([p_eth, p_poly])
+        db_session.flush()
+
+        db_session.add(
+            Contract(address=_addr("native", "e9"), chain="ethereum", protocol_id=p_eth.id, contract_name="EthV")
+        )
+        db_session.add(
+            Contract(address=_addr("native_fail", "p9"), chain="polygon", protocol_id=p_poly.id, contract_name="PolyV")
+        )
+        db_session.commit()
+
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        self._mock_prices(monkeypatch, wei=1_000_000_000_000_000_000)
+
+        cycles: list[dict] = []
+        monkeypatch.setattr(
+            "services.monitoring.tvl.emit_monitor_cycle",
+            lambda *a, **k: cycles.append(k),
+        )
+
+        count = refresh_all_protocols(db_session)
+
+        # The ETH protocol snapshotted; the polygon one did not.
+        assert count == 1
+        eth_snaps = db_session.query(TvlSnapshot).filter(TvlSnapshot.protocol_id == p_eth.id).count()
+        poly_snaps = db_session.query(TvlSnapshot).filter(TvlSnapshot.protocol_id == p_poly.id).count()
+        assert eth_snaps == 1
+        assert poly_snaps == 0
+
+        # Operator-visible degraded cycle: exactly one partial heartbeat emitted.
+        assert len(cycles) == 1
+        assert cycles[0]["partial"] is True
+        assert cycles[0]["note"] == "1_failed"
 
 
 @requires_postgres
