@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -891,7 +892,7 @@ class AddressLabel(Base):
 
     __tablename__ = "address_labels"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     chain: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
