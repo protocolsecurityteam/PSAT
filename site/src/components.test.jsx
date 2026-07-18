@@ -148,6 +148,19 @@ describe("AddressLabelInline", () => {
     );
     expect(screen.getByText("Treasury")).toBeInTheDocument();
   });
+
+  it("prefers a chain-qualified label over the global one (invariant 12)", () => {
+    const addr = "0x1111111111111111111111111111111111111111";
+    const maps = {
+      global: new Map([[addr, "Global Name"]]),
+      byChain: new Map([["base", new Map([[addr, "Base Name"]])]]),
+    };
+    render(
+      <AddressLabelInline address={addr} labels={maps} chain="base" refreshAll={() => {}} />,
+    );
+    expect(screen.getByText("Base Name")).toBeInTheDocument();
+    expect(screen.queryByText("Global Name")).not.toBeInTheDocument();
+  });
 });
 
 describe("ProductHero", () => {

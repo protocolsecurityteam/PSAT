@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
-import { listAddressLabels } from "./api/addressLabels.js";
+import { listAddressLabels, buildLabelMaps, resolveLabelName } from "./api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import {
   computeCurrentImplAddrs,
@@ -10,6 +10,18 @@ import {
 import { proxyDisplayName } from "./displayName.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
+
+// Which label row an address-inventory contract row edits (invariant 12).
+// These are CONTRACT rows, so a genuine cross-chain deployment gets its own
+// chain-qualified override. Mainnet and legacy NULL-chain rows (the entire
+// current population) intentionally resolve to `null` = the GLOBAL row, so
+// today's single-chain behavior is preserved exactly; only non-mainnet
+// contracts start writing per-chain overrides.
+function rowLabelChain(row) {
+  const c = row?.chain;
+  if (!c || String(c).toLowerCase() === "ethereum") return null;
+  return c;
+}
 
 // "Impl (via UUPSProxy)" for proxy rows, raw name otherwise — see
 // proxyDisplayName. Thin adapter from the address-inventory row shape.
@@ -36,7 +48,9 @@ export default function AddressesModal({ companyName, onClose }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  const [labels, setLabels] = useState(new Map());
+  // { global: Map<addr,name>, byChain: Map<chain, Map<addr,name>> } — chain-aware
+  // so a contract labeled per-network resolves to the right name (invariant 12).
+  const [labels, setLabels] = useState(() => ({ global: new Map(), byChain: new Map() }));
   const [filter, setFilter] = useState("");
   const [sortBy, setSortBy] = useState("rank"); // rank | name | address
   const [analyzing, setAnalyzing] = useState(false);
@@ -57,13 +71,11 @@ export default function AddressesModal({ companyName, onClose }) {
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     listAddressLabels()
-      .then((rows) => {
+      .then((resp) => {
         if (cancelled) return;
-        const m = new Map();
-        for (const r of rows || []) m.set(String(r.address || "").toLowerCase(), r.name);
-        setLabels(m);
+        setLabels(buildLabelMaps(resp));
       })
-      .catch(() => { /* labels are optional; missing key just leaves the map empty */ });
+      .catch(() => { /* labels are optional; missing key just leaves the maps empty */ });
     return () => { cancelled = true; };
   }, [companyName]);
 
@@ -134,7 +146,7 @@ export default function AddressesModal({ companyName, onClose }) {
           const addr = (r.address || "").toLowerCase();
           const name = (r.name || "").toLowerCase();
           const impl = (r.implementation_name || "").toLowerCase();
-          const label = (labels.get(addr) || "").toLowerCase();
+          const label = (resolveLabelName(labels, addr, rowLabelChain(r)) || "").toLowerCase();
           return (
             addr.includes(q) ||
             name.includes(q) ||
@@ -451,6 +463,7 @@ export default function AddressesModal({ companyName, onClose }) {
                             <AddressLabelInline
                               address={r.address}
                               labels={labels}
+                              chain={rowLabelChain(r)}
                               refreshAll={refresh}
                               size="xs"
                             />
