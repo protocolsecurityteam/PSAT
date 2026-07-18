@@ -1264,7 +1264,12 @@ class StaticWorker(BaseWorker):
         force = bool(request.get("force"))
         # Within-cascade dedupe under --force: same impl reached via multiple proxy paths must not spawn N copies.
         root_job_id = request.get("root_job_id") or str(job.id)
-        chain = request.get("chain")
+        # Coalesce a chainless request via the job's first-class chain (same
+        # derivation as the child stamp below): reconcile_impl_job_for_proxy
+        # disables its chain filter for chain=None, and impl singletons share
+        # addresses across chains (CREATE2), so an unfiltered lookup could
+        # adopt or backpatch another chain's impl job.
+        chain = request.get("chain") or _parent_chain_name(job)
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
