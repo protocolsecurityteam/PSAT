@@ -53,10 +53,13 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   // principal details, upgrade state, and audit coverage. Functions
   // live on a separate endpoint now, so splice them back onto each
   // contract for the scorer.
+  // Keyed by the composite (chain, address) entity token (inv. 13): a CREATE2
+  // twin on two chains keeps a coverage row each instead of one overwriting the
+  // other.
   const coverageByAddr = (() => {
     const map = {};
     for (const row of auditCoverage?.coverage || []) {
-      if (row.address) map[row.address.toLowerCase()] = row;
+      if (row.address) map[entityKey(row.chain, row.address)] = row;
     }
     return map;
   })();
@@ -78,9 +81,9 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   // after a proxy upgrade, so the raw count overshoots the contract count
   // (e.g. 56 covered of 32 contracts). Intersect with the current contract
   // set so the denominator and numerator are comparable.
-  const activeAddrs = new Set(contracts.map((c) => (c.address || "").toLowerCase()));
+  const activeAddrs = new Set(contracts.map((c) => entityKey(c.chain, c.address)));
   const coveredContracts = Object.values(coverageByAddr)
-    .filter((r) => activeAddrs.has((r.address || "").toLowerCase()))
+    .filter((r) => activeAddrs.has(entityKey(r.chain, r.address)))
     .filter((r) => bytecodeVerifiedAudits(r.audits).length > 0).length;
 
   const proxyCount = contracts.filter((c) => c.is_proxy).length;
