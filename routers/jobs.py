@@ -15,7 +15,13 @@ from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
-from utils.chains import UnknownChainError, UnsupportedChainError, chain_by_name, require_supported_chain
+from utils.chains import (
+    UnknownChainError,
+    UnsupportedChainError,
+    chain_by_name,
+    chain_enabled,
+    require_supported_chain,
+)
 
 from . import deps
 
@@ -108,6 +114,15 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
             # duplicate request) don't each create a job for the same contract.
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
+                continue
+            # Allowlist gate (inv. 14), mirroring the selection worker: a stub
+            # on a chain this deployment has not enabled is skipped — its
+            # discovery evidence stays for a future widened scan, no job spawns.
+            if not chain_enabled(contract.chain):
+                logger.info(
+                    "analyze-remaining: skipping stub on non-enabled chain",
+                    extra={"address": contract.address, "chain": contract.chain, "reason": "chain_not_enabled"},
+                )
                 continue
             # Coalesce NULL→"ethereum" (legacy convention): a NULL-chain contract
             # must still dedup within mainnet, not skip chain filtering entirely
