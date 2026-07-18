@@ -161,6 +161,21 @@ def test_resolve_company_jobs_collapses_duplicate_entity_jobs(db_session):
     assert [j.id for j in jobs] == [newer.id]
 
 
+def test_overview_entry_address_is_canonical_lowercase(db_session):
+    """A job stored with a checksummed address (legacy admin submission) must
+    serialize a lowercase card address — node ids and selection keys downstream
+    assume one canonical form."""
+    p = _add_protocol(db_session, f"csum-{uuid.uuid4().hex[:8]}")
+    lower = _addr("checksummed")
+    mixed = lower[:2] + lower[2:].upper()
+    j = _add_job(db_session, address=mixed, protocol_id=p.id, request={"address": mixed})
+    _add_contract(db_session, address=lower, job=j, protocol_id=p.id, contract_name="Csum")
+
+    overview = build_company_overview(db_session, p.name)
+    entry = next(c for c in overview["contracts"] if (c["address"] or "").lower() == lower)
+    assert entry["address"] == lower
+
+
 def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
     """Regression for the surface-page leak: an analyzed job whose subject
     Contract row is orphan (protocol_id=NULL) must NOT show under the

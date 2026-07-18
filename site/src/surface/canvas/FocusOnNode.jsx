@@ -27,10 +27,17 @@ export function FocusOnNode({ address, focusKey, principals }) {
     // renders, e.g. StakedTokenV1 inside the EOA group).
     const rectFor = (addr) => {
       if (!addr) return null;
-      const internal = getInternalNode(addr) || getInternalNode(addr.toLowerCase());
-      const node = internal
-        || getNodes().find((n) => n.id === addr)
+      // Resolve the node case-insensitively FIRST, then fetch its internal
+      // representation by the node's own id — a node id that doesn't share
+      // the caller's case (legacy checksummed payload rows) must still get
+      // the internal node, since only it carries a grouped card's absolute
+      // position.
+      const found = getNodes().find((n) => n.id === addr)
         || getNodes().find((n) => n.id?.toLowerCase() === addr.toLowerCase());
+      const internal = getInternalNode(addr)
+        || getInternalNode(addr.toLowerCase())
+        || (found ? getInternalNode(found.id) : null);
+      const node = internal || found;
       if (!node) return null;
       return {
         x: internal?.internals?.positionAbsolute?.x ?? node.positionAbsolute?.x ?? node.position?.x ?? 0,

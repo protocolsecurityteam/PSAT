@@ -1296,7 +1296,11 @@ def build_governance_view(
                     total_usd += usd
 
         entry: dict[str, Any] = {
-            "address": job.address,
+            # Canonical lowercase: node ids and selection keys downstream
+            # assume one form, but a legacy job row can hold a checksummed
+            # address (ingress normalizes only since the AnalyzeRequest
+            # validator landed).
+            "address": (job.address or "").lower(),
             "name": contract_name,
             "contract_id": contract_row.id if contract_row else None,
             "job_id": str(job.id),
