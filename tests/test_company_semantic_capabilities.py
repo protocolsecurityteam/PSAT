@@ -133,6 +133,62 @@ def test_company_semantic_capabilities_per_contract_map(api_client, db_session):
     assert contracts[addr_legacy] is None
 
 
+def _guard_tree(fn: str) -> dict:
+    art = _semantic_artifact_with_guard()
+    art["trees"] = {fn: art["trees"]["f()"]}
+    return art
+
+
+@requires_postgres
+def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_session):
+    """A CREATE2 twin analyzed on two chains keeps BOTH chains' capability sets,
+    each under its own ``<chain>::<address>`` entity key (multichain invariant
+    13). Resolving per bare address (last-writer-wins on updated_at) used to drop
+    the older chain's set entirely and collapse the two into one ``contracts``
+    entry.
+    """
+    from db.models import Job, JobStage, JobStatus, Protocol
+    from db.queue import store_artifact
+
+    name = f"twin_semcaps_{uuid.uuid4().hex[:6]}"
+    addr = "0x" + uuid.uuid4().hex[:8] + "77" * 16
+    proto = Protocol(name=name)
+    db_session.add(proto)
+    db_session.flush()
+    for chain_id, chain_name, fn in ((1, "ethereum", "eth_fn()"), (8453, "base", "base_fn()")):
+        job = Job(
+            address=addr,
+            protocol_id=proto.id,
+            chain_id=chain_id,
+            request={"address": addr, "chain": chain_name},
+            status=JobStatus.completed,
+            stage=JobStage.done,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db_session.add(job)
+        db_session.flush()
+        store_artifact(db_session, job.id, "predicate_trees", data=_guard_tree(fn))
+    db_session.commit()
+
+    resp = api_client.get(f"/api/company/{name}/semantic_capabilities")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    by_entity = body["contracts_by_entity"]
+    eth_key = f"ethereum::{addr.lower()}"
+    base_key = f"base::{addr.lower()}"
+    assert eth_key in by_entity and base_key in by_entity, sorted(by_entity)
+    assert "eth_fn()" in by_entity[eth_key] and "base_fn()" not in by_entity[eth_key], by_entity[eth_key]
+    assert "base_fn()" in by_entity[base_key] and "eth_fn()" not in by_entity[base_key], by_entity[base_key]
+
+    # The bare ``contracts`` map keeps one deterministic entry per address
+    # (newest completed job wins across chains).
+    assert body["contracts"][addr.lower()] is not None
+    # missing_semantic_count is counted per entity; both twins resolved.
+    assert body["missing_semantic_count"] == 0
+
+
 @requires_postgres
 def test_company_semantic_capabilities_unknown_company_404(api_client, db_session):
     resp = api_client.get(f"/api/company/no_such_{uuid.uuid4().hex[:6]}/semantic_capabilities")

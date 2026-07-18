@@ -1748,3 +1748,73 @@ def test_flows_and_principals_carry_chain_fields(db_session):
     assert principals, "expected the FP-backed Safe to surface as a principal"
     for pr in principals:
         assert pr.get("chains") == ["ethereum"], (pr.get("address"), pr.get("chains"))
+        # controls_detail rows gain exactly ``chain`` alongside the bare
+        # ``address`` — nothing else about the row shape drifts (byte-compat pin).
+        for row in pr.get("controls_detail") or []:
+            assert set(row.keys()) == {"address", "functions", "capabilities", "chain"}, (
+                f"controls_detail row shape drifted beyond the additive chain field: {sorted(row.keys())}"
+            )
+            assert row["chain"] == "ethereum", row
+
+
+def test_controls_detail_rows_carry_chain_for_twins(db_session):
+    """One Safe governing same-address CREATE2 twins on two chains yields two
+    ``controls_detail`` rows with the SAME bare ``address`` but distinct
+    ``chain`` tokens — so a consumer can tell the two governed contracts apart
+    (multichain invariant 13). Without the chain discriminator the two rows are
+    indistinguishable.
+    """
+    p = _add_protocol(db_session, f"twin-detail-{uuid.uuid4().hex[:8]}")
+    vault_addr = _addr("twindetailvault")
+    safe_addr = _addr("twindetailsafe").lower()
+
+    eth_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="Vault")
+    eth_contract = _add_contract(
+        db_session, address=vault_addr, job=eth_job, protocol_id=p.id, chain="ethereum", contract_name="Vault"
+    )
+    base_job = _add_job(
+        db_session,
+        address=vault_addr,
+        protocol_id=p.id,
+        name="Vault",
+        request={"address": vault_addr, "chain": "base"},
+    )
+    base_contract = _add_contract(
+        db_session, address=vault_addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
+    )
+
+    # The SAME Safe holds an owner-gated setFee on both chains' twins.
+    for contract, selector in ((eth_contract, "0x46464641"), (base_contract, "0x46464642")):
+        ef = EffectiveFunction(
+            contract_id=contract.id,
+            function_name="setFee",
+            selector=selector,
+            abi_signature="setFee(uint256)",
+            effect_labels=["pause_toggle"],
+            authority_public=False,
+        )
+        db_session.add(ef)
+        db_session.flush()
+        db_session.add(
+            FunctionPrincipal(
+                function_id=ef.id,
+                address=safe_addr,
+                resolved_type="safe",
+                origin="semantic_capability:finite_set",
+                principal_type="controller",
+            )
+        )
+        db_session.add(ControlGraphNode(contract_id=contract.id, address=safe_addr, resolved_type="safe"))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
+    assert safe_addr in principals, f"the FP-backed Safe must surface as a principal; got {sorted(principals)}"
+
+    detail = principals[safe_addr].get("controls_detail") or []
+    rows_for_vault = [r for r in detail if (r.get("address") or "").lower() == vault_addr.lower()]
+    chains = sorted(r.get("chain") for r in rows_for_vault)
+    assert chains == ["base", "ethereum"], (
+        "the Safe must have one controls_detail row per governed twin, each tagged with its own "
+        f"chain; got rows={rows_for_vault}"
+    )

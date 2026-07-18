@@ -1539,12 +1539,13 @@ def build_governance_view(
         rows = [
             {
                 "address": _entity_addr(caddr),
+                "chain": _entity_chain(caddr),
                 "functions": sorted(d["functions"]),
                 "capabilities": sorted(d["capabilities"]),
             }
             for caddr, d in by_contract.items()
         ]
-        rows.sort(key=lambda e: e["address"])
+        rows.sort(key=lambda e: (e["address"], e["chain"]))
         detail_by_principal[la] = rows
 
     for p in principals:
