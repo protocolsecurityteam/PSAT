@@ -8,9 +8,9 @@ pages (via the ``status="error"`` heartbeat + fly ``[[restart]] policy="always"`
 but never permanently stops. SIGTERM/SIGINT set a shared stop event and the
 threads are joined within a bounded timeout.
 
-The ``--poll`` / ``--tvl`` / ``--reconcile`` / ``--legacy`` flags remain as
-rollback levers and as the workers-group reconciler entrypoint; each still runs
-its single loop in the foreground.
+The ``--poll`` / ``--tvl`` / ``--reconcile`` flags remain as rollback levers
+and as the workers-group reconciler entrypoint; each still runs its single loop
+in the foreground.
 """
 
 from __future__ import annotations
@@ -247,11 +247,6 @@ def main():
             "(orphan-adoption migrations, deployer-cascade, manual fix-ups, etc.)."
         ),
     )
-    parser.add_argument(
-        "--legacy",
-        action="store_true",
-        help="Run the legacy proxy-only scanner (backward compat fallback)",
-    )
     args = parser.parse_args()
     if args.rpc_url is None:
         args.rpc_url = _default_rpc_seed()
@@ -291,28 +286,6 @@ def main():
             RECONCILER_FALLBACK_CHAIN,
         )
         run_enrollment_reconciler_loop(args.rpc_url, RECONCILER_FALLBACK_CHAIN, interval=interval)
-        return
-
-    if args.legacy:
-        signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
-        # Fall back to the old proxy-only scanner
-        from services.monitoring.proxy_watcher import (
-            DEFAULT_POLL_INTERVAL,
-            DEFAULT_SCAN_INTERVAL,
-            run_poll_loop,
-            run_scan_loop,
-        )
-
-        rpc_for_log = sanitize_url(args.rpc_url)
-        if args.poll:
-            interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
-            logger.info("Legacy proxy poll monitor starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
-            run_poll_loop(args.rpc_url, interval)
-        else:
-            interval = args.interval if args.interval is not None else DEFAULT_SCAN_INTERVAL
-            logger.info("Legacy proxy monitor starting (rpc=%s, interval=%ss)", rpc_for_log, interval)
-            run_scan_loop(args.rpc_url, interval)
         return
 
     if args.poll:

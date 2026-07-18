@@ -298,24 +298,6 @@ def test_default_mode_spawns_exactly_three_named_threads():
             {"poll": ("services.monitoring.unified_watcher", "run_poll_loop")},
             {"poll": (("http://p", 3.0), {"startup_offset_s": 0.0})},
         ),
-        # --legacy → proxy_watcher.run_scan_loop only (poll untouched)
-        (
-            ["--legacy", "--rpc-url", "http://l", "--interval", "4"],
-            {
-                "scan": ("services.monitoring.proxy_watcher", "run_scan_loop"),
-                "poll": ("services.monitoring.proxy_watcher", "run_poll_loop"),
-            },
-            {"scan": (("http://l", 4.0), {}), "poll": None},
-        ),
-        # --legacy --poll → proxy_watcher.run_poll_loop only (scan untouched)
-        (
-            ["--legacy", "--poll", "--rpc-url", "http://l", "--interval", "4"],
-            {
-                "scan": ("services.monitoring.proxy_watcher", "run_scan_loop"),
-                "poll": ("services.monitoring.proxy_watcher", "run_poll_loop"),
-            },
-            {"scan": None, "poll": (("http://l", 4.0), {})},
-        ),
         # default (no mode flag) → _run_supervised_default(rpc_url, interval)
         (
             ["--rpc-url", "http://d"],
@@ -326,9 +308,8 @@ def test_default_mode_spawns_exactly_three_named_threads():
 )
 def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
     """Each CLI mode flag routes ``main()`` to exactly its loop entry point with
-    the parsed rpc-url/interval, and mutually-exclusive siblings (legacy scan vs
-    poll) are not invoked. The loops are patched where ``main`` imports them, so
-    the real functions never run."""
+    the parsed rpc-url/interval. The loops are patched where ``main`` imports
+    them, so the real functions never run."""
     seen: dict[str, tuple] = {}
 
     for label, (mod_path, attr) in patch_targets.items():
