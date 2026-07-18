@@ -104,7 +104,7 @@ def _add_contract(
     address: str,
     job: Job,
     protocol_id: int | None = None,
-    chain: str = "ethereum",
+    chain: str | None = "ethereum",
     is_proxy: bool = False,
     implementation: str | None = None,
     contract_name: str | None = None,
