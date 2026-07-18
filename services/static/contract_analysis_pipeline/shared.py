@@ -106,10 +106,6 @@ def _contract_signatures(contract) -> set[str]:
     return signatures
 
 
-def _is_mapping_variable(variable) -> bool:
-    return type(getattr(variable, "type", None)).__name__ == "MappingType"
-
-
 def _source_evidence(item, project_dir: Path, detail: str | None = None) -> Evidence:
     mapping = getattr(item, "source_mapping", None)
     file_info = getattr(mapping, "filename", None)
@@ -128,25 +124,6 @@ def _source_evidence(item, project_dir: Path, detail: str | None = None) -> Evid
     if detail:
         evidence["detail"] = detail
     return evidence
-
-
-def _source_fragment(item, project_dir: Path) -> str:
-    mapping = getattr(item, "source_mapping", None)
-    file_info = getattr(mapping, "filename", None)
-    absolute = getattr(file_info, "absolute", None) if file_info else None
-    lines = list(getattr(mapping, "lines", []) or [])
-    if not absolute or not lines:
-        return ""
-
-    path = Path(str(absolute))
-    try:
-        source_lines = path.read_text().splitlines()
-    except OSError:
-        return ""
-
-    start = max(min(lines) - 1, 0)
-    end = min(max(lines), len(source_lines))
-    return "\n".join(source_lines[start:end])
 
 
 def _declaring_contract_name(item, default_contract_name: str) -> str:
@@ -170,8 +147,3 @@ def _call_or_value(item, attr_name: str) -> list[Any]:
     if isinstance(resolved, Iterable) and not isinstance(resolved, (str, bytes, dict)):
         return list(resolved)
     return []
-
-
-def _node_contains_require_or_assert(node) -> bool:
-    marker = getattr(node, "contains_require_or_assert", False)
-    return bool(marker()) if callable(marker) else bool(marker)

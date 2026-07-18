@@ -94,10 +94,6 @@ def _raw_github_metadata(value: Any) -> dict[str, str]:
     return metadata
 
 
-def _report_key(url: str | None) -> str:
-    return str(url or "").strip().rstrip("/").lower()
-
-
 def _should_fetch_html(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()

@@ -567,23 +567,6 @@ def search_audit_reports(
     }
 
 
-def _empty_result(
-    company: str,
-    domain: str | None,
-    queries_used: int,
-    errors: list,
-    notes: list,
-) -> dict[str, Any]:
-    return {
-        "company": company,
-        "official_domain": domain,
-        "reports": [],
-        "queries_used": queries_used,
-        "errors": errors[:12],
-        "notes": notes[:12],
-    }
-
-
 # --- Append-only merge ----------------------------------------------------
 
 
