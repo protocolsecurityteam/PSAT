@@ -204,6 +204,35 @@ def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_hear
 
 
 @requires_postgres
+def test_build_fleet_status_cursor_lag_is_chain_scoped(db_session, _clean_heartbeats):
+    """Two chains each internally at their own head must read as zero lagging:
+    base's naturally higher block numbers are not a backfill signal for mainnet
+    cursors — lag is measured against each chain's own leader."""
+    for i in (20, 21):
+        db_session.add(
+            IndexedEventCursor(
+                chain_id=1, event_address=_addr(i), topic0="0x" + "aa" * 32, last_indexed_block=25_000_000
+            )
+        )
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=8453, event_address=_addr(22), topic0="0x" + "bb" * 32, last_indexed_block=48_000_000
+        )
+    )
+    db_session.add(MonitoredContract(address=_addr(23), chain="ethereum", last_scanned_block=25_000_000))
+    db_session.add(MonitoredContract(address=_addr(24), chain="base", last_scanned_block=48_000_000))
+    db_session.commit()
+
+    out = build_fleet_status(db_session)
+    work = next(d for d in out["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)["work"]
+    assert work["lagging_cursors"] == 0
+    # Spread is a within-chain figure; the cross-chain height gap is not spread.
+    assert work["block_spread"] == 0
+    # Same for the scan-block spread over monitored contracts.
+    assert out["watchers"]["scan_block_spread"] == 0
+
+
+@requires_postgres
 def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, _clean_heartbeats):
     # The Option B triad: backlog (drainable depth) + oldest_pending_age_s
     # (how long the oldest waiter has sat) come from cheap aggregate SQL.
