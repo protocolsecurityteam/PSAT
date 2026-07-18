@@ -4,6 +4,7 @@ import { isBytecodeVerifiedAudit } from "../../auditCoverage.js";
 import { formatAuditDate } from "../../auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
+import { entityKey } from "../entityKey.js";
 import { principalLabel, shortAddr } from "../format.js";
 
 // Sentinel activeAuditId value for the summary's "all proven contracts"
@@ -231,10 +232,10 @@ function ProtocolAuditsView({
 // verdict here is the same one shown in the whole-protocol breakdown, keyed to
 // the selected contract's address.
 function SelectedContractAuditsView({ machine, byAudit, onClear, onRead }) {
-  const addr = (machine.address || "").toLowerCase();
+  const key = entityKey(machine.chain, machine.address);
   const covering = [];
   for (const { audit, contracts } of byAudit.values()) {
-    const c = contracts.find((x) => x.address === addr);
+    const c = contracts.find((x) => entityKey(x.chain, x.address) === key);
     if (c) covering.push({ audit, sha: c.sha });
   }
   covering.sort((x, y) => {
@@ -342,13 +343,16 @@ export function AuditsListPanel({
     ) : null;
   }
 
-  // Resolve lowercase addresses → machine so covered contracts are legible
-  // instead of raw hex, and so off-canvas impl rows collapse into their proxy.
-  const contractByAddr = new Map();
+  // Resolve (chain, address) → machine so covered contracts are legible instead
+  // of raw hex, and so off-canvas impl rows collapse into their proxy. machines
+  // is activeChain-scoped but coverageData spans all chains, so the join must
+  // key on the composite entity — a base twin sharing an address must not
+  // resolve to the ethereum machine.
+  const contractByKey = new Map();
   if (Array.isArray(machines)) {
     for (const m of machines) {
       const a = (m.address || "").toLowerCase();
-      if (a) contractByAddr.set(a, m);
+      if (a) contractByKey.set(entityKey(m.chain, a), m);
     }
   }
 
@@ -356,28 +360,31 @@ export function AuditsListPanel({
   // `/audit_coverage` returns one row per Contract DB entity (proxy AND impl
   // AND historical impls). The endpoint already unions a proxy's coverage with
   // its impl's, so every logical contract's proof surfaces under its on-canvas
-  // (proxy) address. Skipping addresses that aren't on the canvas both drops
-  // the duplicate impl rows and gives one entry per logical contract.
-  const isOnCanvas = (addr) => contractByAddr.has(addr);
+  // (proxy) entity. Skipping entities that aren't on the canvas both drops the
+  // duplicate impl rows and gives one entry per logical contract.
 
-  // audit_id → { audit, contracts: [{ name, address, sha }] }, built from the
-  // proven set only. `trackedContracts` is the honest denominator (contracts on
-  // this surface we have coverage data for); `provenContracts` the numerator.
+  // audit_id → { audit, contracts: [{ name, address, chain, sha }] }, built from
+  // the proven set only. `trackedContracts` is the honest denominator (contracts
+  // on this surface we have coverage data for); `provenContracts` the numerator.
   const byAudit = new Map();
-  const provenAddrs = new Set();
+  const provenKeys = new Set();
   let trackedContracts = 0;
   for (const entry of coverageData.coverage || []) {
     const addr = (entry.address || "").toLowerCase();
-    if (!addr || !isOnCanvas(addr)) continue;
+    if (!addr) continue;
+    const key = entityKey(entry.chain, addr);
+    const machine = contractByKey.get(key);
+    if (!machine) continue;
     trackedContracts += 1;
-    const machine = contractByAddr.get(addr);
-    const name = machine?.name || entry.contract_name || shortAddr(addr);
+    const name = machine.name || entry.contract_name || shortAddr(addr);
     for (const a of entry.audits || []) {
       if (!isBytecodeVerifiedAudit(a)) continue;
-      provenAddrs.add(addr);
+      provenKeys.add(key);
       const id = a.audit_id;
       if (!byAudit.has(id)) byAudit.set(id, { audit: a, contracts: [] });
-      byAudit.get(id).contracts.push({ name, address: addr, sha: a.matched_commit_sha || null });
+      byAudit
+        .get(id)
+        .contracts.push({ name, address: addr, chain: entry.chain, sha: a.matched_commit_sha || null });
     }
   }
 
@@ -390,22 +397,28 @@ export function AuditsListPanel({
   });
 
   // The proven-contract roster the summary dropdown lists (and the canvas rings
-  // when "all" is picked): one entry per distinct source-proven address, named
+  // when "all" is picked): one entry per distinct source-proven entity, named
   // from its on-canvas machine, sorted by name.
-  const provenList = [...provenAddrs]
-    .map((addr) => ({ address: addr, name: contractByAddr.get(addr)?.name || shortAddr(addr) }))
+  const provenList = [...provenKeys]
+    .map((key) => {
+      const m = contractByKey.get(key);
+      const addr = (m.address || "").toLowerCase();
+      return { address: addr, name: m.name || shortAddr(addr) };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const openRead = (audit) => {
     const bucket = byAudit.get(audit.audit_id);
-    const coveredCount = new Set((bucket?.contracts || []).map((c) => c.address)).size;
+    const coveredCount = new Set(
+      (bucket?.contracts || []).map((c) => entityKey(c.chain, c.address)),
+    ).size;
     setReadingAudit({ audit, coveredCount });
   };
 
   const protocolView = (
     <ProtocolAuditsView
       auditEntries={auditEntries}
-      provenContracts={provenAddrs.size}
+      provenContracts={provenKeys.size}
       provenList={provenList}
       trackedContracts={trackedContracts}
       activeAuditId={activeAuditId}
