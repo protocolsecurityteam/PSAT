@@ -106,16 +106,22 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 
 def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract]:
     """Return contracts to fetch balances for, excluding implementation-behind-proxy."""
+    from services.aggregations.company_overview import _entity_key
+
     contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
 
-    # Build set of implementation addresses that sit behind a proxy
-    impl_addresses: set[str] = set()
+    # Impl-behind-proxy tokens, keyed by the composite "<chain>::<address>": an
+    # EIP-1967 impl lives on its proxy's chain, so exclude it only there. A bare
+    # address set would also drop a standalone contract that merely shares an
+    # address with some other chain's impl (a CREATE2 twin) from balance
+    # collection entirely.
+    impl_tokens: set[str] = set()
     for c in contracts:
         if c.is_proxy and c.implementation:
-            impl_addresses.add(c.implementation.lower())
+            impl_tokens.add(_entity_key(c.chain, c.implementation))
 
     # Keep proxy contracts (they hold the funds) and non-impl regular contracts
-    return [c for c in contracts if c.address and c.address.lower() not in impl_addresses]
+    return [c for c in contracts if c.address and _entity_key(c.chain, c.address) not in impl_tokens]
 
 
 def refresh_contract_balances(

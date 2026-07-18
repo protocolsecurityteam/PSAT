@@ -131,6 +131,39 @@ class TestGetProtocolAddresses:
         assert regular_addr.lower() in addr_set
         assert impl_addr.lower() not in addr_set
 
+    def test_impl_twin_on_other_chain_not_excluded(self, db_session, _cleanup):
+        # A base standalone contract sharing an address with an ethereum proxy's
+        # implementation must NOT be dropped from balance collection: the
+        # exclusion is per-chain (impl-behind-proxy on its OWN chain only), so
+        # the base twin still gets a balance row + breakdown entry.
+        protocol = Protocol(name="TestProto_impltwin")
+        db_session.add(protocol)
+        db_session.flush()
+
+        proxy_addr = _addr("get_addrs", "d9")
+        impl_addr = _addr("get_addrs", "e9")
+
+        proxy = Contract(
+            address=proxy_addr,
+            chain="ethereum",
+            protocol_id=protocol.id,
+            contract_name="Proxy",
+            is_proxy=True,
+            implementation=impl_addr,
+        )
+        eth_impl = Contract(address=impl_addr, chain="ethereum", protocol_id=protocol.id, contract_name="EthImpl")
+        base_twin = Contract(address=impl_addr, chain="base", protocol_id=protocol.id, contract_name="BaseStandalone")
+        db_session.add_all([proxy, eth_impl, base_twin])
+        db_session.commit()
+
+        addresses = _get_protocol_addresses(db_session, protocol.id)
+        kept = {(c.address.lower(), c.chain) for c in addresses}
+
+        # proxy kept; eth impl-behind-proxy excluded; base twin at same address INCLUDED.
+        assert (proxy_addr.lower(), "ethereum") in kept
+        assert (impl_addr.lower(), "base") in kept
+        assert (impl_addr.lower(), "ethereum") not in kept
+
 
 @requires_postgres
 class TestRefreshContractBalances:
