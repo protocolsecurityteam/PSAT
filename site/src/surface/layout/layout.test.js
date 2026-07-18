@@ -14,7 +14,7 @@ import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
 import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
-import { buildControlAdjacency } from "./governancePath.js";
+import { buildControlAdjacency, flowOnChain } from "./governancePath.js";
 import { entityKey } from "../entityKey.js";
 
 // buildMachines reads functions by the composite (chain, address) token; the
@@ -414,5 +414,91 @@ describe("buildControlAdjacency — chain scope (inv. 13)", () => {
   it("is identical to the unscoped build when no active chain is given", () => {
     const adj = buildControlAdjacency(FLOWS);
     expect([...adj.get(CTRL)]).toEqual([TWIN]);
+  });
+});
+
+describe("flowOnChain — canvas fund-flow scope (R3, inv. 13)", () => {
+  const A = "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+  const B = "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+
+  it("keeps only the active chain's flow", () => {
+    expect(flowOnChain({ from: A, to: B, type: "controller", to_chain: "ethereum" }, "ethereum")).toBe(true);
+    expect(flowOnChain({ from: A, to: B, type: "controller", to_chain: "base" }, "ethereum")).toBe(false);
+  });
+
+  it("keeps chain-less legacy flows on any active chain", () => {
+    expect(flowOnChain({ from: A, to: B, type: "controller" }, "ethereum")).toBe(true);
+  });
+
+  it("keeps every flow when no active chain is given", () => {
+    expect(flowOnChain({ from: A, to: B, type: "controller", to_chain: "base" }, null)).toBe(true);
+  });
+
+  // The canvas keys contract→contract edges by bare address, so a base twin flow
+  // between two addresses that ALSO exist as visible ethereum machines misdraws
+  // onto the ethereum nodes. ProtocolSurface scopes the flows with flowOnChain
+  // before they reach the layout; this proves the layer that scoping protects.
+  it("a base twin flow does not reach the canvas layout when scoped to ethereum", () => {
+    const machines = [
+      { address: A, name: "GovA", is_proxy: false, totalFunctions: 2, total_usd: 0 },
+      { address: B, name: "GovB", is_proxy: false, totalFunctions: 1, total_usd: 0 },
+    ];
+    const baseFlow = { from: A, to: B, type: "controller", from_chain: "base", to_chain: "base" };
+    const drawn = (edges) =>
+      edges.some((e) => (e.source || "").toLowerCase() === A && (e.target || "").toLowerCase() === B);
+
+    // Unscoped: the base relationship misdraws as an ethereum edge.
+    expect(drawn(buildGraphLayout(machines, [baseFlow], [], {}, "ethereum").edges)).toBe(true);
+    // Scoped the way ProtocolSurface scopes it: the base edge is gone.
+    const scoped = [baseFlow].filter((f) => flowOnChain(f, "ethereum"));
+    expect(drawn(buildGraphLayout(machines, scoped, [], {}, "ethereum").edges)).toBe(false);
+    // A chain-less flow still draws.
+    const legacy = [{ from: A, to: B, type: "controller" }].filter((f) => flowOnChain(f, "ethereum"));
+    expect(drawn(buildGraphLayout(machines, legacy, [], {}, "ethereum").edges)).toBe(true);
+  });
+});
+
+describe("buildGroupControllers — controls_detail chain keying (R4, inv. 13)", () => {
+  const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
+  const safeAddr = RICH_ADDRESSES.SAFE;
+
+  // The Safe primary-owns machines[0] (→ one group). It carries controls_detail
+  // rows for that same address on both chains — a CREATE2 twin governed on each.
+  // The canvas is scoped to ethereum, so only the ethereum row's functions may
+  // attach to the visible node; the base row keys to its own chain and finds no
+  // ethereum child.
+  function safeWith(detail) {
+    return [
+      {
+        address: safeAddr,
+        type: "safe",
+        primary_for: [machines[0].address],
+        co_controls: [],
+        controls_detail: detail,
+      },
+    ];
+  }
+
+  it("attaches only the active chain's controls_detail row to the node", () => {
+    const principals = safeWith([
+      { address: machines[0].address, chain: "ethereum", functions: ["pauseOnEth"], capabilities: ["pause"] },
+      { address: machines[0].address, chain: "base", functions: ["pauseOnBase"], capabilities: ["pause"] },
+    ]);
+    const { nodes } = buildGraphLayout(machines, [], principals, {}, "ethereum");
+    const group = nodes.find((n) => n.type === "group" && n.id === safeAddr);
+    const governs = group.data.controllers[0].governs;
+    expect(governs).toHaveLength(1);
+    // Only ethereum's function attaches; the same-address base row must not fold
+    // onto the ethereum node (today it overwrites the ethereum row, last-wins).
+    expect(governs[0].functions).toEqual(["pauseOnEth"]);
+  });
+
+  it("attaches a chain-less legacy row on any active chain", () => {
+    const principals = safeWith([
+      { address: machines[0].address, functions: ["pauseLegacy"], capabilities: ["pause"] },
+    ]);
+    const { nodes } = buildGraphLayout(machines, [], principals, {}, "ethereum");
+    const group = nodes.find((n) => n.type === "group" && n.id === safeAddr);
+    expect(group.data.controllers[0].governs[0].functions).toEqual(["pauseLegacy"]);
   });
 });

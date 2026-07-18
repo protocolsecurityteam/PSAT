@@ -15,19 +15,27 @@ import { coalesceChain } from "../entityKey.js";
 // governance.
 const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls"]);
 
+// Whether a fund_flows edge belongs to ``activeChain``. A flow is intra-chain
+// (``from_chain`` === ``to_chain`` in the payload), so ``to_chain`` is
+// representative. With no active chain the page is single-chain and every flow
+// is kept; a legacy flow with no chain field is kept on any chain (inv. 13) —
+// the single home for this predicate so the canvas fund-flow scope (the edges
+// SurfaceCanvas draws) and the governance-adjacency walk agree.
+export function flowOnChain(flow, activeChain) {
+  if (!activeChain || !flow || flow.to_chain == null) return true;
+  return coalesceChain(flow.to_chain) === activeChain;
+}
+
 // from-address (lc) → Set<to-address (lc)> over control-relation edges only.
 //
 // The Surface page is chain-scoped, so when ``activeChain`` is given only flows
-// on that chain feed the adjacency: a control edge carries its own
-// ``from_chain``/``to_chain`` (control is intra-chain, so they agree), and a
-// same-address twin's edge on another chain must not enter this chain's walk
-// (inv. 13). Legacy payloads whose flows carry no chain fields behave as before
-// — every flow is kept.
+// on that chain feed the adjacency: a same-address twin's edge on another chain
+// must not enter this chain's walk (see flowOnChain).
 export function buildControlAdjacency(fundFlows = [], activeChain = null) {
   const adjacency = new Map();
   for (const flow of fundFlows || []) {
     if (!flow || !CONTROL_EDGE_TYPES.has(flow.type)) continue;
-    if (activeChain && flow.to_chain != null && coalesceChain(flow.to_chain) !== activeChain) continue;
+    if (!flowOnChain(flow, activeChain)) continue;
     const from = String(flow.from || "").toLowerCase();
     const to = String(flow.to || "").toLowerCase();
     if (!from || !to || from === to) continue;

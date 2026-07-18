@@ -12,7 +12,7 @@ import { findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
-import { buildControlAdjacency } from "./surface/layout/governancePath.js";
+import { buildControlAdjacency, flowOnChain } from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { coalesceChain, entityKey } from "./surface/entityKey.js";
@@ -380,6 +380,15 @@ export default function ProtocolSurface({
     [companyData, activeChain]
   );
 
+  // Fund flows feeding the canvas are chain-scoped like the principals + the
+  // adjacency: SurfaceCanvas draws contract→contract edges keyed by bare
+  // address, so a same-address twin's flow on another chain must not draw onto
+  // this chain's nodes (inv. 13). Same predicate the adjacency walk uses.
+  const scopedFundFlows = useMemo(
+    () => (companyData?.fund_flows || []).filter((f) => flowOnChain(f, activeChain)),
+    [companyData, activeChain]
+  );
+
   // Principal facet by address — lets a dual-facet contract card render its
   // principal strip + capability tags. Most contracts have no entry (null).
   // Chain-scoped: a principal governs on the chain(s) in its ``chains`` list
@@ -717,7 +726,7 @@ export default function ProtocolSurface({
         <ReactFlowProvider>
           <SurfaceCanvas
             machines={machines}
-            fundFlows={companyData?.fund_flows}
+            fundFlows={scopedFundFlows}
             principals={visiblePrincipals}
             chain={activeChain}
             selectedAddress={selection?.address}
