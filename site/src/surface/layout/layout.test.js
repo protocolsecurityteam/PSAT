@@ -14,9 +14,12 @@ import { collectPrincipals } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
 import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
+import { entityKey } from "../entityKey.js";
 
+// buildMachines reads functions by the composite (chain, address) token; the
+// fixture is single-chain (no chain field → "ethereum"), so key it the same way.
 const functionData = Object.fromEntries(
-  ETHERFI_COMPANY_RICH.contracts.map((c) => [c.address, c.functions || []]),
+  ETHERFI_COMPANY_RICH.contracts.map((c) => [entityKey(c.chain, c.address), c.functions || []]),
 );
 
 describe("buildMachines", () => {

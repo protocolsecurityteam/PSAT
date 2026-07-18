@@ -1803,8 +1803,9 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         # main payload; the entry itself no longer carries them.
         assert "functions" not in c
         functions_body = api_client.get("/api/company/myproj_proxy_test/functions").json()
-        assert proxy_addr in functions_body["functions"]
-        fn_entries = functions_body["functions"][proxy_addr]
+        proxy_key = f"ethereum::{proxy_addr.lower()}"
+        assert proxy_key in functions_body["functions"]
+        fn_entries = functions_body["functions"][proxy_key]
         assert len(fn_entries) == 1
         fn = fn_entries[0]
         assert fn["direct_owner"]["address"] == ("0x" + "1" * 40)

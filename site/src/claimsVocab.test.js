@@ -19,6 +19,7 @@ import {
   toneForFunction,
 } from "./surface/lane.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
+import { entityKey } from "./surface/entityKey.js";
 import { ETHERFI_COMPANY_RICH } from "./test/fixtures.js";
 
 const VALID_LANES = new Set(["top", "left", "right", "ops"]);
@@ -254,7 +255,7 @@ describe("buildMachines carries claims into lane placement + ordering", () => {
     // deposit is legacy asset_pull (inflow); a flow.out claim must move it to outflow.
     const deposit = vault.functions.find((f) => f.function === "deposit");
     deposit.claims = [claim("flow.out")];
-    const functionData = Object.fromEntries(company.contracts.map((c) => [c.address, c.functions]));
+    const functionData = Object.fromEntries(company.contracts.map((c) => [entityKey(c.chain, c.address), c.functions]));
 
     const machines = buildMachines(company, functionData);
     const machine = machines.find((m) => m.address === vault.address);

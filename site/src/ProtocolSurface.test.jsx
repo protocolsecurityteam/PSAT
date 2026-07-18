@@ -10,6 +10,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import ProtocolSurface from "./ProtocolSurface.jsx";
+import { entityKey } from "./surface/entityKey.js";
 import { setFetchHandler } from "./test/fetchMock.js";
 import {
   ETHERFI_COMPANY_RICH,
@@ -295,6 +296,76 @@ describe("ProtocolSurface — multichain chain switcher", () => {
     const user = userEvent.setup();
     await user.click(within(bar).getByText("Base").closest("button"));
     await waitFor(() => expect(scopedMachineCount()).toBe(1));
+    expectNoCrash();
+  });
+});
+
+// The /functions endpoint payload is keyed by the composite "<chain>::<address>"
+// token (entityKey), so a CREATE2 twin at the SAME address on two chains keeps
+// each chain's own function analysis. A flat bare-address map collapsed the two
+// last-wins, rendering one chain's open/gated verdicts under both.
+describe("ProtocolSurface — per-chain function verdicts (functions chain axis)", () => {
+  const SHARED = "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+  const DATA = {
+    company: "twin",
+    contracts: [
+      { address: SHARED, name: "SharedVault", role: "governance", is_proxy: true, chain: "ethereum" },
+      { address: SHARED, name: "SharedVault", role: "governance", is_proxy: true, chain: "base" },
+    ],
+    principals: [],
+    fund_flows: [],
+    ownership_hierarchy: [],
+    all_addresses: [],
+  };
+  // Same address, opposite verdict: pause is gated on ethereum, earned-public
+  // on base — distinct function NAMES make the wrong-chain render observable.
+  const FUNCTIONS = {
+    [`ethereum::${SHARED}`]: [
+      {
+        function: "pauseOnEth",
+        selector: "0xeth00000",
+        abi_signature: "pauseOnEth()",
+        effect_labels: ["pause"],
+        action_summary: "pause eth",
+        authority_public: false,
+      },
+    ],
+    [`base::${SHARED}`]: [
+      {
+        function: "pauseOnBase",
+        selector: "0xbase0000",
+        abi_signature: "pauseOnBase()",
+        effect_labels: ["pause"],
+        action_summary: "pause base",
+        authority_public: true,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  it("renders base's function analysis (not ethereum's) when scoped to base", async () => {
+    render(
+      <ProtocolSurface companyName="twin" initialData={DATA} initialFunctions={FUNCTIONS} embedded />,
+    );
+    const user = userEvent.setup();
+    const bar = await waitFor(() => {
+      const el = document.querySelector(".ps-chain-bar");
+      expect(el).toBeTruthy();
+      return el;
+    });
+
+    // Scope to Base, then select the shared-address contract.
+    await user.click(within(bar).getByText("Base").closest("button"));
+    await user.type(searchInput(), "SharedVault");
+    await commitViaEnter(user);
+
+    // Base's function is shown; ethereum's is not. A flat bare-address map
+    // would look up functionData[SHARED] and collapse the two chains.
+    expect(await screen.findByText("pauseOnBase")).toBeInTheDocument();
+    expect(screen.queryByText("pauseOnEth")).not.toBeInTheDocument();
     expectNoCrash();
   });
 });
@@ -601,8 +672,10 @@ describe("ProtocolSurface — stage-1 selection model", () => {
       async () => {
         await functionsGate;
         return {
+          // /functions is keyed by the composite (chain, address) token; the
+          // bare-data Vault carries no chain → "ethereum".
           functions: {
-            [VAULT]: [
+            [entityKey("ethereum", VAULT)]: [
               {
                 function: "upgrade",
                 selector: "0xupgrade0",

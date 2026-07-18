@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 
 import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
+import { entityKey } from "../surface/entityKey.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
 import { computeProtocolScore } from "../protocolScore.js";
 import LoadingFallback from "../LoadingFallback.jsx";
@@ -60,12 +61,16 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     return map;
   })();
 
+  // functionData is keyed by the composite (chain, address) token (inv. 13), so
+  // each contract picks up ITS chain's functions — a same-address cross-chain
+  // pair no longer collapses to one chain's analysis.
   const dataForScore = functionData
     ? {
         ...data,
-        contracts: contracts.map((c) =>
-          c.address && functionData[c.address] ? { ...c, functions: functionData[c.address] } : c
-        ),
+        contracts: contracts.map((c) => {
+          const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
+          return fns ? { ...c, functions: fns } : c;
+        }),
       }
     : data;
   const { axes, composite, grade } = computeProtocolScore(dataForScore, auditCoverage);

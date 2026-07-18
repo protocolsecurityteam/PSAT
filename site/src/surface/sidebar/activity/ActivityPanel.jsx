@@ -154,6 +154,7 @@ export function ActivityPanel({
         machines={machines}
         onSelect={onSelect}
         now={now}
+        chain={activeChain}
       />
     );
   }
