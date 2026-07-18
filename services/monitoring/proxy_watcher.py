@@ -67,13 +67,6 @@ _RESOLVE_BY_TYPE: dict[str, tuple[str, str]] = {
 }
 
 
-def _build_rpc_call(method_type: str, address: str, arg: str) -> tuple[str, list]:
-    """Return a ``(method, params)`` tuple for use in a JSON-RPC batch."""
-    if method_type == "slot":
-        return ("eth_getStorageAt", [address, arg, "latest"])
-    return ("eth_call", [{"to": address, "data": arg}, "latest"])
-
-
 def resolve_current_implementation(
     proxy_address: str,
     rpc_url: str,

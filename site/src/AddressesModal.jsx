@@ -8,6 +8,7 @@ import {
   isPureHistorical,
 } from "./addressFilter.js";
 import { proxyDisplayName } from "./displayName.js";
+import { coalesceChain, entityKey } from "./surface/entityKey.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
@@ -90,15 +91,34 @@ export default function AddressesModal({ companyName, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Lowercased address → row lookup, so compare mode can O(1) check which
-  // pasted addresses exist in the protocol.
+  // (chain, address) → row lookup, keyed by entityKey (invariant 13): the
+  // all-chains payload can carry the same address on two chains, so a bare
+  // index would last-wins-collapse them into one entry.
   const addrIndex = useMemo(() => {
     const m = new Map();
     for (const r of data?.all_addresses || []) {
-      m.set(String(r.address || "").toLowerCase(), r);
+      m.set(entityKey(r.chain, r.address), r);
     }
     return m;
   }, [data]);
+
+  // Bare-address → winner row for the compare check. Pasted input is chainless,
+  // and the existence question is "is this address tracked on ANY chain", so it
+  // is keyed by bare address. When an address is held on multiple chains the
+  // winner is deterministic — the ethereum row if present, else the first in
+  // payload order — so the matched row's displayed label never last-wins-flips.
+  const compareWinner = useMemo(() => {
+    const m = new Map();
+    for (const r of addrIndex.values()) {
+      const addr = String(r.address || "").toLowerCase();
+      if (!addr) continue;
+      const existing = m.get(addr);
+      if (!existing || (coalesceChain(r.chain) === "ethereum" && coalesceChain(existing.chain) !== "ethereum")) {
+        m.set(addr, r);
+      }
+    }
+    return m;
+  }, [addrIndex]);
 
   // Compute the set of impl addresses currently behind a proxy in this
   // payload — keeps live impls visible even when their only discovery
@@ -129,7 +149,7 @@ export default function AddressesModal({ companyName, onClose }) {
       const matched = [];
       const missing = [];
       for (const a of parsedCompare) {
-        const hit = addrIndex.get(a);
+        const hit = compareWinner.get(a);
         if (hit) matched.push({ ...hit, _compareStatus: "matched" });
         else missing.push({ address: a, _compareStatus: "missing", name: "", is_proxy: false, analyzed: false });
       }
@@ -173,15 +193,15 @@ export default function AddressesModal({ companyName, onClose }) {
       sorted.sort((a, b) => (a.address || "").localeCompare(b.address || ""));
     }
     return sorted;
-  }, [data, filter, labels, sortBy, compareOpen, parsedCompare, addrIndex, showHistorical, activeRows]);
+  }, [data, filter, labels, sortBy, compareOpen, parsedCompare, compareWinner, showHistorical, activeRows]);
 
   const compareSummary = useMemo(() => {
     if (!compareOpen) return null;
     let matched = 0;
     let missing = 0;
-    for (const a of parsedCompare) (addrIndex.has(a) ? matched++ : missing++);
+    for (const a of parsedCompare) (compareWinner.has(a) ? matched++ : missing++);
     return { total: parsedCompare.length, matched, missing };
-  }, [compareOpen, parsedCompare, addrIndex]);
+  }, [compareOpen, parsedCompare, compareWinner]);
 
   const onAnalyze = async (e) => {
     e.preventDefault();
@@ -235,7 +255,7 @@ export default function AddressesModal({ companyName, onClose }) {
       `Queue analysis for ${compareSummary.missing} missing addresses?`,
     );
     if (!ok) return;
-    const missing = parsedCompare.filter((a) => !addrIndex.has(a));
+    const missing = parsedCompare.filter((a) => !compareWinner.has(a));
     for (const addr of missing) {
       try {
         // Serial loop — the /api/analyze endpoint is cheap (just writes a

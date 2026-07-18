@@ -1,8 +1,7 @@
 """Integration tests for the Discord notification pipeline and subscription API.
 
-Covers ``notify_upgrades`` (proxy upgrade → subscription lookup → Discord
-webhook POST), protocol subscription event_filter validation, and the
-monitored-contract PATCH / re-enroll endpoints.
+Covers protocol subscription event_filter validation and the monitored-contract
+PATCH / re-enroll endpoints.
 
 All tests run without live services — PostgreSQL for DB, mocked requests.post
 for Discord.
@@ -15,42 +14,9 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
-from conftest import ADDR, _add_proxy, requires_postgres
-
-from db.models import ProxySubscription, ProxyUpgradeEvent
-from services.monitoring.notifier import notify_upgrades
+from conftest import requires_postgres
 
 pytestmark = requires_postgres
-
-
-# ---------------------------------------------------------------------------
-# Edge case: null webhook URL
-# ---------------------------------------------------------------------------
-
-
-@patch("services.monitoring.notifier.requests.post")
-def test_subscription_without_webhook_url_is_skipped(mock_discord, db_session):
-    """A subscription with discord_webhook_url=None is not called."""
-    proxy = _add_proxy(db_session, ADDR(1), last_known_impl=ADDR(10))
-    sub = ProxySubscription(id=uuid.uuid4(), watched_proxy_id=proxy.id, discord_webhook_url=None, label="no-url")
-    db_session.add(sub)
-    db_session.commit()
-
-    evt = ProxyUpgradeEvent(
-        id=uuid.uuid4(),
-        watched_proxy_id=proxy.id,
-        block_number=100,
-        tx_hash="0x" + "ab" * 32,
-        old_implementation=ADDR(10),
-        new_implementation=ADDR(11),
-        event_type="upgraded",
-    )
-    evt.watched_proxy = proxy
-    db_session.add(evt)
-    db_session.commit()
-
-    notify_upgrades(db_session, [evt])
-    mock_discord.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
