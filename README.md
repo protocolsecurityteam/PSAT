@@ -129,7 +129,6 @@ The monorepo can be run with separate `api` and `site` containers.
 docker compose up --build api site
 ```
 
-See `docs/docker-backend.md`.
 
 ## Tests
 
