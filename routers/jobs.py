@@ -15,7 +15,13 @@ from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
-from utils.chains import UnknownChainError, UnsupportedChainError, chain_by_name, require_supported_chain
+from utils.chains import (
+    UnknownChainError,
+    UnsupportedChainError,
+    chain_by_name,
+    chain_enabled,
+    require_supported_chain,
+)
 
 from . import deps
 
@@ -43,6 +49,15 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
     # default is unaffected and an address-less company/dapp/defillama submission
     # (no chain identity; it fans out to the protocol's declared chains during
     # discovery, an internal derivation not gated here) is left alone.
+    # An address-scoped submission that *names* a chain must name a registered
+    # one. ``derive_job_chain_id``'s unknown-chain fallback (warn + mainnet) is
+    # an internal-writer edge, not an ingress contract — the string is stored
+    # verbatim on the job, so it must resolve here or be rejected.
+    if request.address and request.chain and request.chain.strip():
+        try:
+            chain_by_name(request.chain)
+        except UnknownChainError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved_chain_id = derive_job_chain_id(request.chain, request.address)
     if resolved_chain_id is not None:
         try:
@@ -55,6 +70,24 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
         # ignored in favor of eRPC, so a pinned provider can't shadow the
         # proxy. Stored verbatim and sanitized by ``Job.to_dict`` at output.
         req_dict = request.model_dump()
+        # Optional protocol context: an address submission that also names a
+        # company links to the EXISTING protocol row — lookup-only, so a typo'd
+        # name 404s instead of minting a duplicate protocol (company-only
+        # submissions keep resolving/creating theirs during discovery). The
+        # ``"inventory"`` source records the admin's explicit membership
+        # assertion so the fetched contract row passes the ownership gate and
+        # adopts the protocol. Address-only submissions stay standalone.
+        if request.address and request.company:
+            protocol_row = session.execute(
+                select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
+            ).scalar_one_or_none()
+            if protocol_row is None:
+                raise HTTPException(status_code=404, detail="Company not found")
+            req_dict["protocol_id"] = protocol_row.id
+            sources = list(req_dict.get("discovery_sources") or [])
+            if "inventory" not in sources:
+                sources.append("inventory")
+            req_dict["discovery_sources"] = sources
         if request.dapp_urls:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
         elif request.defillama_protocol:
@@ -99,6 +132,15 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
             # duplicate request) don't each create a job for the same contract.
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
+                continue
+            # Allowlist gate (inv. 14), mirroring the selection worker: a stub
+            # on a chain this deployment has not enabled is skipped — its
+            # discovery evidence stays for a future widened scan, no job spawns.
+            if not chain_enabled(contract.chain):
+                logger.info(
+                    "analyze-remaining: skipping stub on non-enabled chain",
+                    extra={"address": contract.address, "chain": contract.chain, "reason": "chain_not_enabled"},
+                )
                 continue
             # Coalesce NULL→"ethereum" (legacy convention): a NULL-chain contract
             # must still dedup within mainnet, not skip chain filtering entirely

@@ -24,7 +24,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, get_artifact, store_artifact
+from db.queue import create_job, find_existing_job_for_address, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
@@ -602,8 +602,16 @@ class ResolutionWorker(BaseWorker):
             if node.get("node_type") != "contract":
                 continue
 
-            # Skip if a job already exists for this address
-            existing = session.execute(select(Job).where(Job.address == addr).limit(1)).scalar_one_or_none()
+            # Always stamp the child's chain from the job's first-class chain
+            # (inv. 6): a chainless parent request must not leave the child
+            # chain-less, which would write Contract.chain=NULL and dedup-collide.
+            child_chain = _chain_name_for_job(job)
+
+            # Skip if a job already exists for this address on THIS chain —
+            # case-insensitive (a checksummed admin submission is the same
+            # contract) and chain-scoped so a same-address twin on another
+            # chain doesn't suppress this chain's child (inv. 12).
+            existing = find_existing_job_for_address(session, addr, chain=child_chain)
             if existing:
                 continue
 
@@ -615,10 +623,6 @@ class ResolutionWorker(BaseWorker):
                 "parent_job_id": str(job.id),
                 "discovered_by": "resolution",
             }
-            # Always stamp the child's chain from the job's first-class chain
-            # (inv. 6): a chainless parent request must not leave the child
-            # chain-less, which would write Contract.chain=NULL and dedup-collide.
-            child_chain = _chain_name_for_job(job)
             child_request["chain"] = child_chain
             # Defense in depth (inv. 14): discovered contracts share the parent's
             # chain (chain-as-island), so a gated parent already implies a gated

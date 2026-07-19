@@ -12,7 +12,7 @@ from typing import Any
 
 from eth_abi.abi import decode
 
-from schemas.contract_analysis import AssociatedEvent, ControllerReadSpec
+from schemas.contract_analysis import ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
@@ -187,19 +187,6 @@ def _decode_abi_value(raw_value: str, abi_type: str):
     if abi_type == "address[]":
         return [str(item).lower() for item in value]
     return value
-
-
-def _decode_topic_value(raw_value: str, abi_type: str):
-    normalized = _normalize_hex(raw_value)
-    if abi_type == "address" and len(normalized) == 66:
-        return "0x" + normalized[-40:]
-    if abi_type == "bytes4" and len(normalized) == 66:
-        return "0x" + normalized[2:10]
-    if abi_type.startswith("uint"):
-        return int(normalized, 16)
-    if abi_type == "bool":
-        return bool(int(normalized, 16))
-    return normalized
 
 
 def _try_eth_call_decoded(
@@ -822,41 +809,3 @@ def _read_beacon_owner(
         "resolved_type": resolved_type,
         "details": details,
     }
-
-
-def _decode_event_log_fields(event_ref: AssociatedEvent, log_entry: dict[str, Any]) -> dict[str, Any]:
-    topics = list(log_entry.get("topics") or [])
-    topic_index = 1
-    non_indexed_types = [item["type"] for item in event_ref.get("inputs", []) if not item.get("indexed")]
-    non_indexed_values = []
-    data = _normalize_hex(log_entry.get("data"))
-    if non_indexed_types and data not in {"0x", "0x0"}:
-        non_indexed_values = list(decode(non_indexed_types, bytes.fromhex(data[2:])))
-
-    decoded: dict[str, Any] = {}
-    non_indexed_index = 0
-    for item in event_ref.get("inputs", []):
-        name = item.get("name") or item["type"]
-        abi_type = item["type"]
-        if item.get("indexed"):
-            if topic_index >= len(topics):
-                break
-            decoded[name] = _decode_topic_value(topics[topic_index], abi_type)
-            topic_index += 1
-            continue
-
-        if non_indexed_index >= len(non_indexed_values):
-            break
-        value = non_indexed_values[non_indexed_index]
-        non_indexed_index += 1
-        if abi_type == "address":
-            decoded[name] = str(value).lower()
-        elif abi_type == "bytes4":
-            decoded[name] = "0x" + bytes(value).hex()
-        elif abi_type == "bool":
-            decoded[name] = bool(value)
-        elif abi_type.startswith("uint"):
-            decoded[name] = int(value)
-        else:
-            decoded[name] = value
-    return decoded

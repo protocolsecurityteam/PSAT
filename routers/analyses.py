@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from db.models import Artifact, Contract, Job, JobStatus
 from services.aggregations import build_analysis_detail
+from services.aggregations.company_overview import _coalesce_chain, _job_chain_name
 from services.governance.proxies import _merge_proxy_impl_entries
 from utils.chains import UnknownChainError, chain_by_name
 
@@ -47,24 +48,31 @@ def analyses(response: Response) -> list[dict]:
         jobs = session.execute(stmt).scalars().all()
 
         jobs_by_id = {str(job.id): job for job in jobs}
-        jobs_by_address: dict[str, Job] = {}
+        # Keyed by (coalesced-chain, address) so a CREATE2 twin's per-chain
+        # jobs stay distinct (inv. 12): the same address on ethereum and base
+        # is two entities, and impl-hiding must find the impl on the proxy's
+        # own chain — an impl completed only on the other chain must not
+        # un-hide this chain's proxy.
+        jobs_by_key: dict[tuple[str, str], Job] = {}
         for job in jobs:
             if job.address:
-                jobs_by_address.setdefault(job.address.lower(), job)
+                jobs_by_key.setdefault((_coalesce_chain(_job_chain_name(job)), job.address.lower()), job)
 
         # Rank scores, chains, name, proxy_type, implementation come from
         # the ``contracts`` table. is_proxy comes from Job (denormalized via
         # store_artifact). Pulling all of these from columns lets us skip
         # the per-job ``contract_flags`` storage GET entirely — at 25ms
         # production RTT × N jobs, that GET batch was the dominant cost
-        # of this endpoint after the parallel-fanout commit.
-        contracts_by_address: dict[str, Contract] = {}
-        addresses_from_jobs = list(jobs_by_address.keys())
+        # of this endpoint after the parallel-fanout commit. Keyed by
+        # (coalesced-chain, address) so each job pairs with its own chain's
+        # Contract row rather than an arbitrary twin's.
+        contracts_by_key: dict[tuple[str, str], Contract] = {}
+        addresses_from_jobs = list({addr for (_chain, addr) in jobs_by_key})
         if addresses_from_jobs:
             for c in session.execute(select(Contract).where(Contract.address.in_(addresses_from_jobs))).scalars():
                 addr_lower = (c.address or "").lower()
                 if addr_lower:
-                    contracts_by_address.setdefault(addr_lower, c)
+                    contracts_by_key.setdefault((_coalesce_chain(c.chain), addr_lower), c)
 
         job_ids = [job.id for job in jobs]
         # Earlier code fetched every job's ``contract_analysis`` artifact body
@@ -103,7 +111,8 @@ def analyses(response: Response) -> list[dict]:
         parent_job_id = request.get("parent_job_id")
         company = company_for_job(job)
         addr_lower = (job.address or "").lower()
-        contract = contracts_by_address.get(addr_lower)
+        job_chain_key = _coalesce_chain(_job_chain_name(job))
+        contract = contracts_by_key.get((job_chain_key, addr_lower))
         entry: dict[str, Any] = {
             "run_name": run_name,
             "job_id": str(job.id),
@@ -123,10 +132,11 @@ def analyses(response: Response) -> list[dict]:
 
         # Hide proxy entries until the impl is completed — otherwise the
         # listing renders a half-populated card that mutates once the impl
-        # lands. ``jobs_by_address`` only carries completed jobs.
+        # lands. ``jobs_by_key`` only carries completed jobs.
         contract_name_source = contract
         if entry["is_proxy"] and entry["implementation_address"]:
-            impl_job = jobs_by_address.get(entry["implementation_address"].lower())
+            impl_addr_lower = entry["implementation_address"].lower()
+            impl_job = jobs_by_key.get((job_chain_key, impl_addr_lower))
             if impl_job is None:
                 continue
             # Always prefer the impl's name over the proxy shell's. Proxy
@@ -135,7 +145,7 @@ def analyses(response: Response) -> list[dict]:
             # the user actually recognises (e.g. "WithdrawRequestNFT").
             # Fall back to the proxy's name if the impl Contract row is
             # missing or unnamed.
-            impl_contract = contracts_by_address.get(entry["implementation_address"].lower())
+            impl_contract = contracts_by_key.get((job_chain_key, impl_addr_lower))
             if impl_contract is not None and impl_contract.contract_name:
                 contract_name_source = impl_contract
 

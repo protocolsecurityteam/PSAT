@@ -336,7 +336,7 @@ def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
             ],
         },
     )
-    assert es.get_contract_creation_block("0x" + "ab" * 20) == 18_500_000
+    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
 
 
 def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
@@ -349,7 +349,7 @@ def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
         lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
     )
     monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params, chain_id=None: {"blockNumber": hex(18_500_000)})
-    assert es.get_contract_creation_block("0x" + "ab" * 20, rpc_url="http://stub") == 18_500_000
+    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1, rpc_url="http://stub") == 18_500_000
 
 
 def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
@@ -359,7 +359,7 @@ def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
         raise RuntimeError("etherscan down")
 
     monkeypatch.setattr(es, "get", _raise)
-    assert es.get_contract_creation_block("0x" + "ab" * 20) is None
+    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
 
 
 def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
@@ -368,13 +368,13 @@ def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
     monkeypatch.setattr(
         es, "get", lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]}
     )
-    assert es.get_contract_creation_block("0x" + "ab" * 20) == 18_500_000
+    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
 
 
 def test_get_contract_creation_block_rejects_non_address():
     import utils.etherscan as es
 
-    assert es.get_contract_creation_block("not-an-address") is None
+    assert es.get_contract_creation_block("not-an-address", chain_id=1) is None
 
 
 def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatch):
@@ -384,7 +384,7 @@ def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatc
     monkeypatch.setattr(
         es, "get", lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]}
     )
-    assert es.get_contract_creation_block("0x" + "ab" * 20) is None
+    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
 
 
 def test_seed_block_defers_on_lookup_error(monkeypatch):

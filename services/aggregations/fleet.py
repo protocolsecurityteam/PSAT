@@ -300,23 +300,15 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
     ).one()
     # Cursors far behind the leader. A cursor still backfilling from its
     # contract's creation block is invisible in max_indexed_block alone once a
-    # healthy cursor reaches head; this surfaces it.
-    idx_lagging = 0
-    if idx_max_block:
-        idx_lagging = (
-            session.execute(
-                select(func.count())
-                .select_from(IndexedEventCursor)
-                .where(IndexedEventCursor.last_indexed_block < idx_max_block - _CURSOR_LAG_BLOCKS)
-            ).scalar()
-            or 0
-        )
-    if idx_lagging:
-        _warn_lagging_cursors(
-            idx_lagging,
-            idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None,
-        )
+    # healthy cursor reaches head; this surfaces it. Lag and spread are
+    # within-chain figures rolled up from the per-chain breakdown — a faster
+    # chain's naturally higher block numbers are not a backfill signal for
+    # another chain's cursors.
     idx_by_chain = _indexer_by_chain(session, now)
+    idx_lagging = sum(d["lagging_cursors"] for d in idx_by_chain)
+    idx_spread = max((d["block_spread"] or 0 for d in idx_by_chain), default=None)
+    if idx_lagging:
+        _warn_lagging_cursors(idx_lagging, idx_spread)
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
@@ -343,13 +335,12 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
                 "oldest_pending_age_s": _age_seconds(scope_oldest, now),
             }
         if process == HEARTBEAT_EVENT_INDEXER:
-            spread = idx_max_block - idx_min_block if idx_max_block is not None and idx_min_block is not None else None
             return {
                 "cursors": idx_cursors or 0,
                 "stalest_run_age_s": _age_seconds(idx_oldest_run, now),
                 "max_indexed_block": idx_max_block,
                 "min_indexed_block": idx_min_block,
-                "block_spread": spread,
+                "block_spread": idx_spread,
                 "lagging_cursors": idx_lagging,
                 "by_chain": idx_by_chain,
             }
@@ -399,6 +390,10 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         select(func.min(MonitoredContract.last_scanned_block), func.max(MonitoredContract.last_scanned_block))
     ).one()
     tvl_latest = session.execute(select(func.max(TvlSnapshot.timestamp))).scalar()
+    mon_by_chain = _monitoring_by_chain(session, now)
+    # Scan spread is a within-chain figure (rolled up as the worst per-chain
+    # gap) — chains run at different heights, so a cross-chain max−min is noise.
+    mon_spreads = [d["scan_block_spread"] for d in mon_by_chain if d["scan_block_spread"] is not None]
     watchers = {
         "monitored_contracts": mon_total,
         "active": mon_active,
@@ -406,12 +401,10 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         "last_update_age_s": _age_seconds(mon_latest, now),
         "min_scanned_block": mon_min_block,
         "max_scanned_block": mon_max_block,
-        "scan_block_spread": (
-            mon_max_block - mon_min_block if mon_max_block is not None and mon_min_block is not None else None
-        ),
+        "scan_block_spread": max(mon_spreads) if mon_spreads else None,
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
-        "by_chain": _monitoring_by_chain(session, now),
+        "by_chain": mon_by_chain,
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}

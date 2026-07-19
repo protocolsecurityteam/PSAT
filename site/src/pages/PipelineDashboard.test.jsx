@@ -571,6 +571,31 @@ describe("PipelineDashboard — dedup", () => {
     expect(within(hist).getByText(/\(impl\)/)).toBeInTheDocument();
   });
 
+  it("keeps a cross-chain standalone job whose address matches another chain's proxy_address", async () => {
+    // /api/jobs is all-chains. An ethereum impl job references an ethereum
+    // proxy at 0xshared; a base-chain standalone job lives at the SAME address.
+    // The impl-hide predicate keys on (chain, proxy_address) so it hides only
+    // the same-chain impl — the base twin stays visible.
+    const ethImpl = makeJob({
+      job_id: "eth-impl", name: "VaultImpl", address: "0xshared", status: "completed", stage: "done",
+      request: { proxy_address: "0xshared", chain: "ethereum" }, updated_at: isoAgo(60_000),
+    });
+    const baseStandalone = makeJob({
+      job_id: "base-standalone", name: "BaseVault", company: "protocol-base", address: "0xshared",
+      status: "completed", stage: "done", is_proxy: false, request: { chain: "base" }, updated_at: isoAgo(60_000),
+    });
+    installMocks([ethImpl, baseStandalone]);
+    const { container } = render(<PipelineDashboard />);
+    await waitFor(() => {
+      const hist = container.querySelector(".zone-hist");
+      expect(within(hist).getByText("BaseVault")).toBeInTheDocument();
+    });
+    const hist = container.querySelector(".zone-hist");
+    // Base standalone visible; the same-chain impl still hidden.
+    expect(within(hist).getByText("BaseVault")).toBeInTheDocument();
+    expect(within(hist).queryByText("VaultImpl")).not.toBeInTheDocument();
+  });
+
   it("hides a completed company SHELL but keeps completed company CONTRACT jobs", async () => {
     // A childless+addressed job flips hasChildJobs true. The completed company
     // *shell* (company, no address) drops out; the completed company *contract*

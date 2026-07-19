@@ -118,15 +118,18 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
     return row is not None
 
 
-def _address_has_active_job(session: Session, address: str | None, *, exclude_job_id: Any) -> bool:
+def _address_has_active_job(session: Session, address: str | None, *, chain_id: int, exclude_job_id: Any) -> bool:
     """True iff a non-terminal job (queued/processing) already exists for
-    ``address`` other than ``exclude_job_id`` — so the reconciler does not pile
-    a second re-analysis on top of one already in flight."""
+    ``(address, chain_id)`` other than ``exclude_job_id`` — so the reconciler does
+    not pile a second re-analysis on top of one already in flight. Chain-scoped:
+    a twin deployment's in-flight job on another chain must not block this chain's
+    re-enqueue."""
     if not address:
         return False
     row = session.execute(
         select(Job.id)
         .where(func.lower(Job.address) == address.lower())
+        .where(Job.chain_id == chain_id)
         .where(Job.id != exclude_job_id)
         .where(Job.status.in_((JobStatus.queued, JobStatus.processing)))
         .limit(1)
@@ -155,6 +158,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
         .where(Job.status == JobStatus.completed)
         .where(Job.stage == JobStage.done)
+        .where(Job.chain_id == chain_id)
         .where(EffectiveFunction.capability_expr.isnot(None))
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
@@ -181,7 +185,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
             continue
-        if _address_has_active_job(session, job.address, exclude_job_id=job.id):
+        if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
         _requeue_policy(job, "Re-resolving: durable event index caught up for a deferred authority")
         reenqueued += 1
@@ -274,6 +278,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
         .where(Job.status == JobStatus.completed)
         .where(Job.stage == JobStage.done)
+        .where(Job.chain_id == chain_id)
         .where(EffectiveFunction.capability_expr.isnot(None))
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{ROLE_STORE_TRACE_STEP}%"))
     ).all()
@@ -303,7 +308,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
             continue
-        if _address_has_active_job(session, job.address, exclude_job_id=job.id):
+        if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
         _requeue_policy(job, "Re-resolving: role-store membership drifted past the folded frontier")
         reenqueued += 1

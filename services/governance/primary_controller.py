@@ -49,6 +49,15 @@ PRINCIPAL_PRIORITY: dict[str, int] = {
 _MAX_GOVERNANCE_HOPS = 4
 
 
+def _addr_of(token: str) -> str:
+    """Bare lowercased address of a possibly-composite ``<chain>::<address>``
+    token. A plain address (no ``"::"``) passes through unchanged, so callers
+    that key by bare address (the pre-multichain shape, and the unit tests) work
+    identically to callers that key by composite entity (the Surface pipeline,
+    which keeps twins on different chains from merging — inv. 13)."""
+    return token.rsplit("::", 1)[-1]
+
+
 def assign_primary_controllers(
     principals: list[dict[str, Any]],
     fp_addrs_by_contract: Mapping[str, set[str]],
@@ -60,10 +69,14 @@ def assign_primary_controllers(
     output shape). Each must have ``address`` and ``type``; only those whose
     ``type`` is in :data:`PRINCIPAL_PRIORITY` participate.
 
-    *fp_addrs_by_contract* — for every contract address (lower-cased), the
-    set of ``function_principals.address`` values (lower-cased) attached to
-    any ``EffectiveFunction`` of that contract. The caller is expected to
-    drop ``signature_witness`` rows before building this map.
+    *fp_addrs_by_contract* — for every contract key, the set of
+    ``function_principals.address`` values attached to any ``EffectiveFunction``
+    of that contract. Keys and values may be bare lowercased addresses OR
+    composite ``<chain>::<address>`` entity tokens; the two must be in the same
+    keyspace so the passthrough walk connects a governance contract's caller edge
+    to its own contract key. The returned contract keys mirror whatever keyspace
+    was passed in. The caller is expected to drop ``signature_witness`` rows
+    before building this map.
 
     *governance_passthrough* — addresses of in-protocol governance contracts
     (Timelocks / ProxyAdmins) that *mediate* control rather than hold it: the
@@ -114,15 +127,18 @@ def assign_primary_controllers(
                 stack.extend((nxt, depth + 1) for nxt in fp_graph.get(addr, ()) if nxt not in seen)
         return out
 
-    # eligibility[principal_lc] = set of contract addresses this principal
-    # could primary-control. A principal is eligible for a contract iff it is
-    # one of that contract's effective controllers (its FP callers, resolved
+    # eligibility[principal_lc] = set of contract keys this principal could
+    # primary-control. A principal is eligible for a contract iff it is one of
+    # that contract's effective controllers (its FP callers, resolved
     # transitively through any in-protocol governance contract in between).
+    # Contract keys and caller tokens may be composite ``<chain>::<address>``
+    # entities; principal identity is the bare address, so map each caller back.
     eligibility: dict[str, set[str]] = {addr: set() for addr in principal_by_addr}
     for contract_lc in fp_graph:
         for ctrl in _effective_controllers(contract_lc):
-            if ctrl in eligibility:
-                eligibility[ctrl].add(contract_lc)
+            ctrl_addr = _addr_of(ctrl)
+            if ctrl_addr in eligibility:
+                eligibility[ctrl_addr].add(contract_lc)
 
     total_owned = {addr: len(owned) for addr, owned in eligibility.items()}
 

@@ -129,6 +129,33 @@ def test_analyze_default_mainnet_unaffected(mock_session_cls, mock_create_job, m
 
 @patch("routers.deps.create_job")
 @patch("routers.deps.SessionLocal")
+def test_analyze_rejects_unregistered_chain_string(mock_session_cls, mock_create_job, monkeypatch):
+    monkeypatch.delenv(_ENV, raising=False)
+    client = _client()
+
+    # A typo'd chain name must be rejected at ingress, not silently resolved
+    # to mainnet by derive_job_chain_id's internal-writer fallback.
+    resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t", "chain": "arbtrum"})
+
+    assert resp.status_code == 400
+    assert "arbtrum" in resp.json()["detail"]
+    mock_create_job.assert_not_called()
+
+
+@patch("routers.deps.create_job")
+@patch("routers.deps.SessionLocal")
+def test_analyze_rejects_unknown_sentinel_chain(mock_session_cls, mock_create_job, monkeypatch):
+    monkeypatch.delenv(_ENV, raising=False)
+    client = _client()
+
+    resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t", "chain": "unknown"})
+
+    assert resp.status_code == 400
+    mock_create_job.assert_not_called()
+
+
+@patch("routers.deps.create_job")
+@patch("routers.deps.SessionLocal")
 def test_analyze_chainless_company_submission_unaffected(mock_session_cls, mock_create_job, monkeypatch):
     monkeypatch.delenv(_ENV, raising=False)
     client = _client()

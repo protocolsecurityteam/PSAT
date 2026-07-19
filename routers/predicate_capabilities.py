@@ -225,13 +225,19 @@ def probe_contract_membership(
     from services.resolution.repos import PostgresEventLogRepo
 
     with deps.SessionLocal() as session:
-        job = session.execute(
+        job_stmt = (
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
-        ).scalar_one_or_none()
+        )
+        # An explicit chain_id scopes to that chain's job (inv. 12): a CREATE2
+        # twin's trees must not cross-load. Absent, the mainnet-default edge
+        # (logged above) keeps the address-only most-recent pick.
+        if "chain_id" in req.model_fields_set:
+            job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
+        job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
@@ -309,13 +315,18 @@ def probe_contract_signature(
         logger.info("probe_signature: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
-        job = session.execute(
+        job_stmt = (
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
-        ).scalar_one_or_none()
+        )
+        # An explicit chain_id scopes to that chain's job (inv. 12); absent,
+        # the mainnet-default edge (logged above) keeps the most-recent pick.
+        if "chain_id" in req.model_fields_set:
+            job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
+        job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
         artifact = deps.get_artifact(session, job.id, "predicate_trees")
@@ -407,14 +418,34 @@ def get_contract_capabilities(
         # job's request when chain is None, but doing it here too keeps
         # cache and direct resolver lookups aligned.
         chain_str: str | None = None
+        # Hard-filter the job pick to the requested chain (inv. 12): a CREATE2
+        # twin's trees must never cross-load. Ordering-by-preference used to fall
+        # back to another chain's job when the requested chain had none, serving
+        # that chain's trees under the requested chain_id. No job on this chain
+        # falls through to the 404 below. Address-scoped jobs always carry a
+        # chain_id (Job CHECK constraint), so no legacy NULL-chain row is lost.
         latest_job = session.execute(
             select(Job)
-            .where(Job.address == addr)
+            .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
-            .order_by(Job.updated_at.desc(), Job.created_at.desc())
+            .where(Job.chain_id == chain_id)
+            .order_by(
+                Job.updated_at.desc(),
+                Job.created_at.desc(),
+            )
             .limit(1)
         ).scalar_one_or_none()
-        if latest_job is not None and isinstance(latest_job.request, dict):
+        no_capabilities_detail = (
+            "No semantic capabilities for this address — either no completed "
+            "analysis exists or the predicate-tree artifact is missing. Fall "
+            "back to /api/company/* or /api/jobs?address=..."
+        )
+        # No job on the requested chain: 404 directly rather than calling the
+        # resolver, whose ``job_id=None`` fallback re-looks-up the job by address
+        # alone and would cross-load a twin's trees from another chain.
+        if latest_job is None:
+            raise HTTPException(status_code=404, detail=no_capabilities_detail)
+        if isinstance(latest_job.request, dict):
             req_chain = latest_job.request.get("chain")
             if isinstance(req_chain, str) and req_chain:
                 chain_str = req_chain
@@ -423,18 +454,11 @@ def get_contract_capabilities(
             address=addr,
             chain_id=chain_id,
             block=block,
-            job_id=latest_job.id if latest_job is not None else None,
+            job_id=latest_job.id,
             chain=chain_str,
         )
         if capabilities is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "No semantic capabilities for this address — either no completed "
-                    "analysis exists or the predicate-tree artifact is missing. Fall "
-                    "back to /api/company/* or /api/jobs?address=..."
-                ),
-            )
+            raise HTTPException(status_code=404, detail=no_capabilities_detail)
         freshness = _compute_data_freshness(session, addr, chain_id)
     response = {
         "contract_address": addr,
@@ -485,6 +509,7 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
     NOT admin-gated — read-only / idempotent, the same shape contract
     as ``/api/contract/{addr}/capabilities``.
     """
+    from services.aggregations.company_overview import _entity_addr, _entity_key, _job_chain_name
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     with deps.SessionLocal() as session:
@@ -492,37 +517,41 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        addresses = sorted(
-            {
-                (job.address or "").lower()
-                for job in session.execute(
-                    select(Job).where(
-                        Job.protocol_id == protocol_row.id,
-                        Job.status == JobStatus.completed,
-                        Job.address.isnot(None),
-                    )
-                ).scalars()
-                if job.address
-            }
-        )
+        # Group completed jobs by composite (chain, address) entity (inv. 13): a
+        # CREATE2 twin analyzed on two chains is two entities, resolved against
+        # its OWN chain's job. Resolving per bare address collapsed the twin and
+        # dropped one chain's capability set. Jobs newest-first within each entity
+        # so the per-entity pick and the bare-map winner are deterministic.
+        jobs_by_entity: dict[str, list[Job]] = {}
+        for job in session.execute(
+            select(Job).where(
+                Job.protocol_id == protocol_row.id,
+                Job.status == JobStatus.completed,
+                Job.address.isnot(None),
+            )
+        ).scalars():
+            if not job.address:
+                continue
+            jobs_by_entity.setdefault(_entity_key(_job_chain_name(job), job.address), []).append(job)
 
-        contracts: dict[str, Any] = {}
+        def _job_recency(job: Job) -> tuple[Any, Any]:
+            return (job.updated_at, job.created_at)
+
+        for entity_jobs in jobs_by_entity.values():
+            entity_jobs.sort(key=_job_recency, reverse=True)
+
+        # ``contracts_by_entity`` carries one entry per (chain, address); the bare
+        # ``contracts`` map keeps one deterministic entry per address (newest
+        # completed job across chains wins), preserving the pre-multichain shape
+        # for single-chain consumers. ``missing_semantic_count`` counts per entity.
+        contracts_by_entity: dict[str, Any] = {}
         missing = 0
-        for addr in addresses:
-            # Find the latest completed Job for this (protocol, address)
-            # so the resolver can scope ControllerValue lookups by
-            # (job_id, chain). Without this the resolver hits the
-            # address-only fallback path and warn-logs once per address.
-            latest_job = session.execute(
-                select(Job)
-                .where(Job.protocol_id == protocol_row.id)
-                .where(Job.address == addr)
-                .where(Job.status == JobStatus.completed)
-                .order_by(Job.updated_at.desc(), Job.created_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+        bare_winner: dict[str, tuple[tuple[Any, Any], str]] = {}
+        for entity in sorted(jobs_by_entity):
+            latest_job = jobs_by_entity[entity][0]
+            addr = _entity_addr(entity)
             chain_str: str | None = None
-            if latest_job is not None and isinstance(latest_job.request, dict):
+            if isinstance(latest_job.request, dict):
                 req_chain = latest_job.request.get("chain")
                 if isinstance(req_chain, str) and req_chain:
                     chain_str = req_chain
@@ -532,21 +561,21 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
                 # UnsupportedChainError and lands in the warn-and-count-missing
                 # path below rather than 500ing the whole company map.
                 chain_info = require_chain(
-                    latest_job.chain_id if latest_job is not None else None,
+                    latest_job.chain_id,
                     chain=chain_str,
-                    context=f"semantic capabilities for {addr}",
+                    context=f"semantic capabilities for {entity}",
                 )
                 caps = resolve_contract_capabilities(
                     session,
                     address=addr,
                     chain_id=chain_info.chain_id,
-                    job_id=latest_job.id if latest_job is not None else None,
+                    job_id=latest_job.id,
                     chain=chain_str,
                 )
             except Exception as exc:
                 logger.warning(
                     "semantic capability resolution failed for %s in company %s: %s",
-                    addr,
+                    entity,
                     company_name,
                     exc,
                     extra={"exc_type": type(exc).__name__},
@@ -554,10 +583,17 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
                 caps = None
             if caps is None:
                 missing += 1
-            contracts[addr] = caps
+            contracts_by_entity[entity] = caps
+            recency = _job_recency(latest_job)
+            prior = bare_winner.get(addr)
+            if prior is None or recency > prior[0]:
+                bare_winner[addr] = (recency, entity)
+
+        contracts = {addr: contracts_by_entity[entity] for addr, (_, entity) in sorted(bare_winner.items())}
 
         return {
             "company": company_name,
             "contracts": contracts,
+            "contracts_by_entity": contracts_by_entity,
             "missing_semantic_count": missing,
         }

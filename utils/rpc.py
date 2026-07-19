@@ -1059,10 +1059,3 @@ def normalize_hex(value: str | None) -> str:
     if not isinstance(value, str) or not value.startswith("0x"):
         return "0x"
     return value.lower()
-
-
-def decode_address(raw_value: str) -> str | None:
-    normalized = normalize_hex(raw_value)
-    if len(normalized) != 66:
-        return None
-    return "0x" + normalized[-40:]

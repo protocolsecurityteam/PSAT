@@ -22,6 +22,18 @@ import { GroupNode } from "./GroupNode.jsx";
 const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
+// Controls-detail rows keyed by each row's OWN chain when present — twin rows
+// share a bare address, so keying them all to the active chain would last-wins
+// one chain's functions onto the other (inv. 13). Rows without a chain (legacy
+// payloads) fall back to the active chain and attach exactly as before.
+export function buildControlsDetailMap(rows, chain) {
+  const map = new Map();
+  for (const d of rows || []) {
+    if (d?.address) map.set(entityKey(d.chain ?? chain, d.address), d);
+  }
+  return map;
+}
+
 // Selection-time legend. Renders only while a contract is selected so
 // the chip-color convention (warm = selected acts outward, cool =
 // other acts on selected) doesn't have to be memorised — the legend
@@ -213,10 +225,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       // chip says what the controller can actually DO ("pause, fund-out", or
       // concrete function names) rather than a generic "<type>-controlled".
       // Used for both the group children (primary) and the co-controlled set.
-      const detailByContract = new Map();
-      for (const d of selPrincipal?.controls_detail || []) {
-        if (d?.address) detailByContract.set(entityKey(chain, d.address), d);
-      }
+      const detailByContract = buildControlsDetailMap(selPrincipal?.controls_detail, chain);
       const capsTextFor = (addrLc) => {
         const d = detailByContract.get(entityKey(chain, addrLc));
         const caps = d?.capabilities || [];
@@ -336,10 +345,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         if (touched.length) {
           browseFallback = new Set(touched);
           browseChips = new Map();
-          const detailByAddr = new Map();
-          for (const d of bp?.controls_detail || []) {
-            if (d?.address) detailByAddr.set(entityKey(chain, d.address), d);
-          }
+          const detailByAddr = buildControlsDetailMap(bp?.controls_detail, chain);
           // Identity is the badge only — the search preview card is already
           // naming the browsed principal (with address) while this chip is
           // visible, so repeating the address just stretches the line.

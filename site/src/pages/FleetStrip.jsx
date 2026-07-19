@@ -356,7 +356,7 @@ function alertContent(d, rate) {
     const w = d.work || {};
     return {
       head: `${w.lagging_cursors} cursor${w.lagging_cursors === 1 ? "" : "s"} far behind head`,
-      body: `Earliest cursor at block ${formatBlockNumber(w.min_indexed_block)} vs ${formatBlockNumber(w.max_indexed_block)} (~${formatBlockNumber(w.block_spread)} behind). These cursors are still backfilling from their contract's creation block; resolution against them fails closed and is deferred until backfill completes, then re-enqueued automatically.`,
+      body: `Worst same-chain gap ~${formatBlockNumber(w.block_spread)} blocks between a chain's slowest and leading cursor. These cursors are still backfilling from their contract's creation block; resolution against them fails closed and is deferred until backfill completes, then re-enqueued automatically.`,
     };
   }
   if (daemonStuck(d)) {

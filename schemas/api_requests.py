@@ -13,6 +13,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 class AnalyzeRequest(BaseModel):
     address: str | None = Field(default=None, min_length=42, max_length=42)
+
+    @field_validator("address")
+    @classmethod
+    def _lowercase_address(cls, v: str | None) -> str | None:
+        # One canonical form in the DB: the job row and request are joined
+        # case-insensitively everywhere else, but exact-match consumers (spawn
+        # dedup, listing joins) must never see a checksummed variant.
+        return v.lower() if isinstance(v, str) else v
+
     company: str | None = Field(default=None, min_length=1)
     dapp_urls: list[str] | None = None
     defillama_protocol: str | None = Field(default=None, min_length=1)

@@ -1,6 +1,7 @@
 import { bytecodeVerifiedAudits, isBytecodeVerifiedAudit } from "./auditCoverage.js";
 import { hasClaims, scoreForClaims } from "./claimsVocab.js";
 import { isInertOneShot, isLiveOneShot } from "./oneShot.js";
+import { entityKey } from "./surface/entityKey.js";
 
 // Generic protocol-posture score built from the control surface, upgrade
 // state, and audit coverage. This intentionally avoids Slither high/medium
@@ -230,16 +231,22 @@ function auditBriefScore(audit) {
 }
 
 function coverageMaps(auditCoverage) {
-  const byAddress = new Map();
+  // Keyed by the composite (chain, address) entity token, not bare address: a
+  // CREATE2 twin on two chains has one coverage row each, and bare keying would
+  // let one overwrite the other (inv. 13).
+  const byEntity = new Map();
   for (const row of asArray(auditCoverage?.coverage)) {
-    const address = lower(row.address);
-    if (address) byAddress.set(address, row);
+    if (row.address) byEntity.set(entityKey(row.chain, row.address), row);
   }
-  return byAddress;
+  return byEntity;
 }
 
 function contractAuditScore(contract, coverageByAddress) {
-  const row = coverageByAddress.get(lower(contract?.address)) || coverageByAddress.get(lower(contract?.implementation));
+  // The implementation shares the proxy's chain, so both lookups coalesce on
+  // the contract's own chain.
+  const row =
+    coverageByAddress.get(entityKey(contract?.chain, contract?.address)) ||
+    coverageByAddress.get(entityKey(contract?.chain, contract?.implementation));
   if (!row) return 0;
   const auditScores = bytecodeVerifiedAudits(row.audits).map(auditBriefScore);
   if (auditScores.length) return Math.max(...auditScores);
@@ -277,18 +284,20 @@ function safeguardScore(actions) {
 }
 
 function upgradeScore(contracts, actions, coverageByAddress) {
+  // Keyed by the composite (chain, address) entity token so a cross-chain twin's
+  // upgrade actions don't fold into each other (inv. 13).
   const byContract = new Map();
   for (const action of actions) {
     if (action.kind !== "upgrade") continue;
-    const key = lower(action.contract?.address);
-    if (!key) continue;
+    if (!action.contract?.address) continue;
+    const key = entityKey(action.contract?.chain, action.contract?.address);
     if (!byContract.has(key)) byContract.set(key, []);
     byContract.get(key).push(action);
   }
 
   return weightedAverage(
     contracts.map((contract) => {
-      const upgradeActions = byContract.get(lower(contract.address)) || [];
+      const upgradeActions = byContract.get(entityKey(contract.chain, contract.address)) || [];
       const upgradeable = Boolean(contract.is_proxy || contract.capabilities?.includes("upgrade") || upgradeActions.length);
       if (!upgradeable) return { value: 1, weight: contractImportance(contract) };
 
@@ -308,17 +317,19 @@ function upgradeScore(contracts, actions, coverageByAddress) {
 }
 
 function pauseScore(contracts, actions) {
+  // Keyed by the composite (chain, address) entity token so a cross-chain twin's
+  // pause/unpause actions stay attributed to their own chain (inv. 13).
   const byContract = new Map();
   for (const action of actions) {
-    const key = lower(action.contract?.address);
-    if (!key) continue;
+    if (!action.contract?.address) continue;
+    const key = entityKey(action.contract?.chain, action.contract?.address);
     if (!byContract.has(key)) byContract.set(key, []);
     byContract.get(key).push(action);
   }
 
   return weightedAverage(
     contracts.map((contract) => {
-      const contractActions = byContract.get(lower(contract.address)) || [];
+      const contractActions = byContract.get(entityKey(contract.chain, contract.address)) || [];
       const pauseActions = contractActions.filter((action) => action.kind === "pause");
       const unpauseActions = contractActions.filter((action) => action.kind === "unpause");
       const important = contract.is_proxy || contract.total_usd > 0 || ["value_handler", "token", "governance", "bridge"].includes(lower(contract.role));

@@ -1631,6 +1631,56 @@ class TestEnrollmentIntegration:
         )
         assert demoted.enrollment_source == "auto_deprimary"
 
+    def test_stale_detection_is_chain_scoped_for_twins(self, pg_session):
+        """A stale base-chain MonitoredContract whose ethereum twin (same
+        address) is freshly enrolled must be deactivated — the stale comparison
+        keys on (address, chain), not address alone. Without the chain the base
+        row is shadowed by its enrolled eth twin and lingers active forever.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        addr = "0x" + "a1" * 20
+        eth_contract = Contract(address=addr, chain="ethereum", protocol_id=proto.id, contract_name="Twin")
+        pg_session.add(eth_contract)
+        pg_session.flush()
+        _create_completed_job(pg_session, addr, proto.id)
+
+        # A pre-existing auto-enrolled base twin with no analyzed contract this
+        # run — stale, and must be deactivated by the chain-scoped stale check.
+        pg_session.add(
+            MonitoredContract(
+                id=uuid.uuid4(),
+                address=addr,
+                chain="base",
+                protocol_id=proto.id,
+                contract_type="regular",
+                monitoring_config={},
+                last_scanned_block=0,
+                is_active=True,
+                enrollment_source="auto",
+            )
+        )
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        pg_session.expire_all()
+        eth_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == addr, MonitoredContract.chain == "ethereum")
+        ).scalar_one()
+        assert eth_mc.is_active is True  # the freshly enrolled twin is untouched
+
+        base_mc = pg_session.execute(
+            select(MonitoredContract).where(MonitoredContract.address == addr, MonitoredContract.chain == "base")
+        ).scalar_one()
+        assert base_mc.is_active is False, "stale base twin should be deactivated by the chain-scoped stale check"
+
     def test_zombie_timelock_row_demoted_when_cgn_evidence_disappears(self, pg_session):
         """A timelock enrolled in a prior run whose CGN node is later
         rebuilt away — and whose FP authority is also gone — must be
@@ -1908,3 +1958,53 @@ class TestControlGraphTypeReconciliation:
         assert reconcile_control_graph_types(pg_session, [c.id]) == 0
         assert self._node_type(pg_session, c.id, addr) == "timelock"
         assert not (self._node_details(pg_session, c.id, addr) or {}).get("owners")
+
+    def test_folds_per_chain_for_same_address_twins(self, pg_session):
+        """Same principal address on two chains that is a Safe on ethereum and a
+        Timelock on base: each chain's CGN node must keep its own chain's type and
+        config. Folding by bare address alone would let the higher-priority
+        (Safe) type and its owners overwrite the base node's Timelock typing.
+        """
+        from db.models import Contract, Protocol
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        principal = "0x" + "f7" * 20
+        owners = ["0x" + "11" * 20, "0x" + "22" * 20]
+
+        eth_c = Contract(address="0x" + "c7" * 20, chain="ethereum", protocol_id=proto.id, contract_name="TwinEth")
+        base_c = Contract(address="0x" + "c7" * 20, chain="base", protocol_id=proto.id, contract_name="TwinBase")
+        pg_session.add_all([eth_c, base_c])
+        pg_session.flush()
+
+        self._add_cgn(pg_session, eth_c.id, principal, "unknown")
+        self._add_cgn(pg_session, base_c.id, principal, "unknown")
+        # Ethereum sees the principal as a Safe (with signers); base sees a Timelock.
+        _grant_primary_authority(
+            pg_session,
+            eth_c.id,
+            principal,
+            function_name="cancel",
+            resolved_type="safe",
+            details={"owners": owners, "threshold": 2},
+        )
+        _grant_primary_authority(
+            pg_session,
+            base_c.id,
+            principal,
+            function_name="schedule",
+            resolved_type="timelock",
+            details={"min_delay": 172800},
+        )
+        pg_session.commit()
+
+        reconcile_control_graph_types(pg_session, [eth_c.id, base_c.id])
+
+        assert self._node_type(pg_session, eth_c.id, principal) == "safe"
+        assert self._node_type(pg_session, base_c.id, principal) == "timelock"
+        # The Safe's owners must not bleed onto the base Timelock node.
+        assert (self._node_details(pg_session, eth_c.id, principal) or {}).get("owners") == owners
+        assert not (self._node_details(pg_session, base_c.id, principal) or {}).get("owners")

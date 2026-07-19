@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
+import { entityKey } from "../surface/entityKey.js";
 import { shortenAddress } from "../graph.js";
 import { JobDetail } from "./JobDetailPanel.jsx";
 import { FleetStrip, DaemonDetail, computeFleetRates } from "./FleetStrip.jsx";
@@ -311,8 +312,19 @@ export default function PipelineDashboard() {
 
   // ── Dedup: hide proxy + company shells once their real work has spawned.
   const hasChildJobs = useMemo(() => allJobs.some((j) => !j.company && j.address), [allJobs]);
-  const implProxyAddresses = useMemo(
-    () => new Set(allJobs.map((j) => (j.request?.proxy_address || "").toLowerCase()).filter(Boolean)),
+  // /api/jobs is all-chains; an impl job's request.proxy_address is same-chain
+  // as the job. Key the impl-hide set on the composite (chain, proxy_address)
+  // so a proxy address on one chain never hides a standalone twin on another.
+  const implProxyKeys = useMemo(
+    () =>
+      new Set(
+        allJobs
+          .map((j) => {
+            const p = (j.request?.proxy_address || "").toLowerCase();
+            return p ? entityKey(j.request?.chain, p) : null;
+          })
+          .filter(Boolean),
+      ),
     [allJobs],
   );
   const visiblePipelineJobs = useMemo(() => {
@@ -321,7 +333,7 @@ export default function PipelineDashboard() {
       const isActive = ACTIVE_STATUSES.has(j.status);
       const isRunning = j.status === "queued" || j.status === "processing";
       if (j.is_proxy && !isRunning) return false;
-      if (!j.is_proxy && j.address && implProxyAddresses.has(j.address.toLowerCase()) && !isRunning) return false;
+      if (!j.is_proxy && j.address && implProxyKeys.has(entityKey(j.request?.chain, j.address.toLowerCase())) && !isRunning) return false;
       // Hide the completed company-discovery *shell* (company set, no address)
       // once its child contract jobs exist — but keep completed contract jobs
       // (they have an address) so they show in History.
@@ -334,7 +346,7 @@ export default function PipelineDashboard() {
       }
       return true;
     });
-  }, [allJobs, hasChildJobs, implProxyAddresses, timeWindow, now]);
+  }, [allJobs, hasChildJobs, implProxyKeys, timeWindow, now]);
 
   const activeJobs = useMemo(
     () =>

@@ -248,10 +248,6 @@ def derive_random_identities(selector: str, contract_address: str, n: int = _RAN
 # ---------------------------------------------------------------------------
 
 
-def _is_success(o: EthCallResult) -> bool:
-    return o.success
-
-
 def _is_node_error(o: EthCallResult) -> bool:
     """A revert with NO decodable data: OOG, transport, a node that omits
     ``error.data``. Not attributable → drives indeterminate."""

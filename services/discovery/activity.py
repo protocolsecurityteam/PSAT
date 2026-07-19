@@ -118,10 +118,15 @@ def enrich_with_activity(
     for contract in contracts:
         address = contract["address"]
         chain = _primary_chain(contract)
-        chain_id = CHAIN_IDS.get(chain, CHAIN_IDS["ethereum"])
-
-        last_ts = _fetch_last_active_ts(address, chain_id=chain_id, debug=debug)
-        score = _activity_score(last_ts)
+        if chain not in CHAIN_IDS:
+            # Unregistered/unknown chain: we can't query the right explorer, and
+            # defaulting to mainnet would rank this contract by an unrelated
+            # address's mainnet activity (inv. 12). Skip the fetch and floor it.
+            last_ts = None
+            score = 0.0
+        else:
+            last_ts = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
+            score = _activity_score(last_ts)
 
         contract["activity"] = {
             "last_active": (

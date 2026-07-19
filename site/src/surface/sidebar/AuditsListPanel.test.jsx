@@ -81,6 +81,74 @@ describe("AuditsListPanel", () => {
     expect(body).not.toContain(HISTORICAL.slice(0, 10));
   });
 
+  it("does not attach a base twin's coverage to the ethereum contract sharing its address", () => {
+    // Multichain: machines are activeChain-scoped (ethereum here) but
+    // coverageData spans all chains. A base twin at the SAME address must not
+    // count toward trackedContracts nor render as covering the ethereum
+    // contract — coverage joins must key on (chain, address), not bare address.
+    const ADDR = "0x1111111111111111111111111111111111111111";
+    const ETH_AUDIT = { ...VERIFIED_AUDIT, audit_id: 42, auditor: "Trail of Bits", date: "2024-03-15" };
+    const BASE_AUDIT = { ...VERIFIED_AUDIT, audit_id: 99, auditor: "Base Auditor", date: "2024-05-01" };
+    const coverage = {
+      audit_count: 2,
+      coverage: [
+        { address: ADDR, chain: "ethereum", contract_name: "Vault", audits: [ETH_AUDIT] },
+        { address: ADDR, chain: "base", contract_name: "Vault", audits: [BASE_AUDIT] },
+      ],
+    };
+    const machines = [{ address: ADDR, chain: "ethereum", name: "Vault", is_proxy: true }];
+    render(
+      <AuditsListPanel
+        coverageData={coverage}
+        activeAuditId={null}
+        onPickAudit={() => {}}
+        loading={false}
+        error={null}
+        machines={machines}
+        selectedMachine={null}
+      />,
+    );
+    // Only the ethereum entry is on-canvas → one tracked contract, one audit.
+    expect(screen.queryByText(/Base Auditor/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Trail of Bits/i)).toBeInTheDocument();
+    // trackedContracts denominator (in ".ps-audits-summary-big") stays 1/1, not
+    // 1/2 — the base twin must not double-count.
+    const big = document.querySelector(".ps-audits-summary-big");
+    expect(big.textContent.replace(/\s+/g, " ").trim()).toBe("1 / 1");
+    // Single audit tier entry, not two.
+    expect(document.querySelector(".ps-audits-tier-count").textContent).toBe("1");
+  });
+
+  it("SelectedContractAuditsView keys covering audits by (chain, address), not bare address", () => {
+    const ADDR = "0x1111111111111111111111111111111111111111";
+    const ETH_AUDIT = { ...VERIFIED_AUDIT, audit_id: 42, auditor: "Trail of Bits", date: "2024-03-15" };
+    const BASE_AUDIT = { ...VERIFIED_AUDIT, audit_id: 99, auditor: "Base Auditor", date: "2024-05-01" };
+    const coverage = {
+      audit_count: 2,
+      coverage: [
+        { address: ADDR, chain: "ethereum", contract_name: "Vault", audits: [ETH_AUDIT] },
+        { address: ADDR, chain: "base", contract_name: "Vault", audits: [BASE_AUDIT] },
+      ],
+    };
+    const machines = [{ address: ADDR, chain: "ethereum", name: "Vault", is_proxy: true }];
+    render(
+      <AuditsListPanel
+        coverageData={coverage}
+        activeAuditId={null}
+        onPickAudit={() => {}}
+        loading={false}
+        error={null}
+        machines={machines}
+        selectedMachine={machines[0]}
+      />,
+    );
+    // The selected ethereum contract is covered by exactly one audit; the base
+    // twin's audit must not attach.
+    expect(screen.getByText(/1 source-proven audit covers/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Base Auditor/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Trail of Bits/i)).toBeInTheDocument();
+  });
+
   it("falls back to short address when a machine has no name", () => {
     const machinesNoName = [{ address: PROXY, is_proxy: true, name: "" }];
     render(

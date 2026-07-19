@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { computeProtocolScore } from "./protocolScore.js";
+import { entityKey } from "./surface/entityKey.js";
 
 const SAFE_4_OF_7 = {
   address: "0xsafe",
@@ -324,5 +325,125 @@ describe("computeProtocolScore", () => {
       expect(tip.positive).toBe("No sensitive function-level authority was detected.");
       expect(tip.negativeExamples).toHaveLength(0);
     });
+  });
+});
+
+// A CREATE2 twin — the same address deployed on two of a protocol's chains — is
+// two distinct entities, not one (identity is (chain, address), inv. 13). The
+// stats-plane reductions used to key by bare address while iterating the
+// all-chains contract array, so a twin's per-chain actions/coverage collapsed
+// together. These assert the invariant directly: a same-address-two-chains
+// fixture must score identically to a two-distinct-addresses fixture, because
+// both describe two separate entities. Bare-address keying diverges (and the
+// per-chain analyses below are deliberately different so the collapse is
+// observable rather than a no-op).
+describe("computeProtocolScore — cross-chain same-address twins", () => {
+  const ADDR = "0x1111111111111111111111111111111111111111";
+  const ADDR2 = "0x2222222222222222222222222222222222222222";
+
+  const EOA = { address: "0xeoa", resolved_type: "eoa", details: {} };
+
+  function axisValue(score, key) {
+    return score.axes.find((entry) => entry.key === key)?.value;
+  }
+
+  it("keeps each chain's pause posture separate (pause axis)", () => {
+    // eth twin has only a pause(); base twin has only an unpause(). Bare keying
+    // merges both into both contracts, so each looks like it has fast pause AND
+    // a weak EOA unpause — flattering the base entity and penalizing the eth one.
+    const ethPause = (addr) => ({
+      address: addr,
+      chain: "ethereum",
+      name: "EthVault",
+      is_proxy: true,
+      source_verified: true,
+      functions: [{ function: "pause()", controllers: [{ principals: [EOA] }] }],
+    });
+    const baseUnpause = (addr) => ({
+      address: addr,
+      chain: "base",
+      name: "BaseVault",
+      is_proxy: true,
+      source_verified: true,
+      functions: [{ function: "unpause()", controllers: [{ principals: [EOA] }] }],
+    });
+
+    const twin = computeProtocolScore({ contracts: [ethPause(ADDR), baseUnpause(ADDR)] }, null);
+    const distinct = computeProtocolScore({ contracts: [ethPause(ADDR), baseUnpause(ADDR2)] }, null);
+
+    expect(axisValue(twin, "pause")).toBeCloseTo(axisValue(distinct, "pause"), 10);
+    expect(axisValue(distinct, "pause")).toBeCloseTo(0.495, 4);
+  });
+
+  it("does not tag a standalone twin as upgradeable from its cross-chain proxy (upgrades axis)", () => {
+    // eth twin is an upgradeable proxy; base twin is a plain non-proxy with no
+    // upgrade function. Bare keying hands the base contract the eth proxy's
+    // upgrade action, flipping it to "upgradeable" and tanking the axis.
+    const ethProxy = (addr) => ({
+      address: addr,
+      chain: "ethereum",
+      name: "EthProxy",
+      is_proxy: true,
+      source_verified: true,
+      implementation: "0ximpl",
+      upgrade_count: 2,
+      functions: [{ function: "upgradeTo(address)", controllers: [{ principals: [EOA] }] }],
+    });
+    const baseStandalone = (addr) => ({
+      address: addr,
+      chain: "base",
+      name: "BaseToken",
+      is_proxy: false,
+      source_verified: true,
+      functions: [],
+    });
+
+    const twin = computeProtocolScore({ contracts: [ethProxy(ADDR), baseStandalone(ADDR)] }, null);
+    const distinct = computeProtocolScore({ contracts: [ethProxy(ADDR), baseStandalone(ADDR2)] }, null);
+
+    expect(axisValue(twin, "upgrades")).toBeCloseTo(axisValue(distinct, "upgrades"), 10);
+  });
+
+  it("attributes audit coverage to the covered chain only (audit axis)", () => {
+    // The verified coverage row is for the eth twin. Bare keying lets the base
+    // twin's empty coverage row overwrite it (last-wins), stripping the eth
+    // entity's audit credit.
+    const bareContract = (addr, chain, name) => ({
+      address: addr,
+      chain,
+      name,
+      is_proxy: false,
+      source_verified: true,
+      functions: [],
+    });
+    const verifiedAudit = {
+      audit_id: 1,
+      match_type: "reviewed_commit",
+      match_confidence: "high",
+      equivalence_status: "proven",
+      proof_kind: "clean",
+    };
+    const coverageFor = (baseAddr) => ({
+      coverage: [
+        { address: ADDR, chain: "ethereum", audits: [verifiedAudit] },
+        { address: baseAddr, chain: "base", audits: [] },
+      ],
+    });
+
+    const twin = computeProtocolScore(
+      { contracts: [bareContract(ADDR, "ethereum", "EthC"), bareContract(ADDR, "base", "BaseC")] },
+      coverageFor(ADDR),
+    );
+    const distinct = computeProtocolScore(
+      { contracts: [bareContract(ADDR, "ethereum", "EthC"), bareContract(ADDR2, "base", "BaseC")] },
+      coverageFor(ADDR2),
+    );
+
+    expect(axisValue(twin, "audits")).toBeCloseTo(axisValue(distinct, "audits"), 10);
+    expect(axisValue(distinct, "audits")).toBeCloseTo(0.5, 4);
+  });
+
+  it("keys twins distinctly (entityKey convention sanity)", () => {
+    expect(entityKey("ethereum", ADDR)).not.toBe(entityKey("base", ADDR));
   });
 });

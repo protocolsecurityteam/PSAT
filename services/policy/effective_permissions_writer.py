@@ -34,7 +34,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import is_dataclass
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope
@@ -284,10 +283,3 @@ def write_effective_function_rows(
                 added_principals += 1
 
     return added_principals
-
-
-def function_principal_count(session: Session, function_id: int) -> int:
-    """Test helper: number of ``FunctionPrincipal`` rows for a function."""
-    return int(
-        session.execute(select(FunctionPrincipal).where(FunctionPrincipal.function_id == function_id)).all().__len__()
-    )

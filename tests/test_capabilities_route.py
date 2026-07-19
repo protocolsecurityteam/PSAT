@@ -41,13 +41,19 @@ def _can_connect() -> bool:
 requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
-def _seed_completed_job_with_artifact(db_session, *, address: str, predicate_trees):
+def _seed_completed_job_with_artifact(
+    db_session, *, address: str, predicate_trees, chain_id: int = 1, chain: str | None = None
+):
     from db.models import Job, JobStage, JobStatus
     from db.queue import store_artifact
 
+    request: dict = {"address": address}
+    if chain is not None:
+        request["chain"] = chain
     job = Job(
         address=address,
-        request={"address": address},
+        chain_id=chain_id,
+        request=request,
         status=JobStatus.completed,
         stage=JobStage.done,
         created_at=datetime.now(timezone.utc),
@@ -105,6 +111,19 @@ def test_capabilities_returns_per_function_dict(api_client, db_session):
 
 
 @requires_postgres
+def test_capabilities_finds_checksummed_address_job(api_client, db_session):
+    """A root job stored with a mixed-case address is still found by the
+    lowercased route param — the job pick matches case-insensitively."""
+    lower = "0x" + uuid.uuid4().hex[:8] + "ab" * 16
+    mixed = lower[:2] + lower[2:].upper()
+    _seed_completed_job_with_artifact(db_session, address=mixed, predicate_trees=_equality_leaf_artifact())
+
+    resp = api_client.get(f"/api/contract/{lower}/capabilities")
+    assert resp.status_code == 200, resp.text
+    assert "f()" in resp.json()["capabilities"]
+
+
+@requires_postgres
 def test_capabilities_returns_404_for_unknown_address(api_client, db_session):
     resp = api_client.get(f"/api/contract/0x{'ee' * 20}/capabilities")
     assert resp.status_code == 404
@@ -152,12 +171,56 @@ def test_capabilities_block_query_param(api_client, db_session):
 @requires_postgres
 def test_capabilities_chain_id_query_param(api_client, db_session):
     """``chain_id`` defaults to 1 (mainnet) but is overridable for
-    multi-chain contracts."""
+    multi-chain contracts. The job pick is a hard filter on the requested
+    chain, so the seeded job lives on the queried chain (137)."""
     address = "0x" + uuid.uuid4().hex[:8] + "e5" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
+    _seed_completed_job_with_artifact(
+        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=137, chain="polygon"
+    )
     resp = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 137})
     assert resp.status_code == 200
     assert resp.json()["chain_id"] == 137
+
+
+@requires_postgres
+def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monkeypatch):
+    """An explicit ``chain_id`` scopes the job pick to that chain (inv. 12): a
+    CREATE2 twin analyzed on two chains resolves against the job on the
+    REQUESTED chain, never falling back to another chain's trees; a chain with
+    no completed job 404s instead of silently serving a twin's data."""
+    from routers import predicate_capabilities
+
+    predicate_capabilities._capabilities_cache.clear()
+    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 0.0)
+
+    address = "0x" + uuid.uuid4().hex[:8] + "e6" * 16
+
+    def _guard_tree(fn: str) -> dict:
+        art = _equality_leaf_artifact()
+        art["trees"] = {fn: art["trees"]["f()"]}
+        return art
+
+    _seed_completed_job_with_artifact(
+        db_session, address=address, predicate_trees=_guard_tree("eth_fn()"), chain_id=1, chain="ethereum"
+    )
+    _seed_completed_job_with_artifact(
+        db_session, address=address, predicate_trees=_guard_tree("poly_fn()"), chain_id=137, chain="polygon"
+    )
+
+    # Requested chain has its own job -> its trees, never the twin's.
+    resp_poly = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 137})
+    assert resp_poly.status_code == 200, resp_poly.text
+    poly_caps = resp_poly.json()["capabilities"]
+    assert "poly_fn()" in poly_caps and "eth_fn()" not in poly_caps, poly_caps
+
+    resp_eth = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 1})
+    assert resp_eth.status_code == 200, resp_eth.text
+    eth_caps = resp_eth.json()["capabilities"]
+    assert "eth_fn()" in eth_caps and "poly_fn()" not in eth_caps, eth_caps
+
+    # A chain with NO completed job 404s rather than cross-loading a twin's trees.
+    resp_base = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 8453})
+    assert resp_base.status_code == 404, resp_base.text
 
 
 @requires_postgres
@@ -289,7 +352,15 @@ def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, mon
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
+    # The job pick is a hard filter on chain (inv. 12), so seed the twin on both
+    # queried chains; the chain_id=137 request resolves its own job rather than
+    # relying on a cross-chain fallback.
+    _seed_completed_job_with_artifact(
+        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=1, chain="ethereum"
+    )
+    _seed_completed_job_with_artifact(
+        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=137, chain="polygon"
+    )
 
     from routers import predicate_capabilities
 

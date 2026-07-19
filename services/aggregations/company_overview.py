@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -52,7 +53,7 @@ from db.models import (
 )
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
-from utils.chains import UnknownChainError, chain_by_name
+from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -107,6 +108,29 @@ def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     return job_cid == contract_cid
 
 
+def _job_chain_name(job: Job) -> str:
+    """Coalesced chain NAME for a job — the job side of
+    :func:`_job_matches_contract_chain` resolved to a registry name so it can
+    build a composite entity token (:func:`_entity_key`). First-class
+    ``chain_id``, else derived from ``request["chain"]``/address, else mainnet;
+    an unknown id folds to ``"ethereum"`` (the NULL≡mainnet legacy-read
+    convention). A proxy's impl resolves on this chain, so a same-address twin on
+    another chain no longer collapses last-wins."""
+    job_cid = job.chain_id if isinstance(job.chain_id, int) else None
+    if job_cid is None:
+        request = job.request if isinstance(job.request, dict) else {}
+        job_cid = derive_job_chain_id(request.get("chain"), job.address) or 1
+    try:
+        return chain_by_id(job_cid).name
+    except UnknownChainError:
+        return "ethereum"
+
+
+def _job_recency(job: Job) -> datetime:
+    """Sort key for picking the surviving job of a duplicated entity."""
+    return job.updated_at or job.created_at or datetime.min.replace(tzinfo=timezone.utc)
+
+
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
     """Find the protocol row + jobs that belong to ``name``.
 
@@ -147,16 +171,19 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
                 Job.address.isnot(None),
             )
         ).all()
-        company_jobs: list[Job] = []
-        seen: set[Any] = set()
+        # One job per (chain, address) entity — newest wins. Duplicate jobs at
+        # one entity are legal (an admin re-analysis, or a cascade child that
+        # raced the spawn dedup); every downstream pass renders per JOB, so
+        # collapsing here is what keeps the surface at one card per entity.
+        best_by_entity: dict[str, Job] = {}
         for job, contract_chain in rows:
             if not _job_matches_contract_chain(job, contract_chain):
                 continue
-            if job.id in seen:
-                continue
-            seen.add(job.id)
-            company_jobs.append(job)
-        return protocol_row, company_jobs
+            key = _entity_key(contract_chain, job.address)
+            prev = best_by_entity.get(key)
+            if prev is None or _job_recency(job) > _job_recency(prev):
+                best_by_entity[key] = job
+        return protocol_row, list(best_by_entity.values())
 
     company_job = session.execute(
         select(Job).where(Job.company == name).order_by(Job.updated_at.desc()).limit(1)
@@ -183,7 +210,16 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
             current = jobs_by_id.get(parent_id)
         return False
 
-    return None, [j for j in all_completed if j.address and belongs_to_company(j)]
+    # Same one-job-per-entity collapse as the protocol path (newest wins).
+    legacy_best: dict[str, Job] = {}
+    for j in all_completed:
+        if not j.address or not belongs_to_company(j):
+            continue
+        key = _entity_key(_job_chain_name(j), j.address)
+        prev = legacy_best.get(key)
+        if prev is None or _job_recency(j) > _job_recency(prev):
+            legacy_best[key] = j
+    return None, list(legacy_best.values())
 
 
 def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]:
@@ -238,7 +274,13 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
 def resolve_implementation_contracts(
     session: Session, jobs: list[Job], contracts_by_job_id: dict[Any, Contract]
 ) -> tuple[dict[str, Job], dict[Any, Contract]]:
-    """Return ``(impl_job_by_addr, contracts_by_job_id)`` with impls resolved.
+    """Return ``(impl_job_by_entity, contracts_by_job_id)`` with impls resolved.
+
+    ``impl_job_by_entity`` is keyed by the composite entity token
+    (:func:`_entity_key`, ``"<chain>::<addr>"``) of the impl job's OWN chain, so
+    a proxy resolves its implementation on the proxy's own chain (inv. 13). A
+    same-address impl twin on two of a protocol's chains no longer collapses
+    last-wins across chains — each chain keeps its own impl job.
 
     Mutates the contracts_by_job_id dict to also include impl-contract rows
     keyed by their own job_id, so downstream code can look up impl
@@ -259,42 +301,44 @@ def resolve_implementation_contracts(
             if impl:
                 impl_addrs_needed.add(impl.lower())
 
-    impl_job_by_addr: dict[str, Job] = {}
+    impl_job_by_entity: dict[str, Job] = {}
     if impl_addrs_needed:
-        # Deterministic pick: newest completed job per impl address, preferring
-        # the one linked to a proxy we're rendering (request.proxy_address points
-        # back at a proxy in this set). Without the ORDER BY a re-analysis that
-        # left >1 completed impl job for an address attached arbitrarily (1C).
+        # Deterministic pick: newest completed job per impl (chain, address),
+        # preferring the one linked to a proxy we're rendering
+        # (request.proxy_address points back at a proxy in this set). Grouping by
+        # the composite token keeps each chain's twin separate; without the
+        # ORDER BY a re-analysis that left >1 completed impl job for one token
+        # attached arbitrarily (1C).
         candidates: dict[str, list[Job]] = {}
         for ij in session.execute(
             select(Job)
             .where(Job.address.in_(list(impl_addrs_needed)), Job.status == JobStatus.completed)
             .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
         ).scalars():
-            key = (ij.address or "").lower()
-            if key:
-                candidates.setdefault(key, []).append(ij)
-        for key, addr_jobs in candidates.items():
+            if not ij.address:
+                continue
+            candidates.setdefault(_entity_key(_job_chain_name(ij), ij.address), []).append(ij)
+        for token, addr_jobs in candidates.items():
             linked = [
                 ij
                 for ij in addr_jobs
                 if isinstance(ij.request, dict) and str(ij.request.get("proxy_address") or "").lower() in proxy_addrs
             ]
-            impl_job_by_addr[key] = (linked or addr_jobs)[0]
+            impl_job_by_entity[token] = (linked or addr_jobs)[0]
 
-    impl_job_ids_needed = [ij.id for ij in impl_job_by_addr.values()]
+    impl_job_ids_needed = [ij.id for ij in impl_job_by_entity.values()]
     if impl_job_ids_needed:
         for c in session.execute(
             select(Contract).where(Contract.job_id.in_(impl_job_ids_needed)).options(selectinload(Contract.summary))
         ).scalars():
             contracts_by_job_id[c.job_id] = c
 
-    return impl_job_by_addr, contracts_by_job_id
+    return impl_job_by_entity, contracts_by_job_id
 
 
 def _secondary_impl_contracts(
     contract_row: Contract | None,
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_entity: dict[str, Job],
     contracts_by_job_id: dict[Any, Contract],
 ) -> list[Contract]:
     """Resolved Contract rows for a proxy's secondary implementations (the
@@ -310,7 +354,7 @@ def _secondary_impl_contracts(
         return []
     out: list[Contract] = []
     for saddr in contract_row.secondary_implementations:
-        impl_job = impl_job_by_addr.get((saddr or "").lower())
+        impl_job = impl_job_by_entity.get(_entity_key(contract_row.chain, saddr))
         sc = contracts_by_job_id.get(impl_job.id) if impl_job else None
         if sc is not None:
             out.append(sc)
@@ -1067,7 +1111,7 @@ def build_governance_view(
     session: Session,
     jobs: list[Job],
     contracts_by_job_id: dict[Any, Contract],
-    impl_job_by_addr: dict[str, Job],
+    impl_job_by_entity: dict[str, Job],
 ) -> GovernanceView:
     """Build the contracts list + ownership hierarchy + fund flows + principals."""
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
@@ -1091,10 +1135,12 @@ def build_governance_view(
     # a controller of the proxy node.
     for job in jobs:
         cr = contracts_by_job_id.get(job.id)
-        secondaries = _secondary_impl_contracts(cr, impl_job_by_addr, contracts_by_job_id)
+        secondaries = _secondary_impl_contracts(cr, impl_job_by_entity, contracts_by_job_id)
         if not secondaries:
             continue
-        impl_job = impl_job_by_addr.get((cr.implementation or "").lower()) if cr and cr.implementation else None
+        impl_job = (
+            impl_job_by_entity.get(_entity_key(cr.chain, cr.implementation)) if cr and cr.implementation else None
+        )
         primary_impl = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = primary_impl.id if primary_impl else (cr.id if cr else None)
         if primary_cid is None:
@@ -1137,13 +1183,15 @@ def build_governance_view(
         proxy_type = contract_row.proxy_type if contract_row else None
         impl_addr = contract_row.implementation if contract_row else None
 
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
+        impl_job = (
+            impl_job_by_entity.get(_entity_key(contract_row.chain, impl_addr)) if contract_row and impl_addr else None
+        )
         impl_job_id = str(impl_job.id) if impl_job else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
         # Split-proxy secondary logic contracts (admin-impl set). Their
         # functions + principals attribute to this proxy node too.
-        secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+        secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
 
         summary_row = impl_contract.summary if impl_contract else None
         if not summary_row and contract_row:
@@ -1248,7 +1296,11 @@ def build_governance_view(
                     total_usd += usd
 
         entry: dict[str, Any] = {
-            "address": job.address,
+            # Canonical lowercase: node ids and selection keys downstream
+            # assume one form, but a legacy job row can hold a checksummed
+            # address (ingress normalizes only since the AnalyzeRequest
+            # validator landed).
+            "address": (job.address or "").lower(),
             "name": contract_name,
             "contract_id": contract_row.id if contract_row else None,
             "job_id": str(job.id),
@@ -1309,13 +1361,17 @@ def build_governance_view(
 
     # Deduplicate: remove standalone impl contracts already represented via a
     # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
-    # latter were analysed standalone in older runs, so drop them by address).
-    impl_addresses = {c["implementation"].lower() for c in contracts if c.get("implementation")}
+    # latter were analysed standalone in older runs). Keyed by the composite
+    # entity token (a proxy's impl is on the proxy's own chain) so a same-address
+    # standalone on ANOTHER chain isn't collapsed away (inv. 13).
+    impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
-            impl_addresses.add(saddr.lower())
+            impl_entities.add(_entity_key(c.get("chain"), saddr))
     contracts = [
-        c for c in contracts if not c["address"] or c["address"].lower() not in impl_addresses or c["is_proxy"]
+        c
+        for c in contracts
+        if not c["address"] or _entity_key(c.get("chain"), c["address"]) not in impl_entities or c["is_proxy"]
     ]
 
     remaining_addrs = {c["address"] for c in contracts if c["address"]}
@@ -1357,37 +1413,66 @@ def build_governance_view(
     #      one hop further, to the terminal Safe/EOA. Only FP (call-authority)
     #      edges are followed, so fund-destination Safes (which hold no FP row)
     #      cannot be re-introduced.
-    contract_addr_by_cid: dict[int, str] = {
-        c.id: c.address.lower() for c in contracts_by_job_id.values() if c is not None and c.address
+    # cid → the composite entity token of the contract's OWN (chain, address).
+    # The whole attribution fold below stays in composite-entity space so a
+    # same-address twin on another chain never merges into this chain's
+    # authority sets (inv. 13): two standalone CREATE2 twins render to distinct
+    # ``<chain>::<address>`` keys, so ``assign_primary_controllers`` runs a
+    # separate contest per chain. The per-principal OUTPUT fields (primary_for /
+    # co_controls / controls_detail / other_callers) are rendered back to BARE
+    # addresses at the landing points — the frontend composes those with the
+    # active chain (site/src/surface/layout/elkLayout.js), so the serialized
+    # values must stay bare.
+    contract_entity_by_cid: dict[int, str] = {
+        c.id: _entity_key(c.chain, c.address) for c in contracts_by_job_id.values() if c is not None and c.address
     }
-    impl_to_proxy: dict[str, str] = {}
+    impl_entity_to_proxy_entity: dict[str, str] = {}
     for c in contracts:
         if not (c.get("is_proxy") and c.get("address")):
             continue
-        proxy_addr_lc = c["address"].lower()
+        # An impl renders under its proxy only on the proxy's own chain.
+        proxy_entity = _entity_key(c.get("chain"), c["address"])
         if c.get("implementation"):
-            impl_to_proxy[c["implementation"].lower()] = proxy_addr_lc
+            impl_entity_to_proxy_entity[_entity_key(c.get("chain"), c["implementation"])] = proxy_entity
         # Secondary impls render under the proxy too, so their FunctionPrincipal
         # authority (e.g. a governor over admin functions) attributes here.
         for saddr in c.get("secondary_implementations") or []:
-            impl_to_proxy[saddr.lower()] = proxy_addr_lc
-    fp_addrs_by_contract_addr: dict[str, set[str]] = {}
+            impl_entity_to_proxy_entity[_entity_key(c.get("chain"), saddr)] = proxy_entity
+
+    def _rendered_entity(cid: int) -> str | None:
+        own_entity = contract_entity_by_cid.get(cid)
+        if not own_entity:
+            return None
+        # Fold onto the proxy (its own chain) if this cid is a proxy's impl; else
+        # render under the contract's own entity.
+        return impl_entity_to_proxy_entity.get(own_entity) or own_entity
+
+    # ``{contract_entity: {caller_entity}}`` — the FP authority graph the
+    # primary-controller contest walks. Callers are composited with the chain of
+    # the contract they call (a caller and its target are always same-chain), so
+    # an in-protocol governance contract is one node whether it appears as a
+    # contract key or as a passthrough caller — the graph stays connected.
+    fp_addrs_by_contract_entity: dict[str, set[str]] = {}
     for cid, addrs in fp_all_addrs_by_cid.items():
-        own_addr = contract_addr_by_cid.get(cid)
-        if not own_addr:
+        rendered = _rendered_entity(cid)
+        if not rendered:
             continue
-        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
-        fp_addrs_by_contract_addr.setdefault(rendered_addr, set()).update(addrs)
+        chain_tok = _entity_chain(rendered)
+        bucket = fp_addrs_by_contract_entity.setdefault(rendered, set())
+        bucket.update(_entity_key(chain_tok, a) for a in addrs)
 
     governance_passthrough = {
-        addr
-        for addr in fp_addrs_by_contract_addr
-        if principal_lookup.get(addr, {}).get("resolved_type") in {"timelock", "proxy_admin"}
+        entity
+        for entity in fp_addrs_by_contract_entity
+        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in {"timelock", "proxy_admin"}
     }
+    # Bare-address mirror for the caller_detail capability walk below, whose inner
+    # caller keys stay bare addresses.
+    governance_passthrough_addrs = {_entity_addr(e) for e in governance_passthrough}
 
     primary_for = assign_primary_controllers(
         principals,
-        fp_addrs_by_contract_addr,
+        fp_addrs_by_contract_entity,
         governance_passthrough=governance_passthrough,
     )
 
@@ -1399,14 +1484,13 @@ def build_governance_view(
     # per-function caller sets + effect labels keyed to the rendered (proxy)
     # address — same keying as ``primary_for``; see
     # ``services.governance.primary_controller.assign_co_controllers``.
-    fp_function_detail_by_addr: dict[str, list[dict[str, Any]]] = {}
+    fp_function_detail_by_entity: dict[str, list[dict[str, Any]]] = {}
     for cid, functions in fp_function_detail_by_cid.items():
-        own_addr = contract_addr_by_cid.get(cid)
-        if not own_addr:
+        rendered = _rendered_entity(cid)
+        if not rendered:
             continue
-        rendered_addr = impl_to_proxy.get(own_addr, own_addr)
-        fp_function_detail_by_addr.setdefault(rendered_addr, []).extend(functions)
-    co_controls = assign_co_controllers(principals, fp_function_detail_by_addr, primary_for)
+        fp_function_detail_by_entity.setdefault(rendered, []).extend(functions)
+    co_controls = assign_co_controllers(principals, fp_function_detail_by_entity, primary_for)
 
     principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
 
@@ -1414,13 +1498,15 @@ def build_governance_view(
     # effect-category tags — each FP caller can actually invoke. Lets the canvas
     # show "pause · recover" instead of a generic "controlled", from verified
     # call rights (FunctionPrincipal), not the CGN-derived ``controls`` list.
-    # ``caller_detail[contract_lc][caller_lc] = {functions, labels}``. EVERY FP
-    # caller is kept here, including in-protocol governance *contracts*
-    # (timelocks / proxy-admins) — they're the passthrough hop a governance Safe
-    # reaches its contracts through, so the capability resolution below needs
-    # them. Non-principal callers are filtered out at the consumption points.
+    # ``caller_detail[contract_entity][caller_lc] = {functions, labels}`` — the
+    # contract key is the composite ``<chain>::<address>`` entity (so twins stay
+    # separate), the caller key a bare address. EVERY FP caller is kept here,
+    # including in-protocol governance *contracts* (timelocks / proxy-admins) —
+    # they're the passthrough hop a governance Safe reaches its contracts
+    # through, so the capability resolution below needs them. Non-principal
+    # callers are filtered out at the consumption points.
     caller_detail: dict[str, dict[str, dict[str, set[str]]]] = {}
-    for caddr, functions in fp_function_detail_by_addr.items():
+    for caddr, functions in fp_function_detail_by_entity.items():
         for fn in functions:
             fname = fn.get("function")
             # Capability chips are computed per function (claims-first) then
@@ -1454,29 +1540,43 @@ def build_governance_view(
         slot["functions"].update(src.get("functions", ()))
         slot["capabilities"].update(src.get("capabilities", ()))
 
+    # detail_acc keys: principal (bare address) → contract (composite entity).
     for caddr, callers_map in caller_detail.items():
         for la, detail in callers_map.items():
             if la in principal_meta:  # direct rights belong to principals, not contract callers
                 _accumulate(la, caddr, detail)
     for la, owned in primary_for.items():
         for caddr in owned:
+            # The governance contract's own entity shares the governed contract's
+            # chain (control is intra-chain), so rebuild it from the bare caller.
+            caddr_chain = _entity_chain(caddr)
             for gov_addr, gov_detail in caller_detail.get(caddr, {}).items():
-                if gov_addr in governance_passthrough and la in caller_detail.get(gov_addr, {}):
+                gov_entity = _entity_key(caddr_chain, gov_addr)
+                if gov_addr in governance_passthrough_addrs and la in caller_detail.get(gov_entity, {}):
                     _accumulate(la, caddr, gov_detail)
 
     detail_by_principal: dict[str, list[dict[str, Any]]] = {}
     for la, by_contract in detail_acc.items():
+        # Render the contract entity back to a bare address for the payload.
         rows = [
-            {"address": caddr, "functions": sorted(d["functions"]), "capabilities": sorted(d["capabilities"])}
+            {
+                "address": _entity_addr(caddr),
+                "chain": _entity_chain(caddr),
+                "functions": sorted(d["functions"]),
+                "capabilities": sorted(d["capabilities"]),
+            }
             for caddr, d in by_contract.items()
         ]
-        rows.sort(key=lambda e: e["address"])
+        rows.sort(key=lambda e: (e["address"], e["chain"]))
         detail_by_principal[la] = rows
 
     for p in principals:
         p_addr_lc = (p.get("address") or "").lower()
-        p["primary_for"] = primary_for.get(p_addr_lc, [])
-        p["co_controls"] = co_controls.get(p_addr_lc, [])
+        # primary_for / co_controls carry composite contract entities internally;
+        # the serialized fields are bare addresses (the frontend re-composes them
+        # with the active chain).
+        p["primary_for"] = sorted({_entity_addr(e) for e in primary_for.get(p_addr_lc, [])})
+        p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
 
     # Per-contract "other callers": principal-callers holding FP authority that
@@ -1488,6 +1588,8 @@ def build_governance_view(
     # a node per bidder. Each carries its own functions / capabilities so the
     # sidebar list says what each caller can do. Restricted to FP-typed
     # principals, so state-variable destinations / CGN noise don't leak in.
+    # Keyed by composite contract entity (primary_for / co_controls carry those);
+    # the principal values stay bare addresses.
     primary_by_contract: dict[str, str] = {c: paddr for paddr, owned in primary_for.items() for c in owned}
     co_by_contract: dict[str, set[str]] = {}
     for paddr, owned in co_controls.items():
@@ -1495,11 +1597,12 @@ def build_governance_view(
             co_by_contract.setdefault(c, set()).add(paddr)
     for entry in contracts:
         addr = (entry.get("address") or "").lower()
-        cd = caller_detail.get(addr, {})
+        entity = _entity_key(entry.get("chain"), addr)
+        cd = caller_detail.get(entity, {})
         callers = {a for a in cd if a in principal_meta}  # contract callers aren't "other callers"
         callers.discard(addr)
-        callers.discard(primary_by_contract.get(addr, ""))
-        callers -= co_by_contract.get(addr, set())
+        callers.discard(primary_by_contract.get(entity, ""))
+        callers -= co_by_contract.get(entity, set())
         entry["other_callers"] = [
             {
                 "address": a,
@@ -1562,11 +1665,15 @@ def _build_flows_and_principals(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
     contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
-    flow_seen: set[tuple[str, str]] = set()
+    # Control relations are intra-chain, so every flow carries a single chain
+    # (from_chain == to_chain). Dedup is per-chain so a same-address twin on
+    # another chain keeps its own edge instead of colliding on the bare pair.
+    flow_seen: set[tuple[str, str, str]] = set()
     fund_flows: list[dict[str, Any]] = []
 
-    def add_flow(from_addr: str, to_addr: str, flow_type: str, lane: str = "control") -> None:
-        key = (from_addr, to_addr)
+    def add_flow(from_addr: str, to_addr: str, flow_type: str, chain: str | None, lane: str = "control") -> None:
+        chain_tok = _coalesce_chain(chain)
+        key = (chain_tok, from_addr, to_addr)
         if key in flow_seen:
             return
         flow_seen.add(key)
@@ -1578,6 +1685,8 @@ def _build_flows_and_principals(
                 "type": flow_type,
                 "lane": lane,
                 "capabilities": target.get("capabilities", []),
+                "from_chain": chain_tok,
+                "to_chain": chain_tok,
             }
         )
 
@@ -1591,16 +1700,20 @@ def _build_flows_and_principals(
             key_id = lookup_job_id
         return contracts_by_job_id.get(key_id)
 
-    lookup_contract_by_entry: dict[str, Contract | None] = {}
+    # Keyed by composite ``<chain>::<address>`` entity, not bare address: two
+    # standalone twins share an address, so a bare key would resolve both to one
+    # chain's Contract row and collapse the other chain's principals (inv. 13).
+    lookup_contract_by_entity: dict[str, Contract | None] = {}
     for entry in contracts:
         if entry.get("address"):
-            lookup_contract_by_entry[entry["address"].lower()] = _lookup_contract_for(entry)
+            lookup_contract_by_entity[_entity_key(entry.get("chain"), entry["address"])] = _lookup_contract_for(entry)
 
     for c in contracts:
         if not c["address"]:
             continue
         target = c["address"].lower()
-        lookup_c = lookup_contract_by_entry.get(target)
+        chain = c.get("chain")
+        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
         # In-protocol contract addresses that hold actual call authority
         # on this target's EffectiveFunctions. Same authoritative signal
         # (FunctionPrincipal) drives both the controller-flow gate and
@@ -1613,7 +1726,7 @@ def _build_flows_and_principals(
                 if any(e in c.get("value_effects", []) for e in ("asset_pull", "asset_send"))
                 else "controls"
             )
-            add_flow(c["owner"], target, flow_type)
+            add_flow(c["owner"], target, flow_type, chain)
 
         # The ``controllers`` dict at the contract entry is populated
         # unfiltered from every tracked address-typed ControllerValue
@@ -1628,7 +1741,7 @@ def _build_flows_and_principals(
             if isinstance(val, str) and val.startswith("0x"):
                 val_lower = val.lower()
                 if val_lower in contract_addrs and val_lower != (c.get("owner") or "") and val_lower in fp_principals:
-                    add_flow(val_lower, target, "controller")
+                    add_flow(val_lower, target, "controller", chain)
 
         # In-protocol contract principals come from FunctionPrincipal —
         # the per-function access-control record produced by the
@@ -1644,7 +1757,7 @@ def _build_flows_and_principals(
                     continue
                 if node_addr not in contract_addrs:
                     continue
-                add_flow(node_addr, target, "principal")
+                add_flow(node_addr, target, "principal", chain)
 
     # Collect non-contract principals from control graph + function principals.
     # First pass: find safe_owner edges so we can nest Safe owners later.
@@ -1655,7 +1768,7 @@ def _build_flows_and_principals(
     for c in contracts:
         if not c["address"]:
             continue
-        lookup_c = lookup_contract_by_entry.get(c["address"].lower())
+        lookup_c = lookup_contract_by_entity.get(_entity_key(c.get("chain"), c["address"]))
         if not lookup_c:
             continue
         for edge in cge_by_cid.get(lookup_c.id, []):
@@ -1673,7 +1786,8 @@ def _build_flows_and_principals(
         if not c["address"]:
             continue
         target = c["address"].lower()
-        lookup_c = lookup_contract_by_entry.get(target)
+        chain = c.get("chain")
+        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
         if not lookup_c:
             continue
 
@@ -1731,10 +1845,12 @@ def _build_flows_and_principals(
                     "label": lookup_meta.get("label") or cgn.contract_name or cgn.label or resolved_type,
                     "details": details,
                     "controls": [],
+                    "chains": set(),
                 }
 
             principal_map[node_addr]["controls"].append(target)
-            add_flow(node_addr, target, "principal")
+            principal_map[node_addr]["chains"].add(_coalesce_chain(chain))
+            add_flow(node_addr, target, "principal", chain)
 
     # Third pass: pull principals out of FunctionPrincipal rows. Some
     # role-gated functions (e.g. EtherFiTimelock.cancel / .execute) have
@@ -1748,7 +1864,8 @@ def _build_flows_and_principals(
         if not c["address"]:
             continue
         target = c["address"].lower()
-        lookup_c = lookup_contract_by_entry.get(target)
+        chain = c.get("chain")
+        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
         if not lookup_c:
             continue
         for fp in fp_governance_by_cid.get(lookup_c.id, []):
@@ -1783,12 +1900,20 @@ def _build_flows_and_principals(
                     "label": lookup_meta.get("label") or resolved_type,
                     "details": fp_details,
                     "controls": [],
+                    "chains": set(),
                 }
             if target not in principal_map[pa]["controls"]:
                 principal_map[pa]["controls"].append(target)
-            add_flow(pa, target, "principal")
+            principal_map[pa]["chains"].add(_coalesce_chain(chain))
+            add_flow(pa, target, "principal", chain)
 
-    return fund_flows, list(principal_map.values())
+    # ``chains`` accumulates as a set during collection (a principal may govern
+    # on several chains); the payload carries a sorted list. It stays additive —
+    # a single-chain protocol reports ``["ethereum"]`` and nothing else moves.
+    principals_out = list(principal_map.values())
+    for pr in principals_out:
+        pr["chains"] = sorted(pr["chains"])
+    return fund_flows, principals_out
 
 
 def _coalesce_chain(chain: str | None) -> str:
@@ -1817,6 +1942,18 @@ def _entity_key(chain: str | None, address: str | None) -> str:
     return f"{_coalesce_chain(chain)}::{str(address or '').lower()}"
 
 
+def _entity_addr(entity: str) -> str:
+    """Bare lowercased address of a composite ``<chain>::<address>`` entity —
+    the inverse of :func:`_entity_key`'s address half. A token without ``"::"``
+    (a plain address) passes through unchanged."""
+    return entity.rsplit("::", 1)[-1]
+
+
+def _entity_chain(entity: str) -> str:
+    """Coalesced chain token of a composite ``<chain>::<address>`` entity."""
+    return entity.split("::", 1)[0] if "::" in entity else _coalesce_chain(None)
+
+
 def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[dict[str, Any]]]:
     """Return ``{"<chain>::<address>": [function_entries]}`` for every contract
     in the protocol, keyed by the composite entity token (:func:`_entity_key`,
@@ -1840,13 +1977,15 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     with _time_phase(timings_ms, "prefetch_contracts"):
         contracts_by_job_id = prefetch_contracts(session, jobs)
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
-        impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+        impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
 
-    # Addresses that are a secondary impl of some proxy are absorbed into that
+    # Entities that are a secondary impl of some proxy are absorbed into that
     # proxy node (their functions surface there), so they get no standalone
-    # entry — mirrors the canvas dedup for split-proxy admin impls.
-    secondary_impl_addrs = {
-        s.lower()
+    # entry — mirrors the canvas dedup for split-proxy admin impls. Keyed by the
+    # composite entity token (the secondary is on its proxy's chain) so a
+    # same-address standalone on another chain isn't suppressed (inv. 13).
+    secondary_impl_entities = {
+        _entity_key(cr.chain, s)
         for cr in contracts_by_job_id.values()
         if cr is not None and cr.is_proxy
         for s in (cr.secondary_implementations or [])
@@ -1864,21 +2003,22 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
             continue
         if not job.address:
             continue
-        if job.address.lower() in secondary_impl_addrs:
-            continue
         contract_row = contracts_by_job_id.get(job.id)
+        entity_chain = contract_row.chain if contract_row else None
+        if _entity_key(entity_chain, job.address) in secondary_impl_entities:
+            continue
         impl_addr = contract_row.implementation if (contract_row and contract_row.is_proxy) else None
-        impl_job = impl_job_by_addr.get(impl_addr.lower()) if impl_addr else None
+        impl_job = impl_job_by_entity.get(_entity_key(entity_chain, impl_addr)) if impl_addr else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
         cids = [primary_cid] if primary_cid is not None else []
         cids += [
             sc.id
-            for sc in _secondary_impl_contracts(contract_row, impl_job_by_addr, contracts_by_job_id)
+            for sc in _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
             if sc.id != primary_cid
         ]
         if cids:
-            entity_key_to_ef_cids[_entity_key(contract_row.chain if contract_row else None, job.address)] = cids
+            entity_key_to_ef_cids[_entity_key(entity_chain, job.address)] = cids
 
     relevant_cids = {cid for cids in entity_key_to_ef_cids.values() for cid in cids}
     ef_rows_by_cid: dict[int, list[EffectiveFunction]] = {}
@@ -1974,9 +2114,11 @@ def all_addresses_for_protocol(
 
     # Prefetch impl-name lookup so proxy rows can expose the implementation
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
-    # template name.
-    impl_name_by_addr = {
-        (c.address or "").lower(): c.contract_name for c in all_contract_rows if c.address and c.contract_name
+    # template name. Keyed by the composite entity token (a proxy's impl is on
+    # the proxy's own chain) so a same-address twin on another chain doesn't
+    # display the other chain's name (inv. 13).
+    impl_name_by_entity = {
+        _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }
     job_ids = {cr.job_id for cr in all_contract_rows if cr.job_id is not None}
     completed_job_ids: set = set()
@@ -2001,7 +2143,7 @@ def all_addresses_for_protocol(
                 "rank_score": (float(cr.rank_score) if cr.rank_score is not None else None),
                 "implementation_address": cr.implementation if cr.is_proxy else None,
                 "implementation_name": (
-                    impl_name_by_addr.get((cr.implementation or "").lower()) if cr.is_proxy else None
+                    impl_name_by_entity.get(_entity_key(cr.chain, cr.implementation)) if cr.is_proxy else None
                 ),
             }
             for cr in all_contract_rows
@@ -2063,9 +2205,9 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     with _time_phase(timings_ms, "prefetch_contracts"):
         contracts_by_job_id = prefetch_contracts(session, jobs)
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
-        impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+        impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     with _time_phase(timings_ms, "build_governance_view"):
-        governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
+        governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
     with _time_phase(timings_ms, "assemble_payload"):
         payload = assemble_company_payload(session, name, protocol_row, jobs, governance)
 
@@ -2120,8 +2262,8 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, st
     if not jobs:
         return {}
     contracts_by_job_id = prefetch_contracts(session, jobs)
-    impl_job_by_addr, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
-    governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_addr)
+    impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
+    governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
 
     controllers: dict[str, str] = {}
     for principal in governance.principals:
