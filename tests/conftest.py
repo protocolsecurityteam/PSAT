@@ -43,6 +43,7 @@ from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
     DaemonLease,
+    EffectVerdict,
     IndexedEventCursor,
     IndexedEventLog,
     Job,
@@ -662,6 +663,9 @@ def db_session():
             # are ON DELETE CASCADE and Job.protocol_id is SET NULL, so this
             # is order-independent among the rows below.
             Job,
+            # Verdicts only SET NULL their function_id when effective_functions
+            # rows go away — they never cascade, so sweep them explicitly.
+            EffectVerdict,
             Contract,
             Protocol,
             # Scanner/poller passes commit durable daemon_leases rows (with a

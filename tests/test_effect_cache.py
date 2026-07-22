@@ -23,7 +23,7 @@ from db.effect_cache import (  # noqa: E402
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import EffectBehaviorCache, EffectVerdict  # noqa: E402
+from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
 
 KERNEL = "kernel"
@@ -210,3 +210,83 @@ def test_record_effect_verdict_upserts_state_plane(clean_effects):
     session.expire_all()
     assert session.query(EffectVerdict).count() == 1
     assert session.query(EffectVerdict).one().verdict == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Stale function_id tolerance: a policy row replace mid-run must not be able to
+# fail the verdict write (identity is the deployment coordinates; function_id is
+# a convenience join).
+# ---------------------------------------------------------------------------
+
+
+def _seed_function_row(session, address: str, selector: str) -> int:
+    contract = Contract(address=address, chain="ethereum", is_proxy=False)
+    session.add(contract)
+    session.flush()
+    ef = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=address,
+        function_name="pause",
+        selector=selector,
+        abi_signature="pause()",
+        effect_labels=[],
+        authority_public=False,
+    )
+    session.add(ef)
+    session.flush()
+    return ef.id
+
+
+@requires_postgres
+def test_record_effect_verdict_stale_function_id_writes_null(clean_effects):
+    session = clean_effects
+    address = "0x" + "22" * 20
+    fn_id = _seed_function_row(session, address, "0x8456cb59")
+    # Simulate a concurrent policy row replace: the selected id vanishes.
+    session.query(EffectiveFunction).filter(EffectiveFunction.id == fn_id).delete(synchronize_session=False)
+    session.flush()
+    record_effect_verdict(
+        session,
+        chain_id=1,
+        contract_address=address,
+        selector="0x8456cb59",
+        effect_class="freeze_pause",
+        verdict="proven",
+        tier="tier2",
+        function_id=fn_id,
+        witness={"latch_flip": True},
+    )
+    session.commit()
+    row = session.query(EffectVerdict).one()
+    assert row.function_id is None
+    assert row.verdict == "proven"
+    assert row.witness == {"latch_flip": True}
+
+
+@requires_postgres
+def test_stale_function_id_does_not_poison_sibling_verdicts(clean_effects):
+    """One stale id in a job's worklist must not lose the other candidates'
+    verdicts — the whole-job session stays writable and commits both rows."""
+    session = clean_effects
+    live_addr = "0x" + "33" * 20
+    stale_addr = "0x" + "44" * 20
+    live_id = _seed_function_row(session, live_addr, "0x8456cb59")
+    stale_id = _seed_function_row(session, stale_addr, "0x8456cb59")
+    session.query(EffectiveFunction).filter(EffectiveFunction.id == stale_id).delete(synchronize_session=False)
+    session.flush()
+    for addr, fid in ((stale_addr, stale_id), (live_addr, live_id)):
+        record_effect_verdict(
+            session,
+            chain_id=1,
+            contract_address=addr,
+            selector="0x8456cb59",
+            effect_class="freeze_pause",
+            verdict="proven",
+            tier="tier2",
+            function_id=fid,
+        )
+    session.commit()
+    rows = {r.contract_address: r for r in session.query(EffectVerdict).all()}
+    assert len(rows) == 2
+    assert rows[live_addr].function_id == live_id
+    assert rows[stale_addr].function_id is None

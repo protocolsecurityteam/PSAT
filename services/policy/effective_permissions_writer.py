@@ -127,16 +127,17 @@ def _capture_observed_before(
     observed-effect state BEFORE the wholesale row replace deletes it, keyed by
     selector, so the re-created rows can carry it forward.
 
-    Two sources, both durable and both about to be lost to the replace:
+    Two sources:
 
     - ``behavioral_observed``-tier claims already on the outgoing rows (minted by
-      the effects stage). These are the durable carrier: ``effect_verdicts``
-      rows FK to ``effective_functions`` with ``ON DELETE CASCADE``, so the
-      replace deletes the verdicts too — without carrying the claims themselves,
-      any policy-only re-run (one that does not re-run effects) would blank the
-      observed labels, which is exactly the regression §5.2 exists to kill.
-    - Any still-present proven ``effect_verdicts`` for those rows, re-merged as
-      the authoritative source when they survive.
+      the effects stage). These are the durable carrier: without carrying the
+      claims themselves, any policy-only re-run (one that does not re-run
+      effects) would blank the observed labels, which is exactly the regression
+      §5.2 exists to kill.
+    - Proven ``effect_verdicts`` for those rows, re-merged as the authoritative
+      source. The verdict rows survive the replace (FK is ``ON DELETE SET
+      NULL``) but come out unlinked; the carry phase relinks them to the
+      re-created rows so claim witnesses keep resolving.
 
     Returns ``{selector_key: (carried_observed_claims, proven_verdicts)}``.
     """
@@ -312,6 +313,10 @@ def write_effective_function_rows(
             merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)
             ef.claims = merged_claims
             ef.effect_labels = claims_bridge.reproject_effect_labels(ef.effect_labels or [], merged_claims)
+            # The replace SET-NULLed the surviving verdicts' function_id; point
+            # them at the re-created row so the convenience join stays live.
+            for verdict in proven_verdicts:
+                verdict.function_id = ef.id
 
         # Semantic caller-shaped principals. ``ON CONFLICT DO NOTHING`` is
         # implemented at the (function_id, address, origin, principal_type)

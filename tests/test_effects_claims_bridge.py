@@ -340,3 +340,100 @@ def test_policy_rewrite_leaves_claimless_functions_byte_identical(db_session):
 def _cleanup(session, contract_id):
     session.query(Contract).filter(Contract.id == contract_id).delete()
     session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Row replace vs effect_verdicts: verdicts are durable state-plane residue keyed
+# on deployment coordinates — a policy rewrite must never destroy them, and the
+# function_id convenience join relinks to the re-created row.
+# ---------------------------------------------------------------------------
+
+
+def _seed_with_real_verdict(session):
+    """A contract whose effective_function has a proven verdict row and an
+    observed claim whose witness points at that REAL verdict id (as call site 1
+    writes it) — so the dangle assertion below is exact."""
+    contract = Contract(address=_DEPLOY, chain="ethereum", is_proxy=False)
+    session.add(contract)
+    session.flush()
+    ef = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=_DEPLOY,
+        function_name="mint",
+        selector=_SELECTOR,
+        abi_signature="mint(address,uint256)",
+        effect_labels=["mint"],
+        claims=[],
+        authority_public=False,
+    )
+    session.add(ef)
+    session.flush()
+    verdict = EffectVerdict(
+        function_id=ef.id,
+        chain_id=1,
+        contract_address=_DEPLOY,
+        selector=_SELECTOR,
+        effect_class=EFFECT_CLASS_SUPPLY,
+        behavior_hash="bh",
+        verdict=VERDICT_PROVEN,
+        tier=TIER_CALL,
+        witness={"supply_delta_sign": "mint"},
+    )
+    session.add(verdict)
+    session.flush()
+    observed = _verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"}, vid=verdict.id)
+    ef.claims = [claims_bridge.verdict_to_claim(observed)]
+    session.commit()
+    return contract.id, verdict.id
+
+
+def _purge_verdicts(session):
+    session.query(EffectVerdict).delete()
+    session.commit()
+
+
+@requires_postgres
+def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
+    """The row replace must not delete the deployment's verdicts; the surviving
+    row relinks to the re-created function row and no carried observed claim's
+    witness may point at a dead verdict."""
+    contract_id, verdict_id = _seed_with_real_verdict(db_session)
+    write_effective_function_rows(
+        db_session,
+        contract_id=contract_id,
+        function_records=[_fn_record()],
+        capability_by_function=None,
+        deployment_address=_DEPLOY,
+    )
+    db_session.commit()
+    db_session.expire_all()
+    verdict = db_session.query(EffectVerdict).filter(EffectVerdict.id == verdict_id).one_or_none()
+    assert verdict is not None
+    ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
+    assert verdict.function_id == ef.id
+    for claim in ef.claims or []:
+        if claim.get("tier") == "behavioral_observed":
+            vid = (claim.get("witness") or {}).get("effect_verdict_id")
+            assert vid is not None
+            assert db_session.query(EffectVerdict).filter(EffectVerdict.id == vid).count() == 1
+    _purge_verdicts(db_session)
+
+
+@requires_postgres
+def test_row_delete_without_recreate_nulls_function_id(db_session):
+    """A function dropped from the new surface keeps its verdict rows (identity =
+    deployment coordinates) with the convenience join nulled, not cascaded away."""
+    contract_id, verdict_id = _seed_with_real_verdict(db_session)
+    write_effective_function_rows(
+        db_session,
+        contract_id=contract_id,
+        function_records=[],
+        capability_by_function=None,
+        deployment_address=_DEPLOY,
+    )
+    db_session.commit()
+    db_session.expire_all()
+    verdict = db_session.query(EffectVerdict).filter(EffectVerdict.id == verdict_id).one_or_none()
+    assert verdict is not None
+    assert verdict.function_id is None
+    _purge_verdicts(db_session)

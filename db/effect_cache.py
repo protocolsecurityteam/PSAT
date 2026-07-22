@@ -37,9 +37,10 @@ from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import EffectBehaviorCache, EffectVerdict
+from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -254,33 +255,54 @@ def record_effect_verdict(
     ``selector`` sentinel keeps the identity constraint portable for
     fallback/receive functions.
     """
-    stmt = pg_insert(EffectVerdict).values(
-        function_id=function_id,
-        chain_id=chain_id,
-        contract_address=contract_address.lower(),
-        selector=(selector or ""),
-        effect_class=effect_class,
-        behavior_hash=behavior_hash,
-        verdict=verdict,
-        tier=tier,
-        concrete_destination=concrete_destination,
-        current_check_passed=current_check_passed,
-        witness=witness,
-        transcript_ptr=transcript_ptr,
-    )
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_effect_verdicts_identity",
-        set_={
-            "function_id": stmt.excluded.function_id,
-            "behavior_hash": stmt.excluded.behavior_hash,
-            "verdict": stmt.excluded.verdict,
-            "tier": stmt.excluded.tier,
-            "concrete_destination": stmt.excluded.concrete_destination,
-            "current_check_passed": stmt.excluded.current_check_passed,
-            "witness": stmt.excluded.witness,
-            "transcript_ptr": stmt.excluded.transcript_ptr,
-            "updated_at": text("NOW()"),
-        },
-    )
-    session.execute(stmt)
+    # A candidate's function row can be replaced (delete+recreate, new id) by a
+    # concurrent policy pass between selection and this write. The verdict must
+    # still persist — unlinked — rather than FK-violate and roll back the whole
+    # job's witnesses.
+    if (
+        function_id is not None
+        and session.execute(select(EffectiveFunction.id).where(EffectiveFunction.id == function_id)).first() is None
+    ):
+        function_id = None
+
+    def _upsert(fid: int | None):
+        stmt = pg_insert(EffectVerdict).values(
+            function_id=fid,
+            chain_id=chain_id,
+            contract_address=contract_address.lower(),
+            selector=(selector or ""),
+            effect_class=effect_class,
+            behavior_hash=behavior_hash,
+            verdict=verdict,
+            tier=tier,
+            concrete_destination=concrete_destination,
+            current_check_passed=current_check_passed,
+            witness=witness,
+            transcript_ptr=transcript_ptr,
+        )
+        return stmt.on_conflict_do_update(
+            constraint="uq_effect_verdicts_identity",
+            set_={
+                "function_id": stmt.excluded.function_id,
+                "behavior_hash": stmt.excluded.behavior_hash,
+                "verdict": stmt.excluded.verdict,
+                "tier": stmt.excluded.tier,
+                "concrete_destination": stmt.excluded.concrete_destination,
+                "current_check_passed": stmt.excluded.current_check_passed,
+                "witness": stmt.excluded.witness,
+                "transcript_ptr": stmt.excluded.transcript_ptr,
+                "updated_at": text("NOW()"),
+            },
+        )
+
+    try:
+        with session.begin_nested():
+            session.execute(_upsert(function_id))
+    except IntegrityError as exc:
+        # The row vanished between the existence check and the insert — the
+        # savepoint keeps the job session writable; retry unlinked.
+        if "effect_verdicts_function_id_fkey" not in str(exc.orig):
+            raise
+        with session.begin_nested():
+            session.execute(_upsert(None))
     session.flush()

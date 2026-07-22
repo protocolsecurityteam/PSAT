@@ -1471,7 +1471,7 @@ class EffectVerdict(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     function_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("effective_functions.id", ondelete="CASCADE"), nullable=True
+        Integer, ForeignKey("effective_functions.id", ondelete="SET NULL"), nullable=True
     )
     chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     contract_address: Mapped[str] = mapped_column(String(42), nullable=False)
