@@ -38,6 +38,7 @@ from services.effects.harness import (
     proven,
     unknown,
 )
+from utils.memory import rss_bytes_for_pid
 from utils.rpc import EthCallResult
 
 # Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
@@ -361,6 +362,14 @@ class SubprocessAnvil:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    def rss_mb(self) -> int:
+        """Resident set size of the anvil subprocess in whole MB; 0 if it has
+        exited (poll reaps it, so a reused pid is never sampled) or /proc is
+        unreadable. Never raises — RSS sampling must not fail a probe."""
+        if self._proc.poll() is not None:
+            return 0
+        return rss_bytes_for_pid(self._proc.pid) // (1024 * 1024)
 
     def _wait_ready(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout

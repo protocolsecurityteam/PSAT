@@ -32,16 +32,28 @@ _CGROUP_V1_PEAK = Path("/sys/fs/cgroup/memory/memory.max_usage_in_bytes")
 _CGROUP_V1_UNSET_SENTINEL = 1 << 60
 
 
-def current_rss_bytes() -> int:
-    """RSS of this process in bytes; 0 if /proc/self/status is unreadable."""
+def _vmrss_bytes(status_path: Path) -> int:
+    """VmRSS from a ``/proc/<pid>/status`` file in bytes; 0 if the file is
+    unreadable (process gone, non-Linux) or has no VmRSS line."""
     try:
-        for line in _PROC_STATUS.read_text().splitlines():
+        for line in status_path.read_text().splitlines():
             if line.startswith("VmRSS:"):
                 # "VmRSS:    13648 kB"
                 return int(line.split()[1]) * 1024
     except Exception:
         return 0
     return 0
+
+
+def current_rss_bytes() -> int:
+    """RSS of this process in bytes; 0 if /proc/self/status is unreadable."""
+    return _vmrss_bytes(_PROC_STATUS)
+
+
+def rss_bytes_for_pid(pid: int) -> int:
+    """RSS of process *pid* in bytes; 0 if the process is gone, /proc is
+    unreadable, or the host is non-Linux. Never raises."""
+    return _vmrss_bytes(Path(f"/proc/{pid}/status"))
 
 
 def _read_cgroup_int(path: Path) -> int | None:

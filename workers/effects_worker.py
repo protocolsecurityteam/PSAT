@@ -556,8 +556,22 @@ class EffectsWorker(BaseWorker):
         with log_timed_phase(logger, "tier2_fork", durations_ms=durations_ms) as ph:
             for it in tier2:
                 self._probe_one(it, counters)
+                self._sample_anvil_rss(counters)
             ph["probed"] = len(tier2)
             ph["peak_anvil_rss_mb"] = counters.peak_anvil_rss_mb
+
+    def _sample_anvil_rss(self, counters: _Counters) -> None:
+        """Fold the memoized fork's current RSS into the job peak. The fork may be
+        absent (fork disabled / never spawned / spawn failed) — guard for that and
+        never raise into the probe loop: an RSS sample must not fail a behavior."""
+        anvil = getattr(self, "_anvil", None)
+        sample = getattr(anvil, "rss_mb", None)
+        if sample is None:
+            return
+        try:
+            counters.peak_anvil_rss_mb = max(counters.peak_anvil_rss_mb, int(sample()))
+        except Exception:
+            pass
 
     def _probe_one(self, it: _Item, counters: _Counters) -> None:
         try:

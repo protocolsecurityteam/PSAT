@@ -460,6 +460,44 @@ def test_projection_not_transfer_across_surfaces(clean_effects, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 4b. tier-2 probes fold the fork's RSS into peak_anvil_rss_mb
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_tier2_folds_anvil_rss_into_peak(clean_effects, monkeypatch):
+    """A projection (tier-2) probe with a live fork present samples the fork's RSS
+    after each probe and records the max as ``peak_anvil_rss_mb`` (was a dead 0)."""
+    session = clean_effects
+    pid, fns = _protocol_with_functions(session, [CONTRACT_A])
+    job = _make_job(session, pid, "rss")
+    cand = _candidate(CONTRACT_A, fns[CONTRACT_A])
+    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
+
+    class _FakeAnvil:
+        closed = False
+
+        def rss_mb(self) -> int:
+            return 137
+
+        def close(self) -> None:
+            self.closed = True
+
+    prober = _Prober(
+        lambda c, ctx: proven(EFFECT_CLASS_FREEZE_PAUSE, scope=SCOPE_PROJECTION, details={"latch_flip": True}),
+        effect_class=EFFECT_CLASS_FREEZE_PAUSE,
+        scope=SCOPE_PROJECTION,
+    )
+    worker = EffectsWorker(prober=prober, hash_resolver=lambda s, c: ("K", "sA"), seams=_seams(session, job))
+    fake = _FakeAnvil()
+    worker._anvil = fake  # the fork the tier-2 loop samples (memoized in prod)
+    _errors, metrics = _run(worker, session, job)
+
+    assert metrics["peak_anvil_rss_mb"] == 137
+    assert fake.closed  # fork still closed on the normal exit path (inv. 16)
+
+
+# ---------------------------------------------------------------------------
 # 5. self-audit catches an injected hash collision ⇒ withhold, not propagate
 # ---------------------------------------------------------------------------
 

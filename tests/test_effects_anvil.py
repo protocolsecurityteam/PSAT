@@ -185,6 +185,52 @@ def test_build_anvil_cmd_nonforking_has_no_fork_flags():
     assert "--fork-url" not in cmd and "--fork-header" not in cmd
 
 
+# ---------------------------------------------------------------------------
+# rss_mb — anvil subprocess RSS sampling (feeds peak_anvil_rss_mb)
+# ---------------------------------------------------------------------------
+
+
+def _anvil_with_proc(proc: object) -> SubprocessAnvil:
+    """A SubprocessAnvil whose only wired dependency is ``_proc`` — no real
+    subprocess spawned, so ``rss_mb`` is exercised in isolation."""
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    anvil._proc = proc  # type: ignore[attr-defined]
+    return anvil
+
+
+def test_rss_mb_positive_for_live_pid_zero_when_exited():
+    import os
+
+    class _LiveProc:
+        pid = os.getpid()
+
+        def poll(self):
+            return None  # still running
+
+    class _DeadProc:
+        pid = os.getpid()
+
+        def poll(self):
+            return 0  # exited
+
+    # A live process reports a non-negative MB figure (positive on Linux, 0 on a
+    # non-Linux host where /proc is absent) and never raises.
+    assert _anvil_with_proc(_LiveProc()).rss_mb() >= 0
+    # An exited process is never sampled (guards against a reused pid) → 0.
+    assert _anvil_with_proc(_DeadProc()).rss_mb() == 0
+
+
+@pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
+def test_rss_mb_on_real_subprocess():
+    """A live NON-FORKING anvil reports positive RSS; 0 once closed."""
+    anvil = SubprocessAnvil(port=8548, hardfork_name="prague")
+    try:
+        assert anvil.rss_mb() > 0
+    finally:
+        anvil.close()
+    assert anvil.rss_mb() == 0
+
+
 def test_build_anvil_cmd_forking_passes_auth_header():
     cmd = _build_anvil_cmd("anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"})
     assert cmd[cmd.index("--fork-url") + 1] == "https://erpc/main/evm/1"
