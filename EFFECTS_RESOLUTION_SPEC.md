@@ -1112,7 +1112,29 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       gate clean. Flag-off parity proven (Phase-0 baseline sha256s reproduce
       exactly). Commit: the single "Effects resolution Phase 1: …" commit on
       `feat/effects-resolution` (verify via `git log --oneline main..HEAD`).
-- [ ] Phase 2 — harness. Commits: ____.
+- [x] Phase 2 — harness (2026-07-21). ONE Opus coder. Pure injectable library
+      under `services/effects/` (worker left inert — additive-only, flag-off
+      parity intact by construction): `simulate.py` (eth_simulateV1 seam),
+      `harness.py` (Tier-1 core: injected call_batch, ≥2-identity + block-
+      independence, raw-revert compare, precondition→unknown, transcript emit),
+      `preflight.py` (inv. 14 capability probe via injectable CapabilityStore —
+      no DB table, boundary-preserving), `recipes.py` (4.2 value-out three-valued
+      + sentinel→unknown/§9 discrepancy, 4.3 code-upgrade Tier-0-conjunction +
+      transparent/UUPS sentinel stubs, 4.4 authority kernel, 4.5 supply),
+      `anvil.py` (Tier-2 behind injectable AnvilTransport; `SubprocessAnvil` =
+      sole real I/O, non-forking loopback default; hardfork pin + anvil/foundry
+      version in transcript; 4.1 pause recipe = revert-set diff + source-read
+      `MAX_PAUSE_DURATION` time-warp; denominator from static). Seams: one real-
+      I/O impl each (eth_call_batch, eth_simulate_v1, SubprocessAnvil, injected
+      TranscriptStore). TESTS: transcript-stub per recipe 4.1–4.5; one negative
+      fail-closed test per §8 rule 1–8 + inv.14 + sentinel cases (registry-param
+      →unknown, bare-sentinel-proves-nothing); gated non-forking real-anvil
+      integration test (checked-in fixture, runs under CI's foundry-toolchain,
+      auto-skips without anvil). GATE: full offline suite green (4327 passed, 44
+      xfailed), ruff/format/pyright clean on all new files, alembic drift clean
+      (no new migration). NO Phase-3 work done (no cache r/w, self-audit,
+      persistence, §9 routing, monitor page — worker still inert). Commit: the
+      single "Effects resolution Phase 2: …" commit (see `git log main..HEAD`).
 - [ ] Phase 3 — integration + review + gate. Commits: ____. Deliverable
       delivered: ____.
 
