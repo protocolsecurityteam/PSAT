@@ -23,6 +23,7 @@ import requests
 import urllib3.exceptions
 
 from services.discovery.classifier import ClassificationIncompleteError
+from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 
 # psycopg2 wraps "connection lost mid-query" with OperationalError. Fold it
 # into the transient set so a Neon idle-disconnect doesn't terminally fail
@@ -91,6 +92,13 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # raise self-heals once the RPC recovers, so retry rather than terminally
     # kill the job (which would itself erase the implementation's surface).
     ClassificationIncompleteError,
+    # Effects stage (EFFECTS_RESOLUTION_SPEC): an anvil fork that fails to spawn
+    # or a fork-backing RPC timeout is an infra blip that self-heals on retry.
+    # Type-based only, like every entry here. Inv. 15 composes on top: whatever
+    # this classifier says, the effects stage's *exhaustion* outcome is
+    # degrade-and-advance, never failed_terminal.
+    AnvilSpawnError,
+    ForkRpcTimeoutError,
     *_PSYCOPG2_OPERATIONAL,
 )
 

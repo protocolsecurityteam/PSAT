@@ -95,6 +95,13 @@ for _ in $(seq 1 "$POLICY_COUNT"); do
   "${PYTHON_CMD[@]}" -m workers.policy_worker &
   PIDS+=($!)
 done
+# Effects stage (EFFECTS_RESOLUTION_SPEC): sits between policy and coverage.
+# Launched unconditionally so enabling PSAT_EFFECTS_STAGE never parks jobs at a
+# stage no worker drains; idles when the flag is off. Single instance
+# (PSAT_EFFECTS_JOB_CONCURRENCY=1, inv. 16 — anvil snapshot/revert is
+# process-global).
+"${PYTHON_CMD[@]}" -m workers.effects_worker &
+PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.coverage_worker &
 PIDS+=($!)
 # Drains audit_contract_coverage rows where equivalence_status='pending'.

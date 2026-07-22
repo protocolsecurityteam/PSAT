@@ -65,6 +65,12 @@ class JobStage(str, enum.Enum):
     static = "static"
     resolution = "resolution"
     policy = "policy"
+    # Effect simulation (EFFECTS_RESOLUTION_SPEC §3a). Inserted between policy
+    # and coverage; source order IS the progression, so this position makes
+    # ``_satisfy_dependencies`` (relative enum order) route it correctly. The
+    # policy->effects transition is feature-flagged (PSAT_EFFECTS_STAGE); with
+    # the flag off, policy advances straight to coverage and this stage is inert.
+    effects = "effects"
     coverage = "coverage"
     done = "done"
 
@@ -1372,6 +1378,126 @@ class BytecodeCache(Base):
     selfdestructed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (Index("ix_bytecode_cache_cached_at", "cached_at"),)
+
+
+class EffectBehaviorCache(Base):
+    """Persistent, cross-job behavioral-verdict cache (EFFECTS_RESOLUTION_SPEC
+    §7 / inv. 11-12). Shared across jobs AND cross-chain twins — the 11
+    ``PausableUntil`` sharers are separate jobs, so a sibling (or a twin on
+    another chain, or a prior run) that already witnessed a behavior yields a
+    free, *trusted* hit.
+
+    Two verdict scopes (inv. 3):
+
+    - ``scope='kernel'`` — function-local (latch-flip, gate-mutation, code-
+      change, supply-delta sign, destination *shape*). Key = (``behavior_hash``,
+      ``effect_class``); ``contract_surface_hash`` is the empty sentinel.
+    - ``scope='projection'`` — contract-scoped (pause blast radius, authorization
+      delta). Keyed additionally on ``contract_surface_hash`` (the metadata-
+      stripped whole-contract bytecode hash) because the same mixin kernel
+      yields different blast radii on different surfaces.
+
+    The row is **code-plane only** (inv. 11): no concrete values ever enter the
+    key. Verdicts are **gate-relative** (inv. 12): ``gate_ref`` names the gate
+    *structure*, never a concrete address; principal binding happens at read
+    time by joining ``function_principals``. The concrete state-plane residue
+    (destination address, exact impl, current-check result) lives in
+    ``effect_verdicts``, never here.
+
+    ``transcript_ptr`` is an artifact-store key (§8.5), never an inline JSONB
+    blob. ``analysis_schema_version`` invalidates the row on a pipeline bump,
+    mirroring ``ContractMaterialization``.
+
+    Self-audit (§7): the first time two functions share a behavioral hash, both
+    are simulated once and the *kernel* verdicts asserted equal before the cache
+    is trusted; ``audit_status`` / ``audit_peer_hash`` / ``audited_at`` record
+    that, and ``hit_count`` supports the optional every-Nth re-audit.
+    """
+
+    __tablename__ = "effect_behavior_cache"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    behavior_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    effect_class: Mapped[str] = mapped_column(String(40), nullable=False)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, server_default="kernel")
+    # Empty sentinel for kernel rows (projections carry the whole-contract hash).
+    # A sentinel rather than NULL keeps the identity UniqueConstraint portable
+    # (no NULLS-NOT-DISTINCT dependency).
+    contract_surface_hash: Mapped[str] = mapped_column(String(80), nullable=False, server_default="")
+    # Gate *structure* descriptor (inv. 12) — never an address.
+    gate_ref: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
+    verdict: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Artifact-store key (§8.5) — never inline JSONB.
+    transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Small, code-plane structural witness (e.g. supply-delta sign, source-read
+    # duration bound). NO concrete/state-plane values.
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Self-audit bookkeeping (§7).
+    audit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    audit_peer_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "behavior_hash",
+            "effect_class",
+            "scope",
+            "contract_surface_hash",
+            "gate_ref",
+            name="uq_effect_behavior_cache_identity",
+        ),
+        Index("ix_effect_behavior_cache_behavior_class", "behavior_hash", "effect_class"),
+    )
+
+
+class EffectVerdict(Base):
+    """Per contract-function **state-plane** residue (EFFECTS_RESOLUTION_SPEC §3a
+    / inv. 3). This is where the per-deployment concrete values live — the exact
+    destination address, the exact target impl, the Tier-0 current-state check
+    result — never the ``effect_behavior_cache``.
+
+    Keyed on the deployment coordinates ``(chain_id, contract_address,
+    selector, effect_class)`` and linked back to the behavioral hash + function
+    row. The empty-string ``selector`` sentinel keeps the identity constraint
+    portable for fallback/receive functions with no selector.
+    """
+
+    __tablename__ = "effect_verdicts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    function_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("effective_functions.id", ondelete="CASCADE"), nullable=True
+    )
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    contract_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    selector: Mapped[str] = mapped_column(String(10), nullable=False, server_default="")
+    effect_class: Mapped[str] = mapped_column(String(40), nullable=False)
+    behavior_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    # State-plane concrete values — the reason this row is not the cache.
+    concrete_destination: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    current_check_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    witness: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "chain_id",
+            "contract_address",
+            "selector",
+            "effect_class",
+            name="uq_effect_verdicts_identity",
+        ),
+        Index("ix_effect_verdicts_function_id", "function_id"),
+    )
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")

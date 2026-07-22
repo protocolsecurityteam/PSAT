@@ -1460,18 +1460,20 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
 # ===================================================================
 
 
-def test_worker_stage_chain_is_complete():
-    """The pipeline stage chain must be: discovery -> static -> resolution
-    -> policy -> done. If any next_stage doesn't match the following
-    worker's stage, jobs will get stuck."""
+def test_worker_stage_chain_is_complete(monkeypatch):
+    """The pipeline stage chain must connect end to end so no job gets stuck.
+    ``PolicyWorker.next_stage`` is flag-dynamic (``PSAT_EFFECTS_STAGE`` gates the
+    policy->effects transition itself, §3a.4): off -> straight to coverage, on ->
+    through the effects stage."""
     from db.models import JobStage
     from workers.coverage_worker import CoverageWorker
     from workers.discovery import DiscoveryWorker
+    from workers.effects_worker import EffectsWorker
     from workers.policy_worker import PolicyWorker
     from workers.resolution_worker import ResolutionWorker
     from workers.static_worker import StaticWorker
 
-    # Verify the chain
+    # Static edges (flag-independent).
     assert DiscoveryWorker.stage == JobStage.discovery
     assert DiscoveryWorker.next_stage == JobStage.static
 
@@ -1482,18 +1484,22 @@ def test_worker_stage_chain_is_complete():
     assert ResolutionWorker.next_stage == JobStage.policy
 
     assert PolicyWorker.stage == JobStage.policy
-    assert PolicyWorker.next_stage == JobStage.coverage
+
+    assert EffectsWorker.stage == JobStage.effects
+    assert EffectsWorker.next_stage == JobStage.coverage
 
     assert CoverageWorker.stage == JobStage.coverage
     assert CoverageWorker.next_stage == JobStage.done
 
-    # Verify the chain links: each worker's next_stage matches the next worker's stage
-    chain = [DiscoveryWorker, StaticWorker, ResolutionWorker, PolicyWorker, CoverageWorker]
-    for i in range(len(chain) - 1):
-        assert chain[i].next_stage == chain[i + 1].stage, (
-            f"{chain[i].__name__}.next_stage ({chain[i].next_stage}) != "
-            f"{chain[i + 1].__name__}.stage ({chain[i + 1].stage})"
-        )
+    # Flag OFF: policy advances straight to coverage; effects is bypassed.
+    monkeypatch.delenv("PSAT_EFFECTS_STAGE", raising=False)
+    assert PolicyWorker().next_stage == JobStage.coverage
+
+    # Flag ON: policy -> effects -> coverage; the inserted stage keeps the chain
+    # connected (no parked jobs).
+    monkeypatch.setenv("PSAT_EFFECTS_STAGE", "1")
+    assert PolicyWorker().next_stage == JobStage.effects
+    assert EffectsWorker.next_stage == CoverageWorker.stage
 
 
 # ===================================================================

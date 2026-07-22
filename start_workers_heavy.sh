@@ -59,6 +59,11 @@ PIDS+=($!)
 PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.policy_worker &
 PIDS+=($!)
+# Effects stage (EFFECTS_RESOLUTION_SPEC): between policy and coverage, RPC-bound
+# like resolution/policy. Launched unconditionally so enabling PSAT_EFFECTS_STAGE
+# never parks jobs; idles off. Single instance (inv. 16).
+"${PYTHON_CMD[@]}" -m workers.effects_worker &
+PIDS+=($!)
 
 echo "All heavy workers started: ${PIDS[*]}"
 wait -n

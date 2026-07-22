@@ -1094,7 +1094,24 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       **FABLE CIRCLE-BACK (per 2026-07-21 amendment): Phase-3 review ran on Opus
       4.8 @ xhigh while Fable was unavailable — re-run with a real Fable reviewer
       once the limit resets. [ ] not yet done.**
-- [ ] Phase 1 — foundations. Commits: ____.
+- [x] Phase 1 — foundations (2026-07-21). Two parallel Opus coders (1a schema/
+      identity/stage; 1b selection/ordering), file-disjoint. Landed: §7 hash
+      ladder items 1–3 (`services/effects/hashing.py`, no lifter); migration
+      `d8f3a1c02e47` (`effect_behavior_cache` + `effect_verdicts`, native-enum
+      `ADD VALUE 'effects' BEFORE 'coverage'` autocommit); `JobStage.effects`;
+      default-off `PSAT_EFFECTS_STAGE` gating the policy→effects edge (flag-
+      dynamic `PolicyWorker.next_stage` property); inert fail-forward
+      `EffectsWorker` (6-phase scaffolding) wired into all start_workers*.sh +
+      start_local.sh; `retry_policy` transient types; `db/queue.py:856` latent-
+      bug fix; `services/effects/selection.py` (§6 cascade keyed on `claims` +
+      transitive value-at-stake, no gate, safety-valve log). base.py seam
+      `_finalize_terminal_failure` (behavior-preserving) enables inv. 15.
+      GATE: full offline suite green (4298 passed after allow-list line fix in
+      test_log_level_contract.py — a benign shift from 1a's property insert),
+      ruff/format clean, pyright clean on all touched+new files, alembic drift
+      gate clean. Flag-off parity proven (Phase-0 baseline sha256s reproduce
+      exactly). Commit: the single "Effects resolution Phase 1: …" commit on
+      `feat/effects-resolution` (verify via `git log --oneline main..HEAD`).
 - [ ] Phase 2 — harness. Commits: ____.
 - [ ] Phase 3 — integration + review + gate. Commits: ____. Deliverable
       delivered: ____.
