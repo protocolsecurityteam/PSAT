@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -243,10 +243,30 @@ def _succeeding_set(
 # ---------------------------------------------------------------------------
 
 
+def _build_anvil_cmd(
+    anvil_bin: str,
+    port: int,
+    hardfork_name: str,
+    fork_url: str | None,
+    fork_headers: Mapping[str, str] | None,
+) -> list[str]:
+    cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
+    if fork_url is not None:
+        cmd += ["--fork-url", fork_url]
+        # eRPC (the production upstream) authenticates via a header, not the URL —
+        # without this the fork upstream is unauthenticated and every lazy
+        # getStorageAt/getCode fails. anvil applies each --fork-header to its fork
+        # RPC requests.
+        for key, value in (fork_headers or {}).items():
+            cmd += ["--fork-header", f"{key}: {value}"]
+    return cmd
+
+
 class SubprocessAnvil:
     """Real anvil transport: one subprocess, localhost JSON-RPC (loopback, so the
     netguard allows it). Non-forking by default (offline integration test); a
-    ``fork_url`` is accepted for the user's preview step but agents never pass one.
+    ``fork_url`` (+ optional ``fork_headers`` for an authenticated upstream like
+    eRPC) is accepted for the user's preview step but agents never pass one.
     """
 
     def __init__(
@@ -255,14 +275,13 @@ class SubprocessAnvil:
         port: int = 8546,
         hardfork_name: str = "prague",
         fork_url: str | None = None,
+        fork_headers: Mapping[str, str] | None = None,
         anvil_bin: str = "anvil",
         startup_timeout: float = 20.0,
     ) -> None:
         self._url = f"http://127.0.0.1:{port}"
         self._hardfork = hardfork_name
-        cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
-        if fork_url is not None:
-            cmd += ["--fork-url", fork_url]
+        cmd = _build_anvil_cmd(anvil_bin, port, hardfork_name, fork_url, fork_headers)
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:

@@ -14,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from services.effects.anvil import EntryPoint, SubprocessAnvil, anvil_available, assert_post_cancun, pause_recipe
+from services.effects.anvil import (
+    EntryPoint,
+    SubprocessAnvil,
+    _build_anvil_cmd,
+    anvil_available,
+    assert_post_cancun,
+    pause_recipe,
+)
 from services.effects.config import SCOPE_PROJECTION, TIER_FORK, VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
 from utils.rpc import EthCallResult
@@ -157,6 +164,23 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_blast_radius_observed"
+
+
+# ---------------------------------------------------------------------------
+# fork-header wiring — eRPC (and any authenticated upstream) needs a header, not
+# URL auth. Non-forking spawns carry no fork flags.
+# ---------------------------------------------------------------------------
+
+
+def test_build_anvil_cmd_nonforking_has_no_fork_flags():
+    cmd = _build_anvil_cmd("anvil", 8546, "prague", None, {"X-ERPC-Secret-Token": "s"})
+    assert "--fork-url" not in cmd and "--fork-header" not in cmd
+
+
+def test_build_anvil_cmd_forking_passes_auth_header():
+    cmd = _build_anvil_cmd("anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"})
+    assert cmd[cmd.index("--fork-url") + 1] == "https://erpc/main/evm/1"
+    assert cmd[cmd.index("--fork-header") + 1] == "X-ERPC-Secret-Token: sec"
 
 
 # ---------------------------------------------------------------------------
