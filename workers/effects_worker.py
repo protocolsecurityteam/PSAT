@@ -190,6 +190,7 @@ class _Counters:
     cache_misses: int = 0
     verdicts_written: int = 0
     discrepancies_filed: int = 0
+    new_idiom_candidates: int = 0
     upstream_requests: int = 0
     peak_anvil_rss_mb: int = 0
     skipped: int = 0
@@ -402,7 +403,7 @@ class EffectsWorker(BaseWorker):
         self._record_metrics(counters)
         logger.info(
             "Effects stage complete for job %s: %d candidates, %d verdicts, "
-            "%d hits (%dk/%dp), %d misses, %d discrepancies",
+            "%d hits (%dk/%dp), %d misses, %d discrepancies, %d new-idiom candidates",
             job.id,
             len(candidates),
             counters.verdicts_written,
@@ -411,6 +412,7 @@ class EffectsWorker(BaseWorker):
             counters.cache_hits_projection,
             counters.cache_misses,
             counters.discrepancies_filed,
+            counters.new_idiom_candidates,
             extra={"durations_ms": durations_ms},
         )
 
@@ -717,13 +719,16 @@ class EffectsWorker(BaseWorker):
             route_discrepancy(discrepancy, contract_address=cand.probe_target, selector=cand.selector, tier=tier)
             counters.discrepancies_filed += 1
         # Direction 2 (§9): a freshly-witnessed effect on a static-silent (blank)
-        # function is a candidate new static idiom. Only on a fresh probe (miss),
-        # not on cache reuse — the idiom was filed when first witnessed.
+        # function is a candidate new static idiom — an INFORMATIONAL vocabulary-
+        # growth signal, NOT a degradation (every proven verdict is one, so it
+        # would flood a healthy job's stage_errors). Counted separately as a
+        # benign metric; ``discrepancies_filed`` stays direction-1 only. Only on a
+        # fresh probe (miss), not on cache reuse — witnessed once, when first seen.
         if verdict == VERDICT_PROVEN and it.cached is None and it.probed is not None:
             eff = it.probed
             eff.transcript_ptr = eff.transcript_ptr or transcript_ptr
             file_new_idiom_candidate(eff, contract_address=cand.probe_target, selector=cand.selector)
-            counters.discrepancies_filed += 1
+            counters.new_idiom_candidates += 1
 
     def _record_metrics(self, counters: _Counters) -> None:
         record_stage_metric("candidates_in", counters.candidates_in)
@@ -733,6 +738,7 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("cache_misses", counters.cache_misses)
         record_stage_metric("verdicts_written", counters.verdicts_written)
         record_stage_metric("discrepancies_filed", counters.discrepancies_filed)
+        record_stage_metric("new_idiom_candidates", counters.new_idiom_candidates)
         record_stage_metric("upstream_requests", counters.upstream_requests)
         record_stage_metric("peak_anvil_rss_mb", counters.peak_anvil_rss_mb)
 

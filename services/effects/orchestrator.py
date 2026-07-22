@@ -162,8 +162,14 @@ def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) ->
 def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
     """§4.3 code-upgrade for proxy candidates: an indexed upgrade (Tier 0 history)
     discharges a present-tense capability claim only in conjunction with a
-    current-state check (inv. 13). The current check reads the statically-resolved
-    implementation (non-zero ⇒ still upgradeable) — a DB read, off the wire."""
+    current-state check (inv. 13). That check is a static/DB read (off the wire)
+    and, per inv. 13, requires the capability be present NOW — BOTH the impl slot
+    still non-zero AND a resolved, non-renounced upgrade authority. Freezing
+    upgradeability does not zero the impl slot, so impl-non-zero alone would mint a
+    false "upgradeable now" for a proxy whose authority was renounced; requiring a
+    resolved principal closes that. A renounced/unset authority resolves to the
+    zero address / empty set here (predicate_evaluator / solmate_roles), so an
+    empty resolved set WITHHOLDS (fail-closed §8), never over-claims."""
     plans: list[ProbePlan] = []
     contract = session.execute(
         select(Contract).where(Contract.id == candidate.contract_id).limit(1)
@@ -180,9 +186,15 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
     if not has_indexed_upgrade:
         return plans
 
+    zero = "0x" + "0" * 40
     impl = (contract.implementation or "").strip().lower()
-    current_impl_nonzero = bool(impl) and impl != "0x" + "0" * 40 and impl != "0x0"
-    principal = candidate.principal_addresses[0] if candidate.principal_addresses else None
+    current_impl_nonzero = bool(impl) and impl != zero and impl != "0x0"
+    # inv. 13 current-state check: a resolved, non-renounced upgrade authority must
+    # ALSO be present now. A renounced/unset authority is the zero address / empty
+    # set, so drop those before deciding the capability is live.
+    resolved_principals = [p for p in candidate.principal_addresses if p and p.strip().lower() != zero]
+    current_capability_present = current_impl_nonzero and len(resolved_principals) > 0
+    principal = resolved_principals[0] if resolved_principals else None
 
     def _run() -> ObservedEffect:
         return recipes.code_upgrade(
@@ -196,7 +208,7 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
             sentinel_override=None,
             impl_before=impl or None,
             indexed_upgrade=True,
-            current_impl_nonzero=current_impl_nonzero,
+            current_impl_nonzero=current_capability_present,
             gate_ref=_upgrade_gate_ref(contract),
         )
 

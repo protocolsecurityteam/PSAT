@@ -22,11 +22,24 @@ from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from db.models import Artifact, Job, JobStage, JobStatus  # noqa: E402
+from db.models import Artifact, EffectVerdict, Job, JobStage, JobStatus  # noqa: E402
 from db.queue import create_job  # noqa: E402
-from services.effects.config import effects_stage_enabled  # noqa: E402
+from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects_stage_enabled  # noqa: E402
 from services.effects.exceptions import ForkRpcTimeoutError  # noqa: E402
+from services.effects.harness import proven  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
+from tests.test_effects_worker_integration import (  # noqa: E402
+    CONTRACT_A,
+    CONTRACT_B,
+    CONTRACT_C,
+    _candidate,
+    _make_job,
+    _Prober,
+    _protocol_with_functions,
+    _run,
+    _seams,
+    clean_effects,  # noqa: F401  (imported so pytest registers the fixture here)
+)
 from tests.test_policy_worker_integration import (  # noqa: E402
     TARGET_ADDRESS,
     _graph_with_nodes,
@@ -254,3 +267,42 @@ def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_lo
     assert refreshed is not None
     assert refreshed.status != JobStatus.failed_terminal
     assert refreshed.stage == JobStage.coverage
+
+
+# ---------------------------------------------------------------------------
+# §9 direction 2 is a benign metric, not a degradation: a fully-HEALTHY run of
+# many proven verdicts files ZERO degraded discrepancies and reports the
+# idiom-candidate count as a metric instead.
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_healthy_multi_proven_run_files_no_degraded_discrepancies(clean_effects, monkeypatch):
+    """Selection returns only blank-claim functions, so every proven verdict is a
+    §9 direction-2 (static-silent / sim-positive) event. A healthy cold-cache run
+    of N such verdicts must NOT flood ``stage_errors`` with ``degraded`` entries —
+    ``discrepancies_filed`` stays 0 while ``new_idiom_candidates`` reflects N."""
+    session = clean_effects
+    addresses = [CONTRACT_A, CONTRACT_B, CONTRACT_C]
+    pid, fns = _protocol_with_functions(session, addresses)
+    job = _make_job(session, pid, "healthy-multi")
+
+    cands = [_candidate(addr, fns[addr]) for addr in addresses]
+    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: cands)
+
+    # Distinct kernel hashes → every candidate is a fresh cache miss, so each
+    # proven verdict is witnessed anew and files its idiom candidate.
+    hashes = {fns[addr]: (f"K{i}", f"S{i}") for i, addr in enumerate(addresses)}
+    prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, details={"supply_delta_sign": "mint"}))
+    worker = EffectsWorker(prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, job))
+    errors, metrics = _run(worker, session, job)
+
+    # All N verdicts proven and persisted.
+    proven_rows = session.query(EffectVerdict).filter(EffectVerdict.verdict == VERDICT_PROVEN).all()
+    assert len(proven_rows) == len(addresses)
+
+    # ZERO degraded stage_errors of any kind on a healthy run.
+    assert errors == []
+    # Direction-2 events are a benign metric, not discrepancies.
+    assert metrics["discrepancies_filed"] == 0
+    assert metrics["new_idiom_candidates"] == len(addresses)

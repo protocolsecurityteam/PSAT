@@ -36,6 +36,7 @@ PIPELINE_WORKERS: tuple[str, ...] = (
     "workers/resolution_worker.py",
     "workers/policy_worker.py",
     "workers/coverage_worker.py",
+    "workers/effects_worker.py",
 )
 
 # {file: {line_of_logger_call: reason}}
@@ -50,6 +51,13 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
         809: "Notifier side-effect; reanalysis already completed before this fired.",
+    },
+    "workers/effects_worker.py": {
+        # Fork-close cleanup: the anvil subprocess close failing is a resource
+        # side-effect (port/memory), not a degradation of the stage's verdict
+        # output. record_degraded would mislead /monitor into flagging a healthy
+        # job's effects stage as degraded.
+        322: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
 }
 

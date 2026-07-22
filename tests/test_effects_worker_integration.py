@@ -284,8 +284,10 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
 
     assert metrics["verdicts_written"] == 1
     assert metrics["cache_misses"] == 1
-    # static-silent/sim-positive ⇒ a new-idiom candidate was filed.
-    assert any(e.context and e.context.get("discrepancy_kind", "").startswith("static_silent") for e in errors)
+    # static-silent/sim-positive ⇒ a new-idiom candidate is a benign metric
+    # (INFO signal), NOT a degraded stage_error.
+    assert metrics["new_idiom_candidates"] == 1
+    assert not any(e.context and e.context.get("discrepancy_kind", "").startswith("static_silent") for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +539,7 @@ def test_section9_static_pos_sim_neg_routes_to_warning(clean_effects, monkeypatc
 
 
 @requires_postgres
-def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch):
+def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch, caplog):
     session = clean_effects
     pid, fns = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "idiom")
@@ -546,10 +548,26 @@ def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch):
 
     prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, details={"supply_delta_sign": "mint"}))
     worker = EffectsWorker(prober=prober, hash_resolver=lambda s, c: ("Ki", "Si"), seams=_seams(session, job))
-    errors, _metrics = _run(worker, session, job)
+    import logging
 
-    # Witness persisted (proven verdict) AND a new-idiom candidate filed.
+    with caplog.at_level(logging.INFO, logger="services.effects.discrepancies"):
+        errors, metrics = _run(worker, session, job)
+
+    # Witness persisted (proven verdict). Direction 2 is an INFORMATIONAL
+    # vocabulary-growth signal: it must NOT file a degraded stage_error, and it
+    # is counted as a benign ``new_idiom_candidates`` metric (not a discrepancy).
     assert session.query(EffectVerdict).one().verdict == VERDICT_PROVEN
-    idioms = [e for e in errors if e.context and e.context.get("discrepancy_kind", "").startswith("static_silent")]
-    assert len(idioms) == 1
-    assert "closing_rule" in idioms[0].context
+    degraded_idioms = [
+        e for e in errors if e.context and e.context.get("discrepancy_kind", "").startswith("static_silent")
+    ]
+    assert degraded_idioms == []
+    assert metrics["new_idiom_candidates"] == 1
+    assert metrics["discrepancies_filed"] == 0
+    # The candidate stays harvestable from logs, carrying the same context dict
+    # (incl. closing-rule bookkeeping) the degraded path used to record.
+    idiom_records = [r for r in caplog.records if getattr(r, "discrepancy_kind", "").startswith("static_silent")]
+    assert len(idiom_records) == 1
+    rec = idiom_records[0]
+    assert rec.levelno == logging.INFO
+    assert getattr(rec, "closing_rule", None)
+    assert getattr(rec, "effect_class", None) == EFFECT_CLASS_SUPPLY
