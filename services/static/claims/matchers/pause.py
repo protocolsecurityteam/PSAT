@@ -41,9 +41,22 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
         return None
 
     fn = _facts.contract_function(ctx, function)
+    gate_reads = _facts.mandatory_gate_reads(ctx)
+    namespaced = _facts.namespaced_write_vars(ctx, function)
     matched: list[dict[str, str | None]] = []
     for var, member in sorted(targets, key=lambda pair: (pair[0], pair[1] or "")):
-        polarity = _facts.toggle_polarity(fn, var, member) if fn is not None else "both"
+        # A namespaced latch is written through a local storage pointer, so the
+        # member the GUARD reads on this slot is the only handle on which flag
+        # the assignment touched.
+        aliases = frozenset(m for v, m in gate_reads if v == var and m) if member is None else frozenset()
+        polarity = _facts.toggle_polarity(fn, var, member, alias_members=aliases) if fn is not None else "both"
+        if var in namespaced and polarity == "both":
+            # An ERC-7201 slot holds the whole struct, so writing it proves
+            # nothing about a boolean latch on its own — `transferOwnership`
+            # writes the same slot the owner gate reads. Only a definite
+            # constant-bool toggle of a guard-read member is a pause; anything
+            # else fails closed.
+            continue
         if polarity in (want, "both"):
             matched.append({"var": var, "member": member})
     if not matched:

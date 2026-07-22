@@ -29,6 +29,8 @@ TOKEN = "0x0000000000000000000000000000000000000010"
 VAULT_HOOK = "0x0000000000000000000000000000000000000040"
 LZ_OAPP = "0x0000000000000000000000000000000000000050"
 WRAPPED_NATIVE = "0x000000000000000000000000000000000000dead"
+NAMESPACED_PAUSABLE = "0x0000000000000000000000000000000000000060"
+OZ_V5_NAMESPACED_OWNABLE = "0x0000000000000000000000000000000000000020"
 
 
 def _load(address: str) -> dict[str, list[Any]]:
@@ -62,6 +64,36 @@ def test_pause_standard_require_toggle():
     assert "pause.set" not in _ids(fns["unpause()"])
     # Counterexample: a non-toggle setter on the same contract carries no pause claim.
     assert not _ids(fns["mint(address,uint256)"]) & {"pause.set", "pause.unset"}
+
+
+def test_pause_namespaced_erc7201_latch():
+    """The flag lives in an ERC-7201 struct reached through assembly, so Plane 0
+    records a ``bytes32`` slot pseudo-variable, never a ``bool``. A bool-only
+    filter left every OZ-v5 / etherfi pauser unlabelled."""
+    fns = _load(NAMESPACED_PAUSABLE)
+    assert _one(fns["pause()"], "pause.set")
+    assert _one(fns["unpause()"], "pause.unset")
+    # Polarity survives the local storage pointer: the assignment names `$`, not
+    # the slot, so without the guard-read member alias both directions would fire.
+    assert "pause.unset" not in _ids(fns["pause()"])
+    assert "pause.set" not in _ids(fns["unpause()"])
+    # The guarded victim and the view are not pausers.
+    assert not _ids(fns["transfer(address,uint256)"]) & {"pause.set", "pause.unset"}
+    assert not _ids(fns["paused()"]) & {"pause.set", "pause.unset"}
+    # Counterexample: an unguarded sibling writing ordinary storage stays clean.
+    assert not _ids(fns["approveSelf(uint256)"]) & {"pause.set", "pause.unset"}
+
+
+def test_namespaced_authority_write_is_not_a_pause():
+    """A namespaced slot holds the WHOLE struct, so "writes a slot some gate
+    reads" is satisfied by an owner change against the owner gate. Only a
+    definite constant-bool toggle of a guard-read member is a pause; the OZ-v5
+    Ownable contract must stay pause-free."""
+    fns = _load(OZ_V5_NAMESPACED_OWNABLE)
+    for signature in ("transferOwnership(address)", "renounceOwnership()"):
+        assert not _ids(fns[signature]) & {"pause.set", "pause.unset"}, signature
+        # ...while its real claim is untouched.
+        assert _ids(fns[signature]) & {"ownership.transfer", "ownership.renounce"}
 
 
 # ---------------------------------------------------------------------------

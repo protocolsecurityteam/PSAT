@@ -91,6 +91,18 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/lz_oapp.sol",
     },
     {
+        # ERC-7201 namespaced pause latch (the etherfi Pausable.sol shape): the
+        # flag is written through an assembly storage pointer, so Plane 0 records
+        # a bytes32 slot pseudo-variable, not a bool state var. Pins that the
+        # pause family is recognized on namespaced storage, and that the
+        # unguarded sibling carries no pause claim.
+        "address": "0x0000000000000000000000000000000000000060",
+        "name": "NamespacedPausable",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/namespaced_pausable.sol",
+    },
+    {
         # WETH-shaped wrapped-native token: weth.* / erc20.* / supply.* / flow.out.
         "address": "0x000000000000000000000000000000000000dead",
         "name": "WrappedNative",
