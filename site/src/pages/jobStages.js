@@ -4,11 +4,15 @@
 // (PipelineDashboard) and the docked stage timeline (JobDetailPanel) so the
 // two surfaces never drift.
 
-// The CORE contract path — the 6-segment progress bar in the runs tables and
-// the synthesized PENDING rows in the timeline. dapp_crawl/defillama_scan are
+// The CORE contract path — the progress bar in the runs tables (segment count
+// auto-derives from CORE_STAGES.length; adding `effects` makes it 7) and the
+// synthesized PENDING rows in the timeline. dapp_crawl/defillama_scan are
 // company-discovery child stages (not on the per-contract path) and `done` is
-// terminal, so neither belongs here.
-export const CORE_STAGES = ["discovery", "selection", "static", "resolution", "policy", "coverage"];
+// terminal, so neither belongs here. `effects` is a flag-gated optional stage:
+// it lives in CORE for the bar/ordering, but the timeline renders it
+// presence-based (see JobDetailPanel) so a flag-off/historical job that never
+// entered it shows no eternal row.
+export const CORE_STAGES = ["discovery", "selection", "static", "resolution", "policy", "effects", "coverage"];
 
 // Full pipeline order, including the company-discovery children and `done`.
 // The stage timeline iterates server timings in THIS order, not alphabetical
@@ -21,6 +25,7 @@ export const JOB_STAGE_ORDER = [
   "static",
   "resolution",
   "policy",
+  "effects",
   "coverage",
   "done",
 ];
@@ -33,6 +38,7 @@ export const STAGE_COLORS = {
   static: "#d97706",
   resolution: "#2563eb",
   policy: "#7c3aed",
+  effects: "#c026d3",
   coverage: "#059669",
   done: "#16a34a",
 };
@@ -86,6 +92,17 @@ const METRIC_LABELS = {
   effective_functions: "functions",
   principals_labeled: "principals",
   enrolled: "enrolled",
+  // effects (behavioral simulation) — keys match record_stage_metric in
+  // workers/effects_worker.py
+  candidates_in: "candidates",
+  candidates_after_cascade: "after cascade",
+  cache_hits_kernel: "kernel hits",
+  cache_hits_projection: "projection hits",
+  cache_misses: "cache misses",
+  verdicts_written: "verdicts",
+  discrepancies_filed: "discrepancies",
+  upstream_requests: "rpc reqs",
+  peak_anvil_rss_mb: "anvil rss mb",
   // coverage
   coverage_rows: "coverage rows",
 };

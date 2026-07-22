@@ -1135,8 +1135,28 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       (no new migration). NO Phase-3 work done (no cache r/w, self-audit,
       persistence, §9 routing, monitor page — worker still inert). Commit: the
       single "Effects resolution Phase 2: …" commit (see `git log main..HEAD`).
-- [ ] Phase 3 — integration + review + gate. Commits: ____. Deliverable
-      delivered: ____.
+- [~] Phase 3 — integration + review + gate (2026-07-21). CODING DONE (one Opus
+      coder); REVIEW + final gate in progress. Landed: `effects_worker.process()`
+      fully wired (6 phases, injectable seams built lazily from job.request, zero-
+      candidate touches no wire); `db/effect_cache.py` (kernel keys on behavior
+      hash / projection additionally on contract_surface_hash, inv. 3;
+      pg_advisory_xact_lock coalesce) + `effect_verdicts` state-plane persistence;
+      §7 self-audit (first shared-hash pair; disagree ⇒ withhold + poison key);
+      `services/effects/discrepancies.py` §9 routing both directions via the
+      existing `record_degraded`/stage_errors warning channel + closing-rule
+      bookkeeping; `services/effects/orchestrator.py` (injectable `Prober` seam,
+      conservative `default_prober` = code-upgrade Tier-0 only — Tier-1/Tier-2
+      per-class calldata synthesis is the preview follow-up, recipes fail closed
+      on thin inputs); monitor-page: `effects` in CORE_STAGES/JOB_STAGE_ORDER/
+      STAGE_COLORS/METRIC_LABELS, presence-based timeline (no eternal not-reached
+      row), no visual-baseline change; `tests/test_effects_invariants.py` (§10
+      sweep 1–16) + cache/worker-integration tests. Coder-reported gates:
+      backend 4359 passed, frontend npm 412 + playwright 26e2e/4visual, ruff/
+      pyright/alembic-drift clean. DEVIATIONS (documented, review to adjudicate):
+      default_prober conservative; behavioral hash uses §7 item-2 bytecode
+      fallback (no cheap Slither IR); ProbeContext.block=0 (Tier-0-only inert).
+      REVIEW: Opus 4.8 @ xhigh (Fable unavailable — see amendment; RE-RUN with
+      real Fable on reset). Commits: ____. Deliverable delivered: ____.
 
 ## Agent structure
 
