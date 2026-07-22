@@ -948,6 +948,99 @@ Goal: wire it end-to-end behind the flag and prove the invariants.
 **Exit:** gate green, deliverable written, Progress log complete. Everything
 after this is the user's post-push preview cycle.
 
+### Phase 4 — recipe wiring: prober synthesis + `anvil_factory`, interleaved with live validation (added 2026-07-21)
+
+**Why this phase exists.** Phases 0–3 shipped the *substrate* (stage, cache,
+self-audit, persistence, monitor) and the *recipe library* (all five recipes +
+the Tier-1/Tier-2 transports), all offline-tested. But the production worker
+still classifies **only Tier-0 code-upgrade**: `default_prober`
+(`services/effects/orchestrator.py`) returns `[]` for every non-proxy-upgrade
+candidate, and `effects_worker.py` sets `anvil_factory=None`. So an ordinary
+flag-on run produces **no** pause / value-out / supply / authority verdicts —
+the recipes sit uncalled. This was the documented MAJOR-1 deferral: the missing
+piece is the **per-class calldata + entry-point synthesizer** (turn static facts
+— param types, taint, sinks, resolved principals — into concrete probe calls),
+plus turning `anvil_factory` on. It was deferred because it **cannot be validated
+offline** — only live chain/fork state proves whether synthesized args satisfy a
+real contract's non-pause preconditions (a live run on 2026-07-21 confirmed this:
+raw `transfer`/`mint` calls on eETH reverted on rate-limiters/balances; only a
+1-wei `transfer` from the WeETH holder succeeded, yielding the blast radius).
+
+**Development style: same as Phases 1–3.** Opus coders as subagents (pinned
+`opus`), orchestrator gate, per-phase offline suite green + committed, one PR on
+`feat/effects-resolution`, no push, Fable review substituted by Opus 4.8 @ xhigh
+until the limit resets (see 2026-07-21 amendment). Difference from the original
+build: this phase **interleaves offline coding with a small LIVE validation
+loop** run by the orchestrator (the coder builds offline-testable code; the
+orchestrator validates a handful of functions live, feeds failures back). This
+is a NEW budget beyond the original "four coders + one reviewer".
+
+**Scope — one Opus coder builds the offline-testable core:**
+1. **Per-class calldata synthesizer** (new `services/effects/calldata.py`, a PURE
+   function over static facts — offline-testable against recorded fixtures, no
+   wire): for a `Candidate` + its facts, emit the concrete probe inputs each
+   recipe needs. Uses the facts plane already present (`effects.py` sinks/
+   value_flows; `summaries.py:461/:498` `is_parameter` taint — Phase-0 finding),
+   ABI param types, and resolved `function_principals`.
+   - **4.2 value-out (Tier-1):** function calldata with valid default args; the
+     taint-identified address param filled with the attacker sentinel; principal
+     = resolved caller.
+   - **4.5 supply / 4.4 authority (Tier-1):** calldata to call F as the principal;
+     supply reads `totalSupply` pre/post; authority re-runs the who-can-call probe.
+   - **4.1 pause (Tier-2, the hard one):** pause selector; blast-radius entry
+     points = static's predicted `whenNotPaused`/guard set; for EACH entry point
+     synthesize calldata that SUCCEEDS pre-pause. Because real contracts gate
+     these on more than pause (rate limits, balances, blacklists, allowances),
+     the synthesizer must (a) pick valid args from param types/taint, and (b)
+     where a precondition needs state, set it up on the fork via anvil cheatcodes
+     (`anvil_setBalance`, `anvil_setStorageAt`) — a "fork fixture" helper. Read
+     `MAX_PAUSE_DURATION` from source (inv. 10). The observed blast radius is a
+     LOWER bound (§4.1); entry points that stay unwitnessed are fine — the scored
+     denominator remains static's set.
+2. **Wire `default_prober`** (or a new prober) to call the synthesizer and emit a
+   `ProbePlan` per applicable class for each candidate (not just Tier-0).
+3. **Turn on `anvil_factory`** in `effects_worker._make_seams`: build the fork
+   transport `SubprocessAnvil(fork_url=require_rpc_url(chain_id=cid),
+   fork_headers=rpc_headers(fork_url), hardfork_name=<per-chain>)` — **eRPC
+   must-dos (from the 2026-07-21 eRPC review):** source `fork_url` via
+   `require_rpc_url`/`erpc_url_for_chain_id` and `fork_headers` via
+   `rpc_headers(fork_url)` — NEVER hand-assemble the header dict (single source
+   of truth; a local/explicit fork URL correctly gets no secret). Single-flight
+   (inv. 16): one fork per run per chain, snapshot/revert between contracts.
+4. **Offline tests** for the synthesizer (recorded-fact fixtures → expected
+   calldata/entry-points; sentinel-in-right-slot; pause fork-fixture setup) and
+   for the prober emitting the right plans per class. The wire stays stubbed;
+   netguard untouched.
+
+**Live validation loop — ORCHESTRATOR ONLY, conservative RPC (the "few functions,
+tiny cost" rule):** After each offline-green iteration, the orchestrator validates
+against live state using the **eRPC in `.env`** (`require_rpc_url` + `rpc_headers`;
+`ERPC_SECRET` never printed), mirroring the 2026-07-21 run:
+- **A handful of functions only (≤~5), never a full run**; ONE forking anvil per
+  session, snapshot/revert reused; tiny amounts (1 wei) to slip under rate
+  limiters; impersonate the RESOLVED principal (`function_principals`) with
+  `anvil_setBalance`. Hand-verify each verdict against the real Solidity source
+  (pull from MinIO `source_files.storage_key`, bucket `ARTIFACT_STORAGE_BUCKET`).
+- **Known gotchas (measured):** `eth_getLogs` returns empty through this eRPC
+  endpoint — find holders via known wrappers (WeETH holds eETH) / `balanceOf`
+  probing, not logs. Verify the fork's method mix (`getStorageAt`/`getProof`/
+  `getCode`) actually routes through eRPC to a full-node upstream (hyperrpc
+  can't serve them) — if a fork silently fails, that's the eRPC-routing risk,
+  not the code. anvil bypasses the invariant-7 chain-id guard, so construct the
+  fork URL via `erpc_url_for_chain_id` at the source.
+- **Still-open (track, don't block):** spec §3 "distinct client tag" for cost
+  attribution is unimplemented (all traffic uses the `main` eRPC project
+  segment); note it for an eRPC-config follow-up.
+- A live-validated verdict that disagrees with source is a coder feedback item,
+  not a merge; loop until the handful classify correctly (kernel + blast radius +
+  auto-expiry for pause; shape for value-out; delta for supply).
+
+**Exit:** synthesizer + prober + `anvil_factory` landed; offline suite green on
+committed state; the small live-validation set (incl. ≥1 pause on a money
+contract) classifies correctly and is hand-verified against source; Progress log
+updated; the §3 client-tag + eRPC routing items recorded. Full-protocol runs and
+the sizing measurement remain the user's post-push preview cycle — NOT this phase.
+
 ### Resuming a partial run
 
 A fresh session picks up by: (1) reading the Progress log below; (2)
@@ -1171,6 +1264,18 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       by RUNNING (baseline sha256s match). Commits: Phase-3 code + review-fix
       commit (see `git log main..HEAD`). Deliverable delivered: yes (final
       report in-session).
+- [x] Post-P3 live validation (2026-07-21). Drove the shipped `pause_recipe`
+      against a LIVE mainnet fork via the eRPC in `.env`: pause KERNEL flips
+      `paused()` 0→1 as the resolved principal; blast radius + auto-expiry
+      (30-day time-warp) PROVEN on eETH; `eth_simulateV1` confirmed supported
+      through eRPC (inv. 14). Caught + fixed a real gap: `SubprocessAnvil` passed
+      no fork auth header, so a forking anvil could not authenticate to eRPC —
+      added `--fork-header` passthrough (commit `5ad9ed6`, eRPC-reviewed
+      FOLLOWS-CONVENTION). Confirmed the MAJOR-1 gap concretely: production wires
+      only Tier-0; the per-class calldata synthesis is real remaining work →
+      **Phase 4**.
+- [ ] Phase 4 — recipe wiring (prober synthesis + `anvil_factory`), interleaved
+      with live validation. See the Phase 4 section above. Commits: ____.
 
 ## Agent structure
 
