@@ -13,15 +13,24 @@ from typing import Any, Literal, TypedDict, get_args
 
 SCHEMA_VERSION = "claims/1"
 
-Tier = Literal["standard_exact", "idiom_structural", "policy_derived"]
+Tier = Literal["behavioral_observed", "standard_exact", "idiom_structural", "policy_derived"]
 TIERS: frozenset[str] = frozenset(get_args(Tier))
 
 # Provenance strength, strongest first. When two witnesses would assert the SAME
 # claim on one function, the registry's precedence rule keeps the strongest tier:
-# a standard proof supersedes a structural idiom, which supersedes a policy
-# derivation. Distinct claims (including sibling operations within a namespace)
-# are never collapsed — they are different sentences, not the same claim.
-TIER_PRECEDENCE: dict[str, int] = {"standard_exact": 3, "idiom_structural": 2, "policy_derived": 1}
+# a witnessed on-chain/forked state transition supersedes a standard proof, which
+# supersedes a structural idiom, which supersedes a policy derivation. Distinct
+# claims (including sibling operations within a namespace) are never collapsed —
+# they are different sentences, not the same claim. ``behavioral_observed`` is
+# the effects plane's provenance (EFFECTS_RESOLUTION_SPEC §5.2): a state
+# transition observed on real forked state is the strongest evidence an
+# existential claim can carry.
+TIER_PRECEDENCE: dict[str, int] = {
+    "behavioral_observed": 4,
+    "standard_exact": 3,
+    "idiom_structural": 2,
+    "policy_derived": 1,
+}
 
 # Which downstream decision family keys off a claim. ``fact`` marks a claim that
 # carries no semantic weight (present for provenance only); the others map onto

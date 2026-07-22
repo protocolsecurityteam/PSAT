@@ -8,10 +8,15 @@ The policy->effects transition is feature-flagged (``PSAT_EFFECTS_STAGE``,
 default-off, read in ``PolicyWorker.next_stage``); with the flag off no job ever
 enters this stage and the worker simply idles.
 
-**V1 is write-only (§3a).** Verdicts persist to ``effect_behavior_cache`` /
-``effect_verdicts`` and §9 discrepancies to the warning channel
-(``record_degraded``); nothing *reads* them yet. The only consumer surface this
-stage touches is the /monitor stage observability.
+**Consumption boundary (§3a amended by §5.2): labels-observable, scoring-
+deferred.** Verdicts persist to ``effect_behavior_cache`` / ``effect_verdicts``
+and §9 discrepancies to the warning channel (``record_degraded``). Beyond that,
+*proven* verdicts are minted into registry claims on the matching
+``effective_functions`` rows through ``services.effects.claims_bridge`` (call
+site 1, after ``verdict_write``), so the frontend renders them as labels through
+the one shared claims vocabulary. The **score** still does not consume verdicts
+(deferred to ``SCORING_INVARIANTS.md``); the frontend score path neutralises the
+``behavioral_observed`` tier so it stays byte-identical.
 
 Orchestration lives here; the per-candidate probe wiring is a ``Prober`` seam
 (``services.effects.orchestrator``) and every wire (simulate / call-batch / anvil
@@ -44,8 +49,9 @@ from db.effect_cache import (
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import EffectBehaviorCache, Job, JobStage
+from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, store_artifact
+from services.effects import claims_bridge
 from services.effects.config import (
     SCOPE_KERNEL,
     TIER_CALL,
@@ -384,10 +390,14 @@ class EffectsWorker(BaseWorker):
         # tier1_probes / tier2_fork → run recipes for misses + audit re-runs.
         self._run_probes(items, durations_ms, counters, seams)
 
-        # verdict_write → cache + state-plane persistence + §9 routing.
+        # verdict_write → cache + state-plane persistence + §9 routing, then mint
+        # proven verdicts into registry claims on the matching effective_functions
+        # rows (§5.2 call site 1) — same job, same rows, same phase span so the
+        # /monitor timeline gains no new stage.
         with log_timed_phase(logger, "verdict_write", durations_ms=durations_ms) as ph:
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
+            ph["labeled"] = self._bridge_claims(session, items)
 
         self._record_metrics(counters)
         logger.info(
@@ -585,6 +595,37 @@ class EffectsWorker(BaseWorker):
             )
             counters.verdicts_written += 1
             self._route_section9(it, verdict, tier, transcript_ptr, discrepancy, counters)
+
+    def _bridge_claims(self, session: Session, items: list[_Item]) -> int:
+        """§5.2 call site 1: fold this job's *proven* verdicts into registry claims
+        on the matching ``effective_functions`` rows. Reads the verdicts back from
+        the DB (authoritative — includes cache-hit proven verdicts, not only fresh
+        probes) and merges through the pure bridge. Fail-closed is the bridge's
+        job; this only touches rows that actually mint. Returns the row count
+        labeled."""
+        fn_ids = {it.candidate.function_id for it in items if it.candidate.function_id is not None}
+        if not fn_ids:
+            return 0
+        verdicts = (
+            session.query(EffectVerdict)
+            .filter(EffectVerdict.function_id.in_(fn_ids), EffectVerdict.verdict == VERDICT_PROVEN)
+            .all()
+        )
+        by_fn: dict[int, list[EffectVerdict]] = {}
+        for verdict in verdicts:
+            if verdict.function_id is not None:
+                by_fn.setdefault(verdict.function_id, []).append(verdict)
+        if not by_fn:
+            return 0
+        rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(by_fn)).all()
+        labeled = 0
+        for ef in rows:
+            merged = claims_bridge.merge_into_function(ef.claims, ef.effect_labels, by_fn.get(ef.id, ()))
+            if merged is None:
+                continue
+            ef.claims, ef.effect_labels = merged
+            labeled += 1
+        return labeled
 
     def _resolve_item(
         self, session: Session, it: _Item, counters: _Counters

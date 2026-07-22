@@ -236,6 +236,16 @@ exception is pipeline *observability*, which is operational rather than
 score consumption: the /monitor page must learn the new stage (stage
 registry + metric chips — Phase 3).
 
+> **Amended 2026-07-22 (Phase 5): the boundary moves from "write-only" to
+> "labels-observable, scoring-deferred".** The user decided blank labels on
+> the money functions must fill *in this branch*. Phase 5 (see its section
+> below) mints **claims** from *proven* verdicts through the existing static
+> claims registry — same vocabulary, same precedence rule, a new provenance
+> tier — so the frontend renders them with zero duplicated display logic.
+> Everything else in this paragraph stands: no `analysis_detail`/API shape
+> changes, and the **score** still must not consume verdicts until the
+> `SCORING_INVARIANTS.md` work designs that properly.
+
 ## 4. The five effect classes (v1)
 
 Each class is a **behavioral definition** (the observation *is* the label), a
@@ -1355,6 +1365,176 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       remain the user's post-push preview cycle. Commits: see
       `git log --oneline main..HEAD` (the single "Effects resolution Phase 4: …"
       commit).
+- [x] Phase 5 — enablement + observable labels (claims bridge) (2026-07-22). ONE
+      Opus coder. LANDED: (1) **Enablement** — `fly.toml [env]`
+      `PSAT_EFFECTS_STAGE = "1"` (the whole enablement diff; no workflow edits —
+      the worker already launches unconditionally, so the flag only arms the
+      policy→effects transition). (2) **The bridge** — `services/effects/
+      claims_bridge.py`, pure functions: a *proven* verdict → a registry claim at
+      the new `behavioral_observed` tier via `emit_claim`/`resolve_claim_precedence`
+      (never hand-built dicts), merged onto `EffectiveFunction.claims` with legacy
+      `effect_labels` re-projected additively (mirrors `project_effect_labels`).
+      New tier `behavioral_observed` (rank 4, above `standard_exact`) added to
+      `services/static/claims/types.py` `Tier`/`TIER_PRECEDENCE` and mirrored in
+      `site/src/claimsVocab.js` `TIER_RANK`/`TIER_LABEL` (display "observed").
+      **Mapping (honest, existing vocab first):** `code_upgrade →
+      upgrade.implementation`; `value_out → flow.out`; `supply → supply.mint /
+      supply.burn` by the recipe's `supply_delta_sign`; `freeze_pause → pause.set`
+      only (the pause recipe witnesses a freeze, never an unfreeze — `pause.unset`
+      stays static-only until an unfreeze recipe exists). **`authority_change` gets
+      a NEW registered claim `authority.grant`** ("lets a caller pass a permission
+      gate that previously rejected it"): the recipe proves a mechanism-agnostic
+      gate-open, for which none of `roles.grant` (recognized-standard role scheme) /
+      `authority.replace` (contract swap) / `authorized_caller.rotate` (scalar
+      rotation) is honest — registered like `transfer_policy.configure` (inert
+      static gate/trigger, minted only by the bridge; `legacy_projection=
+      authority_update`; corpus-exempt entry + `claimsVocab.js` sentence + JS
+      `EXPECTED_CLAIM_IDS`). **Fail-closed (§8):** only `verdict == proven` mints;
+      Tier-0 historical mints only when `current_check_passed is True`; witness is
+      a pointer (`effect_verdict_id`/`effect_class`/`behavior_hash`/`verdict_tier`
+      + tiny observed summary), never a transcript. `claims_bridge` calls
+      `matchers.discover()` at import so the effects worker's own process has the
+      full registry before emitting. (3) **Two call sites, one helper:**
+      `workers/effects_worker.py` folds this job's proven verdicts onto the rows
+      right after `verdict_write` (same phase span — no new /monitor stage);
+      `services/policy/effective_permissions_writer.py` captures the outgoing rows'
+      observed claims + surviving proven verdicts BEFORE the wholesale replace and
+      re-merges them onto the re-created rows, so a policy-only rewrite never blanks
+      observed labels. (4) **Score stays deferred (§3a amendment):**
+      `site/src/protocolScore.js` scores over a `scoreClaimsView` that strips
+      `behavioral_observed` claims and the labels they alone projected, so the score
+      is byte-identical with/without observed claims (parity asserted). §3a
+      "write-only" text amended in the worker + package docstrings.
+      TESTS: `tests/test_effects_claims_bridge.py` (mapping honesty per class,
+      both §8 fail-closed directions, idempotent double-merge, observed-supersedes-
+      static precedence, sibling-claim preservation, label re-projection, + DB
+      writer-regression for both the verdict-survives and verdict-cascaded paths +
+      claim-free byte-identity); `test_effects_worker_integration` end-to-end
+      extension (proven supply ⇒ row shows `supply.mint` + "mint"); frontend
+      `claimsVocab.test.js` (observed tier + `authority.grant`) + `protocolScore.
+      test.js` score-parity block (claimed / blank-money-function / name-fallback).
+      GATE: full offline suite green (**4423 passed, 0 failed, 44 xfailed**, 102
+      live deselected, netguard clean, fresh isolated DB), ruff check + format
+      clean (612 files), pyright 0 errors on repo files (the 4 remaining are the
+      pre-existing untracked `issue-fixes-111-122/` scratch dir), alembic `check`
+      clean (**no migration — the JSONB `claims` / ARRAY `effect_labels` columns
+      already exist**), frontend vitest 412 + playwright 26 e2e / 4 visual (NO
+      visual-baseline change — claimsVocab data + score logic only, no CSS).
+      DELIBERATELY NOT DONE: (a) **the score does not consume verdicts** — that is
+      the `SCORING_INVARIANTS.md` work, and the `scoreClaimsView` guard exists
+      precisely to keep it deferred; (b) `pause.unset` is never minted (no unfreeze
+      recipe witnesses it) — it remains a static-only claim; (c) `effect_verdicts`
+      keeps its `ON DELETE CASCADE` on `function_id` (no schema change), so a
+      policy replace deletes the verdict rows — the durable carrier across repeated
+      policy-only re-runs is the outgoing rows' observed *claims*, which call site 2
+      captures and re-merges; if repeated policy-only re-runs without an
+      intervening effects run ever prove a problem, `SET NULL` on that FK is the
+      clean follow-up (flagged, not taken). Commits: the single "Effects resolution
+      Phase 5: …" commit on `feat/effects-resolution` (see `git log main..HEAD`).
+
+## Phase 5 — enablement + observable labels (claims bridge). Added 2026-07-22
+
+Decided by the user after Phase 4: witnesses nobody can see don't fix the
+blank-row problem this branch exists for. Phase 5 (a) turns the stage on in
+deployed environments and (b) makes proven verdicts observable as labels —
+**by minting claims through the existing static claims registry**, not by
+building any parallel display path. Scoring consumption stays deferred
+(§3a amendment above).
+
+### 5.1 Enablement (config only — verified 2026-07-22)
+
+- `fly.toml` `[env]`: add `PSAT_EFFECTS_STAGE = "1"`. That is the whole
+  enablement diff. Verified: no GitHub workflow sets any `PSAT_EFFECTS_*`
+  var; preview deploys inherit `fly.toml`; all three `start_workers*.sh`
+  already launch `workers.effects_worker` unconditionally (comment at
+  `start_workers.sh:99` — flag can never park jobs); `PSAT_EFFECTS_FORK`
+  already defaults on (`workers/effects_worker.py:121`).
+- Do NOT touch `.github/workflows/*` for this.
+
+### 5.2 The bridge: proven verdicts mint claims (design is fixed, follow it)
+
+The seam is pre-plumbed; use it, don't invent one:
+
+- `EffectVerdict.function_id` already FKs to `effective_functions.id`
+  (`db/models.py:1473`). `EffectiveFunction` carries both `claims`
+  (plane-1 `{claim_id, tier, witness}` JSONB, `db/models.py:812`) and legacy
+  `effect_labels` (rendered by `site/src/surface/sidebar/InspectorCard.jsx:102`
+  via `effectLabels`). `site/src/claimsVocab.js` renders any claim whose
+  `claim_id` is in vocab, picking the strongest tier via `TIER_RANK`.
+- **New module `services/effects/claims_bridge.py`** — pure functions, no
+  I/O: map a *proven* verdict to a claim and merge claim lists.
+  - Claims are minted via `services/static/claims/registry.emit_claim` and
+    merged via `resolve_claim_precedence` — NEVER hand-built dicts (the
+    "unregistered id can't escape a matcher" invariant extends to this
+    bridge unchanged).
+  - **New tier `behavioral_observed`** added to the `Tier` literal
+    (`services/static/claims/types.py`) with `TIER_PRECEDENCE` rank 4 —
+    above `standard_exact`: a witnessed state transition on forked real
+    state is the strongest provenance for an existential claim. Mirror in
+    `claimsVocab.js` `TIER_RANK`/`TIER_LABEL` (display label: `observed`).
+  - **Mapping (effect_class → claim_id), existing vocabulary first:**
+    `code_upgrade → upgrade.implementation`; `value_out → flow.out`;
+    `supply → supply.mint` / `supply.burn` by observed sign;
+    `pause → pause.set` / `pause.unset` by the direction the verdict
+    actually witnessed. For `authority_change`, inspect what the witness
+    records and pick the honest existing id (`roles.grant`,
+    `roles.configure`, `authority.replace`, `authorized_caller.rotate`);
+    if none of those sentences is honest for what was proven, register a
+    new claim id properly (registry + `claimsVocab.js` sentence) rather
+    than stretching a wrong one — but prefer existing ids.
+  - **Fail-closed (§8 applies verbatim):** only `verdict == proven` mints.
+    `unknown`/degraded mint nothing. Tier-0 historical: mints ONLY when the
+    current-state check passed (`current_check_passed is True`); a failed
+    current check proves *past* capability and a present-tense label would
+    overclaim — no claim.
+  - **Claim witness = pointer, not payload:** `{effect_verdict_id,
+    effect_class, behavior_hash, verdict_tier}` plus a minimal observed
+    summary. Never embed transcripts into `EffectiveFunction.claims`.
+  - After merging claims, re-project legacy `effect_labels` with the
+    registry's `legacy_projections` so the legacy display path stays in
+    sync with the claims plane (same dual-write discipline the policy
+    writer uses).
+- **Two call sites, one helper:**
+  1. `workers/effects_worker.py` — after `verdict_write` (same job, same
+     rows), merge this job's proven verdicts into the matching
+     `EffectiveFunction` rows.
+  2. `services/policy/effective_permissions_writer.py` — at policy write
+     time, re-merge any existing proven `effect_verdicts` for the
+     deployment coordinates. Without this, any later policy-only re-run
+     silently strips observed labels back to blank — that regression is
+     the exact failure mode this branch exists to kill.
+- **Idempotency:** double-merge must be a no-op (`resolve_claim_precedence`
+  keys on claim_id + tier rank; verify with a test, don't assume).
+- **Scoring untouched:** `site/src/protocolScore.js` behavior must be
+  byte-identical for inputs with/without `behavioral_observed` claims
+  beyond what generic claim handling already does — no new score rules.
+  Add a parity assertion to the score tests.
+- Any existing test/text asserting the §3a "write-only" boundary must be
+  amended *deliberately* to the new statement ("consumption = registry-
+  mediated claims bridge, proven-only; scoring deferred") — never deleted.
+
+### 5.3 Tests (offline suite + frontend; no live, no migrations expected)
+
+- `tests/test_effects_claims_bridge.py`: mapping honesty per class;
+  fail-closed on `unknown` and on historical-with-failed-current-check;
+  idempotent double-merge; `behavioral_observed` supersedes a static claim
+  of the same id under precedence; legacy `effect_labels` re-projection
+  stays in sync.
+- Writer regression: policy rewrite of `EffectiveFunction` rows preserves
+  observed claims (call site 2).
+- `tests/test_effects_worker_integration.py` extension: end-to-end fake
+  proven verdict → row shows the claim + label.
+- Frontend vitest: `claimsVocab` renders the new tier; score parity.
+- No schema change anticipated (JSONB/ARRAY columns exist) — if one turns
+  out to be needed, stop and reconsider the design first.
+
+### 5.4 Gate
+
+Same CI-faithful gate checklist as every phase (full offline suite on fresh
+`psat_test`, ruff check + format, pyright, alembic check, frontend vitest +
+playwright). Commit on `feat/effects-resolution` (single-line message, no
+attribution trailers); NO push. Update the Progress log with a Phase 5
+entry in the established format, including anything deliberately not done.
 
 ## Agent structure
 
@@ -1365,6 +1545,8 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
   (1a, 1b, 2, 3 per the phasing). Pin the model EXPLICITLY to `opus` on every
   spawn — an unpinned spawn silently inherits the session model and is a
   defect. 1a/1b are the only parallel pair (file-disjoint by construction).
+  *Amended 2026-07-22:* Phase 5 adds ONE more Opus dispatch (enablement +
+  claims bridge, its section above); the final Fable review covers it.
 - **Review: ONE Fable-pinned reviewer** (see 2026-07-21 amendment above —
   while Fable is unavailable, run this reviewer as **Opus 4.8 at `xhigh`
   effort**, and re-run it with a real Fable reviewer once the limit resets),

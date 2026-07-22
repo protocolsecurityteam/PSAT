@@ -37,7 +37,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope
-from db.models import EffectiveFunction, FunctionPrincipal
+from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
+from services.effects import claims_bridge
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
@@ -113,6 +114,77 @@ def _column_values_for_capability(
     return out
 
 
+def _selector_key(selector: str | None) -> str:
+    return (selector or "").lower()
+
+
+def _capture_observed_before(
+    session: Session,
+    contract_id: int,
+    deployment_address: str | None,
+) -> dict[str, tuple[list[Any], list[Any]]]:
+    """§5.2 call site 2, capture phase. Read this deployment's *outgoing*
+    observed-effect state BEFORE the wholesale row replace deletes it, keyed by
+    selector, so the re-created rows can carry it forward.
+
+    Two sources, both durable and both about to be lost to the replace:
+
+    - ``behavioral_observed``-tier claims already on the outgoing rows (minted by
+      the effects stage). These are the durable carrier: ``effect_verdicts``
+      rows FK to ``effective_functions`` with ``ON DELETE CASCADE``, so the
+      replace deletes the verdicts too — without carrying the claims themselves,
+      any policy-only re-run (one that does not re-run effects) would blank the
+      observed labels, which is exactly the regression §5.2 exists to kill.
+    - Any still-present proven ``effect_verdicts`` for those rows, re-merged as
+      the authoritative source when they survive.
+
+    Returns ``{selector_key: (carried_observed_claims, proven_verdicts)}``.
+    """
+    # Older/stripped test metadata swaps in an EffectiveFunction model without the
+    # claims plane; nothing observed can exist there, so there is nothing to carry.
+    if not hasattr(EffectiveFunction, "claims"):
+        return {}
+    rows = (
+        session.query(EffectiveFunction.id, EffectiveFunction.selector, EffectiveFunction.claims)
+        .filter(
+            EffectiveFunction.contract_id == contract_id,
+            deployment_scope(EffectiveFunction.deployment_address, deployment_address),
+        )
+        .all()
+    )
+    if not rows:
+        return {}
+    observed_by_selector: dict[str, list[Any]] = {}
+    id_to_selector: dict[int, str] = {}
+    for row_id, selector, claims in rows:
+        key = _selector_key(selector)
+        id_to_selector[row_id] = key
+        for claim in claims or []:
+            if isinstance(claim, dict) and claim.get("tier") == claims_bridge.OBSERVED_TIER:
+                observed_by_selector.setdefault(key, []).append(claim)
+
+    verdicts_by_selector: dict[str, list[Any]] = {}
+    verdicts = (
+        session.query(EffectVerdict)
+        .filter(
+            EffectVerdict.function_id.in_(id_to_selector),
+            EffectVerdict.verdict == "proven",
+        )
+        .all()
+    )
+    for verdict in verdicts:
+        if verdict.function_id is None:
+            continue
+        key = id_to_selector.get(verdict.function_id)
+        if key is not None:
+            verdicts_by_selector.setdefault(key, []).append(verdict)
+
+    return {
+        key: (observed_by_selector.get(key, []), verdicts_by_selector.get(key, []))
+        for key in set(observed_by_selector) | set(verdicts_by_selector)
+    }
+
+
 def write_effective_function_rows(
     session: Session,
     *,
@@ -153,6 +225,10 @@ def write_effective_function_rows(
     Returns the number of FunctionPrincipal rows added.
     """
     capability_by_function = capability_by_function or {}
+
+    # §5.2 call site 2: snapshot the outgoing rows' observed-effect state before
+    # the replace destroys it, so the re-created rows carry it forward.
+    observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
     # Replace this deployment's effective_functions wholesale, sweeping any
     # legacy untagged (NULL) rows. FunctionPrincipal rows are removed by the
@@ -225,6 +301,17 @@ def write_effective_function_rows(
         ef = EffectiveFunction(**ef_kwargs)
         session.add(ef)
         session.flush()
+
+        # §5.2 call site 2, carry phase: fold the outgoing row's observed claims
+        # (and any surviving proven verdicts) back onto this re-created row so a
+        # policy-only rewrite never blanks observed labels. Only touches rows that
+        # had observed state — claim-free functions stay byte-identical.
+        carried = observed_before.get(_selector_key(ef.selector))
+        if carried:
+            carried_claims, proven_verdicts = carried
+            merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)
+            ef.claims = merged_claims
+            ef.effect_labels = claims_bridge.reproject_effect_labels(ef.effect_labels or [], merged_claims)
 
         # Semantic caller-shaped principals. ``ON CONFLICT DO NOTHING`` is
         # implemented at the (function_id, address, origin, principal_type)

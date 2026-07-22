@@ -268,6 +268,15 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     assert verdict.verdict == VERDICT_PROVEN
     assert verdict.behavior_hash == "kernel_hash_A"
 
+    # §5.2 call site 1: the proven verdict is minted onto the function row as an
+    # observable claim + legacy label (behavioral_observed tier). A mint supply
+    # delta ⇒ supply.mint / "mint".
+    ef_row = session.query(EffectiveFunction).filter(EffectiveFunction.id == fns[CONTRACT_A]).one()
+    observed = [c for c in (ef_row.claims or []) if c["tier"] == "behavioral_observed"]
+    assert [c["claim_id"] for c in observed] == ["supply.mint"]
+    assert observed[0]["witness"]["effect_verdict_id"] == verdict.id
+    assert "mint" in (ef_row.effect_labels or [])
+
     # Transcript artifact actually persisted and resolvable.
     _job_id, _, name = cache.transcript_ptr.partition("::")
     tr = get_artifact(session, job.id, name)
