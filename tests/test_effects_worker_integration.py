@@ -36,11 +36,13 @@ from db.models import (  # noqa: E402
 )
 from db.queue import create_job, get_artifact, store_artifact  # noqa: E402
 from services.effects.config import (  # noqa: E402
+    EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
     SCOPE_PROJECTION,
+    TIER_HISTORICAL,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
@@ -357,6 +359,61 @@ def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
     assert hits == 2
     # All three deployments got a state-plane verdict.
     assert session.query(EffectVerdict).count() == 3
+
+
+# ---------------------------------------------------------------------------
+# 3b. Tier-0 (historical) verdicts NEVER transfer across bytecode twins — each
+#     deployment's current-state check must run (inv. 13 / §7 state-plane).
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_tier0_historical_verdict_never_transfers_across_twins(clean_effects, monkeypatch):
+    """Three EIP-1967 proxies share a runtime-bytecode kernel hash but DIVERGE in
+    current state: A/B are upgraded with a non-zero impl (proven-now), C's impl is
+    currently zero (historical-only ⇒ unknown). A cached Tier-0 verdict would let
+    C free-hit A's ``proven`` "upgradeable now" though C's own current-state check
+    never ran. The fix: Tier-0 is never code-plane cached — so every twin probes
+    and each gets its OWN state-plane verdict; no EffectBehaviorCache row exists."""
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
+
+    # Same kernel hash (twin bytecode); C's current-state check fails.
+    hashes = {fns[CONTRACT_A]: ("KUP", "sA"), fns[CONTRACT_B]: ("KUP", "sB"), fns[CONTRACT_C]: ("KUP", "sC")}
+    upgraded = {fns[CONTRACT_A]: True, fns[CONTRACT_B]: True, fns[CONTRACT_C]: False}
+
+    def factory(c, ctx):
+        if upgraded[c.function_id]:
+            return proven(
+                EFFECT_CLASS_CODE_UPGRADE,
+                tier=TIER_HISTORICAL,
+                reason="indexed_upgrade_plus_current_state",
+                details={"upgradeable": True},
+                concrete={"current_check_passed": True},
+            )
+        return unknown(
+            EFFECT_CLASS_CODE_UPGRADE,
+            tier=TIER_HISTORICAL,
+            reason="historical_only_current_check_failed",
+            concrete={"current_check_passed": False},
+        )
+
+    prober = _Prober(factory, effect_class=EFFECT_CLASS_CODE_UPGRADE, gate_ref="proxy:transparent")
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+
+    # Every twin re-probed (no free transfer); nothing landed in the code-plane cache.
+    assert set(prober.runs) == set(fns.values())
+    assert session.query(EffectBehaviorCache).count() == 0
+
+    # Each deployment's state-plane verdict reflects its OWN current-state check.
+    verdicts = {v.function_id: v for v in session.query(EffectVerdict).all()}
+    assert verdicts[fns[CONTRACT_A]].verdict == VERDICT_PROVEN
+    assert verdicts[fns[CONTRACT_B]].verdict == VERDICT_PROVEN
+    assert verdicts[fns[CONTRACT_C]].verdict == VERDICT_UNKNOWN
 
 
 # ---------------------------------------------------------------------------

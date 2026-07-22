@@ -49,6 +49,7 @@ from db.queue import advance_job, store_artifact
 from services.effects.config import (
     SCOPE_KERNEL,
     TIER_CALL,
+    TIER_HISTORICAL,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
@@ -90,7 +91,18 @@ _CACHEABLE_UNKNOWN_REASONS = frozenset(
 
 def _is_cacheable(eff: ObservedEffect) -> bool:
     """Whether a verdict may transfer on the behavioral hash. Proven verdicts
-    always; unknowns only when the non-observation is code-plane structural."""
+    that are code-plane structural transfer; unknowns only when the
+    non-observation is code-plane structural.
+
+    Tier-0 (historical) verdicts NEVER transfer, even when proven: their truth
+    depends on per-deployment state (the indexed upgrade *and* the current-state
+    check, inv. 13), so they are state-plane and live only in ``effect_verdicts``
+    (§7 "state-determined → never cached"). Caching one would let a present-tense
+    "upgradeable now" mint for a bytecode twin whose own current-state check was
+    never run — EIP-1967 proxies of the same type share runtime bytecode, so the
+    kernel hash collides across many real twins."""
+    if eff.tier == TIER_HISTORICAL:
+        return False
     if eff.verdict == VERDICT_PROVEN:
         return True
     return eff.reason in _CACHEABLE_UNKNOWN_REASONS

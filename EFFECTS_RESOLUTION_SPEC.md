@@ -1155,8 +1155,22 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       pyright/alembic-drift clean. DEVIATIONS (documented, review to adjudicate):
       default_prober conservative; behavioral hash uses §7 item-2 bytecode
       fallback (no cheap Slither IR); ProbeContext.block=0 (Tier-0-only inert).
-      REVIEW: Opus 4.8 @ xhigh (Fable unavailable — see amendment; RE-RUN with
-      real Fable on reset). Commits: ____. Deliverable delivered: ____.
+      REVIEW DONE: Opus 4.8 @ max-rigor (Fable unavailable — Agent tool has no
+      effort param, so xhigh could not be set literally; RE-RUN with real Fable
+      on reset per amendment). Found 1 CRITICAL (Tier-0 historical code-upgrade
+      verdict was code-plane cached and would transfer across bytecode twins
+      without each deployment's current-state check — inv. 13 / §7 violation)
+      → FIXED: `_is_cacheable` now excludes `TIER_HISTORICAL` (Tier-0 is state-
+      plane, lives only in `effect_verdicts`) + added state-divergent-twin
+      regression test. 2 MAJORs are DISCLOSURES not blockers: (M1) production
+      wires ONLY Tier-0 code-upgrade — pause/value-out/authority/supply + Tier-2
+      are tested-but-dormant library code, so Appendix B pause witnesses arrive
+      only with the preview Tier-1/2 calldata-synthesis follow-up; (M2) pause
+      recipe bundles kernel into the projection verdict (no kernel transfer
+      across the 11 sharers) — moot in V1, follow-up. Flag-off parity re-verified
+      by RUNNING (baseline sha256s match). Commits: Phase-3 code + review-fix
+      commit (see `git log main..HEAD`). Deliverable delivered: yes (final
+      report in-session).
 
 ## Agent structure
 
