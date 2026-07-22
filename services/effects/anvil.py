@@ -46,17 +46,36 @@ POST_CANCUN_HARDFORKS = frozenset({"cancun", "prague", "osaka"})
 
 
 @dataclass(frozen=True)
+class ForkFixture:
+    """One piece of fork state a probe needs before it can be meaningful — a
+    funded caller, a storage slot holding a precondition. Applied INSIDE the
+    recipe's snapshot so it is reverted with everything else.
+
+    ``kind`` is ``set_balance`` (``address``/``value``) or ``set_storage_at``
+    (``address``/``slot``/``value``). An unknown kind is ignored, never guessed."""
+
+    kind: str
+    address: str
+    value: str
+    slot: str | None = None
+
+
+@dataclass(frozen=True)
 class EntryPoint:
     """One state-changing entry point to probe for the blast-radius diff.
 
     ``key`` is a stable identity (selector or ``name`` — never used to CLASSIFY,
     only to label which points reverted); ``calldata`` + ``from_addr`` are the
-    probe call. ``to`` defaults to the recipe's contract when ``None``."""
+    probe call. ``to`` defaults to the recipe's contract when ``None``.
+    ``fixtures`` is the fork state THIS probe needs to be able to succeed
+    pre-pause (gas for its caller, a balance/allowance slot); carried per entry
+    point so it stays inspectable and tunable, applied once with the rest."""
 
     key: str
     calldata: str
     from_addr: str | None = None
     to: str | None = None
+    fixtures: tuple["ForkFixture", ...] = ()
 
 
 class AnvilTransport(Protocol):
@@ -83,6 +102,10 @@ class AnvilTransport(Protocol):
 
     def mine(self) -> None: ...
 
+    def set_balance(self, address: str, value: str) -> None: ...
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None: ...
+
 
 def assert_post_cancun(transport: AnvilTransport) -> str:
     """Assert the fork's hardfork carries post-Cancun semantics and return it for
@@ -108,6 +131,7 @@ def pause_recipe(
     predicted_guard_set: Sequence[str],
     max_pause_duration: int | None,
     gate_ref: str = "",
+    fixtures: Sequence[ForkFixture] = (),
 ) -> ObservedEffect:
     """§4.1 freeze/pause: snapshot → record the pre-pause SUCCEEDING entry-point
     set → impersonate principal + call F → re-probe → the newly-reverting set is
@@ -132,6 +156,11 @@ def pause_recipe(
 
     snap = transport.snapshot()
     try:
+        # Fixtures go inside the snapshot and before the pre-pause probe: an entry
+        # point that reverts for an unfunded caller / unmet precondition would
+        # silently shrink the observed blast radius (which the diff treats as
+        # "pause did not freeze it").
+        _apply_fixtures(transport, [*fixtures, *(fx for ep in entry_points for fx in ep.fixtures)], tr)
         pre_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "pre_pause")
 
         transport.impersonate(principal)
@@ -146,6 +175,12 @@ def pause_recipe(
 
         auto_expiry: bool | None = None
         if max_pause_duration is not None and observed_blast:
+            # The caller passes the latch's declared MAXIMUM. The live window is
+            # whatever the contract's own duration state (or its MIN fallback)
+            # says, which is always ≤ that maximum — so warping past the max is a
+            # sound over-warp, and a latch that has NOT expired by then is
+            # genuinely indefinite. An indefinite latch passes ``None`` and is
+            # never warped at all.
             transport.increase_time(max_pause_duration + 1)
             transport.mine()
             expiry_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "post_expiry")
@@ -214,6 +249,28 @@ def pause_recipe(
     )
     eff.discrepancy = disc
     return emit(store, eff)
+
+
+def _apply_fixtures(transport: AnvilTransport, fixtures: Sequence[ForkFixture], transcript: dict[str, Any]) -> None:
+    """Apply the fork-state fixtures, recording each in the transcript so a replay
+    reproduces the same starting state. A cheatcode that fails is recorded and
+    skipped — a missing fixture can only shrink the observed radius (a lower
+    bound), never manufacture one."""
+    applied: list[dict[str, Any]] = []
+    for fx in fixtures:
+        entry: dict[str, Any] = {"kind": fx.kind, "address": fx.address, "slot": fx.slot, "value": fx.value}
+        try:
+            if fx.kind == "set_balance":
+                transport.set_balance(fx.address, fx.value)
+            elif fx.kind == "set_storage_at" and fx.slot is not None:
+                transport.set_storage_at(fx.address, fx.slot, fx.value)
+            else:
+                entry["skipped"] = "unknown_kind"
+        except Exception as exc:  # noqa: BLE001 - recorded, never fatal
+            entry["error"] = str(exc)
+        applied.append(entry)
+    if applied:
+        transcript["fixtures"] = applied
 
 
 def _succeeding_set(
@@ -359,6 +416,12 @@ class SubprocessAnvil:
 
     def accounts(self) -> list[str]:
         return list(self._rpc("eth_accounts", []))
+
+    def set_balance(self, address: str, value: str) -> None:
+        self._rpc("anvil_setBalance", [address, value])
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None:
+        self._rpc("anvil_setStorageAt", [address, slot, value])
 
     def increase_time(self, seconds: int) -> None:
         self._rpc("evm_increaseTime", [hex(seconds)])

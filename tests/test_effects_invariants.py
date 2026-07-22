@@ -348,6 +348,12 @@ def test_inv10_duration_bound_from_source_constant():
             self._paused = True
             return "0xhash"
 
+        def set_balance(self, address, value):
+            pass
+
+        def set_storage_at(self, address, slot, value):
+            pass
+
     src_read_duration = 4242  # a duration READ from the contract's source constant
     eff = anvil.pause_recipe(
         transport=_T(),

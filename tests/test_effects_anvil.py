@@ -61,6 +61,8 @@ class StubAnvil:
         self._n = 0
         self.impersonated: list[str] = []
         self.log: list[str] = []
+        self.balances: dict[str, str] = {}
+        self.storage: dict[tuple[str, str], str] = {}
 
     def hardfork(self) -> str:
         return self._hf
@@ -102,6 +104,12 @@ class StubAnvil:
 
     def mine(self) -> None:
         pass
+
+    def set_balance(self, address: str, value: str) -> None:
+        self.balances[address.lower()] = value
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None:
+        self.storage[(address.lower(), slot.lower())] = value
 
 
 GUARDED = "0xc2985578"  # foo()

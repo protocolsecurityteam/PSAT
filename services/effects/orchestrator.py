@@ -13,14 +13,16 @@ injected seams and returns a tiered, transcripted
 behavioral hash — the worker stamps that from the candidate's resolved hashes so
 kernel/projection cache scoping (inv. 3) lives in one place.
 
-The default prober is deliberately conservative: it drives the one effect class
-fully derivable from data the worker already holds — **code-upgrade** (Tier 0
-indexed history + a current-state check, §4.3/inv. 13) — for proxy candidates.
-The remaining classes need ABI-driven calldata / entry-point synthesis from the
-effects-facts + predicate-tree artifacts; that derivation is the preview
-follow-up (V1 is write-only, validated by the Appendix B preview cycle). Every
-recipe fails closed on thin inputs, so a conservative prober is sound, never
-wrong.
+The default prober drives **code-upgrade** (Tier 0 indexed history + a
+current-state check, §4.3/inv. 13) for proxy candidates, plus every class whose
+concrete probe inputs :mod:`services.effects.calldata` can synthesize from the
+static facts — value-out (§4.2), supply (§4.5), authority-change (§4.4) at Tier
+1, and freeze/pause (§4.1) at Tier 2 when a fork transport is available.
+
+Where the synthesizer returns nothing the prober emits NO plan for that class:
+the recipes already fail closed on thin inputs, but a probe on guessed calldata
+burns a simulation to learn nothing. So the plan set is exactly the set of
+classes with real inputs, and everything else stays ``unknown``.
 """
 
 from __future__ import annotations
@@ -33,13 +35,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, UpgradeEvent
+from services.effects import calldata as calldata_synth
 from services.effects import recipes
-from services.effects.anvil import AnvilTransport
+from services.effects.anvil import AnvilTransport, pause_recipe
 from services.effects.config import (
+    EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
+    EFFECT_CLASS_FREEZE_PAUSE,
+    EFFECT_CLASS_SUPPLY,
+    EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
+    SCOPE_PROJECTION,
 )
-from services.effects.harness import CallBatch, ObservedEffect, SimContext, TranscriptStore
+from services.effects.harness import (
+    CallBatch,
+    ObservedEffect,
+    SimContext,
+    TranscriptStore,
+    select_identities,
+)
 from services.effects.selection import Candidate
 from services.effects.simulate import Simulate
 
@@ -140,14 +154,16 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
 
 
 def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
-    """Build probe plans for one candidate.
+    """Build probe plans for one candidate: the Tier-0 code-upgrade plan plus one
+    plan per class the synthesizer produced concrete inputs for."""
+    return _code_upgrade_plans(session, candidate, ctx) + _synthesized_plans(session, candidate, ctx)
 
-    v1 drives the code-upgrade class for proxy candidates: an indexed upgrade
-    (Tier 0 history) discharges a present-tense capability claim only in
-    conjunction with a current-state check (inv. 13). The current check reads the
-    statically-resolved implementation (non-zero ⇒ still upgradeable) — a DB read,
-    keeping this off the wire. The other classes await ABI-driven calldata
-    synthesis (documented preview follow-up)."""
+
+def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
+    """§4.3 code-upgrade for proxy candidates: an indexed upgrade (Tier 0 history)
+    discharges a present-tense capability claim only in conjunction with a
+    current-state check (inv. 13). The current check reads the statically-resolved
+    implementation (non-zero ⇒ still upgradeable) — a DB read, off the wire."""
     plans: list[ProbePlan] = []
     contract = session.execute(
         select(Contract).where(Contract.id == candidate.contract_id).limit(1)
@@ -173,7 +189,7 @@ def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) ->
             simulate=ctx.simulate,
             store=ctx.transcript_store,
             ctx=ctx.sim_context(),
-            proxy_address=candidate.contract_address,
+            proxy_address=candidate.probe_target,
             principal=principal,
             upgrade_calldata="0x",
             sentinel_address="0x" + "ee" * 20,
@@ -199,6 +215,110 @@ def _upgrade_gate_ref(contract: Contract) -> str:
     """A gate-STRUCTURE descriptor (inv. 12) — the proxy pattern, never the admin
     address. Principal binding happens at read time via ``function_principals``."""
     return f"proxy:{(contract.proxy_type or 'unknown').lower()}"
+
+
+# ---------------------------------------------------------------------------
+# Synthesized plans — §4.2 / §4.4 / §4.5 (Tier 1) and §4.1 (Tier 2)
+# ---------------------------------------------------------------------------
+
+
+def _synthesized_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
+    """One plan per class the synthesizer produced inputs for. A class with thin
+    facts yields no plan at all rather than a probe on guessed calldata."""
+    inputs = calldata_synth.synthesize(session, candidate)
+    plans: list[ProbePlan] = []
+    if inputs.value_out is not None:
+        plans.append(_value_out_plan(ctx, inputs.value_out))
+    if inputs.supply is not None:
+        plans.append(_supply_plan(ctx, inputs.supply))
+    if inputs.authority is not None:
+        plans.append(_authority_plan(ctx, candidate, inputs.authority))
+    # Tier 2 needs the fork; with no anvil factory the pause class stays unknown
+    # rather than degrading into a Tier-1 approximation that cannot see sequencing.
+    if inputs.pause is not None and ctx.anvil_factory is not None:
+        plans.append(_pause_plan(ctx, inputs.pause))
+    return plans
+
+
+def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) -> ProbePlan:
+    def _run() -> ObservedEffect:
+        return recipes.value_out(
+            simulate=ctx.simulate,
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            calldata=spec.calldata,
+            simulate_supported=ctx.simulate_supported,
+            taint_param_reaches_sink=spec.taint_param_reaches_sink,
+            sentinel_address=spec.sentinel_address,
+            sentinel_calldata=spec.sentinel_calldata,
+            gate_ref=spec.gate_ref,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> ProbePlan:
+    def _run() -> ObservedEffect:
+        return recipes.supply(
+            simulate=ctx.simulate,
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            token_address=spec.token_address,
+            principal=spec.principal,
+            mint_calldata=spec.mint_calldata,
+            simulate_supported=ctx.simulate_supported,
+            taint_param_reaches_sink=spec.taint_param_reaches_sink,
+            sentinel_address=spec.sentinel_address,
+            sentinel_calldata=spec.sentinel_calldata,
+            gate_ref=spec.gate_ref,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _authority_plan(ctx: ProbeContext, candidate: Candidate, spec: calldata_synth.AuthorityPlanInputs) -> ProbePlan:
+    # Randoms are derived deterministically from (selector, contract) exactly as
+    # the differential probe derives them, so a replay reuses the same identities.
+    randoms, _ = select_identities(candidate.selector or "0x00000000", spec.contract_address, principal=spec.principal)
+
+    def _run() -> ObservedEffect:
+        return recipes.authority_change(
+            simulate=ctx.simulate,
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            mutate_calldata=spec.mutate_calldata,
+            probe_calldata=spec.probe_calldata,
+            randoms=randoms,
+            gate_ref=spec.gate_ref,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_AUTHORITY_CHANGE, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> ProbePlan:
+    def _run() -> ObservedEffect:
+        factory = ctx.anvil_factory
+        if factory is None:  # pragma: no cover - guarded at plan time
+            raise RuntimeError("pause plan requires an anvil factory")
+        return pause_recipe(
+            transport=factory(),
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            pause_calldata=spec.pause_calldata,
+            entry_points=spec.entry_points,
+            predicted_guard_set=spec.predicted_guard_set,
+            max_pause_duration=spec.max_pause_duration,
+            gate_ref=spec.gate_ref,
+            fixtures=spec.fixtures,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_FREEZE_PAUSE, scope=SCOPE_PROJECTION, run=_run, gate_ref=spec.gate_ref)
 
 
 # ---------------------------------------------------------------------------

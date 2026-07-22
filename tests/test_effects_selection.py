@@ -58,6 +58,7 @@ def _fn(
     effect_targets: list[str] | None = None,
     claims=None,
     authority_public: bool = False,
+    deployment_address: str | None = None,
 ) -> EffectiveFunction:
     f = EffectiveFunction(
         contract_id=contract_id,
@@ -66,6 +67,7 @@ def _fn(
         effect_targets=effect_targets,
         claims=claims,
         authority_public=authority_public,
+        deployment_address=deployment_address,
     )
     session.add(f)
     session.flush()
@@ -335,3 +337,34 @@ def test_appendix_a_funnel_on_dev_db():
         cands = select_candidates(s, 1)
         # Appendix A: blank (no claim) + facts + gated == 265.
         assert len(cands) == 265
+
+
+# ---------------------------------------------------------------------------
+# Probe target (proxy vs implementation)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_target_is_the_deployment_not_the_implementation(db_session):
+    """A proxy-backed function must be PROBED at its deployment: the
+    implementation holds none of the state the probes read, so probing it yields
+    quietly-wrong witnesses (an empty totalSupply, a virgin pause latch). Hashing
+    deliberately stays on the code-bearing address."""
+    proto = _protocol(db_session, "probe-target")
+    impl = _contract(db_session, proto.id, ADDR(0x7001))
+    _fn(
+        db_session,
+        impl.id,
+        name="pause",
+        selector="0x8456cb59",
+        effect_targets=["paused"],
+        deployment_address=ADDR(0x7002),
+    )
+    _fn(db_session, impl.id, name="sweep", selector="0xdeadbeef", effect_targets=["bal"])
+    db_session.commit()
+
+    by_name = {c.function_name: c for c in select_candidates(db_session, proto.id)}
+    proxied = by_name["pause"]
+    assert proxied.contract_address == ADDR(0x7001).lower()
+    assert proxied.probe_target == ADDR(0x7002).lower()
+    # No deployment recorded ⇒ the code-bearing address is the probe target.
+    assert by_name["sweep"].probe_target == ADDR(0x7001).lower()

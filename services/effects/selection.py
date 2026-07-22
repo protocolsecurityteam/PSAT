@@ -56,6 +56,8 @@ class Candidate:
 
     function_id: int
     contract_id: int
+    # The CODE-bearing address (``contracts.address``) — for a proxy-backed
+    # protocol this is the implementation. Behavioral hashing keys on it.
     contract_address: str
     selector: str | None
     function_name: str
@@ -65,6 +67,18 @@ class Candidate:
     # Transitive USD an exercise of this function can reach through the control
     # graph. Upper bound; orders only (inv. 4/5).
     value_at_stake_usd: float = 0.0
+    # ``effective_functions.deployment_address`` — the address that actually holds
+    # the state. Empty when the row predates it / is not proxy-backed.
+    deployment_address: str = ""
+
+    @property
+    def probe_target(self) -> str:
+        """The address every PROBE must call. An implementation contract has
+        empty storage of its own (an uninitialized ``totalSupply``, a virgin
+        pause latch, empty role sets), so probing it mints silently-wrong
+        witnesses; only the deployment answers for behavior. Hashing deliberately
+        stays on ``contract_address`` — the behavior belongs to the code."""
+        return self.deployment_address or self.contract_address
 
 
 @dataclass
@@ -184,6 +198,7 @@ def _cascade_rows(session: Session, protocol_id: int):
             EffectiveFunction.function_name,
             EffectiveFunction.authority_public,
             EffectiveFunction.effect_targets,
+            EffectiveFunction.deployment_address,
         )
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .where(
@@ -230,7 +245,7 @@ def select_candidates(
     graph = build_authority_graph(session, protocol_id)
 
     candidates: list[Candidate] = []
-    for fid, contract_id, address, selector, name, public, targets in rows:
+    for fid, contract_id, address, selector, name, public, targets, deployment in rows:
         addr = _addr(address) or ""
         prins = principals.get(fid, [])
         seeds = {addr, *prins}
@@ -245,6 +260,7 @@ def select_candidates(
                 effect_targets=tuple(targets or ()),
                 principal_addresses=tuple(prins),
                 value_at_stake_usd=graph.reachable_value(seeds),
+                deployment_address=_addr(deployment) or "",
             )
         )
 

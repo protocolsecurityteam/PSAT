@@ -114,6 +114,20 @@ def _is_cacheable(eff: ObservedEffect) -> bool:
 _CHAIN_HARDFORK = {1: "prague", 8453: "prague"}
 
 
+def _fork_enabled() -> bool:
+    """Tier-2 fork kill switch. Default ON in production — the stage itself is
+    already behind ``PSAT_EFFECTS_STAGE`` (default off), so this exists to disable
+    forking alone (a host without foundry, an incident) without losing Tier 0/1."""
+    return os.getenv("PSAT_EFFECTS_FORK", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _anvil_port() -> int:
+    try:
+        return int(os.getenv("PSAT_EFFECTS_ANVIL_PORT", "8546"))
+    except ValueError:
+        return 8546
+
+
 def _resource_cap() -> int | None:
     """Hard safety-valve only (inv. 4) — value never gates. Unset ⇒ no cap; every
     distinct behavior is simulated. When set and exceeded, ``select_candidates``
@@ -139,6 +153,9 @@ class _Seams:
     chain_id: int
     call_batch: Any = None
     anvil_factory: Any = None
+    # ``() -> int | None`` — the chain head, pinned once at preflight so every
+    # Tier-1 probe simulates at the same real block. ``None`` (tests) ⇒ no wire.
+    block_number: Any = None
 
 
 @dataclass
@@ -190,6 +207,10 @@ class EffectsWorker(BaseWorker):
         self._injected_hash_resolver = hash_resolver
         self._injected_seams = seams
         self._capability_store: CapabilityStore = capability_store or InMemoryCapabilityStore()
+        # Single-flight fork state (inv. 16): one anvil per job, memoized on first
+        # Tier-2 plan and closed in ``process()``'s finally.
+        self._anvil: Any = None
+        self._anvil_error: Exception | None = None
 
     # -- seam construction (lazy; real I/O only here) ----------------------
 
@@ -218,14 +239,80 @@ class EffectsWorker(BaseWorker):
         def call_batch(calls, block_tag="latest"):
             return eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
 
+        def block_number() -> int | None:
+            from utils.rpc import rpc_request
+
+            result = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
+            if isinstance(result, str):
+                return int(result, 16)
+            return int(result) if isinstance(result, int) else None
+
         return _Seams(
             simulate=simulate,
             transcript_store=self._make_transcript_store(session, job),
             capability_store=self._capability_store,
             chain_id=chain_id,
             call_batch=call_batch,
-            anvil_factory=None,  # Tier-2 fork is the user's preview step; agents never spawn one.
+            anvil_factory=self._anvil_factory(chain_id, rpc_url),
+            block_number=block_number,
         )
+
+    def _anvil_factory(self, chain_id: int, rpc_url: str):
+        """Single-flight forking-anvil factory (inv. 16): ONE fork per job per
+        chain, created lazily on the first Tier-2 plan and memoized. Returns
+        ``None`` when the fork is disabled, which makes the pause class emit no
+        plan at all.
+
+        Never reached from the offline suite — tests inject ``seams=``, and
+        ``PSAT_EFFECTS_FORK`` is a belt-and-braces kill switch on top of that (the
+        stage's own ``PSAT_EFFECTS_STAGE`` flag already gates every job out).
+
+        A spawn failure is memoized and re-raised per plan: ``_probe_one`` catches
+        it, records degraded, and the behavior lands ``unknown``
+        (``AnvilSpawnError`` is a transient kind in ``retry_policy``), so a fork
+        that will not start degrades the stage instead of crashing it."""
+        if not _fork_enabled():
+            return None
+        from services.effects.anvil import SubprocessAnvil
+        from services.effects.exceptions import AnvilSpawnError
+        from utils.rpc import rpc_headers
+
+        hardfork = _CHAIN_HARDFORK.get(chain_id, "prague")
+
+        def factory():
+            if self._anvil_error is not None:
+                raise self._anvil_error
+            if self._anvil is not None:
+                return self._anvil
+            try:
+                # rpc_headers is the single source of truth for eRPC auth — a local
+                # or explicit fork URL correctly gets no secret.
+                self._anvil = SubprocessAnvil(
+                    port=_anvil_port(),
+                    hardfork_name=hardfork,
+                    fork_url=rpc_url,
+                    fork_headers=rpc_headers(rpc_url),
+                )
+            except Exception as exc:
+                self._anvil_error = exc if isinstance(exc, AnvilSpawnError) else AnvilSpawnError(str(exc))
+                raise self._anvil_error from exc
+            logger.info("effects fork ready: chain_id=%s hardfork=%s", chain_id, hardfork)
+            return self._anvil
+
+        return factory
+
+    def _close_anvil(self) -> None:
+        """Always run — an anvil subprocess outliving the job would hold the port
+        and the fork's memory for every subsequent job."""
+        anvil = self._anvil
+        self._anvil = None
+        self._anvil_error = None
+        if anvil is None:
+            return
+        try:
+            anvil.close()
+        except Exception:
+            logger.warning("effects fork close failed", exc_info=True)
 
     def _make_transcript_store(self, session: Session, job: Job):
         """Persist each transcript as a job artifact (§8.5) and return a stable,
@@ -247,6 +334,13 @@ class EffectsWorker(BaseWorker):
     # -- main entry --------------------------------------------------------
 
     def process(self, session: Session, job: Job) -> None:
+        try:
+            self._process(session, job)
+        finally:
+            # Never leak a fork subprocess, on any exit path (inv. 16).
+            self._close_anvil()
+
+    def _process(self, session: Session, job: Job) -> None:
         logger.info(
             "Effects stage started for job %s address=%s name=%s",
             job.id,
@@ -279,8 +373,8 @@ class EffectsWorker(BaseWorker):
 
         seams = self._make_seams(session, job)
         hash_resolver = self._hash_resolver(seams.chain_id)
-        supported = self._preflight(seams, durations_ms)
-        ctx = self._probe_context(seams, supported, counters)
+        supported, block = self._preflight(seams, durations_ms)
+        ctx = self._probe_context(seams, supported, block, counters)
 
         # cache_lookup → build the worklist, partition hits/misses/audits.
         with log_timed_phase(logger, "cache_lookup", durations_ms=durations_ms) as ph:
@@ -321,7 +415,11 @@ class EffectsWorker(BaseWorker):
             return []
         return select_candidates(session, protocol_id, resource_cap=_resource_cap())
 
-    def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> bool:
+    def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> tuple[bool, int]:
+        """Capability probe + the ONE ``eth_blockNumber`` that pins every Tier-1
+        simulation to the same real block. Without a pinned block a recipe would
+        simulate at genesis, so an unpinnable head disables Tier 1 (the classes
+        then declare their Tier-2 fallback) rather than probing a wrong state."""
         with log_timed_phase(logger, "preflight", durations_ms=durations_ms) as ph:
             try:
                 supported = probe_simulate_support(seams.simulate, seams.chain_id, seams.capability_store)
@@ -331,10 +429,28 @@ class EffectsWorker(BaseWorker):
                 # stage over a capability probe.
                 record_degraded(phase="effects_preflight", exc=exc, context={"chain_id": seams.chain_id})
                 supported = False
+            block = 0
+            if seams.block_number is not None:
+                try:
+                    head = seams.block_number()
+                    block = int(head) if isinstance(head, int) and head > 0 else 0
+                except Exception as exc:
+                    record_degraded(phase="effects_block_pin", exc=exc, context={"chain_id": seams.chain_id})
+                if supported and block <= 0:
+                    # The seam exists and could not pin a head: Tier 1 is off
+                    # rather than simulating at genesis. (No seam at all is a
+                    # test/stub bundle — nothing block-tagged is issued there.)
+                    record_degraded(
+                        phase="effects_block_pin",
+                        exc=RuntimeError("no pinned block for Tier-1 simulation"),
+                        context={"chain_id": seams.chain_id},
+                    )
+                    supported = False
             ph["simulate_supported"] = supported
-        return supported
+            ph["block"] = block
+        return supported, block
 
-    def _probe_context(self, seams: _Seams, supported: bool, counters: _Counters) -> ProbeContext:
+    def _probe_context(self, seams: _Seams, supported: bool, block: int, counters: _Counters) -> ProbeContext:
         try:
             hardfork = _CHAIN_HARDFORK.get(seams.chain_id) or chain_by_id(seams.chain_id).name
         except UnknownChainError:
@@ -345,13 +461,7 @@ class EffectsWorker(BaseWorker):
 
         return ProbeContext(
             chain_id=seams.chain_id,
-            # Placeholder block. The v1 default prober is Tier-0 code-upgrade only
-            # and never calls the block-tagged simulate path, so 0 is inert here.
-            # A future Tier-1 prober MUST pin the real latest block into this field
-            # (one eth_blockNumber at preflight) before issuing eth_simulateV1 —
-            # otherwise a recipe would simulate at genesis. Tracked as the Tier-1
-            # wiring follow-up.
-            block=0,
+            block=block,
             hardfork=hardfork,
             simulate=seams.simulate,
             simulate_supported=supported,
@@ -457,7 +567,11 @@ class EffectsWorker(BaseWorker):
             record_effect_verdict(
                 session,
                 chain_id=seams.chain_id,
-                contract_address=cand.contract_address,
+                # The address whose behavior was actually observed (the
+                # deployment for a proxy-backed function) — the state-plane
+                # identity. The code-plane cache key stays on the behavioral
+                # hash, which is derived from the code-bearing address.
+                contract_address=cand.probe_target,
                 selector=cand.selector,
                 effect_class=it.effect_class,
                 function_id=cand.function_id,
@@ -559,7 +673,7 @@ class EffectsWorker(BaseWorker):
         if discrepancy is not None:
             if discrepancy.transcript_ptr is None:
                 discrepancy.transcript_ptr = transcript_ptr
-            route_discrepancy(discrepancy, contract_address=cand.contract_address, selector=cand.selector, tier=tier)
+            route_discrepancy(discrepancy, contract_address=cand.probe_target, selector=cand.selector, tier=tier)
             counters.discrepancies_filed += 1
         # Direction 2 (§9): a freshly-witnessed effect on a static-silent (blank)
         # function is a candidate new static idiom. Only on a fresh probe (miss),
@@ -567,7 +681,7 @@ class EffectsWorker(BaseWorker):
         if verdict == VERDICT_PROVEN and it.cached is None and it.probed is not None:
             eff = it.probed
             eff.transcript_ptr = eff.transcript_ptr or transcript_ptr
-            file_new_idiom_candidate(eff, contract_address=cand.contract_address, selector=cand.selector)
+            file_new_idiom_candidate(eff, contract_address=cand.probe_target, selector=cand.selector)
             counters.discrepancies_filed += 1
 
     def _record_metrics(self, counters: _Counters) -> None:

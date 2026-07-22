@@ -1030,7 +1030,24 @@ against live state using the **eRPC in `.env`** (`require_rpc_url` + `rpc_header
   fork URL via `erpc_url_for_chain_id` at the source.
 - **Still-open (track, don't block):** spec §3 "distinct client tag" for cost
   attribution is unimplemented (all traffic uses the `main` eRPC project
-  segment); note it for an eRPC-config follow-up.
+  segment); note it for an eRPC-config follow-up. **Status after Phase 4
+  (2026-07-21): still unimplemented, and now load-bearing for the §3 sizing
+  measurement** — the fork URL is built by `erpc_url_for_chain_id(chain_id)`,
+  which hardcodes the `/main/evm/<id>` segment, so anvil's lazy
+  `getStorageAt`/`getCode` traffic is indistinguishable from pipeline reads in
+  eRPC's per-project accounting. Sizing (post-push checklist item 5) can
+  therefore only be read from the stage's own `upstream_requests` counter, not
+  from eRPC. Fix is an eRPC-config + `erpc_url_for_chain_id` change (a
+  `client_tag`/segment parameter), deliberately NOT bundled into Phase 4.
+- **eRPC fork routing: VERIFIED WORKING (2026-07-21).** A forking anvil against
+  `erpc_url_for_chain_id(1)` + `rpc_headers(fork_url)` authenticates and serves
+  the full lazy-fetch method mix; `evm_snapshot`/`evm_revert`,
+  `anvil_impersonateAccount`, `anvil_setBalance`, and `evm_increaseTime` all
+  work through it, and the fork reports `prague`. `eth_simulateV1` is ALSO
+  supported through eRPC on chain 1 and correctly carries state across calls in
+  one block, so inv. 14's preflight answers "supported" on mainnet and the Tier-2
+  fallback stays unexercised there. The measured `eth_getLogs`-returns-empty
+  gotcha is unchanged — do not build holder discovery on logs.
 - A live-validated verdict that disagrees with source is a coder feedback item,
   not a merge; loop until the handful classify correctly (kernel + blast radius +
   auto-expiry for pause; shape for value-out; delta for supply).
@@ -1274,8 +1291,70 @@ precedents: `e7a4f1d63b29`, `ccfe335ed565`, `f1a2b3c4d5e6`. New tables need mode
       FOLLOWS-CONVENTION). Confirmed the MAJOR-1 gap concretely: production wires
       only Tier-0; the per-class calldata synthesis is real remaining work →
       **Phase 4**.
-- [ ] Phase 4 — recipe wiring (prober synthesis + `anvil_factory`), interleaved
-      with live validation. See the Phase 4 section above. Commits: ____.
+- [x] Phase 4 — recipe wiring (prober synthesis + `anvil_factory`), interleaved
+      with live validation (2026-07-21). ONE Opus coder + orchestrator live loop.
+      LANDED: `services/effects/calldata.py` (pure per-class synthesizer over
+      static facts — reuses `differential_probe`'s encoder, reads the `effects` /
+      `predicate_trees` / `contract_analysis` artifacts via
+      `find_analysis_job_for_address`, per-latch `MAX_PAUSE_DURATION` from source
+      per inv. 10, `ForkFixture` per entry point); `default_prober` now emits a
+      plan per applicable class (Tier-0 code-upgrade path unchanged);
+      `anvil_factory` ON in `effects_worker._make_seams` — single-flight, one fork
+      per job, `fork_url` via `require_rpc_url` + `fork_headers` via
+      `rpc_headers` (never hand-assembled), closed in a `finally`, kill switch
+      `PSAT_EFFECTS_FORK`; the hardcoded `ProbeContext.block=0` TODO is gone (one
+      `eth_blockNumber` at preflight; unpinnable head ⇒ Tier 1 off, not genesis).
+      **THREE REAL BUGS found by the live loop and fixed:** (1) selection probed
+      `contracts.address` — the IMPLEMENTATION — so every recipe ran against empty
+      storage (WeETH impl `totalSupply()`=0 vs proxy 1.6M; LiquidityPool
+      `withdraw` reverts on the impl, succeeds on the proxy). `Candidate` gained
+      `deployment_address` + `probe_target`; hashing deliberately stays on the
+      code-bearing address, verdict rows follow the probed address. (2) guard-set
+      derivation must match on the state-variable NAME — the write fact records
+      `member_path=[]` while the read operand records `["paused"]`, so a strict
+      pair match returned an EMPTY guard set for every ERC-7201 latch. (3)
+      `_latch_pairs`/`_normal_state_pairs` must require `origin == "body"`: a
+      guard-origin entry is the latch being READ by that function's own modifier,
+      so every `whenNotPaused` VICTIM was being treated as a pauser — 141 Tier-2
+      fork plans (~1692 entry-point probes) instead of 98 on the real candidate
+      set, for functions that definitionally cannot flip the latch.
+      **LIVE VALIDATION (eRPC-forked anvil 1.5.1-stable, prague, ≤5 functions,
+      1-wei amounts), hand-verified against `Pausable.sol`/`PausableUntil.sol`
+      pulled from MinIO:** eETH (money contract) `pause()` ⇒ `proven/tier2/
+      projection`, `latch_flip`, observed blast radius `{mintShares, transfer}`,
+      `auto_expiry: null` + `duration_bound: null` (correct — the indefinite
+      latch has no bound); `pauseUntil()` ⇒ same radius, **`auto_expiry: true`,
+      `duration_bound: 2592000`** (30 days read from source, over-warping the live
+      8h window). Both ran on plans generated by the shipped synthesizer, no hand
+      editing. `transferFrom` stays invisible (allowance revert) — the documented
+      §4.1 LOWER BOUND, not a gap; `burnShares` likewise drops out because the
+      synthesizer aims the burn at the caller, which holds no shares (deliberately
+      NOT "fixed" with a guessed storage slot).
+      **FINDING — value-out and supply yield ZERO plans on etherfi, and this is
+      §6.2 working as designed, not a bug:** all 265 candidates carry no
+      value-flow direction, because every value-moving function
+      (`withdraw(address,uint256)`, `requestWithdraw`, `transferLockedEthForPriority`,
+      `addEthAmountLockedForWithdrawal`, `requestMembershipNFTWithdraw`) already
+      carries a `flow.out` CLAIM and the cascade selects blank-claim functions
+      only. The fact plumbing is sound (those functions do carry
+      `{"direction":"out","from_is_self":true,"origin":"body"}`). Consequence for
+      the preview run: **this phase's yield on etherfi is pause (98 plans) +
+      authority (40), not all five classes.** Recorded in the module docstring.
+      GATE: full offline suite green on committed state (**4401 passed, 0 failed,
+      44 xfailed**, netguard clean, fresh `psat_test`), ruff check + format clean,
+      pyright 0 errors on repo files (the 4 remaining are in the untracked
+      `issue-fixes-111-122/` scratch dir), alembic `upgrade head` + `check` clean
+      (no new migration — Phase 4 is code-only), frontend vitest 412 passed +
+      playwright 26 e2e / 4 visual (no `site/` diff this phase).
+      NOT DONE / deliberate: no `anvil_setStorageAt` fixture is ever generated
+      (deriving an allowance/balance slot statically is a guess — the plumbing and
+      tests exist, the generator does not); `check_trees` is not read, so an
+      `unsupported` leaf can never manufacture a guard; the authority mutation
+      keeps encoder defaults (no guessed grantee), so grant-style functions
+      realistically stay `unknown`. Full-protocol runs + the §3 sizing measurement
+      remain the user's post-push preview cycle. Commits: see
+      `git log --oneline main..HEAD` (the single "Effects resolution Phase 4: …"
+      commit).
 
 ## Agent structure
 
