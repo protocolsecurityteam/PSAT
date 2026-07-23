@@ -300,6 +300,110 @@ def test_section8_rule8_scored_denominator_is_static_not_observed():
 
 
 # ---------------------------------------------------------------------------
+# Read-back-verified storage fixtures (_apply_fixtures)
+# ---------------------------------------------------------------------------
+
+
+class VerifyStub(StubAnvil):
+    """Scripted transport for the verified-application path: ``call`` returns a
+    fixed word (or raises), and reverts are recorded. Inherits the full
+    :class:`AnvilTransport` surface from :class:`StubAnvil`."""
+
+    def __init__(self, *, echo: str = "0x", raise_on_call: bool = False) -> None:
+        super().__init__(guarded=set(), pause_calldata="0x", duration=None)
+        self.echo = echo
+        self.raise_on_call = raise_on_call
+        self.snaps: list[str] = []
+        self.reverted: list[str] = []
+
+    def snapshot(self) -> str:
+        sid = super().snapshot()
+        self.snaps.append(sid)
+        return sid
+
+    def revert(self, snapshot_id: str) -> bool:
+        self.reverted.append(snapshot_id)
+        return super().revert(snapshot_id)
+
+    def call(self, tx: dict) -> EthCallResult:
+        if self.raise_on_call:
+            raise RuntimeError("node error")
+        return EthCallResult(True, self.echo, None, None)
+
+
+def _verified_fixture(value: str):
+    from services.effects.anvil import ForkFixture
+
+    return ForkFixture(
+        kind="set_storage_at",
+        address=CONTRACT,
+        value=value,
+        slot="0x5",
+        verify_to=CONTRACT,
+        verify_calldata="0xabcdefff",
+        verify_expected=value,
+    )
+
+
+def test_verified_fixture_kept_when_getter_echoes():
+    from services.effects.anvil import _apply_fixtures
+
+    word = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo=word)
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(word)], tr)
+    assert transport.storage[(CONTRACT, "0x5")] == word  # write kept
+    assert transport.reverted == []  # inner snapshot NOT reverted
+    assert tr["fixtures"][0]["readback"] == "ok"
+
+
+def test_verified_fixture_dropped_when_getter_returns_wrong_word():
+    from services.effects.anvil import _apply_fixtures
+
+    seed = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo="0x" + "00" * 31 + "01")  # wrong word
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
+    # The inner snapshot is reverted with its own id, undoing the write.
+    assert transport.reverted == transport.snaps
+    assert tr["fixtures"][0]["readback"] == "failed"
+
+
+def test_verified_fixture_dropped_when_readback_call_raises():
+    from services.effects.anvil import _apply_fixtures
+
+    seed = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(raise_on_call=True)
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
+    assert transport.reverted == transport.snaps
+    assert tr["fixtures"][0]["readback"] == "failed"
+    assert "error" in tr["fixtures"][0]
+
+
+def test_verified_fixtures_are_applied_after_plain_ones():
+    from services.effects.anvil import ForkFixture, _apply_fixtures
+
+    word = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo=word)
+    plain = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x64")
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(word), plain], tr)
+    # Order in the transcript: plain first, then the verified storage write.
+    assert [f["kind"] for f in tr["fixtures"]] == ["set_balance", "set_storage_at"]
+    assert transport.balances == {PRINCIPAL: "0x64"}
+
+
+def test_forkfixture_backward_compatible_defaults():
+    from services.effects.anvil import ForkFixture, _has_verify_spec
+
+    fx = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x1")
+    assert fx.verify_to is None and fx.verify_calldata is None and fx.verify_expected is None
+    assert _has_verify_spec(fx) is False
+    assert _has_verify_spec(_verified_fixture("0x" + "00" * 32)) is True
+
+
+# ---------------------------------------------------------------------------
 # Localhost NON-FORKING anvil integration — GATED behind availability
 # ---------------------------------------------------------------------------
 

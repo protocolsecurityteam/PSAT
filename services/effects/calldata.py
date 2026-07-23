@@ -77,6 +77,13 @@ ARG_AMOUNT = 1
 # never masquerade as a pause revert.
 FIXTURE_BALANCE_WEI = 10**19
 
+# Token balance / allowance / shares seeded into a prober's slot so a
+# balance/allowance precondition can never make an entry point revert pre-pause
+# (which the diff would misread as "the pause froze it"). A clean power of two far
+# above ARG_AMOUNT (the 1-unit transfer/mint amount) so amount args always clear
+# the check, and far below 2**256 so a ``balance + amount`` path cannot overflow.
+SEED_AMOUNT = 2**128
+
 # Upper sanity bound for a pause duration read out of a guard constant: a value
 # above this is not a freeze window (it is a chain-id, an amount, a role hash).
 _MAX_PLAUSIBLE_DURATION_S = 365 * 24 * 3600
@@ -176,6 +183,11 @@ class ContractFacts:
     # contract_analysis semantic value_flows (the shape carrying ``is_parameter``).
     legacy_value_flows: Mapping[str, list[dict[str, Any]]] = field(default_factory=dict)
     by_selector: Mapping[str, str] = field(default_factory=dict)
+    # effects artifact ``token_slots.entries`` — mapping base slots (balance,
+    # allowance, shares, owner) the pause recipe seeds so a token precondition
+    # cannot hide an entry point from the blast-radius diff. ABSENT on older
+    # artifacts, in which case seeding is skipped and behavior is unchanged.
+    token_slots: tuple[Mapping[str, Any], ...] = ()
 
     def canonical_signature(self, full_name: str) -> str:
         return self.canonical_signatures.get(full_name) or _abi_signature(full_name)
@@ -243,6 +255,10 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
     analysis = get_artifact(session, job_id, "contract_analysis")
     legacy_flows = _legacy_value_flow_map(analysis)
 
+    raw_slots = effects_art.get("token_slots") if isinstance(effects_art, dict) else None
+    slot_entries = raw_slots.get("entries") if isinstance(raw_slots, dict) else None
+    token_slots = tuple(e for e in slot_entries if isinstance(e, dict)) if isinstance(slot_entries, list) else ()
+
     by_selector: dict[str, str] = {}
     for full_name, info in functions.items():
         if not isinstance(info, dict):
@@ -265,6 +281,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         canonical_signatures=canonical,
         legacy_value_flows=legacy_flows,
         by_selector=by_selector,
+        token_slots=token_slots,
     )
 
 
@@ -851,6 +868,112 @@ def _entry_point_for(facts: ContractFacts, name: str, principals: Mapping[str, s
     return EntryPoint(key=name, calldata=calldata, from_addr=caller, fixtures=fixtures)
 
 
+# ---------------------------------------------------------------------------
+# Token-precondition seeding (§4.1 blast-radius honesty)
+# ---------------------------------------------------------------------------
+
+
+def _word_hex(value: int) -> str:
+    """A 32-byte big-endian EVM word as ``0x`` + 64 hex."""
+    return "0x" + format(value & (2**256 - 1), "064x")
+
+
+def _mapping_entry_slot(base_slot: str, keys: Sequence[int]) -> str | None:
+    """Storage slot of a (possibly nested) mapping entry, folding keys OUTERMOST
+    first: ``m[k1][k2] = keccak(pad32(k2) ++ keccak(pad32(k1) ++ base))``. ``keys``
+    is ``[k1, k2, ...]`` in declaration order. ``None`` when ``base_slot`` is not a
+    parseable ≤32-byte word."""
+    try:
+        raw = base_slot[2:] if base_slot.lower().startswith("0x") else base_slot
+        slot = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    if len(slot) > 32:
+        return None
+    slot = slot.rjust(32, b"\x00")
+    for key in keys:
+        slot = keccak(key.to_bytes(32, "big") + slot)
+    return "0x" + slot.hex()
+
+
+def _seed_fixture_for_role(entry: Mapping[str, Any], caller: str, target: str) -> ForkFixture | None:
+    """One read-back-verified storage fixture seeding ``caller``'s precondition for
+    a single token_slots ``entry`` on ``target`` (the state-bearing deployment).
+    ``None`` on any malformed field or role/kind mismatch — a dropped seed only
+    shrinks the observed lower bound, never manufactures a witness."""
+    role = entry.get("role")
+    key_kind = entry.get("key_kind")
+    base_slot = entry.get("base_slot")
+    getter = entry.get("getter")
+    if not isinstance(base_slot, str) or not isinstance(getter, str):
+        logger.debug("effects calldata: token_slots entry missing base_slot/getter: %r", entry)
+        return None
+    getter_selector = _selector_of(getter)
+    if getter_selector is None:
+        logger.debug("effects calldata: token_slots getter not a canonical signature: %r", getter)
+        return None
+
+    caller = caller.lower()
+    try:
+        caller_key = int(caller, 16)
+    except ValueError:
+        logger.debug("effects calldata: token_slots caller not an address: %r", caller)
+        return None
+
+    # The synthesizer substitutes identity=caller for every address arg and
+    # ARG_AMOUNT for every uint arg (see ``_arg_values``), so in a probe an
+    # allowance is m[owner=caller][spender=caller] and a uint-keyed owner mapping
+    # is read at tokenId == ARG_AMOUNT — the seeds MUST match those exact keys.
+    if role in ("balance", "shares") and key_kind == "address":
+        keys, subs, value = [caller_key], {0: caller}, _word_hex(SEED_AMOUNT)
+    elif role == "allowance" and key_kind == "address_address":
+        keys, subs, value = [caller_key, caller_key], {0: caller, 1: caller}, _word_hex(SEED_AMOUNT)
+    elif role == "owner" and key_kind == "uint256":
+        # The stored word IS the caller: ownerOf(tokenId) must return the prober.
+        keys, subs, value = [ARG_AMOUNT], {0: ARG_AMOUNT}, _word_hex(caller_key)
+    else:
+        logger.debug("effects calldata: token_slots role/kind unsupported: role=%r kind=%r", role, key_kind)
+        return None
+
+    slot = _mapping_entry_slot(base_slot, keys)
+    verify_calldata = encode_calldata(getter_selector, getter, substitutions=subs)
+    if slot is None or verify_calldata is None:
+        logger.debug("effects calldata: token_slots slot/getter unencodable: %r", entry)
+        return None
+    return ForkFixture(
+        kind="set_storage_at",
+        address=target,
+        value=value,
+        slot=slot,
+        verify_to=target,
+        verify_calldata=verify_calldata,
+        verify_expected=value,
+    )
+
+
+def _token_seed_fixtures(
+    token_slots: Sequence[Mapping[str, Any]], callers: Sequence[str], target: str
+) -> tuple[ForkFixture, ...]:
+    """Seed each distinct prober's token preconditions on ``target``. Deterministic
+    over (entry order, sorted callers).
+
+    An ``owner`` seed is emitted for the FIRST caller only: its slot is keyed by
+    the tokenId (``ARG_AMOUNT``), not the caller, so per-caller seeds would all
+    write the same slot last-writer-wins — leaving every earlier caller's probe
+    precondition silently unmet while its read-back transcript said ok. One
+    deterministic owner keeps the transcript truthful; other callers' NFT entry
+    points stay invisible to the diff, which only shrinks the observed lower
+    bound."""
+    fixtures: list[ForkFixture] = []
+    for entry in token_slots:
+        entry_callers = callers[:1] if entry.get("role") == "owner" else callers
+        for caller in entry_callers:
+            fx = _seed_fixture_for_role(entry, caller, target)
+            if fx is not None:
+                fixtures.append(fx)
+    return tuple(fixtures)
+
+
 def synthesize_pause(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> PausePlanInputs | None:
@@ -884,8 +1007,17 @@ def synthesize_pause(
 
     # The pause principal needs gas of its own; the per-entry-point fixtures cover
     # the probers. Kept flat here so the recipe applies one list, while each
-    # EntryPoint still carries its own for inspection.
-    fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)),)
+    # EntryPoint still carries its own for inspection. Token-precondition seeds
+    # (balance/allowance/shares/owner) go here too, one per distinct prober, so a
+    # token check can never hide an entry point from the diff; each carries its own
+    # getter read-back and lands on the state-bearing deployment, never the impl.
+    # The seeds are visible to the pause tx itself (a pause gated on the
+    # principal's token stake succeeds on the fork regardless of live holdings) —
+    # same gate-relative semantics as the ETH balance seed above (inv. 12: the
+    # verdict binds the gate structure, not the principal's current funding).
+    callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
+    token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
+    fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)
     return PausePlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
@@ -929,6 +1061,7 @@ __all__ = [
     "NEUTRAL_CALLER",
     "SENTINEL_ADDRESS",
     "FIXTURE_BALANCE_WEI",
+    "SEED_AMOUNT",
     "AuthorityPlanInputs",
     "CandidatePlanInputs",
     "ContractFacts",

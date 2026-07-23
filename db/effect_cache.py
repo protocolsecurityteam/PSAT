@@ -48,7 +48,11 @@ logger = logging.getLogger(__name__)
 # changes. Deliberately independent of a git SHA (mirrors
 # ``ANALYSIS_SCHEMA_VERSION``): an unrelated deploy must not cold-miss the whole
 # behavioral cache.
-EFFECT_CACHE_SCHEMA_VERSION = 1
+# v2: pause probes seed token preconditions (balance/allowance/shares/owner
+# slots, read-back verified). A v1 ``unknown`` row for a surface whose entry
+# points were precondition-blind would otherwise cache-hit forever and mask the
+# widened observed radius.
+EFFECT_CACHE_SCHEMA_VERSION = 2
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

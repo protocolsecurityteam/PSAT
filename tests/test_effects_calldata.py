@@ -875,6 +875,204 @@ def test_prober_emits_nothing_when_facts_are_thin(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# token-precondition seeding: slot math + fixture synthesis
+# ---------------------------------------------------------------------------
+
+from eth_utils.crypto import keccak  # noqa: E402
+
+CALLER = "0x" + "22" * 20
+SPENDER = "0x" + "33" * 20
+
+
+def _slot(base: int, *keys: int) -> str:
+    """Independent reference: fold keys outermost-first over a 32-byte base."""
+    word = base.to_bytes(32, "big")
+    for key in keys:
+        word = keccak(key.to_bytes(32, "big") + word)
+    return "0x" + word.hex()
+
+
+def test_mapping_entry_slot_single_address_key_golden():
+    # Solidity mapping at slot 9 (a common ERC-20 `_balances` slot), key = CALLER.
+    base = "0x" + "00" * 31 + "09"
+    got = cd._mapping_entry_slot(base, [int(CALLER, 16)])
+    assert got == _slot(9, int(CALLER, 16))
+    # The classic "mapping at slot 0, key = address(0)" constant.
+    assert cd._mapping_entry_slot(cd._word_hex(0), [0]) == "0x" + keccak(b"\x00" * 64).hex()
+
+
+def test_mapping_entry_slot_nested_address_address_key_golden():
+    base = "0x" + "00" * 31 + "0a"
+    got = cd._mapping_entry_slot(base, [int(CALLER, 16), int(SPENDER, 16)])
+    assert got == _slot(10, int(CALLER, 16), int(SPENDER, 16))
+
+
+def test_mapping_entry_slot_uint_key_golden():
+    got = cd._mapping_entry_slot(cd._word_hex(2), [cd.ARG_AMOUNT])
+    assert got == _slot(2, cd.ARG_AMOUNT)
+
+
+def test_mapping_entry_slot_rejects_malformed_base():
+    assert cd._mapping_entry_slot("0xnothex", [0]) is None
+    assert cd._mapping_entry_slot("0x" + "ab" * 33, [0]) is None  # > 32 bytes
+
+
+def _slot_entry(**over: Any) -> dict[str, Any]:
+    entry = {
+        "getter": "balanceOf(address)",
+        "role": "balance",
+        "key_kind": "address",
+        "base_slot": "0x" + "00" * 31 + "09",
+        "derivation": "storage_layout",
+        "variable": "_balances",
+    }
+    entry.update(over)
+    return entry
+
+
+def test_seed_fixture_balance_carries_verified_readback():
+    fx = cd._seed_fixture_for_role(_slot_entry(), CALLER, CONTRACT)
+    assert fx is not None
+    assert fx.kind == "set_storage_at"
+    assert fx.address == CONTRACT  # the state-bearing deployment
+    assert fx.slot == cd._mapping_entry_slot(_slot_entry()["base_slot"], [int(CALLER, 16)])
+    assert fx.value == cd._word_hex(cd.SEED_AMOUNT)
+    # read-back anchor: the contract's own balanceOf(CALLER) must echo the seed.
+    assert fx.verify_to == CONTRACT
+    assert fx.verify_expected == fx.value
+    sel = cd._selector_of("balanceOf(address)")
+    assert sel is not None
+    assert fx.verify_calldata == cd.encode_calldata(sel, "balanceOf(address)", substitutions={0: CALLER.lower()})
+
+
+def test_seed_fixture_allowance_seeds_owner_equals_spender():
+    entry = _slot_entry(
+        getter="allowance(address,address)", role="allowance", key_kind="address_address", base_slot=cd._word_hex(10)
+    )
+    fx = cd._seed_fixture_for_role(entry, CALLER, CONTRACT)
+    assert fx is not None
+    # owner == spender == the prober, matching the synthesizer's identity policy.
+    assert fx.slot == cd._mapping_entry_slot(cd._word_hex(10), [int(CALLER, 16), int(CALLER, 16)])
+    assert fx.value == cd._word_hex(cd.SEED_AMOUNT)
+    sel = cd._selector_of("allowance(address,address)")
+    assert sel is not None
+    assert fx.verify_calldata == cd.encode_calldata(
+        sel, "allowance(address,address)", substitutions={0: CALLER.lower(), 1: CALLER.lower()}
+    )
+
+
+def test_seed_fixture_owner_stores_caller_at_probed_tokenid():
+    entry = _slot_entry(getter="ownerOf(uint256)", role="owner", key_kind="uint256", base_slot=cd._word_hex(2))
+    fx = cd._seed_fixture_for_role(entry, CALLER, CONTRACT)
+    assert fx is not None
+    # key is the EXACT uint the arg synthesizer uses; stored word is the caller.
+    assert fx.slot == cd._mapping_entry_slot(cd._word_hex(2), [cd.ARG_AMOUNT])
+    assert fx.value == cd._word_hex(int(CALLER, 16))
+    assert fx.verify_expected == cd._word_hex(int(CALLER, 16))
+    sel = cd._selector_of("ownerOf(uint256)")
+    assert sel is not None
+    assert fx.verify_calldata == cd.encode_calldata(sel, "ownerOf(uint256)", substitutions={0: cd.ARG_AMOUNT})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _slot_entry(base_slot=123),  # non-string base
+        _slot_entry(getter=42),  # non-string getter
+        _slot_entry(getter="not a signature"),  # unparseable getter
+        _slot_entry(role="balance", key_kind="uint256"),  # role/kind mismatch
+        _slot_entry(role="mystery"),  # unknown role
+        _slot_entry(base_slot="0xzz"),  # bad hex
+    ],
+)
+def test_seed_fixture_malformed_entry_is_skipped(entry):
+    assert cd._seed_fixture_for_role(entry, CALLER, CONTRACT) is None
+
+
+def test_seed_fixture_bad_caller_is_skipped():
+    assert cd._seed_fixture_for_role(_slot_entry(), "not-an-address", CONTRACT) is None
+
+
+def test_token_seed_fixtures_one_per_caller_and_entry():
+    entries = (
+        _slot_entry(),
+        _slot_entry(getter="ownerOf(uint256)", role="owner", key_kind="uint256", base_slot=cd._word_hex(2)),
+    )
+    fixtures = cd._token_seed_fixtures(entries, [CALLER, SPENDER], CONTRACT)
+    # Caller-keyed entries seed every caller; the owner entry seeds only the
+    # FIRST caller — its slot is tokenId-keyed, so a second seed would overwrite
+    # the first (last-writer-wins) while both read-backs claimed ok.
+    assert len(fixtures) == 3  # balance x 2 callers + owner x first caller only
+    assert all(fx.kind == "set_storage_at" and fx.verify_calldata is not None for fx in fixtures)
+    owner_seeds = [fx for fx in fixtures if fx.value == cd._word_hex(int(CALLER, 16))]
+    assert len(owner_seeds) == 1
+
+
+def test_token_seed_fixtures_empty_without_slots():
+    assert cd._token_seed_fixtures((), [CALLER], CONTRACT) == ()
+
+
+# ---------------------------------------------------------------------------
+# synthesize_pause emits token seeds (+ the no-token_slots regression)
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_synthesize_pause_emits_token_seed_fixtures(db_session):
+    contract, ids = _pause_contract(db_session)
+    facts = _token_facts(token_slots=(_slot_entry(),))
+    fn = cd.resolve_function(facts, PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    # The lone prober is deposit()'s principal, so exactly one token seed lands.
+    storage = [fx for fx in spec.fixtures if fx.kind == "set_storage_at"]
+    assert len(storage) == 1
+    seed = storage[0]
+    assert seed.address == candidate.probe_target
+    assert seed.slot == cd._mapping_entry_slot(_slot_entry()["base_slot"], [int(PRINCIPAL, 16)])
+    assert seed.verify_to == candidate.probe_target
+    assert seed.verify_expected == cd._word_hex(cd.SEED_AMOUNT)
+    # the principal set_balance is still present and unchanged.
+    assert any(fx.kind == "set_balance" and fx.address == PRINCIPAL for fx in spec.fixtures)
+
+
+@requires_postgres
+def test_synthesize_pause_without_token_slots_is_unchanged(db_session):
+    """Regression: no token_slots key ⇒ the fixture list is exactly today's — one
+    set_balance for the principal, nothing else."""
+    contract, ids = _pause_contract(db_session)
+    facts = _token_facts()  # no token_slots
+    fn = cd.resolve_function(facts, PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    assert all(fx.kind == "set_balance" for fx in spec.fixtures)
+    assert {fx.address for fx in spec.fixtures} == {PRINCIPAL}
+    assert all(fx.verify_calldata is None for fx in spec.fixtures)
+
+
+# ---------------------------------------------------------------------------
 # pause fork fixtures
 # ---------------------------------------------------------------------------
 

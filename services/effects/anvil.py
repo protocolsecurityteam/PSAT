@@ -20,6 +20,7 @@ uses a local NON-FORKING anvil with a checked-in fixture.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
@@ -41,6 +42,8 @@ from services.effects.harness import (
 from utils.memory import rss_bytes_for_pid
 from utils.rpc import EthCallResult
 
+logger = logging.getLogger(__name__)
+
 # Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
 # anything earlier can mint witnesses wrong for the live chain (§8.7).
 POST_CANCUN_HARDFORKS = frozenset({"cancun", "prague", "osaka"})
@@ -53,12 +56,28 @@ class ForkFixture:
     recipe's snapshot so it is reverted with everything else.
 
     ``kind`` is ``set_balance`` (``address``/``value``) or ``set_storage_at``
-    (``address``/``slot``/``value``). An unknown kind is ignored, never guessed."""
+    (``address``/``slot``/``value``). An unknown kind is ignored, never guessed.
+
+    A ``set_storage_at`` fixture MAY carry a read-back spec (``verify_to`` +
+    ``verify_calldata`` + ``verify_expected``): after the slot is written, the
+    contract's OWN getter is called and its 32-byte word compared to
+    ``verify_expected``. What this proves is that the getter NOW echoes the
+    seeded word — the precondition the probe will read is satisfied. It does
+    not prove the write is what the getter reads: a wrong-slot write is kept
+    when the getter already returned the expected word (e.g. an earlier seed
+    satisfied it). That is safe — seeds are constants of the pre/post diff, so
+    a stray write can only shrink the observed lower bound, never flip an
+    entry point across the pause — but the guarantee is precondition-holds,
+    not write-landed. Absent (all ``None``) ⇒ the fixture is applied as-is,
+    exactly as before."""
 
     kind: str
     address: str
     value: str
     slot: str | None = None
+    verify_to: str | None = None
+    verify_calldata: str | None = None
+    verify_expected: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,13 +271,26 @@ def pause_recipe(
     return emit(store, eff)
 
 
+def _has_verify_spec(fx: ForkFixture) -> bool:
+    return fx.verify_to is not None and fx.verify_calldata is not None and fx.verify_expected is not None
+
+
 def _apply_fixtures(transport: AnvilTransport, fixtures: Sequence[ForkFixture], transcript: dict[str, Any]) -> None:
     """Apply the fork-state fixtures, recording each in the transcript so a replay
     reproduces the same starting state. A cheatcode that fails is recorded and
     skipped — a missing fixture can only shrink the observed radius (a lower
-    bound), never manufacture one."""
+    bound), never manufacture one.
+
+    Plain fixtures are applied first; storage fixtures carrying a read-back spec
+    are applied AFTER so their getter observes the final gas/balance state. Each
+    verified write goes under an inner snapshot: if the contract's own getter does
+    not echo the seeded word, the write is reverted (never left half-applied) and
+    recorded ``readback: failed``. A kept write records ``readback: ok``."""
+    plain = [fx for fx in fixtures if not _has_verify_spec(fx)]
+    verified = [fx for fx in fixtures if _has_verify_spec(fx)]
+
     applied: list[dict[str, Any]] = []
-    for fx in fixtures:
+    for fx in plain:
         entry: dict[str, Any] = {"kind": fx.kind, "address": fx.address, "slot": fx.slot, "value": fx.value}
         try:
             if fx.kind == "set_balance":
@@ -270,8 +302,55 @@ def _apply_fixtures(transport: AnvilTransport, fixtures: Sequence[ForkFixture], 
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal
             entry["error"] = str(exc)
         applied.append(entry)
+
+    for fx in verified:
+        applied.append(_apply_verified_fixture(transport, fx))
+
     if applied:
         transcript["fixtures"] = applied
+
+
+def _apply_verified_fixture(transport: AnvilTransport, fx: ForkFixture) -> dict[str, Any]:
+    """Apply one read-back-verified storage fixture. The write is kept only if the
+    contract's own getter echoes ``verify_expected`` afterwards (the precondition
+    holds — not proof this particular write is what the getter reads; see
+    ``ForkFixture``); otherwise the inner snapshot is reverted so the failed write
+    leaves no state behind. Never raises."""
+    entry: dict[str, Any] = {"kind": fx.kind, "address": fx.address, "slot": fx.slot, "value": fx.value}
+    if fx.kind != "set_storage_at" or fx.slot is None:
+        entry["skipped"] = "unknown_kind"
+        return entry
+    inner = transport.snapshot()
+    try:
+        transport.set_storage_at(fx.address, fx.slot, fx.value)
+        res = transport.call({"to": fx.verify_to, "data": fx.verify_calldata})
+        ok = res.success and _word_eq(res.return_data, fx.verify_expected)
+    except Exception as exc:  # noqa: BLE001 - a failed read-back only drops the fixture
+        entry["error"] = str(exc)
+        ok = False
+    if ok:
+        entry["readback"] = "ok"
+        return entry
+    transport.revert(inner)
+    entry["readback"] = "failed"
+    logger.info(
+        "effects fork: dropped storage fixture at %s slot %s (read-back mismatch)",
+        fx.address,
+        fx.slot,
+    )
+    return entry
+
+
+def _word_eq(return_data: str | None, expected: str | None) -> bool:
+    """A direct getter returns exactly one 32-byte word; compare its low 32 bytes
+    to the seeded word, ignoring 0x-prefix and case."""
+    if not isinstance(return_data, str) or not isinstance(expected, str):
+        return False
+    got = return_data[2:] if return_data.lower().startswith("0x") else return_data
+    want = expected[2:] if expected.lower().startswith("0x") else expected
+    if len(got) < 64 or len(want) < 64:
+        return False
+    return got[-64:].lower() == want[-64:].lower()
 
 
 def _succeeding_set(
