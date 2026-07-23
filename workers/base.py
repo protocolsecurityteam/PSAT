@@ -602,14 +602,14 @@ class BaseWorker:
                         else:
                             # Terminal failure → flip pending deps where this
                             # job is the provider to ``degraded`` so dependents
-                            # short-circuit instead of blocking forever.
-                            # Queued before fail_job_terminal so the same tx
-                            # commits both.
-                            self._degrade_dependencies(session, job)
-                            fail_job_terminal(
+                            # short-circuit instead of blocking forever, then
+                            # mark the row failed_terminal. Routed through an
+                            # overridable finalizer so a fail-forward stage
+                            # (effects, inv. 15) can advance instead of terminal.
+                            self._finalize_terminal_failure(
                                 session,
-                                job.id,
-                                error,
+                                job,
+                                error=error,
                                 kind=kind,
                                 retry_count=terminal_retry_count,
                                 lease_id=claim_lease_id,
@@ -650,11 +650,10 @@ class BaseWorker:
                                     lease_id=claim_lease_id,
                                 )
                             else:
-                                self._degrade_dependencies(fresh, job)
-                                fail_job_terminal(
+                                self._finalize_terminal_failure(
                                     fresh,
-                                    job.id,
-                                    truncated,
+                                    job,
+                                    error=truncated,
                                     kind=kind,
                                     retry_count=terminal_retry_count,
                                     lease_id=claim_lease_id,
@@ -1009,6 +1008,36 @@ class BaseWorker:
                 extra={"exc_type": type(exc).__name__},
             )
             return 0
+
+    def _finalize_terminal_failure(
+        self,
+        session: Session,
+        job: Job,
+        *,
+        error: str,
+        kind: str,
+        retry_count: int | None,
+        lease_id: uuid.UUID | None,
+    ) -> None:
+        """Finalize a job whose retries are exhausted (or that failed
+        terminally). Default: degrade pending dependents, then mark the row
+        ``failed_terminal``.
+
+        Overridable so a fail-forward stage advances the job to ``next_stage``
+        instead of terminating one whose upstream artifacts are already complete
+        and correct (the effects stage, inv. 15). Called from both the primary-
+        and fresh-session failure paths, so ``session`` is whichever succeeded a
+        rollback and the same commit discipline as ``fail_job_terminal`` applies.
+        """
+        self._degrade_dependencies(session, job)
+        fail_job_terminal(
+            session,
+            job.id,
+            error,
+            kind=kind,
+            retry_count=retry_count,
+            lease_id=lease_id,
+        )
 
     @staticmethod
     def _provider_chain_for(job: Job) -> str | None:

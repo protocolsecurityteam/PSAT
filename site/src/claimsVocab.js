@@ -79,6 +79,14 @@ const CLAIM_VOCAB = {
     family: "control_plane", lane: "top", tone: "#7a8098", sentence: "rotates caller authority",
     priority: 3, legacy: null, score: { kind: "admin", severity: 0.88 },
   },
+  // Minted only by the effects claims bridge (behavioral_observed): a simulated
+  // call opened a permission gate to previously-rejected callers. Scoreable like
+  // the other control-plane authority claims, but the observed tier is
+  // neutralised in protocolScore.js until SCORING_INVARIANTS.md designs consumption.
+  "authority.grant": {
+    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "opens a gate",
+    priority: 3, legacy: "authority_update", score: { kind: "admin", severity: 0.88 },
+  },
   "callee_pointer.rotate": {
     family: "control_plane", lane: "top", tone: "#7a8098", sentence: "changes hook",
     priority: 3, legacy: "hook_update", score: { kind: "config", severity: 0.78 },
@@ -178,12 +186,16 @@ const CLAIM_VOCAB = {
 };
 
 const TIER_LABEL = {
+  behavioral_observed: "observed",
   standard_exact: "standard",
   idiom_structural: "idiom",
   policy_derived: "policy",
 };
 
-const TIER_RANK = { standard_exact: 3, idiom_structural: 2, policy_derived: 1 };
+// behavioral_observed (effects plane) outranks every static tier: a witnessed
+// state transition on real forked state is the strongest provenance a claim can
+// carry (EFFECTS_RESOLUTION_SPEC §5.2). Mirrors services/static/claims/types.py.
+const TIER_RANK = { behavioral_observed: 4, standard_exact: 3, idiom_structural: 2, policy_derived: 1 };
 
 // Registered claims carried on a function payload, in registry-entry order.
 // Unknown ids are dropped (fail-closed): a claim the vocab can't render is
@@ -195,6 +207,30 @@ export function claimsOf(fn) {
 
 export function hasClaims(fn) {
   return claimsOf(fn).length > 0;
+}
+
+export const OBSERVED_TIER = "behavioral_observed";
+
+// Score-facing view of a function: the effects bridge mints observable labels at
+// the `behavioral_observed` tier, but the score must NOT consume verdicts yet
+// (EFFECTS_RESOLUTION_SPEC §5.2 / §3a amendment — deferred to
+// SCORING_INVARIANTS.md). This strips the observed claims and the legacy
+// effect_labels they alone projected, so a function scores exactly as it did
+// before the bridge labeled it (byte-identical). Display consumers keep the full
+// claim set; only the score path uses this view.
+export function scoreClaimsView(fn) {
+  const claims = Array.isArray(fn?.claims) ? fn.claims : [];
+  const observed = claims.filter((c) => c && c.tier === OBSERVED_TIER);
+  if (!observed.length) return fn;
+  const scoreable = claims.filter((c) => !(c && c.tier === OBSERVED_TIER));
+  const scoreableLabels = new Set(scoreable.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter(Boolean));
+  // Only labels contributed SOLELY by an observed claim are removed; a label a
+  // scoreable claim also projects stays (and is ignored anyway when claims exist).
+  const observedOnly = new Set(
+    observed.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter((l) => l && !scoreableLabels.has(l)),
+  );
+  const labels = (Array.isArray(fn?.effect_labels) ? fn.effect_labels : []).filter((l) => !observedOnly.has(l));
+  return { ...fn, claims: scoreable, effect_labels: labels };
 }
 
 // The claim that drives tone / chip / ordering: lowest priority number wins,

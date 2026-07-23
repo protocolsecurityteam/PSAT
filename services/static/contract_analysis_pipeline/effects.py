@@ -44,15 +44,17 @@ claims plane reads):
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from eth_utils.crypto import keccak
+from typing_extensions import NotRequired
 
 from .shared import _all_state_variables
 from .summaries import (
     _action_summary,
     _effect_labels,
 )
+from .token_slots import derive_token_slots
 
 SCHEMA_VERSION = "semantic-2"
 
@@ -126,10 +128,28 @@ class EffectInfo(TypedDict):
     assembly_state_access: bool
 
 
+class TokenSlotEntry(TypedDict):
+    """Storage base slot of a token-precondition mapping, keyed to the VIEW
+    getter that reads it back. Consumed by the effects stage to seed
+    balance/allowance/shares/ownership on an anvil fork (see ``token_slots``)."""
+
+    getter: str  # canonical signature of a direct-read view getter (read-back anchor)
+    role: str  # balance | allowance | shares | owner
+    key_kind: str  # address | address_address | uint256
+    base_slot: str  # 0x-padded 32-byte base slot of the mapping variable
+    derivation: str  # storage_layout | oz_v5_namespaced
+    variable: str | None
+
+
+class TokenSlots(TypedDict):
+    entries: list[TokenSlotEntry]
+
+
 class EffectsArtifact(TypedDict):
     schema_version: str
     contract_name: str | None
     functions: dict[str, EffectInfo]
+    token_slots: NotRequired[TokenSlots]
 
 
 # ERC-20 pull/send selectors used for value-flow direction facts. ``pull``
@@ -831,8 +851,12 @@ def build_effects(contract: Any) -> EffectsArtifact:
             functions[signature] = info
             chosen_fn[signature] = fn
 
-    return {
+    artifact: EffectsArtifact = {
         "schema_version": SCHEMA_VERSION,
         "contract_name": getattr(contract, "name", None),
         "functions": functions,
     }
+    token_slots = derive_token_slots(contract)
+    if token_slots is not None:
+        artifact["token_slots"] = cast("TokenSlots", token_slots)
+    return artifact

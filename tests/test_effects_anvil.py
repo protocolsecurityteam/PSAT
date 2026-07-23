@@ -1,0 +1,437 @@
+"""Tier-2 fork recipe tests (EFFECTS_RESOLUTION_SPEC §4.1, §8.7, §8.8).
+
+The pause recipe is exercised two ways: against a stubbed ``AnvilTransport``
+(hermetic, always runs) for the revert-set-diff logic and the §8 rules, and
+against a real LOCAL NON-FORKING anvil with a checked-in fixture (gated behind an
+anvil-availability probe — auto-skips on a clone without foundry). A forking
+anvil / real RPC is NEVER used here (that is the user's preview step).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from services.effects.anvil import (
+    EntryPoint,
+    SubprocessAnvil,
+    _build_anvil_cmd,
+    anvil_available,
+    assert_post_cancun,
+    pause_recipe,
+)
+from services.effects.config import SCOPE_PROJECTION, TIER_FORK, VERDICT_PROVEN, VERDICT_UNKNOWN
+from services.effects.harness import SimContext
+from utils.rpc import EthCallResult
+
+CONTRACT = "0x" + "11" * 20
+PRINCIPAL = "0x" + "22" * 20
+CTX = SimContext(chain_id=1, block=1, hardfork="prague")
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "effects" / "pausable_fixture.json").read_text())
+
+
+class RecordingStore:
+    def __init__(self) -> None:
+        self.stored: list[dict] = []
+
+    def __call__(self, transcript: dict) -> str:
+        self.stored.append(transcript)
+        return f"artifact://transcript/{len(self.stored)}"
+
+
+class StubAnvil:
+    """Models a pausable contract on a fork: ``guarded`` entry points revert while
+    paused-and-unexpired; ``send(pause_calldata)`` flips the latch; ``increase_time``
+    past the duration auto-expires it. snapshot/revert restore the latch state."""
+
+    def __init__(
+        self, *, guarded: set[str], pause_calldata: str, duration: int | None, hardfork: str = "prague"
+    ) -> None:
+        self._guarded = guarded
+        self._pause_calldata = pause_calldata
+        self._duration = duration
+        self._hf = hardfork
+        self.paused = False
+        self.time = 0
+        self.expiry: int | None = None
+        self._snaps: dict[str, tuple] = {}
+        self._n = 0
+        self.impersonated: list[str] = []
+        self.log: list[str] = []
+        self.balances: dict[str, str] = {}
+        self.storage: dict[tuple[str, str], str] = {}
+
+    def hardfork(self) -> str:
+        return self._hf
+
+    def versions(self) -> dict[str, str]:
+        return {"anvil": "anvil 1.5.1-stable", "foundry": "anvil 1.5.1-stable"}
+
+    def snapshot(self) -> str:
+        self._n += 1
+        sid = f"0x{self._n}"
+        self._snaps[sid] = (self.paused, self.time, self.expiry)
+        return sid
+
+    def revert(self, snapshot_id: str) -> bool:
+        self.paused, self.time, self.expiry = self._snaps[snapshot_id]
+        return True
+
+    def impersonate(self, address: str) -> None:
+        self.impersonated.append(address)
+
+    def stop_impersonate(self, address: str) -> None:
+        self.log.append(f"stop:{address}")
+
+    def call(self, tx: dict) -> EthCallResult:
+        data = tx.get("data", "")
+        frozen = self.paused and (self.expiry is None or self.time < self.expiry)
+        if data in self._guarded and frozen:
+            return EthCallResult(False, "0x", "0x" + "paused".encode().hex(), "paused")
+        return EthCallResult(True, "0x", None, None)
+
+    def send(self, tx: dict) -> str:
+        if tx.get("data") == self._pause_calldata:
+            self.paused = True
+            self.expiry = None if self._duration is None else self.time + self._duration
+        return "0xhash"
+
+    def increase_time(self, seconds: int) -> None:
+        self.time += seconds
+
+    def mine(self) -> None:
+        pass
+
+    def set_balance(self, address: str, value: str) -> None:
+        self.balances[address.lower()] = value
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None:
+        self.storage[(address.lower(), slot.lower())] = value
+
+
+GUARDED = "0xc2985578"  # foo()
+UNGATED = "0xffffffff"
+PAUSE = "0x8456cb59"
+
+
+def _entry_points():
+    return [EntryPoint(key="foo", calldata=GUARDED), EntryPoint(key="ping", calldata=UNGATED)]
+
+
+# ---------------------------------------------------------------------------
+# §4.1 pause — recorded-transcript recipe test
+# ---------------------------------------------------------------------------
+
+
+def test_pause_recipe_observes_blast_radius_and_expiry():
+    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600)
+    store = RecordingStore()
+    eff = pause_recipe(
+        transport=transport,
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=3600,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.scope == SCOPE_PROJECTION
+    assert eff.tier == TIER_FORK
+    assert eff.details["observed_blast_radius"] == ["foo"]
+    assert eff.details["latch_flip"] is True
+    assert eff.details["auto_expiry"] is True
+    assert eff.details["duration_bound_seconds"] == 3600
+    # Snapshot was reverted; principal impersonation was scoped + released.
+    assert transport.paused is False
+    assert transport.impersonated == [PRINCIPAL]
+    # Transcript records anvil version + hardfork (§8.7).
+    tr = store.stored[-1]
+    assert tr["hardfork"] == "prague"
+    assert tr["anvil_version"] == "anvil 1.5.1-stable"
+
+
+def test_pause_recipe_no_blast_radius_is_unknown():
+    # A latch that guards nothing in the probed set → no observation → unknown.
+    transport = StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)
+    eff = pause_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "no_blast_radius_observed"
+
+
+# ---------------------------------------------------------------------------
+# fork-header wiring — eRPC (and any authenticated upstream) needs a header, not
+# URL auth. Non-forking spawns carry no fork flags.
+# ---------------------------------------------------------------------------
+
+
+def test_build_anvil_cmd_nonforking_has_no_fork_flags():
+    cmd = _build_anvil_cmd("anvil", 8546, "prague", None, {"X-ERPC-Secret-Token": "s"})
+    assert "--fork-url" not in cmd and "--fork-header" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# rss_mb — anvil subprocess RSS sampling (feeds peak_anvil_rss_mb)
+# ---------------------------------------------------------------------------
+
+
+def _anvil_with_proc(proc: object) -> SubprocessAnvil:
+    """A SubprocessAnvil whose only wired dependency is ``_proc`` — no real
+    subprocess spawned, so ``rss_mb`` is exercised in isolation."""
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    anvil._proc = proc  # type: ignore[attr-defined]
+    return anvil
+
+
+def test_rss_mb_positive_for_live_pid_zero_when_exited():
+    import os
+
+    class _LiveProc:
+        pid = os.getpid()
+
+        def poll(self):
+            return None  # still running
+
+    class _DeadProc:
+        pid = os.getpid()
+
+        def poll(self):
+            return 0  # exited
+
+    # A live process reports a non-negative MB figure (positive on Linux, 0 on a
+    # non-Linux host where /proc is absent) and never raises.
+    assert _anvil_with_proc(_LiveProc()).rss_mb() >= 0
+    # An exited process is never sampled (guards against a reused pid) → 0.
+    assert _anvil_with_proc(_DeadProc()).rss_mb() == 0
+
+
+@pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
+def test_rss_mb_on_real_subprocess():
+    """A live NON-FORKING anvil reports positive RSS; 0 once closed."""
+    anvil = SubprocessAnvil(port=8548, hardfork_name="prague")
+    try:
+        assert anvil.rss_mb() > 0
+    finally:
+        anvil.close()
+    assert anvil.rss_mb() == 0
+
+
+def test_build_anvil_cmd_forking_passes_auth_header():
+    cmd = _build_anvil_cmd("anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"})
+    assert cmd[cmd.index("--fork-url") + 1] == "https://erpc/main/evm/1"
+    assert cmd[cmd.index("--fork-header") + 1] == "X-ERPC-Secret-Token: sec"
+
+
+# ---------------------------------------------------------------------------
+# §8 rule 7 — hardfork pinned + recorded
+# ---------------------------------------------------------------------------
+
+
+def test_section8_rule7_stale_hardfork_refused():
+    class Stale(StubAnvil):
+        def hardfork(self) -> str:
+            return "shanghai"
+
+    transport = Stale(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+    with pytest.raises(ValueError, match="not post-Cancun"):
+        pause_recipe(
+            transport=transport,
+            store=RecordingStore(),
+            ctx=CTX,
+            contract_address=CONTRACT,
+            principal=PRINCIPAL,
+            pause_calldata=PAUSE,
+            entry_points=_entry_points(),
+            predicted_guard_set=["foo"],
+            max_pause_duration=None,
+        )
+
+
+def test_assert_post_cancun_accepts_current_forks():
+    class T(StubAnvil):
+        def __init__(self, hf):
+            super().__init__(guarded=set(), pause_calldata=PAUSE, duration=None, hardfork=hf)
+
+    assert assert_post_cancun(T("cancun")) == "cancun"
+    assert assert_post_cancun(T("prague")) == "prague"
+
+
+# ---------------------------------------------------------------------------
+# §8 rule 8 — the scored denominator is static's set, never the observed one
+# ---------------------------------------------------------------------------
+
+
+def test_section8_rule8_scored_denominator_is_static_not_observed():
+    # Observe a guarded point ("foo") that static did NOT predict; predicted set is
+    # {"bar"}. The scored denominator MUST stay static's set, and the surprise is a
+    # §9 discrepancy (recorded, not routed).
+    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+    eff = pause_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["bar"],
+        max_pause_duration=None,
+    )
+    assert eff.details["observed_blast_radius"] == ["foo"]
+    assert eff.details["scored_denominator"] == ["bar"]
+    assert eff.discrepancy is not None
+    assert eff.discrepancy.kind == "observed_guard_not_predicted"
+    assert eff.discrepancy.detail["unpredicted_members"] == ["foo"]
+
+
+# ---------------------------------------------------------------------------
+# Read-back-verified storage fixtures (_apply_fixtures)
+# ---------------------------------------------------------------------------
+
+
+class VerifyStub(StubAnvil):
+    """Scripted transport for the verified-application path: ``call`` returns a
+    fixed word (or raises), and reverts are recorded. Inherits the full
+    :class:`AnvilTransport` surface from :class:`StubAnvil`."""
+
+    def __init__(self, *, echo: str = "0x", raise_on_call: bool = False) -> None:
+        super().__init__(guarded=set(), pause_calldata="0x", duration=None)
+        self.echo = echo
+        self.raise_on_call = raise_on_call
+        self.snaps: list[str] = []
+        self.reverted: list[str] = []
+
+    def snapshot(self) -> str:
+        sid = super().snapshot()
+        self.snaps.append(sid)
+        return sid
+
+    def revert(self, snapshot_id: str) -> bool:
+        self.reverted.append(snapshot_id)
+        return super().revert(snapshot_id)
+
+    def call(self, tx: dict) -> EthCallResult:
+        if self.raise_on_call:
+            raise RuntimeError("node error")
+        return EthCallResult(True, self.echo, None, None)
+
+
+def _verified_fixture(value: str):
+    from services.effects.anvil import ForkFixture
+
+    return ForkFixture(
+        kind="set_storage_at",
+        address=CONTRACT,
+        value=value,
+        slot="0x5",
+        verify_to=CONTRACT,
+        verify_calldata="0xabcdefff",
+        verify_expected=value,
+    )
+
+
+def test_verified_fixture_kept_when_getter_echoes():
+    from services.effects.anvil import _apply_fixtures
+
+    word = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo=word)
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(word)], tr)
+    assert transport.storage[(CONTRACT, "0x5")] == word  # write kept
+    assert transport.reverted == []  # inner snapshot NOT reverted
+    assert tr["fixtures"][0]["readback"] == "ok"
+
+
+def test_verified_fixture_dropped_when_getter_returns_wrong_word():
+    from services.effects.anvil import _apply_fixtures
+
+    seed = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo="0x" + "00" * 31 + "01")  # wrong word
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
+    # The inner snapshot is reverted with its own id, undoing the write.
+    assert transport.reverted == transport.snaps
+    assert tr["fixtures"][0]["readback"] == "failed"
+
+
+def test_verified_fixture_dropped_when_readback_call_raises():
+    from services.effects.anvil import _apply_fixtures
+
+    seed = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(raise_on_call=True)
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
+    assert transport.reverted == transport.snaps
+    assert tr["fixtures"][0]["readback"] == "failed"
+    assert "error" in tr["fixtures"][0]
+
+
+def test_verified_fixtures_are_applied_after_plain_ones():
+    from services.effects.anvil import ForkFixture, _apply_fixtures
+
+    word = "0x" + "00" * 31 + "07"
+    transport = VerifyStub(echo=word)
+    plain = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x64")
+    tr: dict = {}
+    _apply_fixtures(transport, [_verified_fixture(word), plain], tr)
+    # Order in the transcript: plain first, then the verified storage write.
+    assert [f["kind"] for f in tr["fixtures"]] == ["set_balance", "set_storage_at"]
+    assert transport.balances == {PRINCIPAL: "0x64"}
+
+
+def test_forkfixture_backward_compatible_defaults():
+    from services.effects.anvil import ForkFixture, _has_verify_spec
+
+    fx = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x1")
+    assert fx.verify_to is None and fx.verify_calldata is None and fx.verify_expected is None
+    assert _has_verify_spec(fx) is False
+    assert _has_verify_spec(_verified_fixture("0x" + "00" * 32)) is True
+
+
+# ---------------------------------------------------------------------------
+# Localhost NON-FORKING anvil integration — GATED behind availability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
+def test_pause_revert_set_diff_on_real_nonforking_anvil():
+    """Deploy the checked-in pausable fixture to a fresh NON-FORKING anvil and
+    prove the revert-set diff end-to-end: foo() succeeds pre-pause, reverts
+    post-pause, and its key is exactly the observed blast radius."""
+    with SubprocessAnvil(port=8547, hardfork_name="prague") as anvil:
+        owner = anvil.accounts()[0]
+        addr = anvil.deploy(owner, FIXTURE["creation_bytecode"])
+        eff = pause_recipe(
+            transport=anvil,
+            store=RecordingStore(),
+            ctx=SimContext(chain_id=31337, block=1, hardfork="prague"),
+            contract_address=addr,
+            principal=owner,
+            pause_calldata=FIXTURE["selectors"]["pause"],
+            entry_points=[
+                EntryPoint(key="foo", calldata=FIXTURE["selectors"]["foo"]),
+                EntryPoint(key="owner", calldata=FIXTURE["selectors"]["owner"]),
+            ],
+            predicted_guard_set=["foo"],
+            max_pause_duration=None,
+        )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["observed_blast_radius"] == ["foo"]
+    # owner() is a plain getter — never in the blast radius.
+    assert "owner" in eff.details["pre_pause_succeeding"]
+    assert eff.discrepancy is None

@@ -352,6 +352,58 @@
       ]
     },
     {
+      "address": "0x0000000000000000000000000000000000000060",
+      "chain": "synthetic",
+      "contract": "NamespacedPausable",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "approveSelf(uint256)",
+          "selector": "0x9c9457ff",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "pause()",
+          "selector": "0x8456cb59",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "standard_exact"
+            }
+          ]
+        },
+        {
+          "full_name": "paused()",
+          "selector": "0x5c975abb",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "transfer(address,uint256)",
+          "selector": "0xa9059cbb",
+          "effect_labels": [],
+          "claims": []
+        },
+        {
+          "full_name": "unpause()",
+          "selector": "0x3f4ba83a",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "standard_exact"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "address": "0x000000000000000000000000000000000000dead",
       "chain": "synthetic",
       "contract": "WrappedNative",

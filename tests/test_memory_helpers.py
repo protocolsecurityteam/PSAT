@@ -7,18 +7,21 @@ pressure message fires once per threshold and resets cleanly.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.memory import (
+    _vmrss_bytes,
     cache_pressure_message,
     cgroup_memory_max_bytes,
     count_sibling_python_procs,
     current_rss_bytes,
     mb,
     reset_cache_pressure_state,
+    rss_bytes_for_pid,
 )
 
 
@@ -27,6 +30,25 @@ def test_current_rss_bytes_returns_positive_or_zero():
     # Linux returns a real value; non-Linux returns 0. Neither should raise.
     assert isinstance(rss, int)
     assert rss >= 0
+
+
+def test_rss_bytes_for_pid_live_and_dead():
+    # This process is alive → a real value on Linux, 0 on non-Linux; a pid that
+    # cannot exist → 0 without raising.
+    assert rss_bytes_for_pid(os.getpid()) >= 0
+    assert rss_bytes_for_pid(-1) == 0
+    # A pid well past any plausible live process: gone → /proc/<pid>/status absent.
+    assert rss_bytes_for_pid(2**31 - 1) == 0
+
+
+def test_vmrss_bytes_parses_fixture_and_tolerates_missing(tmp_path):
+    status = tmp_path / "status"
+    status.write_text("Name:\tanvil\nVmPeak:\t  200000 kB\nVmRSS:\t   13648 kB\n")
+    assert _vmrss_bytes(status) == 13648 * 1024
+    # No VmRSS line → 0; unreadable path → 0 (never raises).
+    (tmp_path / "no_rss").write_text("Name:\tanvil\n")
+    assert _vmrss_bytes(tmp_path / "no_rss") == 0
+    assert _vmrss_bytes(tmp_path / "does_not_exist") == 0
 
 
 def test_cgroup_helpers_dont_crash_on_dev_host():

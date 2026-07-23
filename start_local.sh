@@ -17,7 +17,7 @@ set +a
 # worker fleet; here it also covers the API, monitors, and dapp worker below.
 export PYTHONUNBUFFERED=1
 
-WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
+WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|effects_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
 API_PID=""
 WORKERS_PID=""
 BROWSER_PID=""

@@ -1,5 +1,5 @@
 import { bytecodeVerifiedAudits, isBytecodeVerifiedAudit } from "./auditCoverage.js";
-import { hasClaims, scoreForClaims } from "./claimsVocab.js";
+import { hasClaims, scoreClaimsView, scoreForClaims } from "./claimsVocab.js";
 import { isInertOneShot, isLiveOneShot } from "./oneShot.js";
 import { entityKey } from "./surface/entityKey.js";
 
@@ -163,7 +163,10 @@ function collectPrincipals(fn) {
 
 function classifyAction(fn) {
   // Claims (Plane 1) drive severity when present; the name-substring arms below
-  // stay a fallback only for claim-less (stale) rows.
+  // stay a fallback only for claim-less (stale) rows. The score defers the
+  // effects bridge's behavioral_observed tier (§5.2): score over the pre-observed
+  // view so verdicts never move the score until SCORING_INVARIANTS.md.
+  fn = scoreClaimsView(fn);
   if (hasClaims(fn)) {
     return scoreForClaims(fn) || { kind: "other", severity: 0 };
   }

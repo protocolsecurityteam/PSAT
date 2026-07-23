@@ -276,6 +276,12 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
       if (stage === "done") continue;
       const blob = timings[stage] || null;
       const coreIdx = CORE_STAGES.indexOf(stage);
+      // `effects` is a flag-gated optional CORE stage: render it presence-based
+      // (a server timing, or the job sitting on it right now) so a flag-off or
+      // historical job that never entered the stage doesn't synthesize an
+      // eternal NOT-REACHED / completed row. Same spirit as the company-child
+      // `coreIdx === -1` skip below, but for an optional (not off-path) stage.
+      if (stage === "effects" && !blob && stage !== job.stage) continue;
       let kind;
       if (blob) {
         const st = String(blob.status || "success").toLowerCase();

@@ -326,6 +326,61 @@ describe("computeProtocolScore", () => {
       expect(tip.negativeExamples).toHaveLength(0);
     });
   });
+
+  // EFFECTS_RESOLUTION_SPEC §5.2: the effects bridge mints observable labels at
+  // the behavioral_observed tier, but the score must NOT consume verdicts yet
+  // (deferred to SCORING_INVARIANTS.md). The score of any input is byte-identical
+  // whether or not behavioral_observed claims (and their re-projected labels) are
+  // present.
+  describe("behavioral_observed claims are score-inert (scoring deferred)", () => {
+    function observed(claim_id) {
+      return { claim_id, tier: "behavioral_observed", witness: {} };
+    }
+    function scoreOf(contracts) {
+      return JSON.stringify(computeProtocolScore({ contracts }, null));
+    }
+
+    it("adding an observed claim to a claimed function does not move the score", () => {
+      const base = {
+        function: "migrateCode(address)",
+        claims: [claim("upgrade.implementation", "idiom_structural")],
+        effect_labels: ["implementation_update"],
+        authority_public: true,
+        controllers: [],
+      };
+      const withObserved = {
+        ...base,
+        claims: [...base.claims, observed("upgrade.implementation")],
+      };
+      expect(scoreOf([contractWithAction(withObserved)])).toBe(scoreOf([contractWithAction(base)]));
+    });
+
+    it("labeling a previously-blank money function does not move the score", () => {
+      // The core Phase-5 case: a blank outflow function gains flow.out + its
+      // re-projected "asset_send" label. The score must not start counting it.
+      const blank = { function: "sweep()", effect_labels: [], claims: [], controllers: [] };
+      const labeled = {
+        function: "sweep()",
+        claims: [observed("flow.out")],
+        effect_labels: ["asset_send"], // re-projected legacy label from the observed claim
+        controllers: [],
+      };
+      expect(scoreOf([contractWithAction(labeled)])).toBe(scoreOf([contractWithAction(blank)]));
+    });
+
+    it("an observed claim never diverts a name-fallback row's score", () => {
+      // A stale claim-less "upgradeTo" row scores via the name fallback; gaining
+      // an observed upgrade claim must not flip it to the claims branch and drop it.
+      const stale = { function: "upgradeTo(address)", effect_labels: [], claims: [], controllers: [] };
+      const withObserved = {
+        function: "upgradeTo(address)",
+        claims: [observed("upgrade.implementation")],
+        effect_labels: ["implementation_update"],
+        controllers: [],
+      };
+      expect(scoreOf([contractWithAction(withObserved)])).toBe(scoreOf([contractWithAction(stale)]));
+    });
+  });
 });
 
 // A CREATE2 twin — the same address deployed on two of a protocol's chains — is

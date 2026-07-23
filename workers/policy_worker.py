@@ -26,6 +26,7 @@ from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
+from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_history import build_principal_history
@@ -350,7 +351,15 @@ def _semantic_controller_context_address(
 
 class PolicyWorker(BaseWorker):
     stage = JobStage.policy
-    next_stage = JobStage.coverage
+
+    @property
+    def next_stage(self) -> JobStage:
+        """Flag-dynamic transition (§3a.4 / inv. 15): route into ``effects``
+        only when ``PSAT_EFFECTS_STAGE`` is armed, else straight to
+        ``coverage``. The flag gates the *transition itself* — with it off no
+        job ever enters ``effects`` (a job parked at a stage no worker drains
+        would sit forever, since the stale sweep only rescues claimed rows)."""
+        return JobStage.effects if effects_stage_enabled() else JobStage.coverage
 
     def process(self, session: Session, job: Job) -> None:
         logger.info(

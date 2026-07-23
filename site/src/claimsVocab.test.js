@@ -36,6 +36,7 @@ function claim(claim_id, tier = "standard_exact") {
 // that lands without a vocab entry is caught here — the JS half of the
 // consumer-coverage invariant (spec §6.5).
 const EXPECTED_CLAIM_IDS = [
+  "authority.grant",
   "authority.replace",
   "authorized_caller.rotate",
   "callee_pointer.rotate",
@@ -212,6 +213,23 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
     // erc20.transfer and erc20.transfer_from both render "transfers tokens".
     const line = claimSummaryLine({ claims: [claim("erc20.transfer"), claim("erc20.transfer_from")] });
     expect(line.text).toBe("transfers tokens");
+  });
+
+  it("renders the behavioral_observed tier as the strongest provenance", () => {
+    // The effects bridge mints at behavioral_observed (rank 4) — it outranks a
+    // static standard_exact claim of a different id and labels as "observed".
+    const fn = {
+      claims: [claim("upgrade.implementation", "standard_exact"), claim("flow.out", "behavioral_observed")],
+    };
+    const line = claimSummaryLine(fn);
+    expect(line.tier).toBe("behavioral_observed");
+    expect(line.label.endsWith("· observed")).toBe(true);
+  });
+
+  it("renders the bridge-only authority.grant claim", () => {
+    const line = claimSummaryLine({ claims: [claim("authority.grant", "behavioral_observed")] });
+    expect(line.text).toBe("opens a gate");
+    expect(line.label).toBe("opens a gate · observed");
   });
 });
 

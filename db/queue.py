@@ -856,6 +856,7 @@ def _convert_impl_job_to_proxy_context(
     already_ran_resolution = job.status == JobStatus.completed or job.stage in (
         JobStage.resolution,
         JobStage.policy,
+        JobStage.effects,
         JobStage.coverage,
         JobStage.done,
     )

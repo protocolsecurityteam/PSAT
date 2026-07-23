@@ -17,6 +17,7 @@ import pytest
 # Importing the policy-site module registers its policy-tier claim
 # (``transfer_policy.configure``) so the registry invariants below see it
 # deterministically regardless of test order.
+import services.effects.claims_bridge  # noqa: E402,F401  (registers authority.grant, minted only by the effects bridge §5.2)
 import services.static.cross_contract  # noqa: E402,F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
@@ -328,6 +329,11 @@ CORPUS_EXEMPT_CLAIM_IDS = {
         "policy-tier claim: minted only downstream from sibling facts, so the "
         "single-contract static corpus never produces it; covered by "
         "test_cross_contract_effects and test_cross_contract_policy_claims."
+    ),
+    "authority.grant": (
+        "behavioral_observed claim: minted only by the effects claims bridge from a "
+        "proven authority-change verdict, never by the static pass (gate/trigger "
+        "inert); covered by test_effects_claims_bridge."
     ),
 }
 

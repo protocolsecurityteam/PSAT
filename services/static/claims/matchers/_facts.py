@@ -121,14 +121,44 @@ def state_writes(ctx: ClaimContext, function: str, *, body_only: bool = True) ->
 
 
 def bool_write_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
-    """``(var, member)`` pairs this function writes as a ``bool`` in its body."""
+    """``(var, member)`` pairs this function writes as a latch flag in its body.
+
+    Two shapes qualify. A plain ``bool`` state variable is the classic form. An
+    ERC-7201 *namespaced* flag is the modern one: the struct lives at a
+    keccak-derived slot reached through assembly, so Plane 0 records a write to
+    the ``bytes32`` slot pseudo-variable (``hygiene_class ==
+    "storage_location_pseudo"``) with no member path — the declared type is
+    ``bytes32``, never ``bool``, and a bool-only filter cannot see it at all.
+    That blind spot is what left ``pause``/``unpause`` unlabelled across the
+    OZ-v5 / etherfi money contracts.
+
+    A pseudo-slot write only becomes a pause target if some function reads the
+    same slot as a mandatory revert gate (``pause_targets``), so admitting the
+    shape here widens the candidate set without weakening the gate evidence."""
     out: set[tuple[str, str | None]] = set()
     for write in state_writes(ctx, function):
-        if write.get("declared_type") != "bool":
+        declared = write.get("declared_type")
+        namespaced = write.get("hygiene_class") == "storage_location_pseudo"
+        if declared != "bool" and not namespaced:
             continue
         member_path = write.get("member_path") or []
         out.add((write["var"], member_path[0] if member_path else None))
     return out
+
+
+def namespaced_write_vars(ctx: ClaimContext, function: str) -> set[str]:
+    """Slot pseudo-variables this function writes (ERC-7201 namespaced storage).
+
+    A namespaced slot aggregates every field of its struct, so "this function
+    writes a slot that some gate reads" is far weaker evidence than the same
+    statement about a plain ``bool``: an owner change writes the very slot the
+    owner gate reads. Callers use this to demand stronger evidence — see the
+    definite-polarity requirement in the pause matcher."""
+    return {
+        str(write["var"])
+        for write in state_writes(ctx, function)
+        if write.get("hygiene_class") == "storage_location_pseudo" and write.get("var")
+    }
 
 
 def value_flows(ctx: ClaimContext, function: str, *, body_only: bool = True) -> list[dict[str, Any]]:
@@ -257,7 +287,15 @@ def _pair_is_gate_read(pair: tuple[str, str | None], gate_reads: set[tuple[str, 
     if pair in gate_reads:
         return True
     # A scalar bool read (member None) still matches a var-granular write.
-    return member is not None and (var, None) in gate_reads
+    if member is not None and (var, None) in gate_reads:
+        return True
+    # ...and the mirror image, which is the namespaced case: the WRITE is
+    # recorded against the slot pseudo-variable with no member path
+    # (`PAUSABLE_STORAGE_SLOT`), while the guard READ resolves through the
+    # struct and carries one (`["paused"]`). Requiring the member paths to agree
+    # would reject every ERC-7201 latch, so a memberless write matches any read
+    # of the same variable.
+    return member is None and any(read_var == var for read_var, _read_member in gate_reads)
 
 
 def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
@@ -265,12 +303,20 @@ def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, s
     return bool_write_targets(ctx, function) & pause_targets(ctx)
 
 
-def toggle_polarity(function: Any, var: str, member: str | None) -> str:
+def toggle_polarity(function: Any, var: str, member: str | None, *, alias_members: frozenset[str] = frozenset()) -> str:
     """``"set"`` (writes the flag true), ``"unset"`` (writes it false), or
     ``"both"`` (parameter-driven / branch-dependent). Member writes are paired
     through their ``Member`` reference the way the effects builder pairs them.
     Walks internal callees so an OZ ``_pause()``/``_unpause()`` indirection is
-    attributed to the entry point."""
+    attributed to the entry point.
+
+    ``alias_members`` handles the ERC-7201 namespaced latch, where the write is
+    attributed to the slot pseudo-variable but the IR assigns through a LOCAL
+    storage pointer (``$.paused = true``), so no assignment ever names ``var``.
+    The caller passes the member names the guard reads on that slot; an
+    assignment to any of them counts, whatever the pointer is called. Without
+    this the polarity is indeterminate and every namespaced pauser would claim
+    both directions — asserting that ``pause()`` also unpauses."""
     polarities: set[str] = set()
     visited: set[int] = set()
 
@@ -294,7 +340,9 @@ def toggle_polarity(function: Any, var: str, member: str | None) -> str:
                     continue
                 lvalue = getattr(ir, "lvalue", None)
                 if member is None:
-                    if _base_name(getattr(lvalue, "name", None)) != var:
+                    named = _base_name(getattr(lvalue, "name", None)) == var
+                    aliased = bool(alias_members) and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
+                    if not (named or aliased):
                         continue
                 elif lvalue is None or ref_pair.get(id(lvalue)) != (var, member):
                     continue

@@ -45,6 +45,10 @@ echo "Starting PSAT workers-light with: ${PYTHON_CMD[*]}"
 
 "${PYTHON_CMD[@]}" -m workers.discovery &
 PIDS+=($!)
+# Effects stage (EFFECTS_RESOLUTION_SPEC): between policy and coverage. Launched
+# unconditionally so enabling PSAT_EFFECTS_STAGE never parks jobs; idles off.
+"${PYTHON_CMD[@]}" -m workers.effects_worker &
+PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.coverage_worker &
 PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.defillama_worker &

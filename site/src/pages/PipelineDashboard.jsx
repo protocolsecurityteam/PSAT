@@ -86,7 +86,8 @@ function onActivate(fn) {
   };
 }
 
-// ── Shared 6-segment CORE-stage progress bar (Active + History rows) ──────
+// ── Shared CORE-stage progress bar (Active + History rows) ────────────────
+// Segment count auto-derives from CORE_STAGES.length (7 with `effects`).
 function StageProgress({ job }) {
   const status = job.status;
   const done = status === "completed" || job.stage === "done";

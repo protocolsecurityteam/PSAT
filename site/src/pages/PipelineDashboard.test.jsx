@@ -144,7 +144,7 @@ describe("PipelineDashboard — zones", () => {
     expect(within(hist).getByText("AvsOperator")).toBeInTheDocument();
   });
 
-  it("renders a 6-segment StageProgress bar: all filled when done, partial mid-flight", async () => {
+  it("renders a 7-segment StageProgress bar (effects added): all filled when done, partial mid-flight", async () => {
     const { container } = render(<PipelineDashboard />);
     const doneRow = await waitFor(() => {
       const b = Array.from(container.querySelectorAll(".zone-hist .run-row")).find((r) =>
@@ -155,11 +155,13 @@ describe("PipelineDashboard — zones", () => {
     });
     const filled = (row) =>
       Array.from(row.querySelectorAll(".prog i")).filter((s) => (s.getAttribute("style") || "").includes("background"));
-    // Completed → all six segments carry a fill.
-    expect(doneRow.querySelectorAll(".prog i")).toHaveLength(6);
-    expect(filled(doneRow)).toHaveLength(6);
+    // Completed → all seven segments carry a fill (count auto-derives from
+    // CORE_STAGES.length, now 7 with `effects`).
+    expect(doneRow.querySelectorAll(".prog i")).toHaveLength(7);
+    expect(filled(doneRow)).toHaveLength(7);
     expect(within(doneRow).getByText("DONE")).toBeInTheDocument();
-    // Processing at `static` (CORE idx 2) → 3 filled (2 done + current), 3 empty.
+    // Processing at `static` (CORE idx 2, unchanged by inserting effects between
+    // policy and coverage) → 3 filled (2 done + current), 4 empty.
     const runRow = Array.from(container.querySelectorAll(".zone-active .run-row")).find((r) =>
       r.textContent.includes("weETH"),
     );
@@ -446,6 +448,74 @@ describe("PipelineDashboard — job drill-in", () => {
     expect(within(dock).getAllByText("SUCCESS")).toHaveLength(2); // discovery + selection
     expect(within(dock).getByText("● FAILED")).toBeInTheDocument(); // static
     expect(within(dock).getAllByText("NOT REACHED")).toHaveLength(3); // resolution/policy/coverage
+  });
+
+  it("renders the effects stage between POLICY and COVERAGE with metric chips when it has a timing", async () => {
+    installMocks([DONE], {
+      stageTimings: {
+        job_id: "done-1",
+        stage_timings: {
+          policy: { stage: "policy", elapsed_s: 10, worker_id: "PolicyWorker-1", status: "success", metrics: {} },
+          effects: {
+            stage: "effects",
+            elapsed_s: 22,
+            worker_id: "EffectsWorker-7",
+            status: "success",
+            metrics: { candidates_in: 12, cache_hits_kernel: 9, verdicts_written: 12, discrepancies_filed: 1 },
+          },
+          coverage: { stage: "coverage", elapsed_s: 4, worker_id: "CoverageWorker-1", status: "success", metrics: {} },
+        },
+      },
+    });
+    const { container } = render(<PipelineDashboard />);
+    const row = await waitFor(() => {
+      const r = Array.from(container.querySelectorAll(".zone-hist .run-row")).find((x) =>
+        x.textContent.includes("LRTSquaredCore"),
+      );
+      expect(r).toBeTruthy();
+      return r;
+    });
+    fireEvent.click(row);
+    const dock = container.querySelector(".dock");
+    await within(dock).findByText("Stage timeline");
+    const names = Array.from(dock.querySelectorAll(".jp-stage-name")).map((n) => n.textContent);
+    // EFFECTS sits between POLICY and COVERAGE.
+    expect(names.indexOf("EFFECTS")).toBe(names.indexOf("POLICY") + 1);
+    expect(names.indexOf("EFFECTS")).toBe(names.indexOf("COVERAGE") - 1);
+    // Metric chips are humanized from the catalog (not raw keys).
+    expect(within(dock).getByText("candidates")).toBeInTheDocument();
+    expect(within(dock).getByText("kernel hits")).toBeInTheDocument();
+    expect(within(dock).getByText("verdicts")).toBeInTheDocument();
+    expect(within(dock).getByText(/EffectsWorker-7/)).toBeInTheDocument();
+  });
+
+  it("does NOT synthesize an effects row for a flag-off / historical job (presence-based)", async () => {
+    // A completed job whose server timings have no `effects` blob (flag was off,
+    // or the job predates the stage). The timeline must show the CORE path
+    // WITHOUT an eternal EFFECTS row — presence-based rendering.
+    installMocks([DONE], {
+      stageTimings: {
+        job_id: "done-1",
+        stage_timings: {
+          discovery: { stage: "discovery", elapsed_s: 5, worker_id: "DiscoveryWorker-1", status: "success", metrics: {} },
+        },
+      },
+    });
+    const { container } = render(<PipelineDashboard />);
+    const row = await waitFor(() => {
+      const r = Array.from(container.querySelectorAll(".zone-hist .run-row")).find((x) =>
+        x.textContent.includes("LRTSquaredCore"),
+      );
+      expect(r).toBeTruthy();
+      return r;
+    });
+    fireEvent.click(row);
+    const dock = container.querySelector(".dock");
+    await within(dock).findByText("Stage timeline");
+    const names = Array.from(dock.querySelectorAll(".jp-stage-name")).map((n) => n.textContent);
+    expect(names).not.toContain("EFFECTS");
+    // The rest of the CORE path still renders.
+    expect(names).toEqual(["DISCOVERY", "SELECTION", "STATIC", "RESOLUTION", "POLICY", "COVERAGE"]);
   });
 
   it("derives a stage's duration from started_at→ended_at when elapsed_s is absent", async () => {
