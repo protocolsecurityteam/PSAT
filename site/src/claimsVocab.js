@@ -298,9 +298,321 @@ export function claimSummaryLine(fn) {
       bestTier = c.tier;
     }
   }
+  // Append the primary claim's witness qualifier to its phrase (phrases[0] is the
+  // lowest-priority = primary claim, matching qualifierForClaims' choice), so the
+  // wider surfaces (graph meta, permissions chip) carry the same honest signal.
+  const qualifier = qualifierForClaims(fn);
+  if (qualifier && phrases.length) phrases[0] = `${phrases[0]} ${qualifier}`;
   const tierLabel = TIER_LABEL[bestTier];
   const text = phrases.join(" · ");
   return { text, tier: bestTier, label: tierLabel ? `${text} · ${tierLabel}` : text };
+}
+
+// ── Witness qualifiers (SCORING plan §7) ─────────────────────────────────────
+//
+// The honesty rule (mirror of the backend witness bar, SCORING_INVARIANTS inv-2):
+// a qualifier renders ONLY when its witness field is present and at the bar.
+// unknown / absent / indeterminate always falls through to the plain phrase —
+// never a guessed qualifier, never a reassurance laundered from absence. That is
+// the whole point: "moves value out" with no destination witness must NOT read
+// "(fixed destination)".
+//
+// All witness parsing lives here (the single-vocabulary-module invariant): chip
+// (lane.compactActionSummary), summary line (claimSummaryLine) and the inspector
+// (claimWitnessFacts / terminalControllerNote / signerOverlapNote) all read these.
+
+// Out-flow destination kinds. "fixed" is a PROVEN NEGATIVE — the destination
+// provably cannot be redirected. storage_setter is deliberately NOT fixed: an
+// admin can repoint it, so it earns its own honest phrasing rather than a
+// reassurance. self / indeterminate / absent are neither proven-fixed nor
+// caller-chosen → they block a "fixed" claim and render nothing.
+const OUT_TARGET_FIXED = new Set(["immutable", "constant", "storage_no_setter"]);
+const OUT_TARGET_CALLER = new Set(["param", "msg_sender"]);
+
+// Scan every out-flow entry across all flow.out claims (the static claim carries
+// witness.flows[]; the behavioral one has no direction/flows and is skipped).
+function flowOutTargetSummary(claims) {
+  let sawCaller = false;
+  let sawSetter = false;
+  let sawFixed = false;
+  let sawOther = false; // indeterminate / self / unclassified → blocks a "fixed" claim
+  let total = 0;
+  for (const c of claims) {
+    if (c.claim_id !== "flow.out") continue;
+    const w = c.witness;
+    if (!w || w.direction !== "out" || !Array.isArray(w.flows)) continue;
+    for (const f of w.flows) {
+      total += 1;
+      const kind = f && f.target_kind && typeof f.target_kind.kind === "string" ? f.target_kind.kind : null;
+      if (OUT_TARGET_CALLER.has(kind)) sawCaller = true;
+      else if (kind === "storage_setter") sawSetter = true;
+      else if (OUT_TARGET_FIXED.has(kind)) sawFixed = true;
+      else sawOther = true;
+    }
+  }
+  return { sawCaller, sawSetter, sawFixed, sawOther, total };
+}
+
+// Worst-case across a multi-flow function: a single caller-chosen path is the
+// theft signal (proven positive) and dominates; "fixed" is asserted only when
+// EVERY classified out-flow is fixed and none is indeterminate/self/unclassified.
+function flowOutQualifier(claims) {
+  const s = flowOutTargetSummary(claims);
+  if (!s.total) return null;
+  if (s.sawCaller) return "(caller-chosen destination)";
+  if (s.sawSetter) return "(admin-settable destination)";
+  if (s.sawFixed && !s.sawOther) return "(fixed destination)";
+  return null;
+}
+
+// The fork-observed pause summary (only the behavioral tier carries it).
+function pauseObserved(claims) {
+  for (const c of claims) {
+    if (c.claim_id === "pause.set" && c.tier === OBSERVED_TIER && c.witness && c.witness.observed) {
+      return c.witness.observed;
+    }
+  }
+  return null;
+}
+
+function formatDuration(seconds) {
+  const days = seconds / 86400;
+  if (days >= 1) return `${Math.round(days)}d`;
+  const hours = seconds / 3600;
+  if (hours >= 1) return `${Math.round(hours)}h`;
+  return `${Math.max(1, Math.round(seconds / 60))}m`;
+}
+
+function pauseQualifier(claims) {
+  const o = pauseObserved(claims);
+  if (!o) return null;
+  // A bounded auto-expiry is a severity REDUCER only when the fork affirmed it
+  // (auto_expiry === true) AND a positive duration bound was read. auto_expiry
+  // false means the fork contradicted the static bound → not a mitigation → plain.
+  if (o.auto_expiry === true && typeof o.duration_bound_seconds === "number" && o.duration_bound_seconds > 0) {
+    return `(auto-expires ~${formatDuration(o.duration_bound_seconds)})`;
+  }
+  // Indefinite latch = most severe: both fields present AND null. Absent keys
+  // (unknown) never reach here — undefined !== null.
+  if (o.auto_expiry === null && o.duration_bound_seconds === null) {
+    return "(indefinite)";
+  }
+  return null;
+}
+
+// The fork-observed mint-backing object (behavioral tier only).
+function mintBacking(claims) {
+  for (const c of claims) {
+    if (
+      c.claim_id === "supply.mint"
+      && c.tier === OBSERVED_TIER
+      && c.witness
+      && c.witness.observed
+      && c.witness.observed.backing
+    ) {
+      return c.witness.observed.backing;
+    }
+  }
+  return null;
+}
+
+function mintQualifier(claims) {
+  const b = mintBacking(claims);
+  if (!b) return null;
+  // inflow_observed === false is a witnessed dilution signal (supply rose with
+  // no matching inflow); absence of the field is unknown, never "backed".
+  if (b.inflow_observed === true) return "(backed)";
+  if (b.inflow_observed === false) return "(unbacked)";
+  return null;
+}
+
+// The glanceable parenthetical for the primary claim, or null. Reads the witness
+// of every claim of the primary's kind (so a static destination + a behavioral
+// reach on the same flow.out both feed the answer).
+export function qualifierForClaims(fn) {
+  const primary = primaryClaim(fn);
+  if (!primary) return null;
+  const claims = claimsOf(fn);
+  switch (primary.claim_id) {
+    case "flow.out":
+      return flowOutQualifier(claims);
+    case "pause.set":
+      return pauseQualifier(claims);
+    case "supply.mint":
+      return mintQualifier(claims);
+    default:
+      return null;
+  }
+}
+
+// ── Inspector verbose facts (SCORING plan §7.3) ──────────────────────────────
+
+const TARGET_KIND_WORD = {
+  immutable: "immutable address",
+  constant: "compile-time constant",
+  storage_no_setter: "storage (no setter — fixed)",
+  storage_setter: "storage (admin-settable)",
+  param: "caller-supplied argument",
+  msg_sender: "msg.sender (the caller)",
+  self: "the contract itself",
+  indeterminate: "indeterminate",
+};
+
+const AMOUNT_KIND_WORD = {
+  msg_value: "msg.value (attached ETH)",
+  param: "caller-supplied argument",
+  whole_balance: "the whole balance",
+  bounded_by_storage: "bounded by a storage value",
+  fixed_constant: "a fixed constant",
+  indeterminate: "indeterminate",
+};
+
+const TIER_WORD = { dispositive_ast: "dispositive AST", static_trace: "static trace" };
+
+function kindTierText(kt, wordMap) {
+  if (!kt || typeof kt.kind !== "string") return null;
+  const word = wordMap[kt.kind] || kt.kind;
+  const tier = TIER_WORD[kt.tier];
+  return tier ? `${word} · ${tier}` : word;
+}
+
+// Conservative UPPER-BOUND USD phrasing — never render as exact (inv. 5/7).
+function formatUsdUpperBound(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  const abs = Math.abs(value);
+  let text;
+  if (abs >= 1e9) text = `$${(value / 1e9).toFixed(1)}B`;
+  else if (abs >= 1e6) text = `$${(value / 1e6).toFixed(1)}M`;
+  else if (abs >= 1e3) text = `$${(value / 1e3).toFixed(1)}K`;
+  else text = `$${Math.round(value)}`;
+  return `up to ~${text}`;
+}
+
+// Verbose witness rows for the function inspector: [{label, value}]. Every row is
+// derived from a present, at-the-bar field — absent facts produce no row (the
+// same honesty rule as the chip; an unwitnessed destination shows nothing rather
+// than a reassuring default).
+export function claimWitnessFacts(fn) {
+  const claims = claimsOf(fn);
+  const facts = [];
+
+  // flow.out — destination kind, amount kind (static lattice) + reach (fork).
+  const destKinds = [];
+  const amtKinds = [];
+  let reachValue = null;
+  let reachIndeterminate = false;
+  for (const c of claims) {
+    if (c.claim_id !== "flow.out") continue;
+    const w = c.witness;
+    if (!w) continue;
+    if (w.direction === "out" && Array.isArray(w.flows)) {
+      for (const f of w.flows) {
+        const dt = kindTierText(f && f.target_kind, TARGET_KIND_WORD);
+        if (dt && !destKinds.includes(dt)) destKinds.push(dt);
+        const at = kindTierText(f && f.amount_kind, AMOUNT_KIND_WORD);
+        if (at && !amtKinds.includes(at)) amtKinds.push(at);
+      }
+    }
+    const observed = w.observed;
+    if (observed) {
+      if (typeof observed.observed_reach_value_usd === "number") reachValue = observed.observed_reach_value_usd;
+      if (observed.reach_indeterminate === true) reachIndeterminate = true;
+    }
+  }
+  if (destKinds.length) facts.push({ label: "Destination", value: destKinds.join(", ") });
+  if (amtKinds.length) facts.push({ label: "Amount", value: amtKinds.join(", ") });
+  if (reachIndeterminate) {
+    facts.push({ label: "Reach", value: "floored to own balance (reach indeterminate)" });
+  } else {
+    const reach = formatUsdUpperBound(reachValue);
+    if (reach) facts.push({ label: "Reach (upper bound)", value: reach });
+  }
+
+  // pause.set — freeze blast radius, auto-expiry + duration (fork-observed).
+  const observed = pauseObserved(claims);
+  if (observed) {
+    const radius = observed.observed_blast_radius;
+    if (Array.isArray(radius) && radius.length) {
+      const shown = radius.slice(0, 4).join(", ");
+      const more = radius.length > 4 ? ` +${radius.length - 4} more` : "";
+      facts.push({ label: "Freeze scope", value: `${radius.length} entry point(s): ${shown}${more}` });
+    }
+    if (observed.auto_expiry === true && typeof observed.duration_bound_seconds === "number") {
+      facts.push({ label: "Auto-expiry", value: `self-recovers after ~${formatDuration(observed.duration_bound_seconds)}` });
+    } else if (observed.auto_expiry === false) {
+      facts.push({ label: "Auto-expiry", value: "does not self-recover" });
+    } else if (observed.auto_expiry === null && observed.duration_bound_seconds === null) {
+      facts.push({ label: "Auto-expiry", value: "indefinite latch (no self-recovery bound)" });
+    }
+  }
+
+  // supply.mint — backing inflow (fork-observed).
+  const backing = mintBacking(claims);
+  if (backing) {
+    if (backing.inflow_observed === true) {
+      facts.push({ label: "Backing", value: "matching asset inflow observed (backed)" });
+    } else if (backing.inflow_observed === false) {
+      facts.push({ label: "Backing", value: "no matching inflow — supply rose alone (dilution)" });
+    }
+  }
+
+  return facts;
+}
+
+// A resolved-principal's terminal-controller note (SCORING plan §4 / §7.3). Reads
+// the non-terminal marking + terminal walk so the inspector NEVER implies a
+// settled key where the control chain didn't terminate. Returns null for a
+// principal that is itself terminal (a settled Safe/EOA/timelock), or when there
+// is nothing to say. Shape: {kind: "terminated"|"ambiguous"|"unresolved", ...}.
+export function terminalControllerNote(principal) {
+  const details = (principal && principal.details) || {};
+  const resolvedType = (principal && (principal.resolvedType || principal.resolved_type)) || "unknown";
+  // A settled key (terminal === true) needs no way-point note.
+  if (details.terminal === true) return null;
+
+  const tp = details.terminal_principal;
+  if (tp && typeof tp === "object") {
+    if (tp.terminal === true && tp.address) {
+      return { kind: "terminated", address: tp.address, resolvedType: String(tp.resolved_type || "unknown") };
+    }
+    if (tp.status === "ambiguous_controllers") {
+      const planes = Array.isArray(tp.controllers) ? tp.controllers : [];
+      return { kind: "ambiguous", planes };
+    }
+    // cycle | depth_exceeded | unknown_unfetched → honestly unresolved.
+    return { kind: "unresolved", status: tp.status || "unknown" };
+  }
+
+  // resolved_type=contract way-point with no terminal walk: still non-terminal.
+  if (resolvedType === "contract" || details.terminal === false) {
+    return { kind: "unresolved", status: "unknown_unfetched" };
+  }
+  return null;
+}
+
+// Signer-overlap attribution CONTEXT for a Safe principal (SCORING plan §2 / C1).
+// Tier 1 (on-chain owner reads). NB the honesty boundary baked into the copy this
+// feeds: shared signers is attribution context, NOT proof of shared org identity.
+// Returns {selfOwnerCount, strongest: {address, sharedCount, otherOwnerCount,
+// subset, superset, equal, jaccard}} or null.
+export function signerOverlapNote(principal) {
+  const so = principal && principal.details && principal.details.signer_overlap;
+  if (!so || !Array.isArray(so.overlaps) || !so.overlaps.length) return null;
+  const withShared = so.overlaps.filter((o) => o && typeof o.shared_count === "number" && o.shared_count > 0);
+  if (!withShared.length) return { selfOwnerCount: so.self_owner_count, strongest: null };
+  const strongest = withShared.reduce((best, o) => (o.jaccard > best.jaccard ? o : best));
+  return {
+    selfOwnerCount: so.self_owner_count,
+    strongest: {
+      address: strongest.address,
+      sharedCount: strongest.shared_count,
+      otherOwnerCount: strongest.other_owner_count,
+      subset: Boolean(strongest.subset),
+      superset: Boolean(strongest.superset),
+      equal: Boolean(strongest.equal),
+      jaccard: strongest.jaccard,
+    },
+  };
 }
 
 // {kind, severity} for protocolScore — the strongest-severity scoreable claim.

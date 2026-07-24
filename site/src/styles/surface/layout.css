@@ -2352,6 +2352,55 @@
   line-height: 1.45;
 }
 
+/* Witness facts (SCORING plan §7.3): verbose destination/expiry/backing/reach
+   rows in the function inspector. */
+.ps-witness-facts {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ps-witness-fact {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ps-witness-fact dt {
+  color: #94a3b8;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ps-witness-fact dd {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Non-terminal way-point / terminal-controller note under a principal card. The
+   "open" variant flags an unresolved/ambiguous controller — never a settled key. */
+.ps-principal-terminal {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+.ps-principal-terminal-open {
+  color: #c8a36a;
+}
+
+.ps-principal-overlap {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
 @media (max-width: 1220px) {
   .ps-layout {
     grid-template-columns: minmax(0, 1fr);

@@ -1,6 +1,49 @@
 import { formatDelay, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
+import { claimWitnessFacts, signerOverlapNote, terminalControllerNote } from "../../claimsVocab.js";
+
+// Way-point / terminal-controller copy for a non-terminal principal. Mirrors the
+// backend witness bar: a resolved_type=contract principal is a way-point, never a
+// settled key, so the UI must never imply one where the chain didn't terminate
+// (SCORING plan §4). Renders nothing for a settled key.
+function TerminalNote({ principal }) {
+  const note = terminalControllerNote(principal);
+  if (!note) return null;
+  if (note.kind === "terminated") {
+    return (
+      <div className="ps-principal-terminal">
+        ultimate key: {shortAddr(note.address)} · {note.resolvedType}
+      </div>
+    );
+  }
+  if (note.kind === "ambiguous") {
+    return (
+      <div className="ps-principal-terminal ps-principal-terminal-open">
+        {note.planes.length} parallel control planes witnessed — no single settled key
+      </div>
+    );
+  }
+  return (
+    <div className="ps-principal-terminal ps-principal-terminal-open">
+      controlled by contract — ultimate key unresolved
+    </div>
+  );
+}
+
+// Signer-overlap attribution CONTEXT (Tier 1, on-chain owner reads). NOT proof of
+// shared organizational identity — the copy stays factual about signers only.
+function SignerOverlapNote({ principal }) {
+  const note = signerOverlapNote(principal);
+  if (!note || !note.strongest) return null;
+  const s = note.strongest;
+  const shareText = s.equal
+    ? `same signer set as ${shortAddr(s.address)}`
+    : s.subset
+      ? `${s.sharedCount} signers all also sign ${shortAddr(s.address)}`
+      : `${s.sharedCount} of ${note.selfOwnerCount} signers shared with ${shortAddr(s.address)}`;
+  return <div className="ps-principal-overlap">{shareText}</div>;
+}
 
 // Empty-callers copy keyed by the guard's open-path shape, so a one-shot or a
 // denylist/permit reads accurately instead of a flat "marked public".
@@ -73,11 +116,35 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
         {onNavigate && <GotoArrow onCommit={() => onNavigate(target)} label={`Go to ${type.label} ${shortAddr(principal.address)}`} />}
       </div>
       <div className="ps-principal-meta">{detail}</div>
+      <TerminalNote principal={principal} />
+      <SignerOverlapNote principal={principal} />
       <div className="ps-principal-origin">
         {indirect
           ? `via ${principal.path.slice(0, -1).map((p) => shortAddr(p.address)).join(" → ")}`
           : principal.origins.join(" · ")}
       </div>
+    </div>
+  );
+}
+
+// Verbose witness facts for the selected function (SCORING plan §7.3): where the
+// funds go + how much, freeze scope/expiry, mint backing, reach upper bound. Each
+// row derives from a present, at-the-bar witness field — nothing renders from
+// absence, so the block is silent when there is no witnessed fact to show.
+function WitnessFacts({ fn }) {
+  const facts = claimWitnessFacts(fn);
+  if (!facts.length) return null;
+  return (
+    <div className="ps-inspector-block">
+      <div className="ps-inspector-label">Witnessed facts</div>
+      <dl className="ps-witness-facts">
+        {facts.map((f) => (
+          <div key={f.label} className="ps-witness-fact">
+            <dt>{f.label}</dt>
+            <dd>{f.value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -113,6 +180,8 @@ export function InspectorCard({ selected, onNavigate, onPreview }) {
         <div className="ps-inspector-label">Action</div>
         <p className="ps-inspector-body">{selected.action || "Permissioned path"}</p>
       </div>
+
+      <WitnessFacts fn={selected} />
 
       <div className="ps-inspector-block">
         <div className="ps-inspector-label">
