@@ -553,7 +553,11 @@ def _resolve_destination_shape(
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            return SHAPE_CALLER_ARBITRARY, "simulation", None, None
+            # The attacker sentinel is the PROVEN caller-chosen destination — the
+            # state-plane residue of a caller_arbitrary verdict. Record it so a
+            # proven caller_arbitrary carries its concrete witness address rather
+            # than an empty destination (the address is never a cache key — inv.3).
+            return SHAPE_CALLER_ARBITRARY, "simulation", sentinel_address.lower(), None
     if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED) and static_destination:
         return static_shape, "static", static_destination, None
     if taint_param_reaches_sink and sentinel_transfers is not None:
@@ -565,7 +569,15 @@ def _resolve_destination_shape(
             detail={"sentinel_address": sentinel_address},
         )
         return SHAPE_UNKNOWN, "none", None, disc
-    observed_dest = base_transfers[0][1] if len(base_transfers) == 1 else None
+    # State-plane residue: the address value actually left to THIS run. Capture it
+    # whenever every observed outflow converged on a single destination — a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to
+    # the same address) still has one concrete destination. Divergent destinations
+    # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
+    # single observation can't prove "always this address"); the shape stays
+    # unknown while the concrete destination is recorded for the state plane.
+    out_destinations = {to for _f, to, _v in base_transfers}
+    observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
     return SHAPE_UNKNOWN, "none", observed_dest, None
 
 

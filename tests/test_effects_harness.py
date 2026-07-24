@@ -180,8 +180,86 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
+    # A proven caller_arbitrary carries the sentinel it provably reached as its
+    # concrete state-plane destination (never empty on a proven move).
+    assert eff.concrete["destination"] == SENTINEL.lower()
     assert eff.discrepancy is None
     assert eff.transcript_ptr is not None
+
+
+def test_value_out_value_moved_records_single_observed_destination():
+    # value moved, no sentinel, no static shape → shape stays unknown (a single
+    # observation can't prove a fixed shape) BUT the concrete destination the
+    # value reached this run is recorded for the state plane.
+    recipient = "0x" + "ab" * 20
+    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, recipient, 9)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xabcd0002",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["value_moved"] is True
+    assert eff.details["destination_shape"] == recipes.SHAPE_UNKNOWN
+    assert eff.details["shape_proved_by"] == "none"
+    assert eff.concrete["destination"] == recipient.lower()
+
+
+def test_value_out_multi_log_single_destination_records_it():
+    # A withdrawal emitting several outbound Transfer logs that all converge on
+    # ONE destination still has one concrete destination (len(logs) != 1).
+    recipient = "0x" + "ab" * 20
+    base = SimResult(
+        calls=(
+            ok(
+                logs=[
+                    transfer_log(TOKEN, CONTRACT, recipient, 5),
+                    transfer_log(TOKEN, CONTRACT, recipient, 3),
+                ]
+            ),
+        )
+    )
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xabcd0003",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.concrete["destination"] == recipient.lower()
+
+
+def test_value_out_divergent_destinations_withheld():
+    # Outflow to TWO distinct destinations is genuinely ambiguous → no concrete
+    # destination recorded (never guess which is "the" destination).
+    base = SimResult(
+        calls=(
+            ok(
+                logs=[
+                    transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 5),
+                    transfer_log(TOKEN, CONTRACT, "0x" + "cd" * 20, 3),
+                ]
+            ),
+        )
+    )
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xabcd0004",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert "destination" not in eff.concrete
 
 
 def test_value_out_static_fixed_shape_from_static_plane():
