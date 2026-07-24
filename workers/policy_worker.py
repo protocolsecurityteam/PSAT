@@ -29,7 +29,7 @@ from schemas.effective_permissions import PrincipalResolution
 from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
-from services.policy.principal_enrichment import load_protocol_safe_owner_sets
+from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
@@ -691,6 +691,10 @@ class PolicyWorker(BaseWorker):
                 # has no sibling Safes to compare against.
                 protocol_safe_owner_sets=(
                     load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
+                ),
+                # §2 sub-part B: shared-deployer groups (witnessed heuristic fact).
+                protocol_deployer_groups=(
+                    load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # A4: contract-principal -> ultimate Safe/EOA terminal walk.
                 resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),

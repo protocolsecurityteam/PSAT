@@ -139,6 +139,64 @@ def _compute_signer_overlap(
     }
 
 
+# --- shared-deployer attribution fact (§2 sub-part B) -------------------------
+def load_protocol_deployer_groups(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
+    """Per-address shared-deployer groups for a protocol, keyed by lowercased
+    contract address (SCORING plan §2 sub-part B).
+
+    Groups the protocol's ``contracts`` by ``deployer`` (lowercased); a group of
+    ≥2 contracts sharing one deployer yields, for each member, ``{"deployer",
+    "addresses": [full sorted group]}``. Contracts with a NULL ``deployer`` (73/205
+    populated locally) are omitted — no fact without the witness. Same-deployer is
+    a WITNESSED on-chain fact but a HEURISTIC for attribution (factories defeat
+    "same deployer ⇒ same org"); the emitted fact carries that flag and never
+    yields an org-identity deduction (see ``_shared_deployer_fact``).
+    """
+    rows = session.execute(
+        select(func.lower(Contract.address), func.lower(Contract.deployer)).where(
+            Contract.protocol_id == protocol_id, Contract.deployer.is_not(None)
+        )
+    ).all()
+
+    by_deployer: dict[str, set[str]] = defaultdict(set)
+    for address, deployer in rows:
+        addr = str(address).lower()
+        dep = str(deployer).lower()
+        if addr.startswith("0x") and dep.startswith("0x"):
+            by_deployer[dep].add(addr)
+
+    groups: dict[str, dict[str, Any]] = {}
+    for deployer, addresses in by_deployer.items():
+        if len(addresses) < 2:
+            continue  # a lone contract shares a deployer with nobody — no fact
+        ordered = sorted(addresses)
+        for addr in ordered:
+            groups[addr] = {"deployer": deployer, "addresses": ordered}
+    return groups
+
+
+def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The ``shared_deployer`` fact for a principal that co-shares a deployer with
+    other protocol contracts, or ``None`` to omit (deployer absent / singleton).
+
+    WITNESSED fact, NOT a conclusion: ``provenance="deployer_read"`` is a Tier-1
+    on-chain read, but ``heuristic=True`` flags that same-deployer does NOT prove
+    same organization (factories, shared deployer EOAs, and vanity-deployer
+    services all defeat it). Routes to confidence/warnings, never a grade
+    deduction, and MUST NOT mint an org-identity label. Mirrors the C1 bucket
+    honesty: fact yes, org conclusion no.
+    """
+    entry = deployer_groups.get(address)
+    if entry is None:
+        return None
+    return {
+        "provenance": "deployer_read",
+        "heuristic": True,
+        "deployer": entry["deployer"],
+        "addresses": list(entry["addresses"]),
+    }
+
+
 def _safe_role_int(role: Any) -> int | None:
     """Coerce a role identifier to int, returning None for non-int shapes.
 
@@ -497,6 +555,7 @@ def build_principal_labels(
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
     protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
+    protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
 ) -> PrincipalLabels:
     """Construct principal records for every authority address.
@@ -518,6 +577,11 @@ def build_principal_labels(
     exact-owner Safe registry (``load_protocol_safe_owner_sets``). When present,
     each Safe principal gains a ``details.signer_overlap`` attribution fact
     against every other protocol Safe. ``None`` omits the fact (no guessing).
+
+    ``protocol_deployer_groups`` (§2 sub-part B) — the protocol's shared-deployer
+    groups (``load_protocol_deployer_groups``). When present, a principal whose
+    address co-shares a deployer with other protocol contracts gains a witnessed
+    (heuristic-tagged) ``details.shared_deployer`` fact. ``None`` omits it.
 
     ``resolve_controllers`` (A4, SCORING plan §4) — an
     ``address -> [{"address","resolved_type","details"}, ...] | None`` step
@@ -642,6 +706,13 @@ def build_principal_labels(
             overlap = _compute_signer_overlap(address, protocol_safe_owner_sets)
             if overlap is not None:
                 details["signer_overlap"] = overlap
+        # Shared-deployer attribution fact (§2 sub-part B) — witnessed, heuristic,
+        # never an org-identity deduction. Applies to any principal that is itself
+        # a protocol contract co-sharing a deployer.
+        if protocol_deployer_groups:
+            shared = _shared_deployer_fact(address, protocol_deployer_groups)
+            if shared is not None:
+                details["shared_deployer"] = shared
 
         return {
             "address": address,
