@@ -51,9 +51,10 @@ def test_same_address_from_two_getters_deduped(monkeypatch):
     assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
 
 
-def test_zero_answers_skipped(monkeypatch):
-    _stub(monkeypatch, {"owner()": ZERO, "authority()": AUTHORITY})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [AUTHORITY]
+def test_clean_zero_is_not_an_error_proceeds_single_plane(monkeypatch):
+    # authority() cleanly returns zero -> genuinely not a plane; owner() stands.
+    _stub(monkeypatch, {"owner()": OWNER, "authority()": ZERO})
+    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
 
 
 def test_no_getter_present_is_empty(monkeypatch):
@@ -61,14 +62,21 @@ def test_no_getter_present_is_empty(monkeypatch):
     assert read_contract_controllers("http://rpc", CONTRACT) == []
 
 
-def test_probe_error_skipped_per_getter(monkeypatch):
-    # owner() errors transiently -> skipped, not a hard failure; admin() still read.
+def test_any_getter_error_makes_set_incomplete_returns_none(monkeypatch):
+    # owner() answers but authority() ERRORS transiently -> the plane set is not
+    # dispositively complete (a real second plane could hide behind the error), so
+    # return None (retryable) rather than a possibly-false single plane.
     def _fake(rpc_url, address, signature, abi_type, block_tag="latest", *, chain_id=None):
         if signature == "owner()":
-            return _PROBE_ERROR
-        if signature == "admin()":
             return OWNER
+        if signature == "authority()":
+            return _PROBE_ERROR
         return None
 
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", _fake)
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
+    assert read_contract_controllers("http://rpc", CONTRACT) is None
+
+
+def test_all_getters_error_returns_none(monkeypatch):
+    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: _PROBE_ERROR)
+    assert read_contract_controllers("http://rpc", CONTRACT) is None

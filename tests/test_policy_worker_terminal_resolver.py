@@ -49,3 +49,12 @@ def test_resolver_returns_none_when_no_controller(monkeypatch):
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None
     assert resolver(CONTRACT) is None
+
+
+def test_resolver_returns_none_on_probe_incomplete(monkeypatch):
+    # read_contract_controllers returns None (a getter errored) -> the resolver
+    # yields None so the walk reads unknown_unfetched, not a partial plane set.
+    monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: None)
+    resolver = _make_terminal_controller_resolver("http://rpc")
+    assert resolver is not None
+    assert resolver(CONTRACT) is None
