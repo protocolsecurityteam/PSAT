@@ -23,17 +23,23 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, exists, func, literal, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from db.models import (
+    Artifact,
     Contract,
     ContractBalance,
     ControlGraphEdge,
     EffectiveFunction,
+    EffectVerdict,
     FunctionPrincipal,
+    Job,
+    JobStage,
+    JobStatus,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
+from utils.chains import UnknownChainError, canonical_chain, chain_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +197,106 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
     return graph
 
 
-def _cascade_rows(session: Session, protocol_id: int):
+@dataclass(frozen=True)
+class JobScope:
+    """The contract one effects job is responsible for planning.
+
+    Without a scope, ``select_candidates`` plans the WHOLE protocol — which means
+    every one of a protocol's jobs re-plans (and re-writes) every other contract's
+    candidates. With a scope, a job plans its own contract plus the protocol's
+    *unowned* contracts (see :func:`_scope_predicate`), which partitions the work
+    without losing a single candidate.
+
+    ``address`` is the CODE-bearing ``contracts.address`` the job was created for;
+    ownership is matched on that, never on a proxy deployment address.
+    """
+
+    address: str
+    chain_id: int
+
+
+def _chain_name(chain_id: int) -> str:
+    try:
+        return chain_by_id(chain_id).name.lower()
+    except UnknownChainError:
+        return "ethereum"
+
+
+def _contract_chain_matches(chain_id: int):
+    """``Contract.chain`` is a name string and NULL means legacy-mainnet — the same
+    convention (and coalesce) ``services/discovery/upgrade_history`` uses."""
+    name = canonical_chain(_chain_name(chain_id)) or "ethereum"
+    return func.lower(func.coalesce(Contract.chain, "ethereum")) == name
+
+
+# The per-stage timing artifact ``BaseWorker`` writes when a stage finishes.
+# Derived rather than hardcoded so it cannot drift from the writer.
+_EFFECTS_STAGE_ARTIFACT = f"stage_timing_{JobStage.effects.value}"
+
+# A job in either of these states will never run the effects stage again.
+_FINISHED_JOB_STATES = (JobStatus.completed, JobStatus.failed_terminal)
+
+
+def _scope_predicate(protocol_id: int, scope: JobScope):
+    """Which contracts THIS job plans: its own, plus every *unowned* one.
+
+    Ownership must answer "will some job actually plan this contract?", NOT "does
+    a job row exist at this address". Those differ exactly where it matters: a
+    protocol whose jobs all completed in an earlier run (production's steady
+    state) has a job row for every contract and yet nothing scheduled to plan any
+    of them, so a row-existence rule would leave every contract unplanned while
+    looking like a clean partition. A contract is owned when:
+
+    1. a job at its address is still in flight, so it will reach this stage; or
+    2. a job at its address ALREADY ran the effects stage — it was planned, even
+       if the plans yielded no verdict (measured: 5 of 29 contracts in the live
+       run planned candidates and wrote none, so verdict-existence alone would
+       re-sweep them forever); or
+    3. its functions already carry verdicts — which is what a *sweep* leaves
+       behind, and is what stops a sweep repeating across a run: the first job to
+       sweep a contract marks it planned for every job after it.
+
+    Together these make the union over a protocol's jobs the whole protocol-wide
+    set — every contract is owned (planned by its owner) or unowned (planned by
+    whichever job reaches this stage next) — while keeping each job's work to its
+    own contract in the steady state.
+
+    All job matching is protocol- AND chain-qualified: one address can host
+    unrelated contracts on different chains, and (schema-permitting) belong to
+    different protocols, neither of which may claim ownership of the other's.
+    """
+    address_match = (
+        Job.protocol_id == protocol_id,
+        Job.chain_id == scope.chain_id,
+        Job.address.is_not(None),
+        func.lower(Job.address) == func.lower(Contract.address),
+    )
+    in_flight = exists(
+        select(literal(1))
+        .select_from(Job)
+        .where(*address_match, Job.status.not_in(_FINISHED_JOB_STATES))
+        .correlate(Contract)
+    )
+    planned_by_own_job = exists(
+        select(literal(1))
+        .select_from(Job)
+        .join(Artifact, and_(Artifact.job_id == Job.id, Artifact.name == _EFFECTS_STAGE_ARTIFACT))
+        .where(*address_match)
+        .correlate(Contract)
+    )
+    swept_function = aliased(EffectiveFunction)
+    planned_by_a_sweep = exists(
+        select(literal(1))
+        .select_from(EffectVerdict)
+        .join(swept_function, swept_function.id == EffectVerdict.function_id)
+        .where(swept_function.contract_id == Contract.id)
+        .correlate(Contract)
+    )
+    owned = or_(in_flight, planned_by_own_job, planned_by_a_sweep)
+    return or_(func.lower(Contract.address) == scope.address.lower(), ~owned)
+
+
+def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = None):
     """The §6 filter cascade as one query.
 
     (a) has a sink   — ``array_length(effect_targets, 1) > 0`` (there is no
@@ -208,7 +313,21 @@ def _cascade_rows(session: Session, protocol_id: int):
     :func:`select_candidates`. Widening the SQL to all gated rows keeps the whole
     decision inspectable in one place instead of split across a fragile JSONB
     predicate.
+
+    ``scope`` narrows the cascade to one job's own contracts (:class:`JobScope`);
+    ``None`` keeps the historical protocol-wide behavior.
     """
+    where = [
+        Contract.protocol_id == protocol_id,
+        func.array_length(EffectiveFunction.effect_targets, 1) > 0,
+        EffectiveFunction.authority_public.is_(False),
+    ]
+    if scope is not None:
+        # Chain-scoping is part of the fix, not incidental: protocol-wide selection
+        # handed a chain-1 job the candidates of every other chain's contracts and
+        # probed them through chain-1 seams.
+        where.append(_contract_chain_matches(scope.chain_id))
+        where.append(_scope_predicate(protocol_id, scope))
     return session.execute(
         select(
             EffectiveFunction.id,
@@ -222,11 +341,7 @@ def _cascade_rows(session: Session, protocol_id: int):
             EffectiveFunction.claims,
         )
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
-        .where(
-            Contract.protocol_id == protocol_id,
-            func.array_length(EffectiveFunction.effect_targets, 1) > 0,
-            EffectiveFunction.authority_public.is_(False),
-        )
+        .where(*where)
     ).all()
 
 
@@ -281,6 +396,7 @@ def select_candidates(
     protocol_id: int,
     *,
     resource_cap: int | None = None,
+    scope: JobScope | None = None,
 ) -> list[Candidate]:
     """Return the blank-gated simulation set, ordered by transitive value.
 
@@ -288,8 +404,14 @@ def select_candidates(
     safety-valve for a pathological protocol. When it fires it drops the
     lowest-value candidates and ``log()``s exactly what it dropped — value
     never silently removes work.
+
+    ``scope`` narrows the CANDIDATE set to the calling job's own contracts. The
+    two protocol-wide inputs below are deliberately NOT narrowed: the authority
+    closure and the §5b value-holder set are properties of the whole protocol, and
+    computing either from one contract's slice would understate every candidate's
+    blast radius.
     """
-    rows = _cascade_rows(session, protocol_id)
+    rows = _cascade_rows(session, protocol_id, scope)
     function_ids = [r[0] for r in rows]
     principals = _principals_by_function(session, function_ids)
     graph = build_authority_graph(session, protocol_id)

@@ -17,14 +17,19 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from db.models import (
+    Artifact,
     Contract,
     ContractBalance,
     ControlGraphEdge,
     EffectiveFunction,
+    EffectVerdict,
     FunctionPrincipal,
+    Job,
+    JobStage,
+    JobStatus,
     Protocol,
 )
-from services.effects.selection import build_authority_graph, select_candidates
+from services.effects.selection import JobScope, build_authority_graph, select_candidates
 from tests.conftest import ADDR, requires_postgres
 
 pytestmark = requires_postgres
@@ -469,3 +474,255 @@ def test_probe_target_is_the_deployment_not_the_implementation(db_session):
     assert proxied.probe_target == ADDR(0x7002).lower()
     # No deployment recorded ⇒ the code-bearing address is the probe target.
     assert by_name["sweep"].probe_target == ADDR(0x7001).lower()
+
+
+# ---------------------------------------------------------------------------
+# Per-job scoping (JobScope) — the candidate set must PARTITION across a
+# protocol's jobs without losing a single candidate.
+# ---------------------------------------------------------------------------
+
+
+def _job(session: Session, protocol_id: int | None, address: str, *, chain_id: int = 1, status=JobStatus.processing):
+    job = Job(
+        address=address,
+        chain_id=chain_id,
+        protocol_id=protocol_id,
+        status=status,
+        stage=JobStage.effects,
+        request={"address": address, "chain": "ethereum"},
+    )
+    session.add(job)
+    session.flush()
+    return job
+
+
+def _ran_effects(session: Session, job: Job) -> None:
+    """Mark a job as having completed the effects stage, the way BaseWorker does."""
+    session.add(Artifact(job_id=job.id, name="stage_timing_effects", data={"stage": "effects"}))
+    job.status = JobStatus.completed
+    session.flush()
+
+
+def _verdict_for(session: Session, function_id: int, address: str) -> None:
+    """The residue a sweep leaves behind on a contract it planned."""
+    session.add(
+        EffectVerdict(
+            function_id=function_id,
+            chain_id=1,
+            contract_address=address.lower(),
+            selector="0x0000ffff",
+            effect_class="value_out",
+            verdict="unknown",
+            tier="tier1",
+        )
+    )
+    session.flush()
+
+
+def _scoped_fixture(session: Session, *, status=JobStatus.processing):
+    """Three contracts: A and B have a protocol-bearing job; C's only job carries
+    no protocol_id — the live shape where one candidate-owning contract had no
+    job that would ever scope to it."""
+    proto = _protocol(session, f"scope-{ADDR(0x8000)}")
+    addrs = {"a": ADDR(0x8001), "b": ADDR(0x8002), "c": ADDR(0x8003)}
+    fns: dict[str, int] = {}
+    jobs: dict[str, Job] = {}
+    for key, addr in addrs.items():
+        contract = _contract(session, proto.id, addr, chain="ethereum")
+        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{ord(key):04x}", effect_targets=["s"]).id
+    jobs["a"] = _job(session, proto.id, addrs["a"], status=status)
+    jobs["b"] = _job(session, proto.id, addrs["b"], status=status)
+    _job(session, None, addrs["c"])  # unowned: no protocol_id
+    session.commit()
+    return proto, addrs, fns, jobs
+
+
+def _scoped(session, proto_id, addr) -> set[int]:
+    return {c.function_id for c in select_candidates(session, proto_id, scope=JobScope(addr, 1))}
+
+
+# --- Shape 1: full run — every contract has a current, in-flight job ---------
+
+
+def test_shape1_full_run_plans_own_contract_not_its_siblings(db_session):
+    """The defect: every job re-planned every other contract's candidates."""
+    proto, addrs, fns, _ = _scoped_fixture(db_session)
+    got = _scoped(db_session, proto.id, addrs["a"])
+    assert fns["a"] in got
+    assert fns["b"] not in got
+
+
+def test_shape1_sweeps_contracts_no_job_would_ever_claim(db_session):
+    """Coverage guard: C has no protocol-bearing job, so no scoped job owns it.
+    Every job must sweep it or its verdicts vanish silently."""
+    proto, addrs, fns, _ = _scoped_fixture(db_session)
+    for owner in ("a", "b"):
+        assert fns["c"] in _scoped(db_session, proto.id, addrs[owner]), f"unowned contract dropped by job {owner}"
+
+
+def test_shape1_scoped_union_equals_protocol_wide_set(db_session):
+    """The coverage proof: the union over a protocol's per-job scopes is exactly
+    the protocol-wide candidate set. No function loses its verdict."""
+    proto, addrs, _fns, _ = _scoped_fixture(db_session)
+    protocol_wide = {c.function_id for c in select_candidates(db_session, proto.id)}
+    union: set[int] = set()
+    for job_addr in addrs.values():
+        union |= _scoped(db_session, proto.id, job_addr)
+    assert union == protocol_wide
+
+
+def test_shape1_job_that_completes_early_is_not_re_swept(db_session):
+    """The transition edge: B finishes the effects stage mid-run. It is no longer
+    in flight, so a row-existence rule would re-sweep it into every later job —
+    the storm coming back through the side door."""
+    proto, addrs, fns, jobs = _scoped_fixture(db_session)
+    _ran_effects(db_session, jobs["b"])
+    db_session.commit()
+
+    got = _scoped(db_session, proto.id, addrs["a"])
+    assert fns["b"] not in got
+    assert fns["a"] in got
+
+
+def test_shape1_completed_job_that_wrote_no_verdicts_is_still_owned(db_session):
+    """5 of 29 contracts in the live run planned candidates and wrote no verdict.
+    Verdict-existence alone would re-sweep them forever, so the "its own job ran
+    the stage" signal has to stand on its own."""
+    proto, addrs, fns, jobs = _scoped_fixture(db_session)
+    _ran_effects(db_session, jobs["b"])
+    db_session.commit()
+    assert not db_session.query(EffectVerdict).count()
+    assert fns["b"] not in _scoped(db_session, proto.id, addrs["a"])
+
+
+# --- Shape 2: incremental run — one new contract joins an analyzed protocol ---
+
+
+def test_shape2_new_contract_does_not_replan_the_protocol(db_session):
+    """A single new contract joining an already-analyzed protocol must plan only
+    itself — the settled contracts keep the verdicts they already have."""
+    proto = _protocol(db_session, "scope-incremental")
+    old_addr, new_addr = ADDR(0x8301), ADDR(0x8302)
+    old = _contract(db_session, proto.id, old_addr, chain="ethereum")
+    old_fn = _fn(db_session, old.id, name="old", selector="0x00008301", effect_targets=["s"])
+    new = _contract(db_session, proto.id, new_addr, chain="ethereum")
+    new_fn = _fn(db_session, new.id, name="new", selector="0x00008302", effect_targets=["s"])
+    old_job = _job(db_session, proto.id, old_addr)
+    _ran_effects(db_session, old_job)
+    _verdict_for(db_session, old_fn.id, old_addr)
+    _job(db_session, proto.id, new_addr)  # the incremental run's only job
+    db_session.commit()
+
+    assert _scoped(db_session, proto.id, new_addr) == {new_fn.id}
+
+
+# --- Shape 3: first-ever effects run on production's shape -------------------
+
+
+def _prod_shape(session: Session, n_contracts: int = 4):
+    """Production's steady state: every job COMPLETED in an earlier run, none of
+    them ever ran the effects stage, and there is not a single verdict anywhere."""
+    proto = _protocol(session, f"scope-prod-{n_contracts}")
+    addrs, fns = [], {}
+    for i in range(n_contracts):
+        addr = ADDR(0x8400 + i)
+        contract = _contract(session, proto.id, addr, chain="ethereum")
+        fns[addr] = _fn(session, contract.id, name=f"f{i}", selector=f"0x0000{0x8400 + i:04x}", effect_targets=["s"]).id
+        _job(session, proto.id, addr, status=JobStatus.completed)
+        addrs.append(addr)
+    session.commit()
+    return proto, addrs, fns
+
+
+def test_shape3_completed_jobs_do_not_own_a_never_planned_contract(db_session):
+    """The reviewer's hole: on prod every contract has a completed job, so a
+    row-existence rule marked all of them owned and NOTHING would plan them —
+    a silent recall regression that looks exactly like a perf win."""
+    proto, addrs, fns = _prod_shape(db_session)
+    got = _scoped(db_session, proto.id, addrs[0])
+    assert got == set(fns.values()), "prod-shape contracts must all be swept on the first effects run"
+
+
+def test_shape3_fresh_job_owns_itself_so_the_sweep_stays_bounded(db_session):
+    """When the run does give a contract a fresh job, that job owns it and the
+    others stop sweeping it — the sweep never covers contracts already scheduled."""
+    proto, addrs, fns = _prod_shape(db_session)
+    _job(db_session, proto.id, addrs[1])  # the new run's job for contract 1
+    db_session.commit()
+    assert fns[addrs[1]] not in _scoped(db_session, proto.id, addrs[0])
+
+
+def test_shape3_sweep_is_self_limiting_once_verdicts_land(db_session):
+    """Anti-storm: the first job to sweep a contract leaves verdicts behind, which
+    marks it planned for every job after it. Without this the prod shape would
+    have every job planning every contract, reinstating the storm."""
+    proto, addrs, fns = _prod_shape(db_session)
+    swept = _scoped(db_session, proto.id, addrs[0])
+    assert swept == set(fns.values())
+
+    # The sweeping job writes a verdict per planned candidate.
+    for addr, fid in fns.items():
+        _verdict_for(db_session, fid, addr)
+    db_session.commit()
+
+    # The next job now plans only its own contract.
+    assert _scoped(db_session, proto.id, addrs[1]) == {fns[addrs[1]]}
+
+
+def test_owner_job_must_belong_to_the_same_protocol(db_session):
+    """One address can be a contract of two protocols; a job for the OTHER
+    protocol must not silently claim ownership and strand this one's candidates."""
+    mine = _protocol(db_session, "scope-proto-mine")
+    theirs = _protocol(db_session, "scope-proto-theirs")
+    shared, own_addr = ADDR(0x8501), ADDR(0x8502)
+    shared_contract = _contract(db_session, mine.id, shared, chain="ethereum")
+    shared_fn = _fn(db_session, shared_contract.id, name="s", selector="0x00008501", effect_targets=["s"])
+    own = _contract(db_session, mine.id, own_addr, chain="ethereum")
+    _fn(db_session, own.id, name="o", selector="0x00008502", effect_targets=["s"])
+    _job(db_session, mine.id, own_addr)
+    _job(db_session, theirs.id, shared)  # in flight, but for a different protocol
+    db_session.commit()
+
+    assert shared_fn.id in _scoped(db_session, mine.id, own_addr)
+
+
+def test_terminally_failed_job_does_not_own_its_contract(db_session):
+    """A job that will never reach the effects stage cannot be a contract's owner
+    — otherwise the sweep skips a contract nothing else covers."""
+    proto = _protocol(db_session, "scope-failed")
+    owner_addr, other_addr = ADDR(0x8101), ADDR(0x8102)
+    dead = _contract(db_session, proto.id, other_addr, chain="ethereum")
+    dead_fn = _fn(db_session, dead.id, name="d", selector="0x0000d001", effect_targets=["s"])
+    live = _contract(db_session, proto.id, owner_addr, chain="ethereum")
+    _fn(db_session, live.id, name="l", selector="0x0000d002", effect_targets=["s"])
+    _job(db_session, proto.id, owner_addr)
+    _job(db_session, proto.id, other_addr, status=JobStatus.failed_terminal)
+    db_session.commit()
+
+    assert dead_fn.id in _scoped(db_session, proto.id, owner_addr)
+
+
+def test_scope_excludes_other_chains(db_session):
+    """Protocol-wide selection handed a chain-1 job another chain's contracts and
+    probed them through chain-1 seams. A scoped job sees only its own chain."""
+    proto = _protocol(db_session, "scope-chains")
+    eth_addr, base_addr = ADDR(0x8201), ADDR(0x8202)
+    eth = _contract(db_session, proto.id, eth_addr, chain="ethereum")
+    base = _contract(db_session, proto.id, base_addr, chain="base")
+    eth_fn = _fn(db_session, eth.id, name="e", selector="0x0000c001", effect_targets=["s"])
+    base_fn = _fn(db_session, base.id, name="b", selector="0x0000c002", effect_targets=["s"])
+    _job(db_session, proto.id, eth_addr, chain_id=1)
+    _job(db_session, proto.id, base_addr, chain_id=8453)
+    db_session.commit()
+
+    eth_got = {c.function_id for c in select_candidates(db_session, proto.id, scope=JobScope(eth_addr, 1))}
+    base_got = {c.function_id for c in select_candidates(db_session, proto.id, scope=JobScope(base_addr, 8453))}
+    assert eth_got == {eth_fn.id}
+    assert base_got == {base_fn.id}
+
+
+def test_no_scope_keeps_protocol_wide_behavior(db_session):
+    """Callers with no job identity (a company/root job) still see everything."""
+    proto, _addrs, fns, _ = _scoped_fixture(db_session)
+    got = {c.function_id for c in select_candidates(db_session, proto.id)}
+    assert got == set(fns.values())

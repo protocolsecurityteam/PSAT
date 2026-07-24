@@ -609,3 +609,74 @@ def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch, 
     assert rec.levelno == logging.INFO
     assert getattr(rec, "closing_rule", None)
     assert getattr(rec, "effect_class", None) == EFFECT_CLASS_SUPPLY
+
+
+# ---------------------------------------------------------------------------
+# 8. Transcript artifact names are collision-free across passes
+#
+# ``store_artifact`` upserts on (job_id, name), so the old positional counter was
+# only unique WITHIN one pass: a second pass over the same job (stale-lease
+# reclaim, requeue) restarted at 0 against a different probe order — because the
+# first pass turned some misses into hits — and overwrote the artifacts that
+# already-persisted ``transcript_ptr``s pointed at.
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_transcript_names_survive_a_second_pass_over_the_same_job(clean_effects):
+    session = clean_effects
+    pid, _fns = _protocol_with_functions(session, [CONTRACT_A])
+    job = _make_job(session, pid, "transcript-collision")
+    worker = EffectsWorker()
+
+    value_out = {"effect_class": EFFECT_CLASS_VALUE_OUT, "tier": "tier1", "calls": ["v"], "results": []}
+    authority = {"effect_class": "authority_change", "tier": "tier1", "calls": ["a"], "results": []}
+
+    # Pass 1 probes both classes; its value_out pointer is what a cache row keeps.
+    pass1 = worker._make_transcript_store(session, job)
+    value_ptr = pass1(value_out)
+    pass1(authority)
+
+    # Pass 2 re-runs the job with value_out now a cache HIT, so authority_change
+    # is the FIRST transcript stored — the exact index reuse that clobbered.
+    pass2 = worker._make_transcript_store(session, job)
+    pass2(authority)
+    session.commit()
+
+    stored_job_id, _, stored_name = value_ptr.partition("::")
+    assert stored_job_id == str(job.id)
+    assert get_artifact(session, job.id, stored_name) == value_out
+
+
+@requires_postgres
+def test_transcript_name_is_stable_for_identical_content(clean_effects):
+    """A replayed probe must not accumulate a duplicate artifact per pass."""
+    session = clean_effects
+    pid, _fns = _protocol_with_functions(session, [CONTRACT_A])
+    job = _make_job(session, pid, "transcript-stable")
+    worker = EffectsWorker()
+    transcript = {"effect_class": EFFECT_CLASS_VALUE_OUT, "tier": "tier1", "calls": [], "results": []}
+
+    first = worker._make_transcript_store(session, job)(transcript)
+    second = worker._make_transcript_store(session, job)(transcript)
+    assert first == second
+    assert EFFECT_CLASS_VALUE_OUT in first
+
+
+# ---------------------------------------------------------------------------
+# 9. The worker scopes selection to its OWN job's contract
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_select_scopes_to_the_jobs_own_contract(clean_effects):
+    """Drives the REAL ``select_candidates`` (no monkeypatch): a job must not plan
+    — and therefore must not re-write — a sibling contract's candidates."""
+    session = clean_effects
+    pid, fns = _protocol_with_functions(session, [CONTRACT_A, CONTRACT_B])
+    job_a = _make_job(session, pid, "scoped-a", address=CONTRACT_A)
+    _make_job(session, pid, "scoped-b", address=CONTRACT_B)
+    session.commit()
+
+    picked = {c.function_id for c in EffectsWorker()._select(session, job_a)}
+    assert picked == {fns[CONTRACT_A]}

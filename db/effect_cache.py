@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text, tuple_
+from sqlalchemy import case, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -188,6 +188,9 @@ def upsert_cached_verdict(
         audited_at=now if audit_status is not None else None,
         updated_at=now,
     )
+    # No residue guard is needed here (unlike ``record_effect_verdict``): this row
+    # is code-plane only, and the worker writes it exclusively on a cache MISS —
+    # every rewrite IS a fresh simulation, so each field must take the new value.
     set_ = {
         "verdict": stmt.excluded.verdict,
         "tier": stmt.excluded.tier,
@@ -328,15 +331,40 @@ def record_effect_verdict(
             witness=witness,
             transcript_ptr=transcript_ptr,
         )
+        existing = EffectVerdict.__table__.c
+
+        # Did this write resolve the SAME code as the stored row? Residue is
+        # per-deployment but code-relative: it describes what THIS bytecode does
+        # at this address. Carrying it across a behavior_hash change would let a
+        # pre-upgrade destination masquerade as the new implementation's.
+        same_code = stmt.excluded.behavior_hash.is_not_distinct_from(existing.behavior_hash)
+
+        def keep_residue(incoming, stored):
+            """State-plane residue: an absent incoming value means *this* write had
+            no state-plane observation, NOT that none exists. A cache-HIT resolution
+            structurally carries none (inv. 3 — the code-plane cache holds no
+            concrete values), so an unconditional overwrite would erase the
+            first-sighting observation on every subsequent hit."""
+            return case((incoming.is_not(None), incoming), (same_code, stored), else_=None)
+
         return stmt.on_conflict_do_update(
             constraint="uq_effect_verdicts_identity",
             set_={
-                "function_id": stmt.excluded.function_id,
+                # Linkage, not a fact about this resolution: the FK-vanished guard
+                # above nulls ``fid`` when the function row was replaced mid-job.
+                # The FK is ON DELETE SET NULL, so a stored non-NULL id is always
+                # live — keep it rather than orphaning the row from the frontend.
+                "function_id": func.coalesce(stmt.excluded.function_id, existing.function_id),
+                # Current resolution facts — always the latest, even downgrades.
                 "behavior_hash": stmt.excluded.behavior_hash,
                 "verdict": stmt.excluded.verdict,
                 "tier": stmt.excluded.tier,
-                "concrete_destination": stmt.excluded.concrete_destination,
-                "current_check_passed": stmt.excluded.current_check_passed,
+                # State-plane residue — preserved across observation-less rewrites.
+                "concrete_destination": keep_residue(stmt.excluded.concrete_destination, existing.concrete_destination),
+                "current_check_passed": keep_residue(stmt.excluded.current_check_passed, existing.current_check_passed),
+                # Evidence FOR the verdict above, so it moves with it: preserving a
+                # "proven" witness next to a downgraded ``unknown`` verdict would
+                # publish a contradiction. Deliberately not residue-preserved.
                 "witness": stmt.excluded.witness,
                 "transcript_ptr": stmt.excluded.transcript_ptr,
                 "updated_at": text("NOW()"),

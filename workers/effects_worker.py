@@ -33,8 +33,11 @@ overrides ``process()`` and the fail-forward finalizer only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,7 +74,7 @@ from services.effects.orchestrator import (
 )
 from services.effects.prefetch import clear_prefetch, install_prefetch
 from services.effects.preflight import CapabilityStore, InMemoryCapabilityStore, probe_simulate_support
-from services.effects.selection import Candidate, select_candidates
+from services.effects.selection import Candidate, JobScope, select_candidates
 from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -335,11 +338,9 @@ class EffectsWorker(BaseWorker):
         """Persist each transcript as a job artifact (§8.5) and return a stable,
         backend-agnostic pointer resolvable via ``get_artifact(job_id, name)``.
         The pointer is the cache/verdict ``transcript_ptr`` — never an inline blob."""
-        seq = {"n": 0}
 
         def store(transcript: dict[str, Any]) -> str:
-            name = f"effect_transcript_{seq['n']}"
-            seq["n"] += 1
+            name = _transcript_artifact_name(transcript)
             store_artifact(session, job.id, name, data=transcript)
             return f"{job.id}::{name}"
 
@@ -435,7 +436,16 @@ class EffectsWorker(BaseWorker):
             # §6 cascade (it needs the protocol's balances/control graph). Not an
             # error — just an empty candidate set.
             return []
-        return select_candidates(session, protocol_id, resource_cap=_resource_cap())
+        address = getattr(job, "address", None)
+        scope = (
+            JobScope(address=address, chain_id=_chain_id_for_job(job))
+            if isinstance(address, str) and address.strip()
+            else None
+        )
+        # No address ⇒ a company/root job, which owns no contract of its own; it
+        # falls back to protocol-wide selection so such a job still covers the
+        # protocol rather than planning nothing.
+        return select_candidates(session, protocol_id, resource_cap=_resource_cap(), scope=scope)
 
     def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> tuple[bool, int]:
         """Capability probe + the ONE ``eth_blockNumber`` that pins every Tier-1
@@ -833,6 +843,32 @@ class EffectsWorker(BaseWorker):
             "effects degraded → coverage (fail-forward)",
             lease_id=lease_id,
         )
+
+
+_TRANSCRIPT_CLASS_RE = re.compile(r"[^a-z0-9_]")
+
+
+def _transcript_artifact_name(transcript: dict[str, Any]) -> str:
+    """A content-addressed artifact name for one transcript.
+
+    ``store_artifact`` upserts on ``(job_id, name)``, so a positional counter is
+    only unique within a single pass over a job: a second pass (a stale-lease
+    reclaim, a requeue) restarts at 0 against a DIFFERENT probe order — because
+    the first pass's writes turned some misses into cache hits — and silently
+    overwrites the artifacts that already-persisted ``transcript_ptr``s point at.
+    ``effect_behavior_cache`` pointers outlive the job that wrote them, so that
+    destroys the witness trail behind live verdicts.
+
+    Naming on the content instead makes a rewrite either a no-op (identical
+    transcript ⇒ identical bytes) or a NEW artifact (changed transcript ⇒ changed
+    digest), so an existing pointer always still resolves to what it witnessed.
+    The effect-class prefix keeps the name legible; the digest carries uniqueness.
+    """
+    raw_class = transcript.get("effect_class")
+    effect_class = _TRANSCRIPT_CLASS_RE.sub("", str(raw_class or "").lower())[:40] or "unclassified"
+    body = json.dumps(transcript, sort_keys=True, default=str)
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+    return f"effect_transcript_{effect_class}_{digest}"
 
 
 def _chain_id_for_job(job: Job) -> int:
