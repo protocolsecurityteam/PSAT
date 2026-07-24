@@ -55,6 +55,45 @@ VERDICT_PROVEN = "proven"
 VERDICT_UNKNOWN = "unknown"
 
 # Evidence tiers (§3), cheapest/most-authoritative first.
+#
+# WARNING — these strings name the effects stage's INTERNAL evidence ladder
+# (historical index → eth_call → fork), NOT the scoring framework's Tier 1/2/3.
+# They collide numerically with it and the collision is a trap: a fork-OBSERVED
+# verdict persists ``"tier2"`` (``TIER_FORK``), yet a fork observation is scoring
+# **Tier 1** — a witnessed on-chain state transition, the STRONGEST evidence —
+# whereas scoring "Tier 2" means *static-with-fallback*, the opposite provenance.
+# Every effects tier below is observation-origin, so all three are scoring Tier 1.
+# No consumer (scorer, frontend, aggregation) may map a stored tier by its raw
+# string; translate by semantic origin through :func:`scoring_tier_for_effects_tier`.
 TIER_HISTORICAL = "tier0"
 TIER_CALL = "tier1"
 TIER_FORK = "tier2"
+
+# Scoring-framework tiers (the vocabulary the eventual scorer/consumers read).
+# Kept distinct from the ``tierN`` strings above precisely so nothing round-trips
+# through the colliding raw string. Observed = grade-admissible (a proven positive
+# / proven negative); static-with-fallback is never minted by this stage.
+SCORING_TIER_OBSERVED = "scoring_tier_1"
+SCORING_TIER_STATIC_FALLBACK = "scoring_tier_2"
+
+# Every effects verdict tier is a fork/observation tier, so each maps to the
+# OBSERVED scoring tier — never to scoring Tier 2, despite ``TIER_FORK == "tier2"``.
+_EFFECTS_TIER_SCORING_ORIGIN = {
+    TIER_HISTORICAL: SCORING_TIER_OBSERVED,
+    TIER_CALL: SCORING_TIER_OBSERVED,
+    TIER_FORK: SCORING_TIER_OBSERVED,
+}
+
+
+def scoring_tier_for_effects_tier(stored_tier: str | None) -> str | None:
+    """Translate a stored effects verdict-tier string (``"tier0"``/``"tier1"``/
+    ``"tier2"``, e.g. a claim witness's ``verdict_tier``) to its SCORING-framework
+    tier by semantic origin — the ONE place the collision is resolved.
+
+    Every effects tier is an on-chain observation tier, so all map to
+    :data:`SCORING_TIER_OBSERVED` (scoring Tier 1); the ``"tier2"`` string never
+    means scoring Tier 2 here. Returns ``None`` for an unrecognized string so an
+    unknown provenance fails closed (never silently promoted to observed)."""
+    if stored_tier is None:
+        return None
+    return _EFFECTS_TIER_SCORING_ORIGIN.get(stored_tier)

@@ -121,6 +121,30 @@ def test_flag_defaults_off(monkeypatch):
     assert effects_stage_enabled() is False
 
 
+def test_scoring_tier_translation_resolves_the_string_collision():
+    # §0 tier-string collision guard: the stored "tier2" (fork-observed) must map to
+    # the OBSERVED scoring tier (scoring Tier 1), never scoring Tier 2. Every effects
+    # tier is observation-origin, so all three translate to observed; an unknown
+    # string fails closed to None.
+    from services.effects.config import (
+        SCORING_TIER_OBSERVED,
+        SCORING_TIER_STATIC_FALLBACK,
+        TIER_CALL,
+        TIER_FORK,
+        TIER_HISTORICAL,
+        scoring_tier_for_effects_tier,
+    )
+
+    assert TIER_FORK == "tier2"  # the colliding raw string
+    assert SCORING_TIER_OBSERVED != SCORING_TIER_STATIC_FALLBACK
+    for stored in (TIER_HISTORICAL, TIER_CALL, TIER_FORK):
+        assert scoring_tier_for_effects_tier(stored) == SCORING_TIER_OBSERVED
+    # Crucially NOT scoring Tier 2 despite the "tier2" string.
+    assert scoring_tier_for_effects_tier(TIER_FORK) != SCORING_TIER_STATIC_FALLBACK
+    assert scoring_tier_for_effects_tier(None) is None
+    assert scoring_tier_for_effects_tier("tierX") is None
+
+
 def test_policy_next_stage_flag_off_is_coverage(monkeypatch):
     monkeypatch.delenv("PSAT_EFFECTS_STAGE", raising=False)
     assert PolicyWorker().next_stage == JobStage.coverage
