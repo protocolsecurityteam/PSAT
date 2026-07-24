@@ -474,3 +474,30 @@ def test_library_unresolvable_alias_is_indeterminate(tmp_path):
     # The storage pointer comes from a call return: some unknown var was written
     # through the alias, so no no-setter proof in the contract is sound.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
+
+
+# ---------------------------------------------------------------------------
+# tx.origin destination (register #7): a distinct caller-directed destination
+# fact -> ``caller_controlled`` (theft-shaped, deduction-admissible like
+# param/msg_sender), NOT folded into msg_sender (the address differs).
+# ---------------------------------------------------------------------------
+
+_TX_ORIGIN_SRC = """
+pragma solidity ^0.8.20;
+interface IERC20 { function transfer(address,uint256) external returns (bool); }
+contract Origin {
+    // ERC-20 send with a direct tx.origin recipient (dispositive).
+    function claim(address tok, uint256 amt) external { IERC20(tok).transfer(tx.origin, amt); }
+    // Low-level value call to tx.origin (traced through the payable cast).
+    function payOrigin(uint256 amt) external { (bool ok,) = payable(tx.origin).call{value: amt}(""); require(ok); }
+}
+"""
+
+
+def test_tx_origin_destination_is_caller_controlled(tmp_path):
+    contract = _compile(tmp_path, _TX_ORIGIN_SRC, "Origin")
+    effects = build_effects(contract)
+    direct = _out_flow(effects["functions"]["claim(address,uint256)"])
+    assert direct["target_kind"] == {"kind": "caller_controlled", "tier": "dispositive_ast"}
+    traced = _out_flow(effects["functions"]["payOrigin(uint256)"])
+    assert traced["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}

@@ -123,7 +123,7 @@ class ValueFlow(TypedDict):
     from_is_self: bool
     origin: str  # body | guard
     # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
-    #   param, msg_sender, self, indeterminate}
+    #   param, msg_sender, caller_controlled, self, indeterminate}
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
     #   fixed_constant, indeterminate}
@@ -1018,6 +1018,11 @@ def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     kind = next(iter(meaningful))
     if kind == "msg_sender":
         return "msg_sender"
+    if kind == "tx_origin":
+        # The transaction origin (an EOA the caller controls) — a proven
+        # caller-directed destination, theft-shaped like msg_sender/param, but a
+        # distinct address fact so it is not folded into msg_sender.
+        return "caller_controlled"
     if kind == "self_address":
         return "self"
     if kind == "parameter":
@@ -1028,7 +1033,6 @@ def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
         names = {s.state_variable_name for s in srcs if s.kind == "state_variable" and s.state_variable_name}
         subs = {_state_var_target_kind(n, ctx) for n in names}
         return next(iter(subs)) if len(subs) == 1 else "indeterminate"
-    # tx_origin (caller-controlled but no lattice member — see ESCALATIONS),
     # view_call, external_call, block_context, signature_recovery, top.
     return "indeterminate"
 
