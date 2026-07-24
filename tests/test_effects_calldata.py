@@ -496,6 +496,94 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
     assert transfer_ep.from_addr == cd.NEUTRAL_CALLER
 
 
+@requires_postgres
+def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_session):
+    """§1 A2 follow-up (cause a): a PREDICTED victim with no resolved principal is
+    additionally probed from the PAUSE principal, so a freeze the neutral caller
+    can't reach pre-pause is still witnessed. Union semantics via a shared key."""
+    proto = Protocol(name=f"pauser-probe-{uuid.uuid4().hex[:8]}")
+    db_session.add(proto)
+    db_session.flush()
+    contract = Contract(protocol_id=proto.id, address=CONTRACT, chain="ethereum", is_proxy=False)
+    db_session.add(contract)
+    db_session.flush()
+    ids: dict[str, int] = {}
+    for name, selector in (("pause", PAUSE_SEL), ("deposit", DEPOSIT), ("transfer", TRANSFER)):
+        f = EffectiveFunction(
+            contract_id=contract.id,
+            function_name=name,
+            selector=selector,
+            authority_public=False,
+            effect_targets=["paused"],
+        )
+        db_session.add(f)
+        db_session.flush()
+        ids[selector] = f.id
+    # deposit() has a resolved principal; transfer() does NOT (the unresolved victim).
+    db_session.add(FunctionPrincipal(function_id=ids[DEPOSIT], address=PRINCIPAL))
+    db_session.commit()
+
+    # Both deposit() and transfer() read the `paused` latch → both predicted victims.
+    # transfer() is ALSO behind a caller-authority gate (its principal is unresolved),
+    # so the neutral caller can't reach it — the pauser-identity probe target.
+    pause_and_auth = _and(_leaf(_state("paused")), _leaf(_state("owner"), authority_role="caller_authority"))
+    facts = _token_facts(
+        trees={
+            "pause()": OWNER_GATE,
+            "deposit()": PAUSE_GATE,
+            "transfer(address,uint256)": pause_and_auth,
+        }
+    )
+    fn = cd.resolve_function(facts, PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    by_key: dict[str, list[str | None]] = {}
+    for ep in spec.entry_points:
+        by_key.setdefault(ep.key, []).append(ep.from_addr)
+    # transfer() (unresolved) is probed from BOTH the neutral caller and the pauser.
+    assert set(by_key["transfer(address,uint256)"]) == {cd.NEUTRAL_CALLER, PRINCIPAL}
+    # deposit() (resolved) keeps a single probe from its own principal — no dup.
+    assert by_key["deposit()"] == [PRINCIPAL]
+
+
+@requires_postgres
+def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
+    """When static predicts nothing (empty guard set → probe-everything fallback),
+    NO pauser-identity probes are added — the recovery is scoped to the predicted
+    victims, so a contract whose pause gates nothing gains no extra work."""
+    contract, ids = _pause_contract(db_session)
+    facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
+    fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    assert spec.predicted_guard_set == ()
+    # No key appears twice: no pauser-identity probe was added to the fallback set.
+    keys = [ep.key for ep in spec.entry_points]
+    assert len(keys) == len(set(keys))
+
+
 # ---------------------------------------------------------------------------
 # fact loading / thin-fact fail-closed
 # ---------------------------------------------------------------------------

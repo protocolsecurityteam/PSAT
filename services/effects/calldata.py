@@ -859,18 +859,25 @@ def _state_changing_functions(facts: ContractFacts) -> list[str]:
     return sorted(name for name, info in facts.effects.items() if isinstance(info, dict) and info.get("state_changing"))
 
 
-def _entry_point_for(facts: ContractFacts, name: str, principals: Mapping[str, str]) -> EntryPoint | None:
+def _entry_point_for(
+    facts: ContractFacts, name: str, principals: Mapping[str, str], *, caller_override: str | None = None
+) -> EntryPoint | None:
     """One blast-radius probe. ``from_addr`` is THAT function's own resolved
     principal — a contract-wide caller would be rejected by every gated entry
     point pre-pause, collapsing the observed radius to nothing. A function with no
     resolved principal is still probed, from a neutral identity: it may be public,
-    and skipping it could only lose a witness."""
+    and skipping it could only lose a witness.
+
+    ``caller_override`` forces a specific caller (the §1 A2 pauser-identity probe):
+    a predicted victim whose OWN principal could not be resolved is additionally
+    probed from the pause principal, so a gate the neutral caller can't pass is
+    still exercised by a caller that can."""
     sig = facts.canonical_signature(name)
     selector = _selector_of(sig)
     types = _parse_arg_types(sig)
     if not selector or types is None:
         return None
-    caller = principals.get(selector, NEUTRAL_CALLER)
+    caller = caller_override or principals.get(selector, NEUTRAL_CALLER)
     calldata = encode_calldata(selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT))
     if calldata is None:
         return None
@@ -878,6 +885,42 @@ def _entry_point_for(facts: ContractFacts, name: str, principals: Mapping[str, s
     # would look like the pause froze this point.
     fixtures = (ForkFixture(kind="set_balance", address=caller, value=hex(FIXTURE_BALANCE_WEI)),)
     return EntryPoint(key=name, calldata=calldata, from_addr=caller, fixtures=fixtures)
+
+
+def _pauser_identity_probes(
+    facts: ContractFacts, predicted: Sequence[str], principals: Mapping[str, str], pauser: str
+) -> list[EntryPoint]:
+    """§1 A2 follow-up (cause a): a PREDICTED pause victim whose own caller could not
+    be resolved is probed from ``NEUTRAL_CALLER`` and rejected by its auth gate
+    pre-pause, hiding any freeze from the diff (bucket B / unresolved-victim cause).
+    Add a second probe of each such victim from the PAUSE principal — often the ops
+    multisig, which reaches many gated functions.
+
+    Same ``EntryPoint`` key ⇒ the succeeding-set unions the identities: a victim
+    counts as succeeding if EITHER caller reaches it pre-pause, and enters the
+    observed blast only when it reverts under BOTH post-pause. So this can only ADD
+    witnessed freezes, never manufacture one — the observed radius stays a sound
+    lower bound.
+
+    Scoped tightly so it adds probes only where they can help: (1) the PREDICTED set
+    only (never the probe-everything fallback); (2) victims behind a CALLER-authority
+    gate — a pause-only or permissionless victim is already reachable by the neutral
+    caller, so a pauser probe there is pure redundant cost; (3) victims whose own
+    principal could not be resolved (a resolved one already probes as itself)."""
+    resolved = set(principals)
+    probes: list[EntryPoint] = []
+    for name in predicted:
+        tree = facts.trees.get(name)
+        # Only a caller-authority gate can hide a victim from the neutral caller.
+        if not (_authority_roles(tree) & set(_AUTHORITY_ROLES)):
+            continue
+        selector = _selector_of(facts.canonical_signature(name))
+        if not selector or selector in resolved:
+            continue
+        ep = _entry_point_for(facts, name, principals, caller_override=pauser)
+        if ep is not None:
+            probes.append(ep)
+    return probes
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1059,11 @@ def synthesize_pause(
     entry_points = [ep for ep in (_entry_point_for(facts, name, principals) for name in probe_names) if ep is not None]
     if not entry_points:
         return None
+    # cause (a) recovery: also probe each predicted victim that has no resolved
+    # principal from the pause principal, so a freeze a foreign caller can't reach
+    # pre-pause is still witnessed. Only over the PREDICTED set (not the fallback),
+    # union semantics keep the observed radius a sound lower bound.
+    entry_points = [*entry_points, *_pauser_identity_probes(facts, predicted, principals, principal)]
 
     # The pause principal needs gas of its own; the per-entry-point fixtures cover
     # the probers. Kept flat here so the recipe applies one list, while each
