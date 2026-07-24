@@ -638,9 +638,19 @@ def _base_name(name: Any) -> str | None:
 # ``sstore(0, …)`` / keccak-slot writes), and any ``delegatecall`` (foreign code
 # can write any slot as this contract). When the scan is incomplete, "no setter"
 # degrades to ``indeterminate`` — never a proven-negative "fixed destination".
+# A third blind spot — storage-pointer aliasing — is resolved separately by
+# ``_aliased_storage_writes``: a state var written only through a callee taking a
+# ``storage`` reference (``using X for`` / library / internal storage-lib idiom)
+# is not attributed by ``all_state_variables_written`` either. We follow the
+# aliasing to attribute the write back to its origin var (a real setter), and
+# only fall back to indeterminate for the aliases we genuinely cannot resolve.
 # Memoized per contract for the build pass.
 _SETTER_VARS: WeakKeyDictionary[Any, set[str]] = WeakKeyDictionary()
 _SETTER_SCAN_COMPLETE: WeakKeyDictionary[Any, bool] = WeakKeyDictionary()
+_ALIASED_WRITES: WeakKeyDictionary[Any, tuple[set[str], set[str], bool]] = WeakKeyDictionary()
+
+# Recursion depth for following a storage reference through forwarding callees.
+_STORAGE_ALIAS_DEPTH = 6
 
 
 def _setter_state_vars(contract: Any) -> set[str]:
@@ -659,8 +669,134 @@ def _setter_state_vars(contract: Any) -> set[str]:
             name = getattr(var, "name", None)
             if name:
                 setters.add(name)
+    # Storage-pointer-aliased writes Slither did not attribute, resolved back to
+    # their origin state var — these are real, redirecting setters.
+    setters |= _aliased_storage_writes(contract)[0]
     _SETTER_VARS[contract] = setters
     return setters
+
+
+def _arg_is_param(arg: Any, param: Any) -> bool:
+    if arg is param:
+        return True
+    pname = getattr(param, "name", None)
+    return bool(pname) and getattr(arg, "name", None) == pname
+
+
+def _storage_param_write_status(callee: Any, param: Any, depth: int = 0, seen: set[int] | None = None) -> str:
+    """Whether ``callee`` writes through its storage-reference parameter
+    ``param`` — directly (``param.field = …`` / ``param[…] = …``, which puts
+    ``param`` in the callee's ``variables_written``) or transitively (forwarding
+    ``param`` into another storage-writing callee). Returns ``writes`` /
+    ``reads_only`` / ``unresolved`` (callee body absent — cannot decide)."""
+    if callee is None or not getattr(callee, "nodes", None):
+        return "unresolved"
+    if depth > _STORAGE_ALIAS_DEPTH:
+        return "unresolved"
+    seen = seen if seen is not None else set()
+    if id(callee) in seen:
+        return "reads_only"
+    seen.add(id(callee))
+    pname = getattr(param, "name", None)
+    for written in getattr(callee, "variables_written", []) or []:
+        if written is param or (pname and getattr(written, "name", None) == pname):
+            return "writes"
+    status = "reads_only"
+    for node in getattr(callee, "nodes", []) or []:
+        for ir in _node_irs(node):
+            if type(ir).__name__ not in ("InternalCall", "LibraryCall"):
+                continue
+            sub = getattr(ir, "function", None)
+            subparams = list(getattr(sub, "parameters", []) or [])
+            for sub_param, arg in zip(subparams, getattr(ir, "arguments", []) or []):
+                if not getattr(sub_param, "is_storage", False) or not _arg_is_param(arg, param):
+                    continue
+                result = _storage_param_write_status(sub, sub_param, depth + 1, seen)
+                if result == "writes":
+                    return "writes"
+                if result == "unresolved":
+                    status = "unresolved"
+    return status
+
+
+def _resolve_storage_origin(arg: Any, function: Any, seen: set[str] | None = None) -> str | None:
+    """The origin state-variable NAME a storage-reference argument aliases, or
+    ``None`` when it cannot be tied to a single declared state var. Handles a
+    direct state var and a local storage pointer assigned from a state var or a
+    member/index of one (``Box storage b = box;`` / ``= boxes[k];``). A pointer
+    sourced from a call return is unresolvable — ``None``."""
+    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+
+    if isinstance(arg, StateVariable):
+        return getattr(arg, "name", None)
+    aname = getattr(arg, "name", None)
+    if not aname:
+        return None
+    seen = seen if seen is not None else set()
+    if aname in seen:
+        return None
+    seen.add(aname)
+    for node in getattr(function, "nodes", []) or []:
+        for ir in _node_irs(node):
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None or getattr(lvalue, "name", None) != aname:
+                continue
+            tn = type(ir).__name__
+            if tn == "Assignment":
+                return _resolve_storage_origin(getattr(ir, "rvalue", None), function, seen)
+            if tn in ("Member", "Index"):
+                base = getattr(ir, "variable_left", None)
+                if isinstance(base, StateVariable):
+                    return getattr(base, "name", None)
+                return _resolve_storage_origin(base, function, seen)
+            return None  # call-sourced / cast / other — not a single state var
+    return None
+
+
+def _aliased_storage_writes(contract: Any) -> tuple[set[str], set[str], bool]:
+    """Resolve storage-pointer aliasing the attributed-write scan misses.
+
+    Returns ``(resolved_setters, indeterminate_vars, contract_unresolvable)``:
+    * ``resolved_setters`` — origin state vars written through a storage-ref
+      alias that resolved to a definite variable: real setters (-> storage_setter).
+    * ``indeterminate_vars`` — origin vars aliased into a callee whose
+      write-through status couldn't be decided; their no-setter proof is unsound
+      so they degrade to indeterminate (not storage_no_setter).
+    * ``contract_unresolvable`` — a write-through alias whose origin var itself
+      couldn't be resolved (unknown which var was redirected): no no-setter proof
+      in the contract is sound, so the whole scan is incomplete.
+    """
+    cached = _ALIASED_WRITES.get(contract)
+    if cached is not None:
+        return cached
+    resolved: set[str] = set()
+    indeterminate: set[str] = set()
+    contract_unresolvable = False
+    for fn in getattr(contract, "functions", []) or []:
+        if getattr(fn, "is_constructor", False):
+            continue
+        for node in getattr(fn, "nodes", []) or []:
+            for ir in _node_irs(node):
+                if type(ir).__name__ not in ("InternalCall", "LibraryCall"):
+                    continue
+                callee = getattr(ir, "function", None)
+                params = list(getattr(callee, "parameters", []) or [])
+                for param, arg in zip(params, getattr(ir, "arguments", []) or []):
+                    if not getattr(param, "is_storage", False):
+                        continue
+                    status = _storage_param_write_status(callee, param)
+                    if status == "reads_only":
+                        continue
+                    origin = _resolve_storage_origin(arg, fn)
+                    if origin is None:
+                        contract_unresolvable = True
+                    elif status == "writes":
+                        resolved.add(origin)
+                    else:  # "unresolved" — might write, cannot decide for this origin
+                        indeterminate.add(origin)
+    result = (resolved, indeterminate, contract_unresolvable)
+    _ALIASED_WRITES[contract] = result
+    return result
 
 
 def _setter_scan_complete(contract: Any) -> bool:
@@ -673,12 +809,18 @@ def _setter_scan_complete(contract: Any) -> bool:
       ``SolidityCall sstore(...)`` IR is exactly the raw-numeric / computed-slot
       write it could not attribute;
     * a ``delegatecall`` / ``callcode`` — foreign code executes in this
-      contract's storage context and may write any slot.
+      contract's storage context and may write any slot;
+    * a storage-pointer alias written through a callee whose ORIGIN state var
+      could not be resolved (``_aliased_storage_writes`` third element) — some
+      unknown var was redirected.
 
     Modifiers are scanned too (assembly can live in a guard body). Memoized."""
     cached = _SETTER_SCAN_COMPLETE.get(contract)
     if cached is not None:
         return cached
+    if _aliased_storage_writes(contract)[2]:
+        _SETTER_SCAN_COMPLETE[contract] = False
+        return False
     units = list(getattr(contract, "functions", []) or []) + list(getattr(contract, "modifiers", []) or [])
     complete = True
     for unit in units:
@@ -728,6 +870,7 @@ class _UnitCtx:
         def_by_id: dict[int, Any],
         state_vars_by_name: dict[str, Any],
         setters: set[str],
+        alias_indeterminate: set[str],
         setter_scan_complete: bool,
         nested: bool,
     ) -> None:
@@ -737,6 +880,7 @@ class _UnitCtx:
         self.def_by_id = def_by_id
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
+        self.alias_indeterminate = alias_indeterminate
         self.setter_scan_complete = setter_scan_complete
         self.nested = nested
 
@@ -746,6 +890,7 @@ def _build_unit_ctx(
     is_entry: bool,
     state_vars_by_name: dict[str, Any],
     setters: set[str],
+    alias_indeterminate: set[str],
     setter_scan_complete: bool,
 ) -> _UnitCtx:
     from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
@@ -770,7 +915,15 @@ def _build_unit_ctx(
                     if base:
                         merged.add(base)
     return _UnitCtx(
-        engine, param_names, merged, def_by_id, state_vars_by_name, setters, setter_scan_complete, not is_entry
+        engine,
+        param_names,
+        merged,
+        def_by_id,
+        state_vars_by_name,
+        setters,
+        alias_indeterminate,
+        setter_scan_complete,
+        not is_entry,
     )
 
 
@@ -843,9 +996,13 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
         return "immutable"
     if name in ctx.setters:
         return "storage_setter"
+    if name in ctx.alias_indeterminate:
+        # Aliased into a callee we could not decide writes-through — the
+        # no-setter proof for this specific var is unsound.
+        return "indeterminate"
     # No attributed setter. Only a *complete* scan makes that a proven negative
-    # ("fixed destination"); an assembly-sstore/delegatecall blind spot leaves it
-    # unknown — never assert immutability we could not prove.
+    # ("fixed destination"); an assembly-sstore/delegatecall/unresolved-alias
+    # blind spot leaves it unknown — never assert immutability we could not prove.
     return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
 
 
@@ -956,13 +1113,14 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
     }
     setters = _setter_state_vars(contract) if contract is not None else set()
+    alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
     scan_complete = _setter_scan_complete(contract) if contract is not None else False
     ctx_cache: dict[int, _UnitCtx] = {}
 
     def unit_ctx(unit: Any, is_entry: bool) -> _UnitCtx:
         cached = ctx_cache.get(id(unit))
         if cached is None:
-            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters, scan_complete)
+            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters, alias_indeterminate, scan_complete)
             ctx_cache[id(unit)] = cached
         return cached
 
