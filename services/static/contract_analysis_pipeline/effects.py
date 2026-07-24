@@ -695,7 +695,11 @@ def _storage_param_write_status(callee: Any, param: Any, depth: int = 0, seen: s
         return "unresolved"
     seen = seen if seen is not None else set()
     if id(callee) in seen:
-        return "reads_only"
+        # A recursion cycle: we cannot see whether the write happens down the
+        # recursive tail. Fail toward unresolved (-> indeterminate), never
+        # reads_only — that would let a genuinely-redirected var read as a
+        # proven-fixed "no setter".
+        return "unresolved"
     seen.add(id(callee))
     pname = getattr(param, "name", None)
     for written in getattr(callee, "variables_written", []) or []:
