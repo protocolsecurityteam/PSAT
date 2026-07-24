@@ -117,6 +117,7 @@ def test_build_company_function_entry_filters_generic_authority_contract_when_sp
                     "source_controller_id": "PROTOCOL_PAUSER",
                     "principal_type": "controller",
                     "details": {"threshold": 4, "owners": ["0x1", "0x2", "0x3", "0x4"]},
+                    "terminal": True,
                 },
                 {
                     "address": "0xeoa",
@@ -124,6 +125,7 @@ def test_build_company_function_entry_filters_generic_authority_contract_when_sp
                     "source_controller_id": "PROTOCOL_PAUSER",
                     "principal_type": "controller",
                     "details": {},
+                    "terminal": True,
                 },
             ],
         }

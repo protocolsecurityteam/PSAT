@@ -268,6 +268,38 @@ def classify_resolved_address(
     return kind, details
 
 
+# Canonical single-owner getters, in precedence order, for reading *who controls*
+# a plain ``contract`` principal. ``classify_resolved_address`` only reads
+# ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
+# generic Ownable/AccessManaged contract falls through untyped — this fills that
+# gap for the contract-principal terminal walk (SCORING plan §4). Each is a
+# caller-independent view getter returning a single address; a reverting or
+# zero-address read means "no single owner exposed here", not an error.
+_CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
+
+
+def read_contract_controller(
+    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
+) -> str | None:
+    """The controlling address of a plain contract, read via canonical owner
+    getters (``owner()`` / ``authority()`` / ``admin()``), or ``None``.
+
+    Bounded, read-only, and caller-independent (view getters). Returns ``None``
+    on every indeterminate outcome — no getter present, a transient probe error,
+    or a zero/empty answer — so the terminal walk fails closed to ``unknown``
+    rather than inventing a controller. Goes through the same ``rpc_request``
+    wire the offline suite stubs, never a fresh transport.
+    """
+    for signature in _CONTROLLER_GETTER_SIGS:
+        result = _try_eth_call_decoded(rpc_url, address, signature, "address", block_tag, chain_id=chain_id)
+        if result is _PROBE_ERROR or result is None:
+            continue
+        owner = str(result).lower()
+        if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"}:
+            return owner
+    return None
+
+
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
 _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
     ("getOwners()", "address[]"),  # 0: Safe

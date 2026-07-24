@@ -29,11 +29,12 @@ from schemas.effective_permissions import PrincipalResolution
 from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
+from services.policy.principal_enrichment import load_protocol_safe_owner_sets
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
-from services.resolution.tracking import classify_resolved_address_with_status
+from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controller
 from services.static.claims import Claim, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.concurrency import parallel_map
@@ -95,6 +96,28 @@ def _make_principal_type_resolver(
             return None, None
         resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, chain_id=chain_id)
         return resolved_type, details
+
+    return _resolve
+
+
+def _make_terminal_controller_resolver(
+    rpc_url: str | None, *, chain_id: int | None = None
+) -> Callable[[str], dict[str, object] | None] | None:
+    """Build the ``address -> controller-step | None`` resolver that drives the
+    contract-principal terminal walk (A4). Reads a contract's ultimate owner via
+    canonical owner getters (``owner()``/``authority()``/``admin()``) and
+    classifies it, so ``resolve_terminal_principal`` can chain contract -> ... ->
+    Safe/EOA. ``None`` when there is no RPC URL (the walk is then skipped and
+    every contract principal simply stays a non-terminal way-point)."""
+    if not rpc_url:
+        return None
+
+    def _resolve(address: str) -> dict[str, object] | None:
+        owner = read_contract_controller(rpc_url, address, chain_id=chain_id)
+        if not owner:
+            return None
+        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, owner, chain_id=chain_id)
+        return {"address": owner, "resolved_type": resolved_type, "details": details}
 
     return _resolve
 
@@ -656,6 +679,14 @@ class PolicyWorker(BaseWorker):
                 cross_chain_recognizer=make_cross_chain_recognizer(
                     _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
                 ),
+                # C1: protocol-wide exact-owner Safe registry for signer-overlap.
+                # Only populated for protocol-scoped jobs; a bare contract analysis
+                # has no sibling Safes to compare against.
+                protocol_safe_owner_sets=(
+                    load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
+                ),
+                # A4: contract-principal -> ultimate Safe/EOA terminal walk.
+                resolve_controller=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 

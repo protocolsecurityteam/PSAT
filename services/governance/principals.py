@@ -2,10 +2,106 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
+
+# A principal is *terminal* when its resolved_type names a settled controlling
+# key or a recognized governance primitive (Safe / EOA / zero / timelock /
+# proxy_admin / cross-chain authority). A plain ``contract`` — and any unresolved
+# (``unknown``/``None``) — is NON-terminal: a way-point whose ultimate controlling
+# key is not yet established. Marking these non-terminal is the guard against the
+# over-claim bug where a ``resolved_type=contract`` row reads as a *settled*
+# principal to a consumer when the real key is still unknown (SCORING plan §4 /
+# SCORING_INVARIANTS inv-2: absence of a proven positive is never a proven fact).
+TERMINAL_PRINCIPAL_TYPES = frozenset({"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"})
+
+# Depth bound for the contract-principal terminal walk. A control chain deeper
+# than this in practice signals a loop or a pathological factory graph; we stop
+# and emit ``unknown`` rather than spin. Cycles are caught independently by the
+# seen-set, so this only bounds genuinely-long acyclic chains.
+DEFAULT_TERMINAL_MAX_DEPTH = 4
+
+
+def is_terminal_principal_type(resolved_type: str | None) -> bool:
+    """Whether *resolved_type* names a settled controlling key / recognized
+    governance primitive (see ``TERMINAL_PRINCIPAL_TYPES``). ``contract`` and
+    any unresolved type are non-terminal — they must never read as a resolved
+    key to a grade-bearing consumer."""
+    return (resolved_type or "").lower() in TERMINAL_PRINCIPAL_TYPES
+
+
+def resolve_terminal_principal(
+    start_address: str,
+    start_type: str | None,
+    *,
+    resolve_controller: Callable[[str], Mapping[str, Any] | None],
+    max_depth: int = DEFAULT_TERMINAL_MAX_DEPTH,
+) -> dict[str, Any]:
+    """Walk a ``resolved_type=contract`` principal to its ultimate Safe/EOA key.
+
+    ``resolve_controller(address)`` returns the *controller* of ``address`` —
+    a mapping ``{"address", "resolved_type", "details"}`` already classified —
+    or ``None`` when the controller is unfetched/unverified/ambiguous. The
+    injected callable is the only wire this function touches (integration
+    callers back it with the resolved control graph + on-chain classify; unit
+    tests stub it), so the walk itself is pure and deterministic (inv-11/12).
+
+    Returns a terminal record ``{terminal, resolved_type, address, chain,
+    status}``. ``terminal`` is True only when the walk reached a member of
+    ``TERMINAL_PRINCIPAL_TYPES``; every indeterminate outcome (unfetched
+    controller, cycle, depth bound, an unresolved intermediate) fails closed to
+    ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
+    unknown`` fallback the witness bar requires, never a guessed key.
+    """
+    start = (start_address or "").lower()
+    if is_terminal_principal_type(start_type):
+        # Already a settled key — nothing to walk.
+        return {
+            "terminal": True,
+            "resolved_type": str(start_type),
+            "address": start or None,
+            "chain": [start] if start else [],
+            "status": "terminated",
+        }
+
+    chain: list[str] = [start] if start else []
+    seen: set[str] = {start} if start else set()
+    current = start
+
+    def _unknown(status: str) -> dict[str, Any]:
+        return {"terminal": False, "resolved_type": "unknown", "address": None, "chain": chain, "status": status}
+
+    for _ in range(max(1, max_depth)):
+        step = resolve_controller(current)
+        if not isinstance(step, Mapping):
+            # Controller unfetched / unverified / ambiguous -> unknown terminal.
+            return _unknown("unknown_unfetched")
+        next_address = str(step.get("address", "")).lower()
+        next_type = str(step.get("resolved_type", "unknown") or "unknown")
+        if not next_address.startswith("0x") or len(next_address) != 42:
+            return _unknown("unknown_unfetched")
+        if next_address in seen:
+            chain.append(next_address)
+            return _unknown("cycle")
+        seen.add(next_address)
+        chain.append(next_address)
+        if is_terminal_principal_type(next_type):
+            return {
+                "terminal": True,
+                "resolved_type": next_type,
+                "address": next_address,
+                "chain": chain,
+                "status": "terminated",
+            }
+        if next_type != "contract":
+            # An intermediate that is neither a settled key nor a walkable
+            # contract (e.g. an unresolved node) — stop honest, not guessed.
+            return _unknown("unknown_unfetched")
+        current = next_address
+
+    return _unknown("depth_exceeded")
 
 
 def _function_principal_payload(
@@ -30,7 +126,17 @@ def _function_principal_payload(
         "source_controller_id": fp.origin,
         "principal_type": fp.principal_type,
         "details": details,
+        # A contract (or unresolved) principal is a non-terminal way-point, not a
+        # settled key — consumers must treat it as ``unknown`` terminal, never as
+        # the controlling principal (SCORING plan §4). ``terminal_principal``, when
+        # present in ``details`` (computed by the policy stage's terminal walk),
+        # names the resolved ultimate key; it is surfaced verbatim and is itself
+        # ``terminal=False`` unless that walk reached a Safe/EOA.
+        "terminal": is_terminal_principal_type(resolved_type),
     }
+    terminal_principal = details.get("terminal_principal")
+    if isinstance(terminal_principal, Mapping):
+        payload["terminal_principal"] = dict(terminal_principal)
     if lookup and lookup.get("label"):
         payload["label"] = lookup["label"]
     return payload
