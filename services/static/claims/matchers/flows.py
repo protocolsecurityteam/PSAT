@@ -34,13 +34,27 @@ def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvi
         witness={
             "kind": "value_flow",
             "direction": direction,
-            "flows": [
-                {"kind": f.get("kind"), "selector": f.get("selector"), "from_is_self": f.get("from_is_self")}
-                for f in flows
-            ],
+            "flows": [_flow_entry(f) for f in flows],
             "sink_ids": sorted(set(sink_ids)),
         },
     )
+
+
+def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
+    """Project a value-flow fact into the witness. ``target_kind`` (where funds
+    go) and ``amount_kind`` (how much can leave) — each ``{kind, tier}`` — carry
+    the theft-vs-routing discriminators when the fact layer classified them;
+    omitted when absent so a consumer never reads a guessed value."""
+    entry: dict[str, Any] = {
+        "kind": f.get("kind"),
+        "selector": f.get("selector"),
+        "from_is_self": f.get("from_is_self"),
+    }
+    if f.get("target_kind"):
+        entry["target_kind"] = f["target_kind"]
+    if f.get("amount_kind"):
+        entry["amount_kind"] = f["amount_kind"]
+    return entry
 
 
 def _is_value_call(sink: dict[str, Any]) -> bool:
