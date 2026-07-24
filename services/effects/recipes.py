@@ -37,7 +37,7 @@ from services.effects.harness import (
     record_calls,
     unknown,
 )
-from services.effects.simulate import SimCall, SimCallResult, Simulate, transfers_out
+from services.effects.simulate import SimCall, SimCallResult, Simulate, transfers_in, transfers_out
 from utils.rpc import EthCallResult
 
 # EIP-1967 implementation slot. keccak("eip1967.proxy.implementation") - 1.
@@ -448,11 +448,32 @@ def supply(
         static_shape=static_shape,
         static_destination=static_destination,
     )
+    details: dict[str, Any] = {"supply_delta_sign": sign}
+    if sign == "mint":
+        # §5a backing: an asset Transfer INTO the vault during the SAME simulated
+        # mint call is the co-occurring inflow that separates a deposit-backed
+        # conversion (WeETH.wrap / BoringVault.enter) from an unbacked, dilutive
+        # admin mint. The mint ran as the resolved principal for an attacker-chosen
+        # amount, and ``mint_c.logs`` is the COMPLETE set of Transfers it emitted —
+        # so ``inflow_observed is False`` is a WITNESSED negative (supply rose with
+        # zero matching asset inflow in the same observed call = dilution), not an
+        # absence-of-evidence guess. Fork-observed, Tier 1. Proportionality (the
+        # backed-vs-partial distinction) is left to the scorer from these counts —
+        # the assets differ in token/decimals, so the recipe does NOT collapse them
+        # to a ratio here. NEVER inferred from static flow.in + supply.mint
+        # co-occurrence (that proves neither causation nor proportionality).
+        inflow = transfers_in(mint_c, token_address)
+        details["backing"] = {
+            "inflow_observed": bool(inflow),
+            "minted": bool(minted),
+            "inflow_transfers": len(inflow),
+            "mint_transfers": len(minted),
+        }
     eff = proven(
         EFFECT_CLASS_SUPPLY,
         gate_ref=gate_ref,
         reason=f"supply_{sign}",
-        details={"supply_delta_sign": sign},
+        details=details,
         transcript=tr,
     )
     eff.discrepancy = disc

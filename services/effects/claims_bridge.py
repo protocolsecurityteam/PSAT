@@ -201,6 +201,11 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     LATCH = the MOST severe freeze, never zero/short.
     #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
     #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
+    # ``backing`` (§5a) is the fork-observed mint-backing object
+    # ``{inflow_observed, minted, ...}`` recorded on EFFECT_CLASS_SUPPLY verdicts —
+    # present only on ``supply.mint``. ``inflow_observed is False`` is a witnessed
+    # dilution signal (supply rose with no asset inflow in the same call); the
+    # scorer must NOT read absence of this key as "backed".
     keep = (
         "supply_delta_sign",
         "gate_mutation",
@@ -209,6 +214,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "observed_blast_radius",
         "auto_expiry",
         "duration_bound_seconds",
+        "backing",
     )
     summary = {k: raw[k] for k in keep if k in raw}
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not None:

@@ -89,6 +89,17 @@ def test_supply_sign_selects_mint_or_burn():
     assert mint["witness"]["observed"]["supply_delta_sign"] == "mint"
 
 
+def test_supply_mint_projects_backing_into_observed_witness():
+    # §5a: the fork mint-backing object must reach claim.witness["observed"] so the
+    # scorer/frontend can tell a backed conversion from an unbacked (dilutive) mint.
+    backing = {"inflow_observed": False, "minted": True, "inflow_transfers": 0, "mint_transfers": 1}
+    claim = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint", "backing": backing})
+    )
+    assert claim is not None and claim["claim_id"] == "supply.mint"
+    assert claim["witness"]["observed"]["backing"] == backing
+
+
 def test_supply_without_sign_fails_closed():
     # No observed sign ⇒ the recipe proved a delta shape we cannot name; withhold.
     assert claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_SUPPLY, witness={})) is None

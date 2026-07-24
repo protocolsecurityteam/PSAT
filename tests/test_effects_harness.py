@@ -117,6 +117,17 @@ def test_transfers_out_extracts_only_source_sends():
     assert out[0][1] == SENTINEL.lower()
 
 
+def test_transfers_in_extracts_only_dest_receives():
+    # Mirror of transfers_out: value ARRIVING at dest_address (the §5a backing check).
+    call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(TOKEN, PRINCIPAL, CONTRACT, 9)])
+    from services.effects.simulate import transfers_in
+
+    ins = transfers_in(call, CONTRACT)
+    assert len(ins) == 1
+    assert ins[0][0] == PRINCIPAL.lower()
+    assert ins[0][1] == CONTRACT.lower()
+
+
 # ---------------------------------------------------------------------------
 # preflight (inv. 14)
 # ---------------------------------------------------------------------------
@@ -289,6 +300,122 @@ def test_supply_mint_delta_sign_proven():
     )
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "mint"
+
+
+def test_supply_mint_unbacked_emits_backing_inflow_false():
+    # §5a: supply rises but the mint call's COMPLETE Transfer set carries no asset
+    # into the vault → witnessed dilution (inflow_observed False), never "backed".
+    zero = "0x" + "00" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1000)),
+            ok(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),  # mint-from-zero only
+            ok(uint_ret(1500)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    backing = eff.details["backing"]
+    assert backing["inflow_observed"] is False
+    assert backing["minted"] is True
+    assert backing["inflow_transfers"] == 0
+    assert backing["mint_transfers"] == 1
+
+
+def test_supply_mint_backed_emits_backing_inflow_true():
+    # §5a: a proportional asset Transfer INTO the vault co-occurs with the mint
+    # (deposit-backed conversion) → inflow_observed True.
+    zero = "0x" + "00" * 20
+    asset = "0x" + "44" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1000)),
+            ok(
+                logs=[
+                    transfer_log(asset, PRINCIPAL, TOKEN, 500),  # backing asset INTO the vault
+                    transfer_log(TOKEN, zero, PRINCIPAL, 500),  # shares minted to depositor
+                ]
+            ),
+            ok(uint_ret(1500)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    backing = eff.details["backing"]
+    assert backing["inflow_observed"] is True
+    assert backing["inflow_transfers"] == 1
+    assert backing["minted"] is True
+
+
+def test_supply_burn_emits_no_backing():
+    # Backing is a mint-only concept; a burn verdict must not carry it.
+    zero = "0x" + "00" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1500)),
+            ok(logs=[transfer_log(TOKEN, PRINCIPAL, zero, 500)]),
+            ok(uint_ret(1000)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x42966c68" + "00" * 32,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "burn"
+    assert "backing" not in eff.details
+
+
+def test_supply_mint_reverted_fails_closed_no_backing():
+    # §5a fallback: a reverted mint is unknown, never "backed" — no backing field.
+    res = SimResult(calls=(ok(uint_ret(10)), rv(), ok(uint_ret(10))))
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert "backing" not in eff.details
+
+
+def test_supply_unsupported_downgrades_no_backing():
+    # §5a fallback: simulate_unsupported → Tier-2 downgrade unknown, never backed.
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(SimResult(calls=(ok(),))),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=False,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert "backing" not in eff.details
 
 
 # ===========================================================================

@@ -102,6 +102,30 @@ def transfers_out(result: SimCallResult, source_address: str) -> list[tuple[str,
     return out
 
 
+def transfers_in(result: SimCallResult, dest_address: str) -> list[tuple[str, str, str]]:
+    """``(from, to, value_hex)`` for every ``Transfer`` log whose recipient is
+    ``dest_address`` — i.e. value ARRIVING at that contract. The mirror of
+    :func:`transfers_out`: raw-log level only, no name/semantic inference, ETH moves
+    surface here too via ``traceTransfers``.
+
+    Used by the §4.5 backing check (§5a): an asset transfer INTO the vault during a
+    mint call is the co-occurring inflow that distinguishes a deposit-backed
+    conversion from an unbacked (dilutive) admin mint. No new I/O — the logs are the
+    ones the mint call already emitted."""
+    dst = dest_address.lower()
+    out: list[tuple[str, str, str]] = []
+    for log in result.logs:
+        if not log.topics or log.topics[0].lower() != TRANSFER_TOPIC.lower():
+            continue
+        if len(log.topics) < 3:
+            continue
+        frm = _topic_addr(log.topics[1])
+        to = _topic_addr(log.topics[2])
+        if to == dst:
+            out.append((frm, to, log.data))
+    return out
+
+
 def _topic_addr(topic: str) -> str:
     """Last 20 bytes of a 32-byte indexed topic, lowercased 0x address."""
     body = topic[2:] if topic.startswith("0x") else topic
