@@ -346,3 +346,236 @@ def test_clean_no_setter_stays_proven_negative(tmp_path):
     effects = build_effects(contract)
     # No delegatecall, no assembly sstore, no setter -> the sound case survives.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
+
+
+# ---------------------------------------------------------------------------
+# Storage-pointer aliasing (register #1): a state var written only through a
+# callee taking a ``storage`` reference (``using X for`` / library idiom) is not
+# attributed by Slither. We resolve the alias back to its origin var (a real
+# setter -> storage_setter), and degrade to indeterminate only when the alias
+# genuinely cannot be resolved — never a false storage_no_setter.
+# ---------------------------------------------------------------------------
+
+_STORAGE_LIB = """
+struct Box { address owner; }
+library L {
+    function put(Box storage s, address v) internal { s.owner = v; }
+    function peek(Box storage s) internal view returns (address) { return s.owner; }
+    function _inner(Box storage s, address v) internal { s.owner = v; }
+    function putNested(Box storage s, address v) internal { _inner(s, v); }
+}
+"""
+
+_LIB_WRITE_SRC = (
+    """
+pragma solidity ^0.8.20;
+"""
+    + _STORAGE_LIB
+    + """
+contract LibWrite {
+    Box box;
+    function setV(address v) external { L.put(box, v); }
+    function pay() external { (bool ok,) = payable(box.owner).call{value: 1}(""); require(ok); }
+}
+"""
+)
+
+_LIB_READ_SRC = (
+    """
+pragma solidity ^0.8.20;
+"""
+    + _STORAGE_LIB
+    + """
+contract LibRead {
+    Box box;
+    function pk() external view returns (address) { return L.peek(box); }
+    function pay() external { (bool ok,) = payable(box.owner).call{value: 1}(""); require(ok); }
+}
+"""
+)
+
+_LIB_NESTED_SRC = (
+    """
+pragma solidity ^0.8.20;
+"""
+    + _STORAGE_LIB
+    + """
+contract LibNested {
+    Box box;
+    function setV(address v) external { L.putNested(box, v); }
+    function pay() external { (bool ok,) = payable(box.owner).call{value: 1}(""); require(ok); }
+}
+"""
+)
+
+_LIB_LOCAL_SRC = (
+    """
+pragma solidity ^0.8.20;
+"""
+    + _STORAGE_LIB
+    + """
+contract LibLocal {
+    Box box;
+    function setV(address v) external { Box storage b = box; L.put(b, v); }
+    function pay() external { (bool ok,) = payable(box.owner).call{value: 1}(""); require(ok); }
+}
+"""
+)
+
+_LIB_UNRESOLVABLE_SRC = (
+    """
+pragma solidity ^0.8.20;
+"""
+    + _STORAGE_LIB
+    + """
+contract LibReturn {
+    mapping(uint => Box) boxes;
+    address fixedDest;               // clean no-setter var, but scan is now incomplete
+    // storage pointer sourced from an internal call return -> origin unresolvable
+    function _sel(uint k) internal view returns (Box storage) { return boxes[k]; }
+    function setV(uint k, address v) external { Box storage b = _sel(k); L.put(b, v); }
+    function pay() external { (bool ok,) = payable(fixedDest).call{value: 1}(""); require(ok); }
+}
+"""
+)
+
+
+def test_library_storage_write_is_real_setter(tmp_path):
+    contract = _compile(tmp_path, _LIB_WRITE_SRC, "LibWrite")
+    effects = build_effects(contract)
+    # box.owner is redirectable via L.put -> the alias is resolved to a setter.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_library_read_only_stays_no_setter(tmp_path):
+    contract = _compile(tmp_path, _LIB_READ_SRC, "LibRead")
+    effects = build_effects(contract)
+    # A storage ref passed only for reading is not a setter; the clean proof holds.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
+
+
+def test_library_transitive_write_is_real_setter(tmp_path):
+    contract = _compile(tmp_path, _LIB_NESTED_SRC, "LibNested")
+    effects = build_effects(contract)
+    # putNested forwards the storage ref into _inner, which writes it.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_library_local_pointer_write_is_real_setter(tmp_path):
+    contract = _compile(tmp_path, _LIB_LOCAL_SRC, "LibLocal")
+    effects = build_effects(contract)
+    # ``Box storage b = box;`` traces back to box -> a resolved setter.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_library_unresolvable_alias_is_indeterminate(tmp_path):
+    contract = _compile(tmp_path, _LIB_UNRESOLVABLE_SRC, "LibReturn")
+    effects = build_effects(contract)
+    # The storage pointer comes from a call return: some unknown var was written
+    # through the alias, so no no-setter proof in the contract is sound.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
+
+
+# ---------------------------------------------------------------------------
+# tx.origin destination (register #7): a distinct caller-directed destination
+# fact -> ``caller_controlled`` (theft-shaped, deduction-admissible like
+# param/msg_sender), NOT folded into msg_sender (the address differs).
+# ---------------------------------------------------------------------------
+
+_TX_ORIGIN_SRC = """
+pragma solidity ^0.8.20;
+interface IERC20 { function transfer(address,uint256) external returns (bool); }
+contract Origin {
+    // ERC-20 send with a direct tx.origin recipient (dispositive).
+    function claim(address tok, uint256 amt) external { IERC20(tok).transfer(tx.origin, amt); }
+    // Low-level value call to tx.origin (traced through the payable cast).
+    function payOrigin(uint256 amt) external { (bool ok,) = payable(tx.origin).call{value: amt}(""); require(ok); }
+}
+"""
+
+
+def test_tx_origin_destination_is_caller_controlled(tmp_path):
+    contract = _compile(tmp_path, _TX_ORIGIN_SRC, "Origin")
+    effects = build_effects(contract)
+    direct = _out_flow(effects["functions"]["claim(address,uint256)"])
+    assert direct["target_kind"] == {"kind": "caller_controlled", "tier": "dispositive_ast"}
+    traced = _out_flow(effects["functions"]["payOrigin(uint256)"])
+    assert traced["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}
+
+
+# ---------------------------------------------------------------------------
+# Struct-field destination of a branch-reassigned local (register #8): the
+# merged-local guard must reach the base through a Member/Index op, or the
+# engine's collapsed (single-branch) value escapes as a guessed concrete kind.
+# ---------------------------------------------------------------------------
+
+_STRUCT_MERGE_SRC = """
+pragma solidity ^0.8.20;
+contract StructMerge {
+    struct Box { address owner; }
+    Box boxA;                       // has a setter
+    Box boxB;                       // no setter
+    function setA(address v) external { boxA.owner = v; }
+    // s is a storage pointer merged across branches; the destination is a FIELD
+    // of it. The engine collapses s to one branch (boxA -> storage_setter) — a
+    // guessed member of the {boxA, boxB} union that the guard must reject.
+    function payMerged(bool c, uint256 amt) external {
+        Box storage s = c ? boxA : boxB;
+        (bool ok,) = payable(s.owner).call{value: amt}(""); require(ok);
+    }
+}
+"""
+
+
+def test_struct_field_of_merged_local_is_indeterminate(tmp_path):
+    contract = _compile(tmp_path, _STRUCT_MERGE_SRC, "StructMerge")
+    effects = build_effects(contract)
+    # Without Member traversal in the def-use walk this escapes as storage_setter
+    # (the collapsed boxA branch); the guard now reaches the merged base ``s``.
+    assert _out_flow(effects["functions"]["payMerged(bool,uint256)"])["target_kind"]["kind"] == "indeterminate"
+
+
+# ---------------------------------------------------------------------------
+# Engine-bundle memoization (register #9): a helper reached from multiple entry
+# points is analyzed once. Behavior-preserving — the bundle is a pure function of
+# the helper's IR; only the per-context ``nested`` flag stays on _UnitCtx.
+# ---------------------------------------------------------------------------
+
+_SHARED_HELPER_SRC = """
+pragma solidity ^0.8.20;
+contract Shared {
+    address public immutable sink;
+    constructor(address s) { sink = s; }
+    function _pay(uint256 amt) internal {
+        (bool ok,) = payable(sink).call{value: amt}(""); require(ok);
+    }
+    function entryA(uint256 amt) external { _pay(amt); }
+    function entryB(uint256 amt) external { _pay(amt); }
+}
+"""
+
+
+def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
+    contract = _compile(tmp_path, _SHARED_HELPER_SRC, "Shared")
+    import services.static.contract_analysis_pipeline.effects as eff_mod
+
+    real_engine = eff_mod.ProvenanceEngine
+    counts: dict[str, int] = {}
+
+    class CountingEngine(real_engine):
+        def __init__(self, function, *args, **kwargs):
+            name = str(getattr(function, "name", None))
+            counts[name] = counts.get(name, 0) + 1
+            super().__init__(function, *args, **kwargs)
+
+    monkeypatch.setattr(eff_mod, "ProvenanceEngine", CountingEngine)
+    effects = build_effects(contract)
+
+    # _pay moves value and is reached from BOTH entries, yet its engine is built
+    # exactly once (cross-entry memoization); without it the count would be 2.
+    assert counts.get("_pay") == 1
+
+    a = _out_flow(effects["functions"]["entryA(uint256)"])
+    b = _out_flow(effects["functions"]["entryB(uint256)"])
+    assert a["target_kind"] == b["target_kind"] == {"kind": "immutable", "tier": "static_trace"}
+    assert a["amount_kind"] == b["amount_kind"]
