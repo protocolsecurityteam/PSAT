@@ -31,10 +31,13 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
     ``membership_quality`` witness). Only ``resolved_type='safe'`` rows whose
     ``details.owners`` is present AND ``membership_quality == 'exact'`` are
     admitted — the on-chain owner set was dispositively read, not a lower-bound
-    guess. A Safe appears on many function rows; deduped by address. The set is
-    only as complete as the protocol contracts analyzed so far, which is correct:
-    the comparison pool grows monotonically as more contracts resolve (inv-6),
-    never producing a wrong deduction, only fewer comparisons.
+    guess. A Safe appears on many function rows; identical exact rows dedup by
+    address. If two exact rows DISAGREE on the owner set, that Safe is a witness
+    conflict and is OMITTED (Register #4 — no recency column to arbitrate, so we
+    never silently pick one contradictory enumeration). The set is only as
+    complete as the protocol contracts analyzed so far, which is correct: the
+    comparison pool grows monotonically as more contracts resolve (inv-6), never
+    producing a wrong deduction, only fewer comparisons.
     """
     rows = session.execute(
         select(func.lower(FunctionPrincipal.address), FunctionPrincipal.details)
@@ -43,13 +46,21 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
         .where(Contract.protocol_id == protocol_id, FunctionPrincipal.resolved_type == "safe")
     ).all()
 
-    registry: dict[str, dict[str, Any]] = {}
+    # Per-Safe accumulator: the first exact owner set seen, its threshold, and a
+    # conflict flag. ``function_principals`` has no recency column (no
+    # updated_at/probe-block on the row — see db/models.py), so two exact rows
+    # that DISAGREE on the owner set are contradictory witnesses with no
+    # dispositive way to pick between them: fail closed (Register #4). Identical
+    # duplicate exact rows agree and are kept.
+    accum: dict[str, dict[str, Any]] = {}
     for address, details in rows:
         if not isinstance(details, dict):
             continue
         # Fallback (no guessing): omit when the owner set was not dispositively
         # enumerated. ``lower_bound`` membership means the resolution did not
-        # prove the full owner set — inadmissible as a Tier-1 owner fact.
+        # prove the full owner set — inadmissible as a Tier-1 owner fact. An exact
+        # + lower_bound pair is NOT a conflict: the lower_bound row is skipped here
+        # and the exact one stands.
         if details.get("membership_quality") != "exact":
             continue
         owners_raw = details.get("owners")
@@ -59,12 +70,17 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
         if not owners:
             continue
         addr = str(address).lower()
-        existing = registry.get(addr)
-        # Duplicate exact rows should agree; if they don't (probed at different
-        # blocks), keep the larger enumerated set deterministically.
-        if existing is None or len(owners) > len(existing["owners"]):
-            registry[addr] = {"owners": owners, "threshold": details.get("threshold"), "membership_quality": "exact"}
-    return registry
+        existing = accum.get(addr)
+        if existing is None:
+            accum[addr] = {"owners": owners, "threshold": details.get("threshold"), "conflict": False}
+        elif existing["owners"] != owners:
+            # Two exact witnesses disagree — refuse to arbitrate, drop the Safe.
+            existing["conflict"] = True
+    return {
+        addr: {"owners": entry["owners"], "threshold": entry["threshold"], "membership_quality": "exact"}
+        for addr, entry in accum.items()
+        if not entry["conflict"]
+    }
 
 
 def _compute_signer_overlap(

@@ -134,6 +134,42 @@ def test_load_protocol_safe_owner_sets_owner_quality_gate(db_session):
     assert registry[OPS.lower()]["threshold"] == 4
 
 
+def test_load_protocol_safe_owner_sets_conflicting_exacts_omitted(db_session):
+    # Two exact witnesses that DISAGREE on the owner set -> fail closed, omit.
+    protocol = Protocol(name="etherfi-conflict")
+    db_session.add(protocol)
+    db_session.flush()
+    contract = Contract(protocol_id=protocol.id, address="0x" + "d" * 40)
+    db_session.add(contract)
+    db_session.flush()
+    _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS, "membership_quality": "exact"})
+    _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS[:6], "membership_quality": "exact"})
+    # A second, non-conflicting Safe stays admitted (conflict is per-Safe).
+    _make_safe_fp(db_session, contract, PAUSER, {"owners": PAUSER_OWNERS, "membership_quality": "exact"})
+    db_session.commit()
+
+    registry = load_protocol_safe_owner_sets(db_session, protocol.id)
+    assert set(registry) == {PAUSER.lower()}  # OPS omitted, PAUSER kept
+
+
+def test_load_protocol_safe_owner_sets_exact_and_lower_bound_not_a_conflict(db_session):
+    # An exact + lower_bound pair for one Safe is NOT a conflict: lower_bound is
+    # skipped and the exact stands (regression guard).
+    protocol = Protocol(name="etherfi-mixed-quality")
+    db_session.add(protocol)
+    db_session.flush()
+    contract = Contract(protocol_id=protocol.id, address="0x" + "e" * 40)
+    db_session.add(contract)
+    db_session.flush()
+    _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS, "membership_quality": "exact"})
+    _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS[:3], "membership_quality": "lower_bound"})
+    db_session.commit()
+
+    registry = load_protocol_safe_owner_sets(db_session, protocol.id)
+    assert set(registry) == {OPS.lower()}
+    assert registry[OPS.lower()]["owners"] == sorted(o.lower() for o in OPS_OWNERS)
+
+
 def test_load_protocol_safe_owner_sets_scoped_to_protocol(db_session):
     p1 = Protocol(name="p1")
     p2 = Protocol(name="p2")
