@@ -155,8 +155,16 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
 
 def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
     """Build probe plans for one candidate: the Tier-0 code-upgrade plan plus one
-    plan per class the synthesizer produced concrete inputs for."""
-    return _code_upgrade_plans(session, candidate, ctx) + _synthesized_plans(session, candidate, ctx)
+    plan per class the synthesizer produced concrete inputs for.
+
+    §5c: a claim-enrolled candidate (``restrict_families`` set) is only re-probed
+    for its value/supply families — the code-upgrade probe is skipped so an
+    already-explained flow/supply function is not re-simulated for upgradeability."""
+    allow = candidate.restrict_families
+    plans: list[ProbePlan] = []
+    if allow is None or EFFECT_CLASS_CODE_UPGRADE in allow:
+        plans += _code_upgrade_plans(session, candidate, ctx)
+    return plans + _synthesized_plans(session, candidate, ctx)
 
 
 def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:

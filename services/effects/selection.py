@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -32,11 +33,19 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
 )
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
 
 logger = logging.getLogger(__name__)
 
 # Node IDs in ``control_graph_edges`` are stored as ``address:0x…``.
 _NODE_PREFIX = "address:"
+
+# §5c gate lift — claim families that re-enroll an already-claimed function for
+# fork probing. A ``flow.*`` claim needs the value-reach probe (§5b); a
+# ``supply.*`` claim needs the mint-backing probe (§5a). Every other claim family
+# (``pause.*``, ``upgrade.*``, …) is already explained and is NOT re-simulated.
+_FLOW_CLAIM_PREFIX = "flow."
+_SUPPLY_CLAIM_PREFIX = "supply."
 
 
 def _addr(value: str | None) -> str | None:
@@ -70,6 +79,11 @@ class Candidate:
     # ``effective_functions.deployment_address`` — the address that actually holds
     # the state. Empty when the row predates it / is not proxy-backed.
     deployment_address: str = ""
+    # §5c gate lift. ``None`` = a BLANK function: synthesize every effect class
+    # (the §6 default). A non-empty set = a function already carrying a
+    # flow.*/supply.* claim, re-enrolled for exactly those value/supply families
+    # (never the whole class set — we don't re-simulate what's already explained).
+    restrict_families: frozenset[str] | None = None
 
     @property
     def probe_target(self) -> str:
@@ -172,23 +186,19 @@ def _cascade_rows(session: Session, protocol_id: int):
 
     (a) has a sink   — ``array_length(effect_targets, 1) > 0`` (there is no
         ``sinks`` column; the sink is the state-write target list).
-    (b) blank only    — a confident claim already resolves it. Blankness is
-        authoritative on ``claims`` (``effect_labels`` is a downstream
-        projection of it): blank ⇔ NOT a non-empty JSON array. The ``CASE``
-        guards ``jsonb_array_length`` so it is only evaluated on arrays —
-        a JSONB column set to Python ``None`` via the ORM stores JSON
-        ``null`` (a scalar), not SQL ``NULL``, and ``jsonb_array_length`` of a
-        scalar raises. On real data (SQL ``NULL`` / ``[]`` / non-empty array)
-        this yields exactly the Appendix A count.
     (c) gated over public — ``authority_public = false``.
+
+    Filter (b) — the blank-claim gate — is applied in PYTHON on the returned
+    ``claims`` column (see :func:`_enrolled_families`), because it is no longer a
+    binary keep/drop: BLANK rows still get full synthesis (the §6 default), while
+    rows already carrying a ``flow.*``/``supply.*`` claim are RE-ENROLLED for just
+    those value/supply families (§5c gate lift) so the fork value-reach and
+    mint-backing probes can run on the functions that need them. Rows carrying
+    only other claims (pause/upgrade/…) are already explained and are dropped by
+    :func:`select_candidates`. Widening the SQL to all gated rows keeps the whole
+    decision inspectable in one place instead of split across a fragile JSONB
+    predicate.
     """
-    claim_count = case(
-        (
-            func.jsonb_typeof(EffectiveFunction.claims) == "array",
-            func.jsonb_array_length(EffectiveFunction.claims),
-        ),
-        else_=0,
-    )
     return session.execute(
         select(
             EffectiveFunction.id,
@@ -199,15 +209,45 @@ def _cascade_rows(session: Session, protocol_id: int):
             EffectiveFunction.authority_public,
             EffectiveFunction.effect_targets,
             EffectiveFunction.deployment_address,
+            EffectiveFunction.claims,
         )
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .where(
             Contract.protocol_id == protocol_id,
             func.array_length(EffectiveFunction.effect_targets, 1) > 0,
-            or_(EffectiveFunction.claims.is_(None), claim_count == 0),
             EffectiveFunction.authority_public.is_(False),
         )
     ).all()
+
+
+def _enrolled_families(claims: Any) -> frozenset[str] | None:
+    """Which effect families a candidate should be probed for, from its claims.
+
+    * ``None`` — the function is BLANK (no claims). It is the §6 default candidate:
+      every effect class is synthesized. ``[]``, SQL ``NULL`` and the ORM's
+      JSON-``null`` all read as blank here.
+    * a **non-empty** frozenset — the function already carries a ``flow.*`` and/or
+      ``supply.*`` claim, so it is re-enrolled (§5c) for exactly ``value_out``
+      and/or ``supply``. Never the whole class set: re-simulating pause/authority/
+      upgrade for an already-explained function is the waste the gate guards.
+    * the **empty** frozenset — the function carries only other claims (pause,
+      upgrade, …); already explained, so the caller drops it (fail-closed: an
+      unrecognized claim shape enrolls nothing).
+    """
+    if not isinstance(claims, list) or not claims:
+        return None
+    families: set[str] = set()
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        cid = claim.get("claim_id")
+        if not isinstance(cid, str):
+            continue
+        if cid.startswith(_FLOW_CLAIM_PREFIX):
+            families.add(EFFECT_CLASS_VALUE_OUT)
+        elif cid.startswith(_SUPPLY_CLAIM_PREFIX):
+            families.add(EFFECT_CLASS_SUPPLY)
+    return frozenset(families)
 
 
 def _principals_by_function(session: Session, function_ids: list[int]) -> dict[int, list[str]]:
@@ -245,7 +285,11 @@ def select_candidates(
     graph = build_authority_graph(session, protocol_id)
 
     candidates: list[Candidate] = []
-    for fid, contract_id, address, selector, name, public, targets, deployment in rows:
+    for fid, contract_id, address, selector, name, public, targets, deployment, claims in rows:
+        families = _enrolled_families(claims)
+        # Claim-carrying but no flow/supply family to re-probe → already explained.
+        if families is not None and not families:
+            continue
         addr = _addr(address) or ""
         prins = principals.get(fid, [])
         seeds = {addr, *prins}
@@ -261,6 +305,7 @@ def select_candidates(
                 principal_addresses=tuple(prins),
                 value_at_stake_usd=graph.reachable_value(seeds),
                 deployment_address=_addr(deployment) or "",
+                restrict_families=families,
             )
         )
 

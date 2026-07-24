@@ -149,6 +149,57 @@ def test_cascade_filters_sink_claim_and_public(db_session):
     assert public.id not in got
 
 
+def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
+    """§5c: functions already carrying flow.*/supply.* claims are re-enrolled for
+    exactly those value/supply families; other claims (pause/upgrade) stay dropped;
+    blank functions keep the unrestricted (None) full-synthesis default."""
+    p = _protocol(db_session, "gate-lift-proto")
+    c = _contract(db_session, p.id, ADDR(0x3000))
+
+    blank = _fn(db_session, c.id, name="pauseUntil", selector="0xcccc0001", effect_targets=["SLOT"])
+    flow = _fn(
+        db_session,
+        c.id,
+        name="withdrawEther",
+        selector="0xcccc0002",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "flow.out", "tier": "idiom_structural"}],
+    )
+    mint = _fn(
+        db_session,
+        c.id,
+        name="mint",
+        selector="0xcccc0003",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "supply.mint", "tier": "standard_exact"}],
+    )
+    both = _fn(
+        db_session,
+        c.id,
+        name="enter",
+        selector="0xcccc0004",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "flow.in", "tier": "idiom_structural"}, {"claim_id": "supply.mint", "tier": "fact"}],
+    )
+    # Carries only a non-value/supply claim → already explained → dropped.
+    upgraded = _fn(
+        db_session,
+        c.id,
+        name="upgradeTo",
+        selector="0xcccc0005",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact"}],
+    )
+    db_session.commit()
+
+    by_id = {cand.function_id: cand for cand in select_candidates(db_session, p.id)}
+    assert by_id[blank.id].restrict_families is None
+    assert by_id[flow.id].restrict_families == frozenset({"value_out"})
+    assert by_id[mint.id].restrict_families == frozenset({"supply"})
+    assert by_id[both.id].restrict_families == frozenset({"value_out", "supply"})
+    assert upgraded.id not in by_id
+
+
 def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
     """effect_labels populated but claims empty => still blank => selected."""
     p = _protocol(db_session, "blank-proto")
@@ -316,10 +367,13 @@ def _dev_engine():
 
 
 def test_appendix_a_funnel_on_dev_db():
-    """Reproduce the 265 blank+facts+gated count for etherfi (protocol_id=1).
+    """Reproduce the §6 funnel + §5c gate-lift partition for etherfi (protocol_id=1).
 
-    Data-gated: skips cleanly when the dev DB / etherfi rows are absent so CI's
-    fresh empty DB never depends on it.
+    Counts are computed LIVE from SQL rather than hardcoded — the dev DB drifts as
+    the matchers grow, so the invariant tested is the PARTITION (blank subset ==
+    the old blank-claim predicate; enrolled == flow/supply claim carriers), not a
+    frozen number. Data-gated: skips cleanly when the dev DB / etherfi rows are
+    absent so CI's fresh empty DB never depends on it.
     """
     eng = _dev_engine()
     if eng is None:
@@ -334,9 +388,31 @@ def test_appendix_a_funnel_on_dev_db():
         if not present:
             pytest.skip("etherfi (protocol_id=1) rows absent from dev DB")
 
+        # The historical blank-claim predicate count (sink + gated + no confident
+        # claim) — the exact set that used to be the whole candidate list.
+        expected_blank = s.execute(
+            text(
+                "SELECT count(*) FROM effective_functions ef "
+                "JOIN contracts c ON c.id = ef.contract_id "
+                "WHERE c.protocol_id = 1 AND array_length(ef.effect_targets, 1) > 0 "
+                "AND ef.authority_public IS FALSE AND (ef.claims IS NULL OR "
+                "(CASE WHEN jsonb_typeof(ef.claims) = 'array' "
+                "THEN jsonb_array_length(ef.claims) ELSE 0 END) = 0)"
+            )
+        ).scalar_one()
+
         cands = select_candidates(s, 1)
-        # Appendix A: blank (no claim) + facts + gated == 265.
-        assert len(cands) == 265
+        blank = [c for c in cands if c.restrict_families is None]
+        # The blank subset is exactly the old candidate set — the gate lift is
+        # purely additive over blank functions (no blank function lost).
+        assert len(blank) == expected_blank
+        # §5c gate lift: every value-mover already carries flow.out, so the lift
+        # re-enrolls a non-empty set of claim-carrying functions for value/supply
+        # probing — restricted to exactly those families, never the whole set.
+        enrolled = [c for c in cands if c.restrict_families]
+        assert enrolled
+        for c in enrolled:
+            assert c.restrict_families <= {"value_out", "supply"}
 
 
 # ---------------------------------------------------------------------------
