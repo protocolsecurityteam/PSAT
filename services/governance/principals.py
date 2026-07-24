@@ -128,10 +128,11 @@ def _function_principal_payload(
         "details": details,
         # A contract (or unresolved) principal is a non-terminal way-point, not a
         # settled key — consumers must treat it as ``unknown`` terminal, never as
-        # the controlling principal (SCORING plan §4). ``terminal_principal``, when
-        # present in ``details`` (computed by the policy stage's terminal walk),
-        # names the resolved ultimate key; it is surfaced verbatim and is itself
-        # ``terminal=False`` unless that walk reached a Safe/EOA.
+        # the controlling principal (SCORING plan §4). ``terminal_principal`` is a
+        # forward-compat passthrough: the terminal walk currently persists its
+        # record on ``principal_labels.details`` only (join by address to get the
+        # chain); nothing writes it into ``function_principals.details`` yet, so
+        # this branch stays dormant until a writer merges it there.
         "terminal": is_terminal_principal_type(resolved_type),
     }
     terminal_principal = details.get("terminal_principal")
