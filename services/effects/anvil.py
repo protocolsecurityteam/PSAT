@@ -183,6 +183,44 @@ def pause_recipe(
         _apply_fixtures(transport, [*fixtures, *(fx for ep in entry_points for fx in ep.fixtures)], tr)
         pre_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "pre_pause")
 
+        # §1 A2 probe follow-up — verify the pause can actually take effect before
+        # reading the freeze. An ``eth_call`` of the pauser from the principal runs
+        # the same EVM logic a ``send`` would, so a revert here means the resolved
+        # pauser cannot enact the pause on this forked state (missing authority, an
+        # active per-pauser cooldown, an unmet precondition). The freeze was then
+        # NEVER TESTED, so an empty blast radius would be INDETERMINATE — reported as
+        # its own ``pause_ineffective`` unknown with the raw revert, never conflated
+        # with a genuine "pause froze nothing" (the §1 fallback: an empty
+        # ``observed_blast_radius`` ≠ no-freeze). This split is what lets the live
+        # cycle tell the recoverable ineffective-pause verdicts from the correct
+        # no-blast ones instead of seeing one undifferentiated pile of empties.
+        pause_probe = transport.call({"from": principal, "to": contract_address, "data": pause_calldata})
+        tr["results"].append(
+            {"label": "pause_effectiveness", "success": pause_probe.success, "revert": pause_probe.revert_data}
+        )
+        if not pause_probe.success:
+            tr["pause_effective"] = False
+            tr["pre_pause_succeeding"] = sorted(pre_succeeding)
+            tr["observed_blast_radius"] = []
+            return emit(
+                store,
+                unknown(
+                    EFFECT_CLASS_FREEZE_PAUSE,
+                    tier=TIER_FORK,
+                    scope=SCOPE_PROJECTION,
+                    gate_ref=gate_ref,
+                    reason="pause_ineffective",
+                    details={
+                        "pause_effective": False,
+                        "pre_pause_succeeding": sorted(pre_succeeding),
+                        "observed_blast_radius": [],
+                        "scored_denominator": sorted(str(g) for g in predicted_guard_set),
+                    },
+                    transcript=tr,
+                ),
+            )
+        tr["pause_effective"] = True
+
         transport.impersonate(principal)
         try:
             transport.send({"from": principal, "to": contract_address, "data": pause_calldata})
@@ -239,6 +277,11 @@ def pause_recipe(
                 gate_ref=gate_ref,
                 reason="no_blast_radius_observed",
                 details={
+                    # pause_effective True + empty blast = a GENUINE no-blast: the
+                    # pause took effect yet froze nothing observable. This is at the
+                    # bar (correct to leave unknown), and distinct from the
+                    # pause_ineffective branch above where the freeze was untested.
+                    "pause_effective": True,
                     "pre_pause_succeeding": sorted(pre_succeeding),
                     "observed_blast_radius": [],
                     "scored_denominator": sorted(predicted),
@@ -259,6 +302,7 @@ def pause_recipe(
             # (which points). The scored denominator stays static's set (§8.8);
             # the observed set is a lower bound recorded alongside it.
             "latch_flip": True,
+            "pause_effective": True,
             "observed_blast_radius": sorted(observed_blast),
             "pre_pause_succeeding": sorted(pre_succeeding),
             "scored_denominator": sorted(predicted),

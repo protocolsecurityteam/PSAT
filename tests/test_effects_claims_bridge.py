@@ -145,6 +145,7 @@ def test_freeze_pause_projects_severity_fields_verdict318_shape():
     # can tell a $3.4B/30-day freeze from a harmless one.
     witness = {
         "latch_flip": True,
+        "pause_effective": True,
         "auto_expiry": True,
         "scored_denominator": ["mintShares(address,uint256)", "transfer(address,uint256)", "unpauseUntil()"],
         "pre_pause_succeeding": ["mintShares(address,uint256)", "transfer(address,uint256)"],
@@ -157,6 +158,7 @@ def test_freeze_pause_projects_severity_fields_verdict318_shape():
     assert observed["observed_blast_radius"] == ["mintShares(address,uint256)", "transfer(address,uint256)"]
     assert observed["auto_expiry"] is True
     assert observed["duration_bound_seconds"] == 2592000
+    assert observed["pause_effective"] is True
 
 
 def test_freeze_pause_indefinite_latch_fields_survive_as_none():
