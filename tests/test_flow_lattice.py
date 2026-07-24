@@ -501,3 +501,35 @@ def test_tx_origin_destination_is_caller_controlled(tmp_path):
     assert direct["target_kind"] == {"kind": "caller_controlled", "tier": "dispositive_ast"}
     traced = _out_flow(effects["functions"]["payOrigin(uint256)"])
     assert traced["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}
+
+
+# ---------------------------------------------------------------------------
+# Struct-field destination of a branch-reassigned local (register #8): the
+# merged-local guard must reach the base through a Member/Index op, or the
+# engine's collapsed (single-branch) value escapes as a guessed concrete kind.
+# ---------------------------------------------------------------------------
+
+_STRUCT_MERGE_SRC = """
+pragma solidity ^0.8.20;
+contract StructMerge {
+    struct Box { address owner; }
+    Box boxA;                       // has a setter
+    Box boxB;                       // no setter
+    function setA(address v) external { boxA.owner = v; }
+    // s is a storage pointer merged across branches; the destination is a FIELD
+    // of it. The engine collapses s to one branch (boxA -> storage_setter) — a
+    // guessed member of the {boxA, boxB} union that the guard must reject.
+    function payMerged(bool c, uint256 amt) external {
+        Box storage s = c ? boxA : boxB;
+        (bool ok,) = payable(s.owner).call{value: amt}(""); require(ok);
+    }
+}
+"""
+
+
+def test_struct_field_of_merged_local_is_indeterminate(tmp_path):
+    contract = _compile(tmp_path, _STRUCT_MERGE_SRC, "StructMerge")
+    effects = build_effects(contract)
+    # Without Member traversal in the def-use walk this escapes as storage_setter
+    # (the collapsed boxA branch); the guard now reaches the merged base ``s``.
+    assert _out_flow(effects["functions"]["payMerged(bool,uint256)"])["target_kind"]["kind"] == "indeterminate"

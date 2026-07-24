@@ -943,6 +943,14 @@ def _ir_source_operands(ir: Any) -> list[Any]:
         return [getattr(ir, "rvalue", None)]
     if tn == "Binary":
         return [getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)]
+    if tn == "Member":
+        # ``s.field`` — the field access carries the base local's identity, so a
+        # destination read off a branch-reassigned struct local must reach it.
+        return [getattr(ir, "variable_left", None)]
+    if tn == "Index":
+        # ``arr[k]`` — both the base and the key select the element; a merge in
+        # either makes the destination element ambiguous.
+        return [getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)]
     return []
 
 
