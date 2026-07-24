@@ -436,6 +436,7 @@ def test_appendix_a_funnel_on_dev_db():
         enrolled = [c for c in cands if c.restrict_families]
         assert enrolled
         for c in enrolled:
+            assert c.restrict_families is not None
             assert c.restrict_families <= {"value_out", "supply"}
 
 
