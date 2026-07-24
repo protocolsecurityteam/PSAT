@@ -172,6 +172,68 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_blast_radius_observed"
+    # A GENUINE no-blast: the pause took effect but froze nothing observable.
+    assert eff.details["pause_effective"] is True
+
+
+class IneffectivePauseAnvil(StubAnvil):
+    """Models a pauser the principal cannot enact: the pause calldata reverts on
+    ``call`` (missing authority / an active cooldown), so ``send`` never flips the
+    latch. Everything else inherits from :class:`StubAnvil`."""
+
+    def call(self, tx: dict) -> EthCallResult:
+        if tx.get("data") == self._pause_calldata:
+            return EthCallResult(False, "0x", "0x" + "cooldown".encode().hex(), "cooldown")
+        return super().call(tx)
+
+    def send(self, tx: dict) -> str:  # the pause tx would revert on-chain: no flip
+        return "0xhash"
+
+
+def test_pause_recipe_ineffective_pause_is_distinct_unknown():
+    # §1 A2 follow-up: the resolved pauser cannot enact the pause on this fork state
+    # → the freeze was never tested → a DISTINCT indeterminate unknown, never
+    # conflated with a genuine "pause froze nothing".
+    transport = IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+    store = RecordingStore()
+    eff = pause_recipe(
+        transport=transport,
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "pause_ineffective"
+    assert eff.details["pause_effective"] is False
+    assert eff.details["observed_blast_radius"] == []
+    # The scored denominator (static's set) is preserved for the consumer.
+    assert eff.details["scored_denominator"] == ["foo"]
+    # The pause was never sent → the snapshot was still reverted, latch untouched.
+    assert transport.paused is False
+    # The raw revert is recorded on the transcript for the live cycle.
+    assert any(r.get("label") == "pause_effectiveness" and r["success"] is False for r in store.stored[-1]["results"])
+
+
+def test_pause_recipe_proven_records_pause_effective():
+    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600)
+    eff = pause_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=3600,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["pause_effective"] is True
 
 
 # ---------------------------------------------------------------------------

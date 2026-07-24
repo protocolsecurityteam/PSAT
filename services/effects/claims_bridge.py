@@ -218,6 +218,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "gate_mutation",
         "historical",
         "current_capability",
+        "pause_effective",
         "observed_blast_radius",
         "auto_expiry",
         "duration_bound_seconds",
