@@ -13,10 +13,16 @@ Recovered:
   * a ``msg.sender`` / ``tx.origin`` / immutable / state-var forwarded origin;
   * the same for ``amount_kind``;
   * a mapping-element / storage-struct destination (``_requests[id].recipient``)
-    -> ``storage_setter`` (redirectable base var), NEVER ``param``.
+    -> ``storage_setter`` (redirectable base var), NEVER ``param``;
+  * a param forwarded ONWARD through a second helper that sibling entries also
+    call (Lido ``claimWithdrawalsTo``);
+  * an array/struct ELEMENT of a caller-supplied base (``targets[i]``,
+    ``request.user``) -> ``param``, classified from the root, never the key.
 
 Held at the witness bar (stay ``indeterminate``):
-  * a helper reached from two call sites with DIVERGENT forwarded origins.
+  * a helper reached from two call sites with DIVERGENT forwarded origins;
+  * an element whose BASE is merged across branches;
+  * a balance-DELTA amount, which must not claim ``whole_balance``.
 
 Precedent: ``tests/test_flow_lattice.py`` (same compile-with-Slither harness).
 """
@@ -470,3 +476,321 @@ def test_computed_single_origin_struct_member_still_recovers(tmp_path):
     # recipient/amount are members of a forwarded caller struct -> caller-directed.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
+
+
+# ---------------------------------------------------------------------------
+# Balance READ vs balance DELTA amounts.
+#
+# ``whole_balance`` asserts the send can drain everything the contract holds.
+# EtherFiRedemptionManager's ``ethReceived = address(this).balance -
+# prevBalance`` is a bounded delta of an LP withdrawal, and the interprocedural
+# recovery routes real fund-out functions into the pure-computed branch, so the
+# over-claim now reaches live data. Arithmetic on a balance is not the balance.
+# ---------------------------------------------------------------------------
+
+_BALANCE_AMOUNT_SRC = """
+pragma solidity ^0.8.20;
+
+interface ILP { function withdraw(address to, uint256 amt) external; }
+
+contract BalanceAmounts {
+    ILP public immutable lp;
+    constructor(ILP l) { lp = l; }
+
+    // A bare whole-balance read really can drain everything -> whole_balance.
+    function drainEntry(address to) external {
+        (bool ok, ) = to.call{value: address(this).balance}("");
+        require(ok);
+    }
+    function drainNested(address to) external { _drain(to); }
+    function _drain(address to) internal {
+        (bool ok, ) = to.call{value: address(this).balance}("");
+        require(ok);
+    }
+
+    // RedemptionManager shape: the amount is the balance DELTA across the LP
+    // withdrawal -> bounded by what the pool paid in, NOT the whole balance.
+    function deltaEntry(address to, uint256 shares) external {
+        uint256 prev = address(this).balance;
+        lp.withdraw(address(this), shares);
+        uint256 got = address(this).balance - prev;
+        (bool ok, ) = to.call{value: got}("");
+        require(ok);
+    }
+    function deltaNested(address to, uint256 shares) external { _delta(to, shares); }
+    function _delta(address to, uint256 shares) internal {
+        uint256 prev = address(this).balance;
+        lp.withdraw(address(this), shares);
+        uint256 got = address(this).balance - prev;
+        (bool ok, ) = to.call{value: got}("");
+        require(ok);
+    }
+
+    receive() external payable {}
+}
+"""
+
+
+def test_bare_balance_read_stays_whole_balance(tmp_path):
+    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
+    effects = build_effects(contract)
+    assert _out_flow(effects["functions"]["drainEntry(address)"])["amount_kind"]["kind"] == "whole_balance"
+
+
+def test_balance_delta_amount_does_not_claim_whole_balance(tmp_path):
+    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
+    effects = build_effects(contract)
+    kind = _out_flow(effects["functions"]["deltaEntry(address,uint256)"])["amount_kind"]["kind"]
+    # A delta of two balance reads is not the balance: claiming whole_balance
+    # here reads as "this can drain the contract" on a bounded redemption path.
+    assert kind != "whole_balance", kind
+    assert kind == "indeterminate", kind
+
+
+def test_balance_amount_nested_matches_entry(tmp_path):
+    """Entry-vs-nested parity: the byte-identical operand shape classifies the
+    same whether the send sits in the entry or one hop inside a helper."""
+    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    assert _out_flow(fns["drainNested(address)"])["amount_kind"] == _out_flow(fns["drainEntry(address)"])["amount_kind"]
+    assert (
+        _out_flow(fns["deltaNested(address,uint256)"])["amount_kind"]
+        == _out_flow(fns["deltaEntry(address,uint256)"])["amount_kind"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# A parameter forwarded ONWARD through a second helper (Lido
+# ``claimWithdrawalsTo`` -> ``_claim`` -> ``_sendValue``).
+#
+# ``_claim``'s entrypoint Phi carries the sibling entries' ``msg.sender``
+# alongside its own parameter seed. The use-site classifiers already drop those
+# echoes for a directly-read nested parameter; the ARGUMENT resolver must drop
+# them the same way, or forwarding the parameter one hop further loses the
+# binding to a phantom {msg_sender, param} disagreement.
+# ---------------------------------------------------------------------------
+
+_ONWARD_FORWARD_SRC = """
+pragma solidity ^0.8.20;
+contract Queue {
+    error ZeroRecipient();
+
+    function claimTo(uint256[] calldata ids, uint256[] calldata hints, address recipient) external {
+        if (recipient == address(0)) revert ZeroRecipient();
+        for (uint256 i = 0; i < ids.length; ++i) { _claim(ids[i], hints[i], recipient); }
+    }
+    function claimSelf(uint256[] calldata ids, uint256[] calldata hints) external {
+        for (uint256 i = 0; i < ids.length; ++i) { _claim(ids[i], hints[i], msg.sender); }
+    }
+    function claimOne(uint256 id, uint256 hint) external { _claim(id, hint, msg.sender); }
+
+    // Entry twin of the forwarded shape: the same param read at the send site.
+    function claimToEntry(uint256 id, address recipient) external {
+        if (recipient == address(0)) revert ZeroRecipient();
+        (bool ok, ) = recipient.call{value: id}("");
+        require(ok);
+    }
+
+    function _claim(uint256 id, uint256 hint, address recipient) internal {
+        require(hint <= id);
+        _sendValue(recipient, id);
+    }
+    function _sendValue(address to, uint256 amt) internal {
+        (bool ok, ) = to.call{value: amt}("");
+        require(ok);
+    }
+}
+"""
+
+
+def test_param_forwarded_two_hops_through_shared_helper_recovers(tmp_path):
+    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["claimTo(uint256[],uint256[],address)"])
+    assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
+
+
+def test_msg_sender_sibling_entries_unchanged(tmp_path):
+    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    # The sibling entries that pass msg.sender into the SAME helper chain must
+    # keep their own origin — the echo-drop resolves per call site, not globally.
+    assert _out_flow(fns["claimSelf(uint256[],uint256[])"])["target_kind"]["kind"] == "msg_sender"
+    assert _out_flow(fns["claimOne(uint256,uint256)"])["target_kind"]["kind"] == "msg_sender"
+
+
+def test_onward_forward_nested_matches_entry(tmp_path):
+    """Entry-vs-nested parity for the guarded forwarded param."""
+    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    nested = _out_flow(fns["claimTo(uint256[],uint256[],address)"])["target_kind"]["kind"]
+    entry = _out_flow(fns["claimToEntry(uint256,address)"])["target_kind"]["kind"]
+    assert nested == entry == "param"
+
+
+_DIVERGENT_TWO_HOP_SRC = """
+pragma solidity ^0.8.20;
+contract DivergentTwoHop {
+    address public immutable feeSink;
+    constructor(address f) { feeSink = f; }
+
+    // ONE entry reaches the two-hop chain from two sites with DIFFERENT origins.
+    // Each site's binding is individually unambiguous; the cross-site fold must
+    // still collapse the disagreement.
+    function router(address a, uint256 amt) external {
+        _hop(a, amt);
+        _hop(feeSink, amt);
+    }
+    function _hop(address d, uint256 x) internal { _send(d, x); }
+    function _send(address d, uint256 x) internal {
+        (bool ok, ) = payable(d).call{value: x}(""); require(ok);
+    }
+
+    // Two entries sharing the chain with different origins: each keeps its own.
+    function entryParam(address a, uint256 amt) external { _hop(a, amt); }
+    function entryImmutable(uint256 amt) external { _hop(feeSink, amt); }
+}
+"""
+
+
+def test_divergent_two_hop_binding_stays_indeterminate(tmp_path):
+    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["router(address,uint256)"])
+    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
+
+
+def test_two_hop_chain_does_not_leak_across_entries(tmp_path):
+    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    assert _out_flow(fns["entryParam(address,uint256)"])["target_kind"]["kind"] == "param"
+    assert _out_flow(fns["entryImmutable(uint256)"])["target_kind"]["kind"] == "immutable"
+
+
+# ---------------------------------------------------------------------------
+# Array / struct ELEMENT destinations and amounts (TimelockController
+# ``executeBatch`` sends to ``targets[i]``).
+#
+# An element is classified from its ROOT base, never from the key: every element
+# of one base shares that base's origin. A caller-supplied array/struct root is
+# caller-chosen -> ``param``; a STORAGE root keeps the base var's mutability and
+# can never become ``param``.
+# ---------------------------------------------------------------------------
+
+_ELEMENT_SRC = """
+pragma solidity ^0.8.20;
+contract Batch {
+    mapping(uint256 => address) public payees;   // written -> storage_setter
+    mapping(uint256 => address) public backups;
+    function setPayee(uint256 i, address p) external { payees[i] = p; }
+    function setBackup(uint256 i, address p) external { backups[i] = p; }
+
+    // TimelockController.executeBatch shape: caller array elements read in a
+    // loop and forwarded into a helper.
+    function executeBatch(address[] calldata targets, uint256[] calldata values) external {
+        for (uint256 i = 0; i < targets.length; ++i) {
+            address target = targets[i];
+            uint256 value = values[i];
+            _execute(target, value);
+        }
+    }
+    // Entry twin: the identical element operand classified at the entry itself.
+    function executeBatchEntry(address[] calldata targets, uint256[] calldata values) external {
+        for (uint256 i = 0; i < targets.length; ++i) {
+            (bool ok, ) = targets[i].call{value: values[i]}(""); require(ok);
+        }
+    }
+
+    // Storage-rooted element, at the entry and forwarded as an argument.
+    function payStored(uint256 i, uint256 amt) external {
+        (bool ok, ) = payees[i].call{value: amt}(""); require(ok);
+    }
+    function payStoredVia(uint256 i, uint256 amt) external { _execute(payees[i], amt); }
+
+    // The BASE is merged across branches -> genuinely ambiguous element.
+    function payMergedBase(bool c, uint256 i, uint256 amt) external {
+        mapping(uint256 => address) storage m = c ? payees : backups;
+        (bool ok, ) = m[i].call{value: amt}(""); require(ok);
+    }
+
+    function _execute(address target, uint256 value) internal {
+        (bool ok, ) = target.call{value: value}(""); require(ok);
+    }
+}
+"""
+
+
+def test_param_array_element_destination_recovers_to_param(tmp_path):
+    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["executeBatch(address[],uint256[])"])
+    # An element of a caller-supplied array is still caller-chosen. The loop's
+    # merged index says nothing about the destination's kind.
+    assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
+    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
+
+
+def test_array_element_nested_matches_entry(tmp_path):
+    """Entry-vs-nested parity for the array-element operand shape."""
+    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    nested = _out_flow(fns["executeBatch(address[],uint256[])"])
+    entry = _out_flow(fns["executeBatchEntry(address[],uint256[])"])
+    assert nested["target_kind"] == entry["target_kind"]
+    assert nested["amount_kind"] == entry["amount_kind"]
+
+
+def test_storage_rooted_element_is_storage_setter_never_param(tmp_path):
+    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    for name in ("payStored(uint256,uint256)", "payStoredVia(uint256,uint256)"):
+        kind = _out_flow(fns[name])["target_kind"]["kind"]
+        # The caller-supplied KEY must never promote a storage destination to
+        # ``param`` — including when the element is forwarded as an argument.
+        assert kind == "storage_setter", (name, kind)
+
+
+def test_merged_element_base_stays_indeterminate(tmp_path):
+    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["payMergedBase(bool,uint256,uint256)"])
+    # payees|backups collapse: never guess a member of the base union.
+    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+
+
+_STRUCT_MEMBER_ENTRY_SRC = """
+pragma solidity ^0.8.20;
+contract StructMemberEntry {
+    struct Payout { address recipient; uint256 amount; }
+    // PriorityWithdrawalQueue.claimWithdraw shape: the destination is a member
+    // of a calldata STRUCT param, read at the entry and one hop deep.
+    function payEntry(Payout calldata p) external {
+        (bool ok, ) = p.recipient.call{value: p.amount}(""); require(ok);
+    }
+    function payNested(Payout calldata p) external { _send(p); }
+    function _send(Payout calldata p) internal {
+        (bool ok, ) = p.recipient.call{value: p.amount}(""); require(ok);
+    }
+    receive() external payable {}
+}
+"""
+
+
+def test_calldata_struct_member_destination_is_param(tmp_path):
+    contract = _compile(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry")
+    effects = build_effects(contract)
+    fns = effects["functions"]
+    entry = _out_flow(fns["payEntry(StructMemberEntry.Payout)"])
+    nested = _out_flow(fns["payNested(StructMemberEntry.Payout)"])
+    assert entry["target_kind"] == {"kind": "param", "tier": "static_trace"}
+    assert entry["amount_kind"] == {"kind": "param", "tier": "static_trace"}
+    # Entry-vs-nested parity for the struct-member operand shape.
+    assert nested["target_kind"] == entry["target_kind"]
+    assert nested["amount_kind"] == entry["amount_kind"]

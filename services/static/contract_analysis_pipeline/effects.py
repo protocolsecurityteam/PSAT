@@ -1138,13 +1138,33 @@ def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     """The neutral origin a single call-site argument forwards, resolved in the
     caller's entry-rooted context. Every meaningful source resolves to a neutral
     origin and they must AGREE; any merge / unresolvable / multi-origin shape →
-    ``("indeterminate",)`` — never a guessed member."""
-    if operand is None or _reaches_merged_local(operand, ctx):
+    ``("indeterminate",)`` — never a guessed member.
+
+    A directly-read nested parameter takes the same entrypoint-Phi echo-drop the
+    use-site classifiers take (``_forwarded_param_sources``): forwarding a
+    parameter ONWARD through a second helper must resolve exactly as reading it
+    at the send site would, or a two-hop forward through a helper that other
+    entries also call (Lido ``claimWithdrawalsTo`` → ``_claim`` → ``_sendValue``,
+    where ``_claim``'s Phi carries the sibling entries' ``msg.sender``) loses its
+    binding to a phantom disagreement."""
+    if operand is None:
+        return ("indeterminate",)
+    # An element read forwarded as an argument (``_execute(targets[i], …)``)
+    # carries its ROOT base's origin — same rule, and same key-blindness, as
+    # classifying it at a send site.
+    elem = _element_origin(operand, ctx)
+    if elem is not None:
+        return elem
+    if _reaches_merged_local(operand, ctx):
         return ("indeterminate",)
     srcs = ctx.engine._sources_for_value(operand)
     if not srcs or is_top(srcs):
         return ("indeterminate",)
-    origins = {_source_neutral_origin(s, ctx) for s in srcs if s.kind != "computed"}
+    forwarded = _forwarded_param_sources(srcs, ctx)
+    if forwarded is not None:
+        origins = {_single_param_origin(s, ctx) for s in forwarded}
+    else:
+        origins = {_source_neutral_origin(s, ctx) for s in srcs if s.kind != "computed"}
     if len(origins) == 1 and ("indeterminate",) not in origins:
         return next(iter(origins))
     return ("indeterminate",)
@@ -1184,6 +1204,14 @@ def _origin_to_target_kind(origin: tuple[str, ...], ctx: _UnitCtx) -> str:
     return "indeterminate"
 
 
+def _is_derivation(computed_kind: str | None) -> bool:
+    """True for a ``computed`` tag produced by arithmetic on other operands
+    (``BinaryType.SUBTRACTION`` / ``UnaryType.*``) — as opposed to a tag that
+    merely names the value read (``msg.value``, ``balance(address)``,
+    ``member.<field>``)."""
+    return computed_kind is not None and computed_kind.startswith(("BinaryType.", "UnaryType."))
+
+
 def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
     tag = origin[0]
     if tag == "param":
@@ -1197,22 +1225,34 @@ def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
     return "indeterminate"
 
 
-def _element_base_vars(operand: Any, ctx: _UnitCtx) -> set[str] | None:
-    """If ``operand`` reads a mapping/struct element rooted at state var(s)
-    (``map[k]`` / ``s.field`` / ``map[k].field``, possibly via a storage-pointer
-    local ``Req storage rq = _requests[id]; rq.recipient``), return the set of
-    base state-var names. ``None`` when it is not such an access.
+# Element-root origins we classify from. A storage root gives the base var's
+# mutability, a parameter root gives ``param`` (an element of a caller-supplied
+# array/struct is still caller-chosen), a constant root is fixed. Any other root
+# (``address(this)`` — some solc versions lower ``address(this).balance`` to a
+# Member — an unresolved local, a merged base) is NOT an element classification;
+# the caller falls through to the source-set path instead.
+_ELEMENT_ROOT_TAGS = ("param", "state_variable", "constant")
+
+_ELEMENT_WALK_DEFS = ("TypeConversion", "Assignment", "Index", "Member")
+
+
+def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] | None:
+    """If ``operand`` reads an array/mapping/struct element (``a[k]`` /
+    ``s.field`` / ``map[k].field``, possibly via a storage-pointer local
+    ``Req storage rq = _requests[id]; rq.recipient``), the set of neutral origins
+    of the access's ROOT base. ``None`` when it is not such an access.
 
     This is a POSITIVE structural test on the operand's def-use chain — an
-    ``Index`` / ``Member`` op rooted at a state variable — so it distinguishes a
-    genuine mapping element (base state var + parameter KEY) from the
-    source-set-identical shape a forwarded param produces via the entrypoint Phi
-    (which has no Index/Member IR). Used for destination classification only."""
+    ``Index`` / ``Member`` op — so it distinguishes a genuine element read from
+    the source-set-identical shape a forwarded param produces via the entrypoint
+    Phi (which has no Index/Member IR). The KEY is deliberately ignored: every
+    element of one base shares that base's origin, so the base alone decides the
+    kind and a caller-chosen (or loop-merged) index cannot upgrade or degrade it."""
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
 
     seen: set[int] = set()
     stack: list[Any] = [operand]
-    names: set[str] = set()
+    origins: set[tuple[str, ...]] = set()
     found_access = False
     while stack:
         v = stack.pop()
@@ -1241,24 +1281,44 @@ def _element_base_vars(operand: Any, ctx: _UnitCtx) -> set[str] | None:
             )
             if base_var is not None:
                 if base_var.name:
-                    names.add(base_var.name)
-            else:
+                    origins.add(("state_variable", base_var.name))
+            elif type(ctx.def_by_id.get(id(base))).__name__ in _ELEMENT_WALK_DEFS:
+                # A nested access (map[k].field) or an aliasing local — keep
+                # walking to the root rather than reading the intermediate
+                # reference's base∪key source union.
                 stack.append(base)
+            else:
+                # A parameter / merged / unresolvable root: resolve it exactly as
+                # a forwarded call-site argument would be (binding-chained, with
+                # the merged-local guard).
+                origins.add(_arg_origin(base, ctx))
         # An unknown def (call return, etc.) ends this branch.
-    return names if (found_access and names) else None
+    return origins if (found_access and origins) else None
 
 
-def _element_target_kind(operand: Any, ctx: _UnitCtx) -> str | None:
-    """The base-storage-var classification of a mapping/struct element
-    destination — ``storage_setter`` when the base var has a redirecting writer,
-    ``storage_no_setter`` only when it provably has none and the scan is complete.
-    Classified from the BASE var only, NEVER the caller-supplied key/param, and
-    NEVER a false ``param``. ``None`` when the operand is not an element read."""
-    bases = _element_base_vars(operand, ctx)
-    if bases is None:
+def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
+    """The neutral origin an element read takes from its ROOT base — NEVER from
+    the caller-supplied key. ``None`` when the operand is not an element read, or
+    when its root is not one we classify from (``address(this)``, a merged or
+    unresolvable base). The caller then falls through to the source-set path,
+    where the merged-local guard still applies — and that guard is also what
+    catches a >1-root walk, since two roots require a Phi between them."""
+    roots = _element_root_origins(operand, ctx)
+    if roots is None or len(roots) != 1:
         return None
-    kinds = {_state_var_target_kind(n, ctx) for n in bases}
-    return next(iter(kinds)) if len(kinds) == 1 else "indeterminate"
+    root = next(iter(roots))
+    return root if root[0] in _ELEMENT_ROOT_TAGS else None
+
+
+def _element_kind(operand: Any, ctx: _UnitCtx, *, amount: bool) -> str | None:
+    """An element read's destination/amount kind. A storage root yields the base
+    var's mutability (``storage_setter`` / ``storage_no_setter`` /
+    ``bounded_by_storage``) and can never become ``param``; a caller-supplied
+    array/struct root yields ``param``."""
+    origin = _element_origin(operand, ctx)
+    if origin is None:
+        return None
+    return _origin_to_amount_kind(origin) if amount else _origin_to_target_kind(origin, ctx)
 
 
 def _forwarded_param_sources(srcs: Any, ctx: _UnitCtx) -> list[Any] | None:
@@ -1319,8 +1379,19 @@ def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
         has_value = any(c == "msg.value" for c in computed_kinds)
         has_balance = any(c and "balance" in c for c in computed_kinds)
         if has_value and not has_balance:
+            # A msg.value derivation (``msg.value - fee``) is still bounded by
+            # what the caller attached to THIS call, so the label does not
+            # over-claim the way the balance case below would.
             return "msg_value"
         if has_balance and not has_value:
+            # ``whole_balance`` asserts the send can drain everything the
+            # contract holds. That is only true of a bare balance READ. Balance
+            # ARITHMETIC is a delta — EtherFiRedemptionManager's
+            # ``address(this).balance - prevBalance`` is bounded by what the
+            # liquidity pool just paid in — and we have no bound for it, so it is
+            # indeterminate rather than a full-drain alarm.
+            if any(_is_derivation(c) for c in computed_kinds):
+                return "indeterminate"
             return "whole_balance"
         return "indeterminate"
     forwarded = _forwarded_param_sources(srcs, ctx)
@@ -1340,15 +1411,20 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     cross-branch merge (``_reaches_merged_local``) is ``indeterminate`` — we
     never project a concrete kind the engine's base-name keying might have
     silently picked from an ambiguous set."""
-    if operand is None or _reaches_merged_local(operand, ctx):
+    if operand is None:
         return ("indeterminate", "static_trace")
-    # A mapping/struct element destination is classified by its base storage var,
-    # detected positively from the operand IR so it is not confused with a
-    # forwarded parameter (source-set-identical via the entrypoint Phi).
-    if not amount:
-        elem = _element_target_kind(operand, ctx)
-        if elem is not None:
-            return (elem, "static_trace") if elem != "indeterminate" else ("indeterminate", "static_trace")
+    # An array/mapping/struct element is classified by its ROOT base, detected
+    # positively from the operand IR so it is not confused with a forwarded
+    # parameter (source-set-identical via the entrypoint Phi). This runs BEFORE
+    # the merged-local guard because the guard also walks the element KEY, and a
+    # loop-merged index (``targets[i]``) says nothing about the destination's
+    # kind — every element of the base shares its origin. A merged BASE is still
+    # caught: the root resolves through ``_arg_origin``, which applies the guard.
+    elem = _element_kind(operand, ctx, amount=amount)
+    if elem is not None:
+        return (elem, "static_trace")
+    if _reaches_merged_local(operand, ctx):
+        return ("indeterminate", "static_trace")
     srcs = ctx.engine._sources_for_value(operand)
     kind = _amount_kind_from_sources(srcs, ctx) if amount else _target_kind_from_sources(srcs, ctx)
     if kind == "indeterminate":
