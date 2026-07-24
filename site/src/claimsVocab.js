@@ -298,11 +298,19 @@ export function claimSummaryLine(fn) {
       bestTier = c.tier;
     }
   }
-  // Append the primary claim's witness qualifier to its phrase (phrases[0] is the
-  // lowest-priority = primary claim, matching qualifierForClaims' choice), so the
-  // wider surfaces (graph meta, permissions chip) carry the same honest signal.
+  // Append the primary claim's witness qualifier to the PRIMARY claim's phrase,
+  // so the wider surfaces (graph meta, permissions chip) carry the same honest
+  // signal. Not phrases[0]: on a priority tie (e.g. supply.burn + flow.out, both
+  // priority 7) the stable sort keeps the array-first claim at index 0 while
+  // primaryClaim tie-breaks by claim_id — the qualifier must land on the claim
+  // it was computed for, never a tied sibling's phrase.
   const qualifier = qualifierForClaims(fn);
-  if (qualifier && phrases.length) phrases[0] = `${phrases[0]} ${qualifier}`;
+  if (qualifier && phrases.length) {
+    const primary = primaryClaim(fn);
+    const primaryPhrase = primary ? CLAIM_VOCAB[primary.claim_id].sentence : phrases[0];
+    const at = Math.max(0, phrases.indexOf(primaryPhrase));
+    phrases[at] = `${phrases[at]} ${qualifier}`;
+  }
   const tierLabel = TIER_LABEL[bestTier];
   const text = phrases.join(" · ");
   return { text, tier: bestTier, label: tierLabel ? `${text} · ${tierLabel}` : text };

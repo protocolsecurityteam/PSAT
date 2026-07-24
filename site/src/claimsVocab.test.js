@@ -407,6 +407,24 @@ describe("claimSummaryLine appends the qualifier to the primary phrase", () => {
     const line = claimSummaryLine({ claims: [claim("pause.set")] });
     expect(line.text).toBe("pauses");
   });
+
+  it("lands on the primary claim's phrase on a priority tie, not the array-first sibling", () => {
+    // supply.burn and flow.out share priority 7; primaryClaim tie-breaks by
+    // claim_id to flow.out. With supply.burn first in the array, the stable sort
+    // puts "burns supply" at index 0 — the destination qualifier must still
+    // attach to "moves value out", never the tied sibling's phrase.
+    const flowOut = {
+      claim_id: "flow.out",
+      tier: "idiom_structural",
+      witness: {
+        kind: "value_flow",
+        direction: "out",
+        flows: [{ kind: "low_level_value_call", selector: null, from_is_self: true, target_kind: { kind: "param", tier: "dispositive_ast" } }],
+      },
+    };
+    const line = claimSummaryLine({ claims: [claim("supply.burn"), flowOut] });
+    expect(line.text).toBe("burns supply · moves value out (caller-chosen destination)");
+  });
 });
 
 describe("claimWitnessFacts — inspector verbose rows", () => {
