@@ -118,6 +118,18 @@ contract Lattice {
     function sweep() external {
         payable(address(liquidityPool)).transfer(address(this).balance);
     }
+
+    // SINGLE call site through a branch-reassigned LOCAL (a Phi merge). This is
+    // the merged-local guard's own shape (payMix covers the two-site fold
+    // instead): the engine keys locals by base name, so the two branch origins
+    // collapse to one entry and the surviving kind is an order-of-processing
+    // accident — the guard must force indeterminate.
+    function payMerged(bool cond, address who, uint256 amt) external {
+        address d = address(liquidityPool);
+        if (cond) { d = who; }
+        (bool ok,) = payable(d).call{value: amt}("");
+        require(ok);
+    }
 }
 """
 
@@ -178,6 +190,16 @@ def test_cross_branch_mix_is_indeterminate(tmp_path):
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMix(bool,address,uint256)"])
     # param on one branch, immutable on the other -> never collapse to a member.
+    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+
+
+def test_branch_reassigned_local_is_indeterminate(tmp_path):
+    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["payMerged(bool,address,uint256)"])
+    # One call site, destination = Phi-merged local (param|immutable). The
+    # engine's base-name keying can silently keep either branch; the guard must
+    # never let a collapsed single kind through.
     assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
 
 
