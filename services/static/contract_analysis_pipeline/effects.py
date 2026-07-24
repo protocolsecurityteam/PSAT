@@ -45,10 +45,12 @@ claims plane reads):
 from __future__ import annotations
 
 from typing import Any, TypedDict, cast
+from weakref import WeakKeyDictionary
 
 from eth_utils.crypto import keccak
 from typing_extensions import NotRequired
 
+from .provenance import ProvenanceEngine, is_top
 from .shared import _all_state_variables
 from .summaries import (
     _action_summary,
@@ -90,16 +92,42 @@ class StateWriteFact(TypedDict):
     origin: str  # body | guard
 
 
+class KindTier(TypedDict):
+    """A lattice classification with the tier at which it was witnessed.
+
+    ``tier`` is ``dispositive_ast`` (scoring Tier 1) when the classified SSA
+    operand is *directly* a StateVariable / parameter / ``msg.sender`` / literal
+    — a definitive AST fact — and ``static_trace`` (scoring Tier 2) when it was
+    recovered through the SSA provenance trace (casts, member reads). The
+    ``indeterminate`` kind always carries ``static_trace``: it is an inference
+    conclusion (TOP / empty / cross-branch MIX), never a dispositive fact."""
+
+    kind: str
+    tier: str  # dispositive_ast | static_trace
+
+
 class ValueFlow(TypedDict):
     """A value movement fact. ``direction`` is corrected for
     ``from == address(this)`` (a ``transferFrom`` whose sender is the
-    contract itself flows *out*, not *in*)."""
+    contract itself flows *out*, not *in*).
+
+    ``target_kind`` / ``amount_kind`` classify *where the funds go* and *how
+    much can leave* — the theft-vs-routing discriminators. They are the union
+    of every contributing IR site's classification collapsed to a single
+    unambiguous origin (or ``indeterminate`` on any MIX), so a caller-chosen
+    destination and an immutable one no longer produce identical witnesses."""
 
     kind: str  # callee_erc20_selector | native_transfer_send | low_level_value_call
     selector: str | None
     direction: str  # in | out
     from_is_self: bool
     origin: str  # body | guard
+    # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
+    #   param, msg_sender, self, indeterminate}
+    target_kind: NotRequired[KindTier]
+    # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
+    #   fixed_constant, indeterminate}
+    amount_kind: NotRequired[KindTier]
 
 
 class EffectInfo(TypedDict):
@@ -588,31 +616,376 @@ def _arg_is_address_this(arg: Any, this_ids: set[int], this_names: set[str]) -> 
     return isinstance(name, str) and name in this_names
 
 
+def _base_name(name: Any) -> str | None:
+    """Strip Slither's SSA version suffix (``dest_1`` -> ``dest``). The
+    provenance engine keys locals by their *base* name, so version suffixes
+    must be normalized before a set-membership test against it."""
+    if not isinstance(name, str):
+        return None
+    parts = name.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return name
+
+
+# Contract-level setter set: state vars written by any non-constructor function
+# body, as Slither attributes writes. A setter's *existence* is a dispositive
+# fact. Its *absence* is only a sound proof that a non-immutable var cannot be
+# redirected post-deploy when the scan is DISPOSITIVELY COMPLETE — i.e. Slither
+# attributed every write in the contract's code. Two blind spots break that
+# precondition and are checked by ``_setter_scan_complete``: a raw/computed-slot
+# ``sstore`` (Slither attributes ``x.slot`` writes to ``x`` but not
+# ``sstore(0, …)`` / keccak-slot writes), and any ``delegatecall`` (foreign code
+# can write any slot as this contract). When the scan is incomplete, "no setter"
+# degrades to ``indeterminate`` — never a proven-negative "fixed destination".
+# Memoized per contract for the build pass.
+_SETTER_VARS: WeakKeyDictionary[Any, set[str]] = WeakKeyDictionary()
+_SETTER_SCAN_COMPLETE: WeakKeyDictionary[Any, bool] = WeakKeyDictionary()
+
+
+def _setter_state_vars(contract: Any) -> set[str]:
+    cached = _SETTER_VARS.get(contract)
+    if cached is not None:
+        return cached
+    setters: set[str] = set()
+    for fn in getattr(contract, "functions", []) or []:
+        if getattr(fn, "is_constructor", False):
+            continue
+        try:
+            written = fn.all_state_variables_written()
+        except Exception:  # pragma: no cover - slither edge
+            written = []
+        for var in written or []:
+            name = getattr(var, "name", None)
+            if name:
+                setters.add(name)
+    _SETTER_VARS[contract] = setters
+    return setters
+
+
+def _setter_scan_complete(contract: Any) -> bool:
+    """True iff Slither's write attribution is exhaustive for this contract, so
+    the *absence* of a setter is dispositive. False when a value could be
+    written through a channel the attributed-write scan cannot see:
+
+    * an unattributed assembly ``sstore`` — Slither lowers ``sstore(x.slot, …)``
+      to an attributed write of ``x`` (no ``sstore`` IR survives), so a residual
+      ``SolidityCall sstore(...)`` IR is exactly the raw-numeric / computed-slot
+      write it could not attribute;
+    * a ``delegatecall`` / ``callcode`` — foreign code executes in this
+      contract's storage context and may write any slot.
+
+    Modifiers are scanned too (assembly can live in a guard body). Memoized."""
+    cached = _SETTER_SCAN_COMPLETE.get(contract)
+    if cached is not None:
+        return cached
+    units = list(getattr(contract, "functions", []) or []) + list(getattr(contract, "modifiers", []) or [])
+    complete = True
+    for unit in units:
+        if not complete:
+            break
+        for node in getattr(unit, "nodes", []) or []:
+            for ir in _node_irs(node):
+                tn = type(ir).__name__
+                if tn == "LowLevelCall":
+                    if getattr(ir, "function_name", None) in ("delegatecall", "callcode"):
+                        complete = False
+                        break
+                elif tn == "SolidityCall":
+                    name = getattr(getattr(ir, "function", None), "name", "") or ""
+                    if name.startswith(("sstore(", "delegatecall(", "callcode(")):
+                        complete = False
+                        break
+            if not complete:
+                break
+    _SETTER_SCAN_COMPLETE[contract] = complete
+    return complete
+
+
+class _UnitCtx:
+    """Per-walked-unit classification context for value-flow destinations and
+    amounts. Carries the unit's provenance map plus the two soundness guards:
+
+    * ``merged`` — base names of LOCAL variables that a Phi merges across
+      branches. The engine keys locals by base name, so two branch versions of
+      ``d`` (``d = cond ? who : feeSink``) collapse to whichever assignment was
+      processed last — silently discarding the other origin. Any destination
+      that reaches such a base is forced ``indeterminate`` rather than trusting
+      the collapsed value. (State-variable entrypoint Phis are excluded: their
+      incoming versions are the same origin, not a cross-branch merge.)
+    * ``nested`` — True when the unit is an internal callee, not the entry
+      point. A ``parameter`` origin inside a callee is ambiguous: the entry may
+      forward a fixed state var OR a caller-chosen argument into it, so we
+      cannot claim ``param`` (theft) — it degrades to ``indeterminate``. A state
+      var / ``msg.sender`` / constant is contract-global and stays trustworthy
+      across the internal-call boundary."""
+
+    def __init__(
+        self,
+        engine: ProvenanceEngine,
+        param_names: set[str],
+        merged: set[str],
+        def_by_id: dict[int, Any],
+        state_vars_by_name: dict[str, Any],
+        setters: set[str],
+        setter_scan_complete: bool,
+        nested: bool,
+    ) -> None:
+        self.engine = engine
+        self.param_names = param_names
+        self.merged = merged
+        self.def_by_id = def_by_id
+        self.state_vars_by_name = state_vars_by_name
+        self.setters = setters
+        self.setter_scan_complete = setter_scan_complete
+        self.nested = nested
+
+
+def _build_unit_ctx(
+    unit: Any,
+    is_entry: bool,
+    state_vars_by_name: dict[str, Any],
+    setters: set[str],
+    setter_scan_complete: bool,
+) -> _UnitCtx:
+    from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
+    from slither.slithir.operations import Phi  # type: ignore[import]
+
+    engine = ProvenanceEngine(unit)
+    engine.run()
+    param_names = {
+        base for param in getattr(unit, "parameters", []) or [] if (base := _base_name(getattr(param, "name", None)))
+    }
+    merged: set[str] = set()
+    def_by_id: dict[int, Any] = {}
+    for node in getattr(unit, "nodes", []) or []:
+        for ir in getattr(node, "irs_ssa", ()) or ():
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is not None:
+                def_by_id[id(lvalue)] = ir
+            if isinstance(ir, Phi):
+                nsv = getattr(lvalue, "non_ssa_version", None) or lvalue
+                if isinstance(nsv, LocalVariable):
+                    base = _base_name(getattr(lvalue, "name", None))
+                    if base:
+                        merged.add(base)
+    return _UnitCtx(
+        engine, param_names, merged, def_by_id, state_vars_by_name, setters, setter_scan_complete, not is_entry
+    )
+
+
+def _ir_source_operands(ir: Any) -> list[Any]:
+    """The value operands an IR derives its lvalue from — the edges of the
+    def-use backward walk used by ``_reaches_merged_local``."""
+    tn = type(ir).__name__
+    if tn == "TypeConversion":
+        return [getattr(ir, "variable", None)]
+    if tn == "Assignment":
+        return [getattr(ir, "rvalue", None)]
+    if tn == "Phi":
+        return list(getattr(ir, "rvalues", ()) or [])
+    if tn == "Unpack":
+        return [getattr(ir, "tuple", None) or getattr(ir, "rvalue", None)]
+    if tn == "Unary":
+        return [getattr(ir, "rvalue", None)]
+    if tn == "Binary":
+        return [getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)]
+    return []
+
+
+def _reaches_merged_local(value: Any, ctx: _UnitCtx) -> bool:
+    if value is None or not ctx.merged:
+        return False
+    seen: set[int] = set()
+    stack: list[Any] = [value]
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        if _base_name(getattr(v, "name", None)) in ctx.merged:
+            return True
+        ir = ctx.def_by_id.get(id(v))
+        if ir is not None:
+            stack.extend(_ir_source_operands(ir))
+    return False
+
+
+def _operand_is_direct(value: Any, param_names: set[str]) -> bool:
+    """True when the operand is a definitive AST leaf (Tier-1 dispositive): a
+    StateVariable, a Solidity built-in (``msg.sender``/``msg.value``), a literal
+    constant, or a formal-parameter read with no intervening cast/computation.
+    Temporaries/references (cast results, computed values) are Tier-2 traces."""
+    if value is None:
+        return False
+    tn = type(value).__name__
+    if "Temporary" in tn or "Reference" in tn or "Tuple" in tn:
+        return False
+    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.slithir.variables import Constant  # type: ignore[import]
+
+    if isinstance(value, (StateVariable, SolidityVariable, Constant)):
+        return True
+    if isinstance(getattr(value, "non_ssa_version", None), StateVariable):
+        return True
+    base = _base_name(getattr(value, "name", None))
+    return bool(base) and base in param_names
+
+
+def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
+    var = ctx.state_vars_by_name.get(name)
+    if var is None:
+        return "indeterminate"
+    if getattr(var, "is_constant", False):
+        return "constant"
+    if getattr(var, "is_immutable", False):
+        return "immutable"
+    if name in ctx.setters:
+        return "storage_setter"
+    # No attributed setter. Only a *complete* scan makes that a proven negative
+    # ("fixed destination"); an assembly-sstore/delegatecall blind spot leaves it
+    # unknown — never assert immutability we could not prove.
+    return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
+
+
+def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
+    if not srcs or is_top(srcs):
+        return "indeterminate"
+    # ``computed`` is a wrapper tag Binary/Member ops attach alongside the real
+    # operand sources; it is never itself a destination origin.
+    meaningful = {s.kind for s in srcs} - {"computed"}
+    if len(meaningful) != 1:
+        # empty (only computed) or a cross-branch/Phi MIX -> never guess a member.
+        return "indeterminate"
+    kind = next(iter(meaningful))
+    if kind == "msg_sender":
+        return "msg_sender"
+    if kind == "self_address":
+        return "self"
+    if kind == "parameter":
+        return "indeterminate" if ctx.nested else "param"
+    if kind == "constant":
+        return "constant"
+    if kind == "state_variable":
+        names = {s.state_variable_name for s in srcs if s.kind == "state_variable" and s.state_variable_name}
+        subs = {_state_var_target_kind(n, ctx) for n in names}
+        return next(iter(subs)) if len(subs) == 1 else "indeterminate"
+    # tx_origin (caller-controlled but no lattice member — see ESCALATIONS),
+    # view_call, external_call, block_context, signature_recovery, top.
+    return "indeterminate"
+
+
+def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
+    if not srcs or is_top(srcs):
+        return "indeterminate"
+    meaningful = {s.kind for s in srcs} - {"computed"}
+    if not meaningful:
+        # Pure computed: only ``msg.value`` and ``address(this).balance`` are
+        # unambiguous amount origins; arithmetic/hash mixes stay indeterminate.
+        computed_kinds = {s.computed_kind for s in srcs if s.kind == "computed"}
+        has_value = any(c == "msg.value" for c in computed_kinds)
+        has_balance = any(c and "balance" in c for c in computed_kinds)
+        if has_value and not has_balance:
+            return "msg_value"
+        if has_balance and not has_value:
+            return "whole_balance"
+        return "indeterminate"
+    if len(meaningful) != 1:
+        return "indeterminate"
+    kind = next(iter(meaningful))
+    if kind == "parameter":
+        return "indeterminate" if ctx.nested else "param"
+    if kind == "constant":
+        return "fixed_constant"
+    if kind == "state_variable":
+        return "bounded_by_storage"
+    return "indeterminate"
+
+
+def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, str]:
+    """Classify one destination/amount operand at one IR site -> (kind, tier).
+
+    The load-bearing fallback: any operand that could be a collapsed
+    cross-branch merge (``_reaches_merged_local``) is ``indeterminate`` — we
+    never project a concrete kind the engine's base-name keying might have
+    silently picked from an ambiguous set."""
+    if operand is None or _reaches_merged_local(operand, ctx):
+        return ("indeterminate", "static_trace")
+    srcs = ctx.engine._sources_for_value(operand)
+    kind = _amount_kind_from_sources(srcs, ctx) if amount else _target_kind_from_sources(srcs, ctx)
+    if kind == "indeterminate":
+        return ("indeterminate", "static_trace")
+    tier = "dispositive_ast" if _operand_is_direct(operand, ctx.param_names) else "static_trace"
+    return (kind, tier)
+
+
+def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
+    """Collapse every contributing IR site's (kind, tier) to one classification.
+    Sites must agree on a single non-indeterminate kind, else the union is
+    ``indeterminate`` (the cross-site MIX rule). Tier is the weaker of the
+    agreeing sites — one traced site makes the whole a ``static_trace``."""
+    if not sites:
+        return None
+    kinds = {kind for kind, _ in sites}
+    if "indeterminate" in kinds or len(kinds) != 1:
+        return {"kind": "indeterminate", "tier": "static_trace"}
+    tier = "static_trace" if any(t == "static_trace" for _, t in sites) else "dispositive_ast"
+    return {"kind": next(iter(kinds)), "tier": tier}
+
+
 def _value_flow_facts(function: Any) -> list[ValueFlow]:
     """Value movement facts, transitively. ``transferFrom`` whose ``from``
     is ``address(this)`` flows *out*; native ``transfer``/``send`` are value
-    sinks Slither lowers to their own IR op (not a low-level call)."""
+    sinks Slither lowers to their own IR op (not a low-level call).
+
+    Each flow additionally carries ``target_kind`` (where the funds go) and
+    ``amount_kind`` (how much can leave), classified by reusing the SSA
+    ``ProvenanceEngine`` per unit. Every IR site contributing to a flow is
+    classified and the results are folded per flow key, so distinct
+    destinations across branches/sites collapse to ``indeterminate`` instead of
+    the first-seen winner."""
     flows: list[ValueFlow] = []
     seen: set[tuple[str, str | None, str, bool, str]] = set()
     visited: set[int] = set()
+    target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
+    amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
 
-    def add(flow: ValueFlow) -> None:
+    contract = getattr(function, "contract", None)
+    state_vars_by_name: dict[str, Any] = {
+        getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
+    }
+    setters = _setter_state_vars(contract) if contract is not None else set()
+    scan_complete = _setter_scan_complete(contract) if contract is not None else False
+    ctx_cache: dict[int, _UnitCtx] = {}
+
+    def unit_ctx(unit: Any, is_entry: bool) -> _UnitCtx:
+        cached = ctx_cache.get(id(unit))
+        if cached is None:
+            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters, scan_complete)
+            ctx_cache[id(unit)] = cached
+        return cached
+
+    def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx) -> None:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
+        amount_sites.setdefault(key, []).append(_classify_site(amount, ctx, amount=True))
         if key in seen:
             return
         seen.add(key)
         flows.append(flow)
 
-    def walk(unit: Any, origin: str) -> None:
+    def walk(unit: Any, origin: str, is_entry: bool) -> None:
         key = id(unit)
         if key in visited:
             return
         visited.add(key)
+        ctx: _UnitCtx | None = None  # built lazily only if the unit moves value
 
         this_ids: set[int] = set()
         this_names: set[str] = set()
         for node in getattr(unit, "nodes", []) or []:
-            for ir in _node_irs(node):
+            for ir in getattr(node, "irs_ssa", ()) or ():
                 if type(ir).__name__ != "TypeConversion":
                     continue
                 source = getattr(ir, "variable", None)
@@ -625,9 +998,11 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             this_names.add(name)
 
         for node in getattr(unit, "nodes", []) or []:
-            for ir in _node_irs(node):
+            for ir in getattr(node, "irs_ssa", ()) or ():
                 op = type(ir).__name__
                 if op in ("Transfer", "Send"):
+                    if ctx is None:
+                        ctx = unit_ctx(unit, is_entry)
                     add(
                         {
                             "kind": "native_transfer_send",
@@ -635,14 +1010,19 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             "direction": "out",
                             "from_is_self": True,
                             "origin": origin,
-                        }
+                        },
+                        getattr(ir, "destination", None),
+                        getattr(ir, "call_value", None),
+                        ctx,
                     )
                 elif op == "HighLevelCall":
                     selector = _selector_for(_callee_signature(ir))
+                    arguments = list(getattr(ir, "arguments", []) or [])
                     if selector in _ERC20_PULL_SELECTORS:
-                        arguments = list(getattr(ir, "arguments", []) or [])
                         from_arg = arguments[0] if arguments else None
                         from_self = _arg_is_address_this(from_arg, this_ids, this_names)
+                        if ctx is None:
+                            ctx = unit_ctx(unit, is_entry)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -650,9 +1030,14 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                                 "direction": "out" if from_self else "in",
                                 "from_is_self": from_self,
                                 "origin": origin,
-                            }
+                            },
+                            arguments[1] if len(arguments) > 1 else None,  # to
+                            arguments[2] if len(arguments) > 2 else None,  # amount
+                            ctx,
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
+                        if ctx is None:
+                            ctx = unit_ctx(unit, is_entry)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -660,9 +1045,14 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                                 "direction": "out",
                                 "from_is_self": True,
                                 "origin": origin,
-                            }
+                            },
+                            arguments[0] if arguments else None,  # to
+                            arguments[1] if len(arguments) > 1 else None,  # amount
+                            ctx,
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
+                    if ctx is None:
+                        ctx = unit_ctx(unit, is_entry)
                     add(
                         {
                             "kind": "low_level_value_call",
@@ -670,15 +1060,26 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             "direction": "out",
                             "from_is_self": True,
                             "origin": origin,
-                        }
+                        },
+                        getattr(ir, "destination", None),
+                        getattr(ir, "call_value", None),
+                        ctx,
                     )
                 if op in ("InternalCall", "LibraryCall"):
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-                        walk(callee, child_origin)
+                        walk(callee, child_origin, False)
 
-    walk(function, "body")
+    walk(function, "body", True)
+    for flow in flows:
+        key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        target = _fold_sites(target_sites.get(key, []))
+        amount = _fold_sites(amount_sites.get(key, []))
+        if target is not None:
+            flow["target_kind"] = target
+        if amount is not None:
+            flow["amount_kind"] = amount
     return flows
 
 
