@@ -1,7 +1,7 @@
 import { formatDelay, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
-import { claimWitnessFacts, signerOverlapNote, terminalControllerNote } from "../../claimsVocab.js";
+import { claimWitnessFacts, sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../claimsVocab.js";
 
 // Way-point / terminal-controller copy for a non-terminal principal. Mirrors the
 // backend witness bar: a resolved_type=contract principal is a way-point, never a
@@ -17,6 +17,25 @@ function TerminalNote({ principal }) {
       </div>
     );
   }
+  if (note.kind === "multi_plane") {
+    // Per-plane detail so a reviewer sees the weakest plane; header never implies
+    // one settled key.
+    return (
+      <div className="ps-principal-terminal ps-principal-terminal-open">
+        <div>{note.planes.length} parallel control planes — no single settled key</div>
+        <ul className="ps-principal-planes">
+          {note.planes.map((p, i) => (
+            <li key={p.controller || i}>
+              {shortAddr(p.controller)} →{" "}
+              {p.outcome.resolved
+                ? `ultimate key ${shortAddr(p.outcome.address)} (${p.outcome.resolvedType})`
+                : `unresolved (${p.outcome.status})`}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
   if (note.kind === "ambiguous") {
     return (
       <div className="ps-principal-terminal ps-principal-terminal-open">
@@ -27,6 +46,20 @@ function TerminalNote({ principal }) {
   return (
     <div className="ps-principal-terminal ps-principal-terminal-open">
       controlled by contract — ultimate key unresolved
+    </div>
+  );
+}
+
+// Shared-deployer attribution HINT (Tier-1 on-chain read, but a HEURISTIC for
+// attribution). Inspector-only; the copy always carries the hedge — never phrased
+// as org identity or common control.
+function SharedDeployerNote({ principal }) {
+  const note = sharedDeployerNote(principal);
+  if (!note) return null;
+  return (
+    <div className="ps-principal-deployer">
+      shares a deployer with {note.otherCount} other address{note.otherCount === 1 ? "" : "es"}
+      {note.heuristic ? " (heuristic — not proof of common control)" : ""}
     </div>
   );
 }
@@ -118,6 +151,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
       <div className="ps-principal-meta">{detail}</div>
       <TerminalNote principal={principal} />
       <SignerOverlapNote principal={principal} />
+      <SharedDeployerNote principal={principal} />
       <div className="ps-principal-origin">
         {indirect
           ? `via ${principal.path.slice(0, -1).map((p) => shortAddr(p.address)).join(" → ")}`

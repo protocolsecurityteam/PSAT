@@ -261,9 +261,37 @@ export function laneForClaims(fn) {
   return null;
 }
 
+// Hazard / calm tone tints (§7.4). Colour obeys the same honesty rule as the chip
+// text: a PROVEN-POSITIVE theft-shaped witness (caller-chosen destination,
+// witnessed dilution) reads more hazardous than the neutral base; a PROVEN-NEGATIVE
+// witness (immutable destination) reads calmer. Absent / indeterminate / unknown
+// keeps the neutral base tone — no reassurance and no alarm laundered from absence.
+// Values stay inside the existing desaturated vocabulary.
+const TONE_FLOW_OUT_CALLER = "#a8746a"; // caller-chosen destination — theft-shaped, warmer/redder
+const TONE_FLOW_OUT_FIXED = "#8f947a"; // proven-immutable destination — cooler, reads calmer
+const TONE_MINT_UNBACKED = "#9e8a6a"; // witnessed dilution — drifts to the hazard/outflow warm
+
 export function toneForClaims(fn) {
   const primary = primaryClaim(fn);
-  return primary ? CLAIM_VOCAB[primary.claim_id].tone : null;
+  if (!primary) return null;
+  const base = CLAIM_VOCAB[primary.claim_id].tone;
+  const claims = claimsOf(fn);
+  if (primary.claim_id === "flow.out") {
+    const s = flowOutTargetSummary(claims);
+    if (s.sawCaller) return TONE_FLOW_OUT_CALLER;
+    // Calm-tint only a purely-fixed out-flow (mirrors flowOutQualifier's "fixed"
+    // gate): any admin-settable, indeterminate, self or unclassified path blocks it.
+    if (s.sawFixed && !s.sawOther && !s.sawSetter) return TONE_FLOW_OUT_FIXED;
+    return base;
+  }
+  // supply.mint primary, or flow.in primary on a wrap carrying a mint backing.
+  if (primary.claim_id === "supply.mint" || primary.claim_id === "flow.in") {
+    const b = mintBacking(claims);
+    if (b && b.inflow_observed === false) return TONE_MINT_UNBACKED;
+    // Backed / unknown keep the neutral inflow green (already reads safe).
+    return base;
+  }
+  return base;
 }
 
 export function priorityForClaims(fn) {
@@ -335,7 +363,11 @@ export function claimSummaryLine(fn) {
 // reassurance. self / indeterminate / absent are neither proven-fixed nor
 // caller-chosen → they block a "fixed" claim and render nothing.
 const OUT_TARGET_FIXED = new Set(["immutable", "constant", "storage_no_setter"]);
-const OUT_TARGET_CALLER = new Set(["param", "msg_sender"]);
+// param / msg_sender / caller_controlled (tx.origin) are all caller-directed
+// destinations — the same theft-shaped class. caller_controlled is a distinct
+// address fact (the origin EOA, not msg.sender) but must never read as fixed and
+// dominates the worst-case precedence exactly like param/msg_sender.
+const OUT_TARGET_CALLER = new Set(["param", "msg_sender", "caller_controlled"]);
 
 // Scan every out-flow entry across all flow.out claims (the static claim carries
 // witness.flows[]; the behavioral one has no direction/flows and is skipped).
@@ -437,6 +469,14 @@ function mintQualifier(claims) {
 // The glanceable parenthetical for the primary claim, or null. Reads the witness
 // of every claim of the primary's kind (so a static destination + a behavioral
 // reach on the same flow.out both feed the answer).
+//
+// Wrap-shape backing visibility (register #10): a wrap carries BOTH flow.in and
+// supply.mint at priority 6; primaryClaim tie-breaks to flow.in ("f" < "s"), so
+// the backing witness would only ever surface in the inspector. flow.in has no
+// destination-theft concept of its own, so when it is primary we promote the
+// co-occurring mint's backing qualifier onto the chip — "moves value in (backed)"
+// — instead of dropping it. Pure-mint (supply.mint primary, no flow.in) is
+// unchanged and still handled by the supply.mint case below.
 export function qualifierForClaims(fn) {
   const primary = primaryClaim(fn);
   if (!primary) return null;
@@ -447,6 +487,10 @@ export function qualifierForClaims(fn) {
     case "pause.set":
       return pauseQualifier(claims);
     case "supply.mint":
+      return mintQualifier(claims);
+    case "flow.in":
+      // Only a co-occurring, at-bar mint-backing witness qualifies a value-in
+      // chip; a plain inflow (no mint, or mint without backing) stays unqualified.
       return mintQualifier(claims);
     default:
       return null;
@@ -462,6 +506,7 @@ const TARGET_KIND_WORD = {
   storage_setter: "storage (admin-settable)",
   param: "caller-supplied argument",
   msg_sender: "msg.sender (the caller)",
+  caller_controlled: "caller (tx.origin)",
   self: "the contract itself",
   indeterminate: "indeterminate",
 };
@@ -583,11 +628,24 @@ export function terminalControllerNote(principal) {
     if (tp.terminal === true && tp.address) {
       return { kind: "terminated", address: tp.address, resolvedType: String(tp.resolved_type || "unknown") };
     }
-    // Multiple parallel control planes (Solmate/Solady Auth owner + authority):
-    // `multi_plane` at the top level (each plane walked in `tp.planes`), or
-    // `ambiguous_controllers` for a nested plane that itself forked. Either way
-    // the honest render is "no single settled key" over the witnessed controller
-    // set — never one collapsed key.
+    // Multiple parallel control planes (Solmate/Solady Auth owner + authority).
+    // `multi_plane` at the top level carries `tp.planes` — each plane walked to
+    // its OWN terminal — so the verbose inspector can show every plane's controller
+    // and outcome (a reviewer needs to see the weakest plane). The header still says
+    // "no single settled key"; we never collapse to one key.
+    if (tp.status === "multi_plane" && Array.isArray(tp.planes) && tp.planes.length) {
+      const planes = tp.planes.map((p) => {
+        const rec = (p && p.terminal_record) || {};
+        const outcome = rec.terminal === true && rec.address
+          ? { resolved: true, address: rec.address, resolvedType: String(rec.resolved_type || "unknown") }
+          : { resolved: false, status: String(rec.status || "unknown") };
+        return { controller: (p && p.controller) || null, outcome };
+      });
+      return { kind: "multi_plane", planes };
+    }
+    // `ambiguous_controllers` (a nested plane that itself forked) has no per-plane
+    // walk to show — render the flat controller count as "no single settled key".
+    // A `multi_plane` status without a usable `planes` array degrades here too.
     if (tp.status === "multi_plane" || tp.status === "ambiguous_controllers") {
       const planes = Array.isArray(tp.controllers) ? tp.controllers : [];
       return { kind: "ambiguous", planes };
@@ -626,6 +684,26 @@ export function signerOverlapNote(principal) {
       jaccard: strongest.jaccard,
     },
   };
+}
+
+// Shared-deployer attribution HINT for a principal (SCORING plan §2 sub-part B).
+// A Tier-1 on-chain read (`provenance:"deployer_read"`) but a HEURISTIC for
+// attribution — factories, shared deployer EOAs and vanity-deployer services all
+// defeat "same deployer ⇒ same org". The fact is honest; the conclusion is not.
+// INSPECTOR-ONLY (never a chip qualifier), and the copy this feeds MUST carry the
+// hedge whenever `heuristic` is true — never phrased as org identity or control.
+// Returns {deployer, otherCount, heuristic} or null (absent fact → nothing).
+export function sharedDeployerNote(principal) {
+  const sd = principal && principal.details && principal.details.shared_deployer;
+  if (!sd || typeof sd.deployer !== "string") return null;
+  const addresses = Array.isArray(sd.addresses) ? sd.addresses : [];
+  const self = String((principal && principal.address) || "").toLowerCase();
+  // `addresses` is the full deployer group INCLUDING this principal; count the
+  // OTHERS. Fall back to the raw length only if self isn't in the list.
+  const others = addresses.filter((a) => String(a).toLowerCase() !== self);
+  const otherCount = others.length || Math.max(0, addresses.length - 1);
+  if (otherCount <= 0) return null;
+  return { deployer: sd.deployer, otherCount, heuristic: sd.heuristic !== false };
 }
 
 // {kind, severity} for protocolScore — the strongest-severity scoreable claim.

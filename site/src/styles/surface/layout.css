@@ -2401,6 +2401,29 @@
   margin-bottom: 4px;
 }
 
+/* Per-plane list under a multi-plane controller note — each parallel plane's own
+   terminal outcome, so the weakest plane is visible. */
+.ps-principal-planes {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 10px;
+}
+
+.ps-principal-planes li {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Shared-deployer attribution HINT — a heuristic, deliberately dimmer than the
+   Tier-1 signer-overlap note so it never reads as a control claim. */
+.ps-principal-deployer {
+  color: #7c8899;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
 @media (max-width: 1220px) {
   .ps-layout {
     grid-template-columns: minmax(0, 1fr);

@@ -144,6 +144,50 @@ describe("InspectorCard principal terminal + signer notes", () => {
     expect(container.textContent).toContain("parallel control planes witnessed");
   });
 
+  it("renders each plane's own terminal outcome for a multi_plane controller", () => {
+    const p = contractPrincipal({
+      terminal: false,
+      terminal_principal: {
+        terminal: false, resolved_type: "unknown", address: null, status: "multi_plane",
+        controllers: ["0xaaa", "0xbbb"],
+        planes: [
+          { controller: "0xaaa", terminal_record: { terminal: true, resolved_type: "safe", address: "0xsafe1234", status: "terminated" } },
+          { controller: "0xbbb", terminal_record: { terminal: false, resolved_type: "unknown", address: null, status: "unknown_unfetched" } },
+        ],
+      },
+    });
+    const { container } = render(<InspectorCard selected={selectedWithClaims([], [p])} />);
+    const text = container.textContent;
+    expect(text).toContain("no single settled key");
+    expect(text).toContain("ultimate key"); // the resolved plane
+    expect(text).toContain("unresolved (unknown_unfetched)"); // the weakest plane
+    // Never a single top-level "ultimate key: 0x…" settled-key line.
+    expect(text).not.toContain("ultimate key:");
+  });
+
+  it("renders the shared-deployer HINT with its heuristic hedge, never as control", () => {
+    const p = {
+      address: "0xself",
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        shared_deployer: { provenance: "deployer_read", heuristic: true, deployer: "0xdep", addresses: ["0xself", "0xaaa", "0xbbb"] },
+      },
+      origins: ["controller"],
+      label: null,
+    };
+    const { container } = render(<InspectorCard selected={selectedWithClaims([], [p])} />);
+    const text = container.textContent;
+    expect(text).toContain("shares a deployer with 2 other addresses");
+    expect(text).toContain("heuristic — not proof of common control");
+  });
+
+  it("omits the shared-deployer hint when the fact is absent", () => {
+    const p = contractPrincipal({ terminal: false });
+    const { container } = render(<InspectorCard selected={selectedWithClaims([], [p])} />);
+    expect(container.textContent).not.toContain("shares a deployer");
+  });
+
   it("renders the signer-overlap fact for a Safe principal", () => {
     const p = {
       address: "0x4279",

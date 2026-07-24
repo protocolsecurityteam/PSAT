@@ -12,6 +12,7 @@ import {
   qualifierForClaims,
   scoreForClaims,
   sentenceForClaims,
+  sharedDeployerNote,
   signerOverlapNote,
   terminalControllerNote,
   toneForClaims,
@@ -270,11 +271,33 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
       .toBe("(fixed destination)");
   });
 
-  it("renders (caller-chosen destination) for param / msg_sender", () => {
+  it("renders (caller-chosen destination) for param / msg_sender / caller_controlled", () => {
     expect(qualifierForClaims({ claims: [flowOut({ kind: "param", tier: "dispositive_ast" })] }))
       .toBe("(caller-chosen destination)");
     expect(qualifierForClaims({ claims: [flowOut({ kind: "msg_sender", tier: "dispositive_ast" })] }))
       .toBe("(caller-chosen destination)");
+    // caller_controlled = tx.origin — a distinct EOA fact, same theft-shaped class.
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+  });
+
+  it("lets caller_controlled dominate a fixed path in the worst case (never reads fixed)", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "caller_controlled", tier: "dispositive_ast" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
   });
 
   it("treats storage_setter as admin-redirectable, NOT fixed", () => {
@@ -372,6 +395,44 @@ describe("qualifierForClaims — mint backing", () => {
   });
 });
 
+describe("qualifierForClaims — wrap-shape backing on the chip (register #10)", () => {
+  // A wrap carries flow.in + supply.mint (both priority 6); primaryClaim
+  // tie-breaks to flow.in, so the backing witness must be promoted onto the
+  // value-in chip or it would only ever show in the inspector.
+  const wrap = (observed) => ({
+    claims: [claim("flow.in"), observedClaim("supply.mint", observed)],
+  });
+
+  it("promotes (backed) onto the value-in chip when the co-mint is backed", () => {
+    const fn = wrap({ backing: { inflow_observed: true, minted: true } });
+    expect(primaryClaim(fn).claim_id).toBe("flow.in");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+    expect(compactActionSummary(fn)).toBe("moves value in (backed)");
+  });
+
+  it("promotes (unbacked) onto the value-in chip for a witnessed dilution", () => {
+    const fn = wrap({ backing: { inflow_observed: false, minted: true } });
+    expect(qualifierForClaims(fn)).toBe("(unbacked)");
+    expect(compactActionSummary(fn)).toBe("moves value in (unbacked)");
+  });
+
+  it("suppresses when the co-mint carries no backing witness (unknown, not backed)", () => {
+    expect(qualifierForClaims(wrap({}))).toBeNull();
+    expect(compactActionSummary(wrap({}))).toBe("moves value in");
+  });
+
+  it("leaves a plain inflow (no mint) unqualified", () => {
+    expect(qualifierForClaims({ claims: [claim("flow.in")] })).toBeNull();
+    expect(compactActionSummary({ claims: [claim("flow.in")] })).toBe("moves value in");
+  });
+
+  it("does not change pure-mint-primary behavior (no flow.in present)", () => {
+    const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] };
+    expect(primaryClaim(fn).claim_id).toBe("supply.mint");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+  });
+});
+
 describe("qualifierForClaims — non-target claims and empties", () => {
   it("returns null for a primary claim with no qualifier concept", () => {
     expect(qualifierForClaims({ claims: [claim("ownership.transfer")] })).toBeNull();
@@ -438,6 +499,11 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     const facts = claimWitnessFacts(fn);
     expect(facts).toContainEqual({ label: "Destination", value: "immutable address · dispositive AST" });
     expect(facts).toContainEqual({ label: "Amount", value: "caller-supplied argument · static trace" });
+  });
+
+  it("labels a caller_controlled destination honestly as caller (tx.origin)", () => {
+    const fn = { claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Destination", value: "caller (tx.origin) · dispositive AST" });
   });
 
   it("emits freeze scope + auto-expiry rows for a fork-observed pause", () => {
@@ -530,7 +596,7 @@ describe("terminalControllerNote — non-terminal way-points never read as settl
     expect(note.planes).toEqual(["0x1", "0x2"]);
   });
 
-  it("shows multiple control planes for a multi_plane walk, never one key", () => {
+  it("renders each plane's own terminal outcome for a multi_plane walk, never one key", () => {
     const note = terminalControllerNote({
       resolvedType: "contract",
       details: {
@@ -548,8 +614,38 @@ describe("terminalControllerNote — non-terminal way-points never read as settl
         },
       },
     });
+    expect(note.kind).toBe("multi_plane");
+    expect(note.planes).toEqual([
+      { controller: "0x1", outcome: { resolved: true, address: "0xsafe", resolvedType: "safe" } },
+      { controller: "0x2", outcome: { resolved: false, status: "unknown_unfetched" } },
+    ]);
+  });
+
+  it("degrades a multi_plane record with no usable planes array to the flat ambiguous render", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: {
+          terminal: false, resolved_type: "unknown", address: null,
+          status: "multi_plane", controllers: ["0x1", "0x2"],
+        },
+      },
+    });
     expect(note.kind).toBe("ambiguous");
     expect(note.planes).toEqual(["0x1", "0x2"]);
+  });
+
+  it("renders a nested ambiguous_controllers fork as the flat 'no single settled key'", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: { terminal: false, resolved_type: "unknown", address: null, status: "ambiguous_controllers", controllers: ["0x1", "0x2", "0x3"] },
+      },
+    });
+    expect(note.kind).toBe("ambiguous");
+    expect(note.planes).toEqual(["0x1", "0x2", "0x3"]);
   });
 
   it("treats cycle / depth_exceeded / unfetched as honestly unresolved", () => {
@@ -591,6 +687,106 @@ describe("signerOverlapNote — attribution context, not org identity", () => {
       details: { signer_overlap: { self_owner_count: 3, overlaps: [{ address: "0x1", shared_count: 0, jaccard: 0 }] } },
     };
     expect(signerOverlapNote(disjoint)).toEqual({ selfOwnerCount: 3, strongest: null });
+  });
+});
+
+describe("sharedDeployerNote — heuristic hint, never an org-identity claim", () => {
+  it("counts the OTHER addresses in the deployer group and carries the heuristic hedge", () => {
+    const note = sharedDeployerNote({
+      address: "0xself",
+      details: {
+        shared_deployer: {
+          provenance: "deployer_read", heuristic: true, deployer: "0xdep",
+          addresses: ["0xself", "0xaaa", "0xbbb"],
+        },
+      },
+    });
+    expect(note).toEqual({ deployer: "0xdep", otherCount: 2, heuristic: true });
+  });
+
+  it("counts case-insensitively and excludes the principal itself", () => {
+    const note = sharedDeployerNote({
+      address: "0xSELF",
+      details: { shared_deployer: { deployer: "0xdep", addresses: ["0xself", "0xaaa"] } },
+    });
+    expect(note.otherCount).toBe(1);
+  });
+
+  it("emits null when the fact is absent (no hint from absence)", () => {
+    expect(sharedDeployerNote({ address: "0xself", details: {} })).toBeNull();
+    expect(sharedDeployerNote({ details: {} })).toBeNull();
+    expect(sharedDeployerNote({})).toBeNull();
+  });
+
+  it("emits null for a singleton group (no OTHER address to share with)", () => {
+    const note = sharedDeployerNote({
+      address: "0xself",
+      details: { shared_deployer: { deployer: "0xdep", addresses: ["0xself"] } },
+    });
+    expect(note).toBeNull();
+  });
+});
+
+describe("toneForClaims — §7.4 hazard/calm tinting (proven positives vs negatives)", () => {
+  const flowOutTone = (targetKind) => toneForClaims({ claims: [flowOut({ kind: targetKind, tier: "dispositive_ast" })] });
+
+  it("tints a caller-chosen out-flow more hazardous than a proven-fixed one", () => {
+    const caller = flowOutTone("param");
+    const callerOrigin = flowOutTone("caller_controlled");
+    const fixed = flowOutTone("immutable");
+    expect(caller).toBe("#a8746a");
+    expect(callerOrigin).toBe("#a8746a");
+    expect(fixed).toBe("#8f947a");
+    expect(caller).not.toBe(fixed);
+    // both differ from the neutral base tone.
+    expect(caller).not.toBe(CLAIM_VOCAB["flow.out"].tone);
+    expect(fixed).not.toBe(CLAIM_VOCAB["flow.out"].tone);
+  });
+
+  it("keeps the neutral base tone for an admin-settable / indeterminate / absent destination", () => {
+    const base = CLAIM_VOCAB["flow.out"].tone;
+    expect(flowOutTone("storage_setter")).toBe(base);
+    expect(flowOutTone("indeterminate")).toBe(base);
+    expect(toneForClaims({ claims: [claim("flow.out")] })).toBe(base);
+  });
+
+  it("does not calm-tint a mixed out-flow where one path is caller-chosen", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow", direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" } },
+          ],
+        },
+      }],
+    };
+    expect(toneForClaims(fn)).toBe("#a8746a");
+  });
+
+  it("tints an unbacked mint hazardous and leaves a backed/unknown mint neutral", () => {
+    const base = CLAIM_VOCAB["supply.mint"].tone;
+    expect(toneForClaims({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: false } })] }))
+      .toBe("#9e8a6a");
+    expect(toneForClaims({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] }))
+      .toBe(base);
+    expect(toneForClaims({ claims: [claim("supply.mint")] })).toBe(base);
+  });
+
+  it("reflects an unbacked co-mint on a wrap's value-in tone", () => {
+    const base = CLAIM_VOCAB["flow.in"].tone;
+    const unbacked = { claims: [claim("flow.in"), observedClaim("supply.mint", { backing: { inflow_observed: false } })] };
+    const backed = { claims: [claim("flow.in"), observedClaim("supply.mint", { backing: { inflow_observed: true } })] };
+    expect(toneForClaims(unbacked)).toBe("#9e8a6a");
+    expect(toneForClaims(backed)).toBe(base);
+  });
+
+  it("leaves non-flow claims on their vocabulary tone", () => {
+    expect(toneForClaims({ claims: [claim("ownership.transfer")] })).toBe(CLAIM_VOCAB["ownership.transfer"].tone);
+    expect(toneForClaims({ claims: [] })).toBeNull();
   });
 });
 
