@@ -864,20 +864,19 @@ class _UnitCtx:
 
     def __init__(
         self,
-        engine: ProvenanceEngine,
-        param_names: set[str],
-        merged: set[str],
-        def_by_id: dict[int, Any],
+        bundle: _EngineBundle,
         state_vars_by_name: dict[str, Any],
         setters: set[str],
         alias_indeterminate: set[str],
         setter_scan_complete: bool,
         nested: bool,
     ) -> None:
-        self.engine = engine
-        self.param_names = param_names
-        self.merged = merged
-        self.def_by_id = def_by_id
+        # Context-independent, shared across every entry that reaches this unit.
+        self.engine = bundle.engine
+        self.param_names = bundle.param_names
+        self.merged = bundle.merged
+        self.def_by_id = bundle.def_by_id
+        # Contract-level (constant within a contract) + the per-context nested flag.
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
         self.alias_indeterminate = alias_indeterminate
@@ -885,14 +884,35 @@ class _UnitCtx:
         self.nested = nested
 
 
-def _build_unit_ctx(
-    unit: Any,
-    is_entry: bool,
-    state_vars_by_name: dict[str, Any],
-    setters: set[str],
-    alias_indeterminate: set[str],
-    setter_scan_complete: bool,
-) -> _UnitCtx:
+class _EngineBundle:
+    """The context-independent provenance artifacts for one function: the SSA
+    ``ProvenanceEngine`` (run to fixed point), formal-parameter base names, the
+    Phi-merged local bases, and the SSA def-use index. All are pure functions of
+    the function's own IR — identical whichever entry point reaches it — so the
+    bundle is memoized per function across the whole build pass. Only the
+    per-context ``nested`` interpretation lives on ``_UnitCtx``."""
+
+    __slots__ = ("engine", "param_names", "merged", "def_by_id")
+
+    def __init__(
+        self, engine: ProvenanceEngine, param_names: set[str], merged: set[str], def_by_id: dict[int, Any]
+    ) -> None:
+        self.engine = engine
+        self.param_names = param_names
+        self.merged = merged
+        self.def_by_id = def_by_id
+
+
+# Per-function memo of the context-independent bundle, keyed by the Slither
+# function object (weak so it dies with the Slither instance). Collapses the
+# prior O(entries × helpers) engine rebuilds to one run per function per pass.
+_ENGINE_BUNDLE: WeakKeyDictionary[Any, _EngineBundle] = WeakKeyDictionary()
+
+
+def _engine_bundle_for(unit: Any) -> _EngineBundle:
+    cached = _ENGINE_BUNDLE.get(unit)
+    if cached is not None:
+        return cached
     from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
     from slither.slithir.operations import Phi  # type: ignore[import]
 
@@ -914,11 +934,24 @@ def _build_unit_ctx(
                     base = _base_name(getattr(lvalue, "name", None))
                     if base:
                         merged.add(base)
+    bundle = _EngineBundle(engine, param_names, merged, def_by_id)
+    try:
+        _ENGINE_BUNDLE[unit] = bundle
+    except TypeError:  # pragma: no cover — unit not weak-referenceable
+        pass
+    return bundle
+
+
+def _build_unit_ctx(
+    unit: Any,
+    is_entry: bool,
+    state_vars_by_name: dict[str, Any],
+    setters: set[str],
+    alias_indeterminate: set[str],
+    setter_scan_complete: bool,
+) -> _UnitCtx:
     return _UnitCtx(
-        engine,
-        param_names,
-        merged,
-        def_by_id,
+        _engine_bundle_for(unit),
         state_vars_by_name,
         setters,
         alias_indeterminate,

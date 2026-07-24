@@ -533,3 +533,49 @@ def test_struct_field_of_merged_local_is_indeterminate(tmp_path):
     # Without Member traversal in the def-use walk this escapes as storage_setter
     # (the collapsed boxA branch); the guard now reaches the merged base ``s``.
     assert _out_flow(effects["functions"]["payMerged(bool,uint256)"])["target_kind"]["kind"] == "indeterminate"
+
+
+# ---------------------------------------------------------------------------
+# Engine-bundle memoization (register #9): a helper reached from multiple entry
+# points is analyzed once. Behavior-preserving — the bundle is a pure function of
+# the helper's IR; only the per-context ``nested`` flag stays on _UnitCtx.
+# ---------------------------------------------------------------------------
+
+_SHARED_HELPER_SRC = """
+pragma solidity ^0.8.20;
+contract Shared {
+    address public immutable sink;
+    constructor(address s) { sink = s; }
+    function _pay(uint256 amt) internal {
+        (bool ok,) = payable(sink).call{value: amt}(""); require(ok);
+    }
+    function entryA(uint256 amt) external { _pay(amt); }
+    function entryB(uint256 amt) external { _pay(amt); }
+}
+"""
+
+
+def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
+    contract = _compile(tmp_path, _SHARED_HELPER_SRC, "Shared")
+    import services.static.contract_analysis_pipeline.effects as eff_mod
+
+    real_engine = eff_mod.ProvenanceEngine
+    counts: dict[str, int] = {}
+
+    class CountingEngine(real_engine):
+        def __init__(self, function, *args, **kwargs):
+            name = str(getattr(function, "name", None))
+            counts[name] = counts.get(name, 0) + 1
+            super().__init__(function, *args, **kwargs)
+
+    monkeypatch.setattr(eff_mod, "ProvenanceEngine", CountingEngine)
+    effects = build_effects(contract)
+
+    # _pay moves value and is reached from BOTH entries, yet its engine is built
+    # exactly once (cross-entry memoization); without it the count would be 2.
+    assert counts.get("_pay") == 1
+
+    a = _out_flow(effects["functions"]["entryA(uint256)"])
+    b = _out_flow(effects["functions"]["entryB(uint256)"])
+    assert a["target_kind"] == b["target_kind"] == {"kind": "immutable", "tier": "static_trace"}
+    assert a["amount_kind"] == b["amount_kind"]
