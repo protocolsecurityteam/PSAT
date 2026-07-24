@@ -84,6 +84,16 @@ class Candidate:
     # flow.*/supply.* claim, re-enrolled for exactly those value/supply families
     # (never the whole class set — we don't re-simulate what's already explained).
     restrict_families: frozenset[str] | None = None
+    # §5b downstream value-reach inputs. ``value_holders`` is the protocol's
+    # WITNESSED value-holder set — ``(address, usd)`` from ``contract_balances``, NOT
+    # control_graph_edges (which has no fund-flow edge) — against which the fork
+    # value-reach probe measures value that provably LEAVES a holder when the call
+    # runs. ``acting_balance_usd`` is this function's own deployment balance, the
+    # floor when downstream reach is fork-observed to be nothing. Shared by
+    # reference across a protocol's candidates (small, immutable), so carrying it
+    # per-candidate is cheap.
+    value_holders: tuple[tuple[str, float], ...] = ()
+    acting_balance_usd: float = 0.0
 
     @property
     def probe_target(self) -> str:
@@ -284,6 +294,11 @@ def select_candidates(
     principals = _principals_by_function(session, function_ids)
     graph = build_authority_graph(session, protocol_id)
 
+    # §5b: the protocol's witnessed value-holder set (on-chain balances), built once
+    # and shared by reference across every candidate. Only positive balances — a
+    # zero-balance holder can't be a value-reach target and only adds noise.
+    value_holders = tuple(sorted((a, u) for a, u in graph.balance.items() if u > 0.0))
+
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, targets, deployment, claims in rows:
         families = _enrolled_families(claims)
@@ -293,6 +308,8 @@ def select_candidates(
         addr = _addr(address) or ""
         prins = principals.get(fid, [])
         seeds = {addr, *prins}
+        deployment_addr = _addr(deployment) or ""
+        acting = deployment_addr or addr
         candidates.append(
             Candidate(
                 function_id=fid,
@@ -304,8 +321,10 @@ def select_candidates(
                 effect_targets=tuple(targets or ()),
                 principal_addresses=tuple(prins),
                 value_at_stake_usd=graph.reachable_value(seeds),
-                deployment_address=_addr(deployment) or "",
+                deployment_address=deployment_addr,
                 restrict_families=families,
+                value_holders=value_holders,
+                acting_balance_usd=graph.balance.get(acting, 0.0),
             )
         )
 

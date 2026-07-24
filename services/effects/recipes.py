@@ -99,6 +99,8 @@ def value_out(
     sentinel_calldata: str | None = None,
     static_shape: str | None = None,
     static_destination: str | None = None,
+    value_holders: Sequence[tuple[str, float]] = (),
+    acting_balance_usd: float = 0.0,
     gate_ref: str = "",
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
@@ -161,6 +163,8 @@ def value_out(
                 discrepancy=disc,
             ),
         )
+    # §5b downstream value-reach rides the proven flow.out verdict only.
+    _add_reach(details, base_res.calls[0], value_holders, acting_balance_usd)
     eff = proven(
         EFFECT_CLASS_VALUE_OUT,
         gate_ref=gate_ref,
@@ -563,6 +567,38 @@ def _resolve_destination_shape(
         return SHAPE_UNKNOWN, "none", None, disc
     observed_dest = base_transfers[0][1] if len(base_transfers) == 1 else None
     return SHAPE_UNKNOWN, "none", observed_dest, None
+
+
+def _add_reach(
+    details: dict[str, Any],
+    base_call: SimCallResult,
+    value_holders: Sequence[tuple[str, float]],
+    acting_balance_usd: float,
+) -> None:
+    """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
+    from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
+    fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
+    conservative upper bound, inv. 5/7). No holder moved ⇒ the reach beyond the
+    acting deployment is fork-observed to be nothing, so value FLOORS to the acting
+    contract's own balance and the ``reach_indeterminate`` flag records that
+    downstream reach was not witnessed. Downstream value is NEVER imputed via the
+    control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
+    edge). Skipped entirely when no value-holder set was supplied (nothing to
+    measure), leaving the verdict shape unchanged."""
+    if not value_holders:
+        return
+    reached_usd = 0.0
+    reach_holders: list[str] = []
+    for holder, usd in value_holders:
+        if transfers_out(base_call, holder):
+            reach_holders.append(holder.lower())
+            reached_usd += usd
+    if reach_holders:
+        details["observed_reach_value_usd"] = reached_usd
+        details["observed_reach_holders"] = sorted(reach_holders)
+    else:
+        details["observed_reach_value_usd"] = acting_balance_usd
+        details["reach_indeterminate"] = True
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

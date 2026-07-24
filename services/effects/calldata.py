@@ -114,6 +114,10 @@ class ValueOutPlanInputs:
     taint_param_reaches_sink: bool = False
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
+    # §5b downstream value-reach: the protocol's witnessed value-holders the recipe
+    # measures against, and the acting deployment's own balance floor.
+    value_holders: tuple[tuple[str, float], ...] = ()
+    acting_balance_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -563,6 +567,8 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         taint_param_reaches_sink=tainted,
         sentinel_address=SENTINEL_ADDRESS if sentinel_calldata else None,
         sentinel_calldata=sentinel_calldata,
+        value_holders=candidate.value_holders,
+        acting_balance_usd=candidate.acting_balance_usd,
     )
 
 

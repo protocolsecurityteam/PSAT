@@ -206,6 +206,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     # present only on ``supply.mint``. ``inflow_observed is False`` is a witnessed
     # dilution signal (supply rose with no asset inflow in the same call); the
     # scorer must NOT read absence of this key as "backed".
+    #
+    # ``observed_reach_value_usd`` / ``observed_reach_holders`` / ``reach_indeterminate``
+    # (§5b) ride the fork flow.out verdict. The reach USD is a conservative upper
+    # bound (a holder's full on-chain balance attributed when value provably leaves
+    # it, inv. 5/7); ``reach_indeterminate is True`` means downstream reach was
+    # fork-observed to be nothing, so the value is FLOORED to the acting deployment's
+    # own balance — never inflated via a control-graph heuristic.
     keep = (
         "supply_delta_sign",
         "gate_mutation",
@@ -215,6 +222,9 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "auto_expiry",
         "duration_bound_seconds",
         "backing",
+        "observed_reach_value_usd",
+        "observed_reach_holders",
+        "reach_indeterminate",
     )
     summary = {k: raw[k] for k in keep if k in raw}
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not None:

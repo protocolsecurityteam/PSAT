@@ -273,6 +273,8 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             taint_param_reaches_sink=spec.taint_param_reaches_sink,
             sentinel_address=spec.sentinel_address,
             sentinel_calldata=spec.sentinel_calldata,
+            value_holders=spec.value_holders,
+            acting_balance_usd=spec.acting_balance_usd,
             gate_ref=spec.gate_ref,
         )
 

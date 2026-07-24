@@ -113,6 +113,31 @@ def test_freeze_pause_maps_to_pause_set_only():
     assert claim is not None and claim["claim_id"] == "pause.set"
 
 
+def test_value_out_projects_reach_into_observed_witness():
+    # §5b: the fork downstream-reach fields ride the flow.out claim witness.
+    witness = {
+        "value_moved": True,
+        "observed_reach_value_usd": 55_200_000.0,
+        "observed_reach_holders": ["0x" + "55" * 20],
+    }
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    assert claim is not None and claim["claim_id"] == "flow.out"
+    observed = claim["witness"]["observed"]
+    assert observed["observed_reach_value_usd"] == 55_200_000.0
+    assert observed["observed_reach_holders"] == ["0x" + "55" * 20]
+
+
+def test_value_out_projects_reach_indeterminate_floor():
+    # §5b floor: reach_indeterminate + floored value both survive projection so the
+    # scorer sees "downstream reach not witnessed, floored to own balance".
+    witness = {"value_moved": True, "observed_reach_value_usd": 221_000_000.0, "reach_indeterminate": True}
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    assert claim is not None
+    observed = claim["witness"]["observed"]
+    assert observed["reach_indeterminate"] is True
+    assert observed["observed_reach_value_usd"] == 221_000_000.0
+
+
 def test_freeze_pause_projects_severity_fields_verdict318_shape():
     # §1 A2: the fork pause recipe records observed_blast_radius / auto_expiry /
     # duration_bound_seconds on the verdict witness (verdict 318's real shape); the

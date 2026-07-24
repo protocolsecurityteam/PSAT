@@ -200,6 +200,30 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
     assert upgraded.id not in by_id
 
 
+def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
+    """§5b: candidates carry the protocol's witnessed value-holder set (positive
+    on-chain balances) and the acting deployment's own balance floor — the inputs
+    the fork value-reach probe measures against."""
+    p = _protocol(db_session, "reach-inputs-proto")
+    acting = _contract(db_session, p.id, ADDR(0x9001))
+    lp = _contract(db_session, p.id, ADDR(0x9002))
+    empty = _contract(db_session, p.id, ADDR(0x9003))
+    _balance(db_session, acting.id, 221_000_000.0)
+    _balance(db_session, lp.id, 55_200_000.0)
+    _balance(db_session, empty.id, 0.0)  # zero-balance holder is excluded
+    f = _fn(db_session, acting.id, name="invalidate", selector="0x99990001", effect_targets=["S"])
+    _principal(db_session, f.id, ADDR(0xE0A2))
+    db_session.commit()
+
+    cand = {c.function_id: c for c in select_candidates(db_session, p.id)}[f.id]
+    holders = dict(cand.value_holders)
+    assert holders.get(ADDR(0x9001).lower()) == pytest.approx(221_000_000.0)
+    assert holders.get(ADDR(0x9002).lower()) == pytest.approx(55_200_000.0)
+    assert ADDR(0x9003).lower() not in holders  # zero balance dropped
+    # Acting floor is this deployment's own balance.
+    assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
+
+
 def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
     """effect_labels populated but claims empty => still blank => selected."""
     p = _protocol(db_session, "blank-proto")

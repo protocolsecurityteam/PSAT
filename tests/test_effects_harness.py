@@ -418,6 +418,81 @@ def test_supply_unsupported_downgrades_no_backing():
     assert "backing" not in eff.details
 
 
+# ---------------------------------------------------------------------------
+# §5b downstream value-reach — fork-observed, over the value_out recipe
+# ---------------------------------------------------------------------------
+
+
+def test_value_out_reach_measures_downstream_holder_loss():
+    # A genuine value-out (the acting contract sends value → proven flow.out) that
+    # ALSO drains a downstream value-holder in the same call. Reach sums each holder
+    # whose value provably left (full on-chain USD, conservative upper bound),
+    # fork-observed via Transfer-out logs; a holder that didn't move is excluded.
+    lp = "0x" + "55" * 20
+    other = "0x" + "66" * 20
+    base = SimResult(
+        calls=(
+            ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3), transfer_log(TOKEN, lp, "0x" + "ab" * 20, 9)]),
+        )
+    )
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        value_holders=((CONTRACT, 221_000_000.0), (lp, 55_200_000.0), (other, 1_000.0)),
+        acting_balance_usd=221_000_000.0,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
+    assert eff.details["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
+    assert "reach_indeterminate" not in eff.details
+
+
+def test_value_out_reach_floors_and_flags_when_no_holder_moved():
+    # Acting contract moves value (value_moved) but NO downstream holder loses value
+    # → floor to the acting deployment's own balance, flag reach_indeterminate.
+    # Downstream value is never imputed via the control graph.
+    lp = "0x" + "55" * 20
+    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        value_holders=((lp, 55_200_000.0),),
+        acting_balance_usd=221_000_000.0,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["observed_reach_value_usd"] == 221_000_000.0
+    assert eff.details["reach_indeterminate"] is True
+    assert "observed_reach_holders" not in eff.details
+
+
+def test_value_out_reach_absent_without_holder_set():
+    # No value-holder set supplied → verdict shape unchanged (no reach fields), so
+    # existing callers and the value_out contract stay byte-identical.
+    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert "observed_reach_value_usd" not in eff.details
+    assert "reach_indeterminate" not in eff.details
+
+
 # ===========================================================================
 # §8 soundness rules — one NEGATIVE fail-closed test per rule
 # ===========================================================================
