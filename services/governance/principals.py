@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
@@ -36,24 +36,30 @@ def resolve_terminal_principal(
     start_address: str,
     start_type: str | None,
     *,
-    resolve_controller: Callable[[str], Mapping[str, Any] | None],
+    resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None],
     max_depth: int = DEFAULT_TERMINAL_MAX_DEPTH,
 ) -> dict[str, Any]:
     """Walk a ``resolved_type=contract`` principal to its ultimate Safe/EOA key.
 
-    ``resolve_controller(address)`` returns the *controller* of ``address`` —
-    a mapping ``{"address", "resolved_type", "details"}`` already classified —
-    or ``None`` when the controller is unfetched/unverified/ambiguous. The
-    injected callable is the only wire this function touches (integration
-    callers back it with the resolved control graph + on-chain classify; unit
-    tests stub it), so the walk itself is pure and deterministic (inv-11/12).
+    ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
+    a sequence of already-classified ``{"address", "resolved_type", "details"}``
+    mappings (owner/authority/admin order) — or ``None``/empty when none is
+    fetched/verified. The injected callable is the only wire this function
+    touches (integration callers back it with on-chain owner reads + classify;
+    unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
 
     Returns a terminal record ``{terminal, resolved_type, address, chain,
-    status}``. ``terminal`` is True only when the walk reached a member of
-    ``TERMINAL_PRINCIPAL_TYPES``; every indeterminate outcome (unfetched
-    controller, cycle, depth bound, an unresolved intermediate) fails closed to
-    ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
-    unknown`` fallback the witness bar requires, never a guessed key.
+    status}`` (plus an optional ``controllers`` list). ``terminal`` is True only
+    when the walk reached a member of ``TERMINAL_PRINCIPAL_TYPES``; every
+    indeterminate outcome fails closed to ``terminal=False`` /
+    ``resolved_type="unknown"`` — the ``indeterminate -> unknown`` fallback the
+    witness bar requires, never a guessed key. Ambiguity is a fail-closed case:
+    when a step exposes MORE THAN ONE distinct controller (Solmate/Solady
+    ``Auth`` owner AND authority are parallel live control planes), the walk
+    stops with ``status="ambiguous_controllers"`` and records the witnessed set
+    on ``controllers`` — it must NOT name one plane as the settled key. Walking
+    each plane to its own terminal (weakest-path) is a deferred multi-chain
+    extension, not this function's job.
     """
     start = (start_address or "").lower()
     if is_terminal_principal_type(start_type):
@@ -74,14 +80,30 @@ def resolve_terminal_principal(
         return {"terminal": False, "resolved_type": "unknown", "address": None, "chain": chain, "status": status}
 
     for _ in range(max(1, max_depth)):
-        step = resolve_controller(current)
-        if not isinstance(step, Mapping):
-            # Controller unfetched / unverified / ambiguous -> unknown terminal.
+        steps = resolve_controllers(current)
+        if not steps:
+            # No controller fetched/verified -> unknown terminal.
             return _unknown("unknown_unfetched")
-        next_address = str(step.get("address", "")).lower()
+        # Distinct controllers by address (case-insensitive), preserving the
+        # owner/authority/admin probe order.
+        distinct: dict[str, Mapping[str, Any]] = {}
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            addr = str(step.get("address", "")).lower()
+            if addr.startswith("0x") and len(addr) == 42:
+                distinct.setdefault(addr, step)
+        if not distinct:
+            return _unknown("unknown_unfetched")
+        if len(distinct) > 1:
+            # Parallel live control planes — refuse to name one as THE key, but
+            # keep the witnessed set so no observed controller is lost.
+            record = _unknown("ambiguous_controllers")
+            record["controllers"] = list(distinct.keys())
+            return record
+
+        next_address, step = next(iter(distinct.items()))
         next_type = str(step.get("resolved_type", "unknown") or "unknown")
-        if not next_address.startswith("0x") or len(next_address) != 42:
-            return _unknown("unknown_unfetched")
         if next_address in seen:
             chain.append(next_address)
             return _unknown("cycle")

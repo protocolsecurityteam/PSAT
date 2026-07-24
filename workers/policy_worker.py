@@ -34,7 +34,7 @@ from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
-from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controller
+from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.concurrency import parallel_map
@@ -102,22 +102,29 @@ def _make_principal_type_resolver(
 
 def _make_terminal_controller_resolver(
     rpc_url: str | None, *, chain_id: int | None = None
-) -> Callable[[str], dict[str, object] | None] | None:
-    """Build the ``address -> controller-step | None`` resolver that drives the
-    contract-principal terminal walk (A4). Reads a contract's ultimate owner via
-    canonical owner getters (``owner()``/``authority()``/``admin()``) and
-    classifies it, so ``resolve_terminal_principal`` can chain contract -> ... ->
-    Safe/EOA. ``None`` when there is no RPC URL (the walk is then skipped and
-    every contract principal simply stays a non-terminal way-point)."""
+) -> Callable[[str], list[dict[str, object]] | None] | None:
+    """Build the ``address -> [controller-step, ...] | None`` resolver that
+    drives the contract-principal terminal walk (A4). Reads a contract's
+    controllers via canonical getters (``owner()``/``authority()``/``admin()``)
+    and classifies each, so ``resolve_terminal_principal`` can chain contract ->
+    ... -> Safe/EOA and fail closed on parallel control planes (Solmate/Solady
+    ``Auth`` exposes owner AND authority). ``None`` when there is no RPC URL (the
+    walk is then skipped and every contract principal stays a non-terminal
+    way-point)."""
     if not rpc_url:
         return None
 
-    def _resolve(address: str) -> dict[str, object] | None:
-        owner = read_contract_controller(rpc_url, address, chain_id=chain_id)
-        if not owner:
+    def _resolve(address: str) -> list[dict[str, object]] | None:
+        controllers = read_contract_controllers(rpc_url, address, chain_id=chain_id)
+        if not controllers:
             return None
-        resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, owner, chain_id=chain_id)
-        return {"address": owner, "resolved_type": resolved_type, "details": details}
+        steps: list[dict[str, object]] = []
+        for owner in controllers:
+            resolved_type, details, _cacheable = classify_resolved_address_with_status(
+                rpc_url, owner, chain_id=chain_id
+            )
+            steps.append({"address": owner, "resolved_type": resolved_type, "details": details})
+        return steps
 
     return _resolve
 
@@ -686,7 +693,7 @@ class PolicyWorker(BaseWorker):
                     load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # A4: contract-principal -> ultimate Safe/EOA terminal walk.
-                resolve_controller=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
+                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 

@@ -241,16 +241,16 @@ def test_contract_principal_gets_terminal_chain(monkeypatch):
         lambda rpc_url, address, **_kw: ("contract", {"address": address}, True),
     )
 
-    def _resolve_controller(address):
+    def _resolve_controllers(address):
         if address.lower() == CONTRACT_PRINCIPAL:
-            return {"address": TERMINAL_SAFE, "resolved_type": "safe", "details": {"threshold": 3}}
+            return [{"address": TERMINAL_SAFE, "resolved_type": "safe", "details": {"threshold": 3}}]
         return None
 
     payload = build_principal_labels(
         _effective_permissions_with_principal(CONTRACT_PRINCIPAL, "contract"),
         resolved_control_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
         rpc_url="http://rpc.example",
-        resolve_controller=_resolve_controller,
+        resolve_controllers=_resolve_controllers,
     )
     profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
     contract_profile = profiles[CONTRACT_PRINCIPAL]
@@ -270,7 +270,7 @@ def test_contract_principal_without_resolver_stays_non_terminal(monkeypatch):
         _effective_permissions_with_principal(CONTRACT_PRINCIPAL, "contract"),
         resolved_control_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
         rpc_url="http://rpc.example",
-        resolve_controller=None,
+        resolve_controllers=None,
     )
     profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
     contract_profile = profiles[CONTRACT_PRINCIPAL]

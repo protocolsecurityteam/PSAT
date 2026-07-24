@@ -268,36 +268,44 @@ def classify_resolved_address(
     return kind, details
 
 
-# Canonical single-owner getters, in precedence order, for reading *who controls*
-# a plain ``contract`` principal. ``classify_resolved_address`` only reads
+# Canonical control getters, in precedence order, for reading *who controls* a
+# plain ``contract`` principal. ``classify_resolved_address`` only reads
 # ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
 # generic Ownable/AccessManaged contract falls through untyped — this fills that
 # gap for the contract-principal terminal walk (SCORING plan §4). Each is a
-# caller-independent view getter returning a single address; a reverting or
-# zero-address read means "no single owner exposed here", not an error.
+# caller-independent view getter returning a single address.
 _CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
 
 
-def read_contract_controller(
+def read_contract_controllers(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
-) -> str | None:
-    """The controlling address of a plain contract, read via canonical owner
-    getters (``owner()`` / ``authority()`` / ``admin()``), or ``None``.
+) -> list[str]:
+    """The distinct nonzero controlling addresses of a plain contract, read via
+    the canonical getters ``owner()`` / ``authority()`` / ``admin()`` in that
+    precedence order (deduped case-insensitively).
 
-    Bounded, read-only, and caller-independent (view getters). Returns ``None``
-    on every indeterminate outcome — no getter present, a transient probe error,
-    or a zero/empty answer — so the terminal walk fails closed to ``unknown``
-    rather than inventing a controller. Goes through the same ``rpc_request``
-    wire the offline suite stubs, never a fresh transport.
+    Returns the FULL set, not just the first hit: Solmate/Solady ``Auth`` (the
+    §4 motivating world — a BoringVault manager is a ``RolesAuthority``, itself
+    an ``Auth``) exposes ``owner`` AND ``authority`` as PARALLEL live control
+    planes (``requiresAuth`` accepts either). Naming one as THE key would
+    over-claim a settled controller while a second live plane also governs, so
+    the caller must see both and fail closed on ambiguity. All three getters are
+    probed every call (no early return); a reverting/zero/erroring getter is
+    skipped per-getter, not treated as a failure. Bounded, read-only, and
+    caller-independent, through the same ``rpc_request`` wire the offline suite
+    stubs — never a fresh transport. ``[]`` when no getter yields a controller.
     """
+    controllers: list[str] = []
+    seen: set[str] = set()
     for signature in _CONTROLLER_GETTER_SIGS:
         result = _try_eth_call_decoded(rpc_url, address, signature, "address", block_tag, chain_id=chain_id)
         if result is _PROBE_ERROR or result is None:
             continue
         owner = str(result).lower()
-        if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"}:
-            return owner
-    return None
+        if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"} and owner not in seen:
+            seen.add(owner)
+            controllers.append(owner)
+    return controllers
 
 
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.

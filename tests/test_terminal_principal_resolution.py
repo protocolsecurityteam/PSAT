@@ -3,7 +3,7 @@
 Covers the pure bounded/cycle-safe walk (``resolve_terminal_principal``) and the
 governance-view non-terminal marking (``_function_principal_payload`` /
 ``_build_company_function_entry``) — SCORING plan §4. The walk's only wire is the
-injected ``resolve_controller`` callable, so every case here stubs it.
+injected ``resolve_controllers`` callable, so every case here stubs it.
 """
 
 import sys
@@ -28,10 +28,15 @@ CONTRACT_C = "0x" + "3" * 40
 
 
 def _dict_resolver(edges):
-    """address -> controller-step from a plain adjacency dict; None when absent."""
+    """address -> list[controller-step] from a plain adjacency dict; None when
+    absent. A single-step value is wrapped so tests stay terse; a list value
+    models parallel control planes."""
 
     def _resolve(address):
-        return edges.get(address.lower())
+        val = edges.get(address.lower())
+        if val is None:
+            return None
+        return val if isinstance(val, list) else [val]
 
     return _resolve
 
@@ -45,7 +50,7 @@ def test_is_terminal_principal_type():
 
 def test_terminates_at_safe_controller():
     resolver = _dict_resolver({CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver)
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
     assert record["terminal"] is True
     assert record["resolved_type"] == "safe"
     assert record["address"] == SAFE
@@ -60,7 +65,7 @@ def test_multi_hop_contract_chain_terminates():
             CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
         }
     )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver)
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
     assert record["terminal"] is True
     assert record["resolved_type"] == "eoa"
     assert record["address"] == EOA
@@ -69,7 +74,7 @@ def test_multi_hop_contract_chain_terminates():
 
 def test_unfetched_controller_is_unknown_not_resolved():
     # Resolver has nothing for CONTRACT_A -> the controller is unfetched/unverified.
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=_dict_resolver({}))
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_dict_resolver({}))
     assert record["terminal"] is False
     assert record["resolved_type"] == "unknown"
     assert record["address"] is None
@@ -80,7 +85,7 @@ def test_unresolved_intermediate_fails_closed():
     # An intermediate that classifies "unknown" (neither settled key nor walkable
     # contract) must not be guessed as terminal.
     resolver = _dict_resolver({CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "unknown", "details": {}}})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver)
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
     assert record["terminal"] is False
     assert record["resolved_type"] == "unknown"
     assert record["status"] == "unknown_unfetched"
@@ -93,7 +98,7 @@ def test_cycle_detected():
             CONTRACT_B: {"address": CONTRACT_A, "resolved_type": "contract", "details": {}},
         }
     )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver)
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
     assert record["terminal"] is False
     assert record["status"] == "cycle"
     assert record["chain"] == [CONTRACT_A, CONTRACT_B, CONTRACT_A]
@@ -107,13 +112,59 @@ def test_depth_bound():
             CONTRACT_C: {"address": SAFE, "resolved_type": "safe", "details": {}},
         }
     )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver, max_depth=2)
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver, max_depth=2)
     assert record["terminal"] is False
     assert record["status"] == "depth_exceeded"
     # Same chain resolved with adequate depth terminates at the Safe.
-    ok = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controller=resolver, max_depth=4)
+    ok = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver, max_depth=4)
     assert ok["terminal"] is True
     assert ok["address"] == SAFE
+
+
+def test_ambiguous_controllers_fail_closed_with_recorded_set():
+    # Two distinct live control planes (Solmate/Solady Auth owner AND authority):
+    # the walk must NOT name one as the settled key.
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": SAFE, "resolved_type": "safe", "details": {}},
+                {"address": EOA, "resolved_type": "eoa", "details": {}},
+            ]
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["terminal"] is False
+    assert record["resolved_type"] == "unknown"
+    assert record["address"] is None
+    assert record["status"] == "ambiguous_controllers"
+    assert record["controllers"] == [SAFE, EOA]  # owner/authority order preserved
+
+
+def test_two_getters_same_controller_not_ambiguous():
+    # owner() and authority() naming the same address (case-insensitively) is one
+    # controller — the walk proceeds with it, not flagged ambiguous.
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": SAFE, "resolved_type": "safe", "details": {}},
+                {"address": SAFE.upper(), "resolved_type": "safe", "details": {}},
+            ]
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["terminal"] is True
+    assert record["status"] == "terminated"
+    assert record["address"] == SAFE
+    assert "controllers" not in record
+
+
+def test_single_controller_plane_proceeds():
+    # Regression guard for the sound single-plane case (owner only, no authority).
+    resolver = _dict_resolver({CONTRACT_A: [{"address": SAFE, "resolved_type": "safe", "details": {}}]})
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["terminal"] is True
+    assert record["address"] == SAFE
+    assert "controllers" not in record
 
 
 def test_already_terminal_start_short_circuits():
@@ -123,7 +174,7 @@ def test_already_terminal_start_short_circuits():
         called["n"] += 1
         return None
 
-    record = resolve_terminal_principal(SAFE, "safe", resolve_controller=_resolver)
+    record = resolve_terminal_principal(SAFE, "safe", resolve_controllers=_resolver)
     assert record["terminal"] is True
     assert record["resolved_type"] == "safe"
     assert called["n"] == 0  # never walked

@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from sqlalchemy import func, select
@@ -481,7 +481,7 @@ def build_principal_labels(
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
     protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
-    resolve_controller: Callable[[str], Mapping[str, Any] | None] | None = None,
+    resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
 ) -> PrincipalLabels:
     """Construct principal records for every authority address.
 
@@ -503,11 +503,12 @@ def build_principal_labels(
     each Safe principal gains a ``details.signer_overlap`` attribution fact
     against every other protocol Safe. ``None`` omits the fact (no guessing).
 
-    ``resolve_controller`` (A4, SCORING plan §4) — an
-    ``address -> {"address","resolved_type","details"} | None`` step function
-    (backed by on-chain owner reads). When present, each ``resolved_type=contract``
-    principal is walked to its ultimate Safe/EOA and the result stored in
-    ``details.terminal_principal``. ``None`` skips the walk; the non-terminal
+    ``resolve_controllers`` (A4, SCORING plan §4) — an
+    ``address -> [{"address","resolved_type","details"}, ...] | None`` step
+    function (backed by on-chain owner reads). When present, each
+    ``resolved_type=contract`` principal is walked to its ultimate Safe/EOA and
+    the result stored in ``details.terminal_principal``. ``None`` skips the walk;
+    the non-terminal
     ``details.terminal`` marking is still stamped on every principal so a
     contract way-point never reads as a settled key.
     """
@@ -612,12 +613,13 @@ def build_principal_labels(
         # way-point, never a settled controlling key. Stamped on every principal
         # so a consumer never mistakes a ``contract`` row for a resolved key.
         details["terminal"] = is_terminal_principal_type(resolved_type)
-        if resolved_type == "contract" and resolve_controller is not None:
+        if resolved_type == "contract" and resolve_controllers is not None:
             # Bounded, cycle-safe walk to the ultimate Safe/EOA. Fails closed to
             # an ``unknown`` terminal record (never a guessed key) when the
-            # controller is unfetched/unverified or the chain doesn't terminate.
+            # controller is unfetched/unverified, the chain doesn't terminate, or
+            # a step exposes parallel control planes (ambiguous_controllers).
             details["terminal_principal"] = resolve_terminal_principal(
-                address, resolved_type, resolve_controller=resolve_controller
+                address, resolved_type, resolve_controllers=resolve_controllers
             )
         # Signer-overlap attribution fact (C1) for dispositively-enumerated Safes.
         if resolved_type == "safe" and protocol_safe_owner_sets:
