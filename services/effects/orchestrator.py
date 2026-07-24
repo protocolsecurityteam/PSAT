@@ -138,6 +138,12 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
     (keyed ``(chain_id, address)``). DB-only (no wire) so hashing stays off the RPC
     path; a miss returns ``None`` and the candidate is skipped rather than guessed."""
     from db.models import BytecodeCache
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
+    addr = address.lower()
+    if pf is not None and pf.chain_id == chain_id and addr in pf.addresses:
+        return pf.bytecode_by_addr.get(addr)
 
     row = session.execute(
         select(BytecodeCache.bytecode).where(
@@ -178,19 +184,28 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
     resolved principal closes that. A renounced/unset authority resolves to the
     zero address / empty set here (predicate_evaluator / solmate_roles), so an
     empty resolved set WITHHOLDS (fail-closed §8), never over-claims."""
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
     plans: list[ProbePlan] = []
-    contract = session.execute(
-        select(Contract).where(Contract.id == candidate.contract_id).limit(1)
-    ).scalar_one_or_none()
+    if pf is not None and candidate.contract_id in pf.contract_ids:
+        contract = pf.contract_by_id.get(candidate.contract_id)
+    else:
+        contract = session.execute(
+            select(Contract).where(Contract.id == candidate.contract_id).limit(1)
+        ).scalar_one_or_none()
     if contract is None or not contract.is_proxy:
         return plans
 
-    has_indexed_upgrade = (
-        session.execute(
-            select(UpgradeEvent.id).where(UpgradeEvent.contract_id == candidate.contract_id).limit(1)
-        ).scalar_one_or_none()
-        is not None
-    )
+    if pf is not None and candidate.contract_id in pf.contract_ids:
+        has_indexed_upgrade = candidate.contract_id in pf.contract_ids_with_upgrade
+    else:
+        has_indexed_upgrade = (
+            session.execute(
+                select(UpgradeEvent.id).where(UpgradeEvent.contract_id == candidate.contract_id).limit(1)
+            ).scalar_one_or_none()
+            is not None
+        )
     if not has_indexed_upgrade:
         return plans
 

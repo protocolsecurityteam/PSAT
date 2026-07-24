@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -101,6 +101,50 @@ def find_cached_verdict(
             EffectBehaviorCache.analysis_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
+
+
+def find_cached_verdicts_batch(
+    session: Session,
+    identities: "Any",
+) -> dict[tuple[str, str, str, str, str], EffectBehaviorCache]:
+    """Bulk form of :func:`find_cached_verdict` for a whole job's plan set.
+
+    ``identities`` is any iterable of
+    ``(behavior_hash, effect_class, scope, contract_surface_hash, gate_ref)``
+    tuples. Returns a dict keyed by the *normalized* identity (kernel scope maps
+    the surface to :data:`KERNEL_SURFACE_SENTINEL`, exactly as the single-row
+    form does) whose value is the current-version cached row, if any.
+
+    Semantics match the single-row lookup precisely: the same 5-field identity,
+    the same ``analysis_schema_version`` gate (a stale-version row is a miss),
+    the same kernel surface-sentinel normalization. The identity UniqueConstraint
+    plus the version filter guarantee at most one row per key — so this returns
+    the same row the per-plan ``SELECT`` would, in ONE composite ``IN`` query
+    instead of N.
+    """
+    keys: set[tuple[str, str, str, str, str]] = set()
+    for behavior_hash, effect_class, scope, surface, gate_ref in identities:
+        surf = surface if scope != "kernel" else KERNEL_SURFACE_SENTINEL
+        keys.add((behavior_hash, effect_class, scope, surf, gate_ref))
+    if not keys:
+        return {}
+    rows = (
+        session.execute(
+            select(EffectBehaviorCache).where(
+                tuple_(
+                    EffectBehaviorCache.behavior_hash,
+                    EffectBehaviorCache.effect_class,
+                    EffectBehaviorCache.scope,
+                    EffectBehaviorCache.contract_surface_hash,
+                    EffectBehaviorCache.gate_ref,
+                ).in_(list(keys)),
+                EffectBehaviorCache.analysis_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {(r.behavior_hash, r.effect_class, r.scope, r.contract_surface_hash, r.gate_ref): r for r in rows}
 
 
 def upsert_cached_verdict(

@@ -687,9 +687,15 @@ def _claim_latch_pairs(session: Session, function_id: int) -> set[tuple[str, str
     """Latch ``(var, member)`` pairs from a persisted ``pause.set`` claim witness.
     Usually empty — the §6 cascade selects BLANK-claim functions — so this is the
     corroborating path, not the primary one."""
-    claims = session.execute(
-        select(EffectiveFunction.claims).where(EffectiveFunction.id == function_id)
-    ).scalar_one_or_none()
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
+    if pf is not None and function_id in pf.function_ids:
+        claims = pf.claims_by_function.get(function_id)
+    else:
+        claims = session.execute(
+            select(EffectiveFunction.claims).where(EffectiveFunction.id == function_id)
+        ).scalar_one_or_none()
     out: set[tuple[str, str | None]] = set()
     if not isinstance(claims, list):
         return out
@@ -742,6 +748,11 @@ def _latch_pairs(fn: FunctionFacts) -> set[tuple[str, str | None]]:
 
 
 def _principals_by_selector(session: Session, contract_id: int) -> dict[str, str]:
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
+    if pf is not None and contract_id in pf.contract_ids:
+        return dict(pf.principals_by_selector_by_contract.get(contract_id, {}))
     rows = session.execute(
         select(EffectiveFunction.selector, FunctionPrincipal.address)
         .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)

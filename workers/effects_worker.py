@@ -44,6 +44,7 @@ from db.effect_cache import (
     AUDIT_FAILED,
     bump_hit,
     find_cached_verdict,
+    find_cached_verdicts_batch,
     kernel_verdicts_agree,
     mark_audited,
     record_effect_verdict,
@@ -68,6 +69,7 @@ from services.effects.orchestrator import (
     default_prober,
     make_bytecode_hash_resolver,
 )
+from services.effects.prefetch import clear_prefetch, install_prefetch
 from services.effects.preflight import CapabilityStore, InMemoryCapabilityStore, probe_simulate_support
 from services.effects.selection import Candidate, select_candidates
 from utils.chains import UnknownChainError, chain_by_id
@@ -125,6 +127,14 @@ def _fork_enabled() -> bool:
     already behind ``PSAT_EFFECTS_STAGE`` (default off), so this exists to disable
     forking alone (a host without foundry, an incident) without losing Tier 0/1."""
     return os.getenv("PSAT_EFFECTS_FORK", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _batch_plan_enabled() -> bool:
+    """Batch the ``cache_lookup`` phase's per-candidate DB round-trips (bulk
+    prefetch + one composite verdict lookup) instead of the serial N+1. Default
+    ON; the switch exists as a kill-valve and as the A/B seam the parity test
+    drives to prove the two paths return byte-identical verdicts."""
+    return os.getenv("PSAT_EFFECTS_BATCH_PLAN", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _anvil_port() -> int:
@@ -491,37 +501,64 @@ class EffectsWorker(BaseWorker):
         hash_resolver: HashResolver,
         counters: _Counters,
     ) -> list[_Item]:
-        items: list[_Item] = []
-        for cand in candidates:
-            try:
-                resolved = hash_resolver(session, cand)
-            except Exception as exc:
-                record_degraded(phase="effects_hash", exc=exc, context={"function_id": cand.function_id})
-                counters.skipped += 1
-                continue
-            if resolved is None:
-                # No behavioral hash (no cached bytecode) — withhold rather than
-                # guess (per-behavior fail-forward, inv. 15).
-                counters.skipped += 1
-                continue
-            kernel_hash, surface_hash = resolved
-            try:
-                plans = self.prober(session, cand, ctx)
-            except Exception as exc:
-                record_degraded(phase="effects_plan", exc=exc, context={"function_id": cand.function_id})
-                counters.skipped += 1
-                continue
-            for plan in plans:
-                behavior_hash = plan.behavior_hash or kernel_hash
-                surface = surface_hash if plan.scope != SCOPE_KERNEL else ""
-                cached = find_cached_verdict(
+        # Bulk-load every per-candidate keyed row up front (bytecode, proxy
+        # Contract/UpgradeEvent, pause claim + principal maps) so the deep
+        # DB-fetch helpers read a dict instead of issuing a serial round-trip.
+        # The flag off falls the helpers back to their single-row queries (the
+        # A/B seam the parity test drives).
+        batched = _batch_plan_enabled()
+        if batched:
+            install_prefetch(session, ctx.chain_id, candidates)
+        try:
+            # Pass 1: resolve hashes + build plans, staging each plan's cache
+            # identity. No verdict lookups yet — those are batched below.
+            staged: list[tuple[Candidate, Any, str, str]] = []
+            for cand in candidates:
+                try:
+                    resolved = hash_resolver(session, cand)
+                except Exception as exc:
+                    record_degraded(phase="effects_hash", exc=exc, context={"function_id": cand.function_id})
+                    counters.skipped += 1
+                    continue
+                if resolved is None:
+                    # No behavioral hash (no cached bytecode) — withhold rather
+                    # than guess (per-behavior fail-forward, inv. 15).
+                    counters.skipped += 1
+                    continue
+                kernel_hash, surface_hash = resolved
+                try:
+                    plans = self.prober(session, cand, ctx)
+                except Exception as exc:
+                    record_degraded(phase="effects_plan", exc=exc, context={"function_id": cand.function_id})
+                    counters.skipped += 1
+                    continue
+                for plan in plans:
+                    behavior_hash = plan.behavior_hash or kernel_hash
+                    surface = surface_hash if plan.scope != SCOPE_KERNEL else ""
+                    staged.append((cand, plan, behavior_hash, surface))
+
+            # Pass 2: one composite verdict lookup for the whole plan set
+            # (collapses the per-plan single-row SELECTs), then assemble items.
+            if batched:
+                verdicts = find_cached_verdicts_batch(
                     session,
-                    behavior_hash=behavior_hash,
-                    effect_class=plan.effect_class,
-                    scope=plan.scope,
-                    contract_surface_hash=surface,
-                    gate_ref=plan.gate_ref,
+                    ((bh, p.effect_class, p.scope, surf, p.gate_ref) for _c, p, bh, surf in staged),
                 )
+            items: list[_Item] = []
+            for cand, plan, behavior_hash, surface in staged:
+                if batched:
+                    # ``surface`` is already kernel-normalized (== "" for kernel),
+                    # matching the batch's stored key.
+                    cached = verdicts.get((behavior_hash, plan.effect_class, plan.scope, surface, plan.gate_ref))
+                else:
+                    cached = find_cached_verdict(
+                        session,
+                        behavior_hash=behavior_hash,
+                        effect_class=plan.effect_class,
+                        scope=plan.scope,
+                        contract_surface_hash=surface,
+                        gate_ref=plan.gate_ref,
+                    )
                 # First re-encounter of a shared hash (writer left audit_status
                 # None) triggers the §7 self-audit re-simulation.
                 needs_audit = cached is not None and cached.audit_status is None
@@ -538,7 +575,10 @@ class EffectsWorker(BaseWorker):
                         needs_audit=needs_audit,
                     )
                 )
-        return items
+            return items
+        finally:
+            if batched:
+                clear_prefetch(session)
 
     def _run_probes(self, items: list[_Item], durations_ms: dict[str, int], counters: _Counters, seams: _Seams) -> None:
         """Run recipes for cache misses + audit re-runs. Tier-2 (fork/projection)
