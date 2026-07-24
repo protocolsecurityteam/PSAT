@@ -121,9 +121,9 @@ def test_depth_bound():
     assert ok["address"] == SAFE
 
 
-def test_ambiguous_controllers_fail_closed_with_recorded_set():
+def test_multi_plane_two_planes_terminating_at_different_keys():
     # Two distinct live control planes (Solmate/Solady Auth owner AND authority):
-    # the walk must NOT name one as the settled key.
+    # never collapse to one "the" key — walk each and record both.
     resolver = _dict_resolver(
         {
             CONTRACT_A: [
@@ -136,8 +136,98 @@ def test_ambiguous_controllers_fail_closed_with_recorded_set():
     assert record["terminal"] is False
     assert record["resolved_type"] == "unknown"
     assert record["address"] is None
-    assert record["status"] == "ambiguous_controllers"
+    assert record["status"] == "multi_plane"
     assert record["controllers"] == [SAFE, EOA]  # owner/authority order preserved
+    assert [p["controller"] for p in record["planes"]] == [SAFE, EOA]
+    r0, r1 = record["planes"][0]["terminal_record"], record["planes"][1]["terminal_record"]
+    assert (r0["terminal"], r0["address"], r0["status"]) == (True, SAFE, "terminated")
+    assert (r1["terminal"], r1["address"], r1["status"]) == (True, EOA, "terminated")
+
+
+def test_multi_plane_walks_each_contract_plane_to_its_own_terminal():
+    # Both controllers are contracts that walk further to DIFFERENT Safes.
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+                {"address": CONTRACT_C, "resolved_type": "contract", "details": {}},
+            ],
+            CONTRACT_B: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
+            CONTRACT_C: [{"address": EOA, "resolved_type": "eoa", "details": {}}],
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["status"] == "multi_plane"
+    p_b, p_c = record["planes"]
+    assert p_b["controller"] == CONTRACT_B
+    assert p_b["terminal_record"]["address"] == SAFE
+    assert p_b["terminal_record"]["chain"] == [CONTRACT_B, SAFE]
+    assert p_c["terminal_record"]["address"] == EOA
+
+
+def test_multi_plane_one_plane_unresolved_recorded_distinctly():
+    # One plane is Safe-terminal, the other has no fetched controller -> each is
+    # recorded honestly; the top level never claims a settled key.
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": SAFE, "resolved_type": "safe", "details": {}},
+                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+            ],
+            # CONTRACT_B has no controllers -> unknown_unfetched
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["status"] == "multi_plane"
+    assert record["terminal"] is False
+    plane_safe, plane_unresolved = record["planes"]
+    assert plane_safe["terminal_record"]["status"] == "terminated"
+    assert plane_safe["terminal_record"]["address"] == SAFE
+    assert plane_unresolved["terminal_record"]["status"] == "unknown_unfetched"
+    assert plane_unresolved["terminal_record"]["address"] is None
+
+
+def test_multi_plane_nested_fork_fails_that_plane_closed_no_explosion():
+    # A plane that itself forks must NOT re-branch: it fails closed with
+    # ambiguous_controllers and no nested `planes` key (bounded work).
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": SAFE, "resolved_type": "safe", "details": {}},
+                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+            ],
+            CONTRACT_B: [
+                {"address": CONTRACT_C, "resolved_type": "safe", "details": {}},
+                {"address": EOA, "resolved_type": "eoa", "details": {}},
+            ],
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["status"] == "multi_plane"
+    nested = record["planes"][1]["terminal_record"]
+    assert nested["status"] == "ambiguous_controllers"
+    assert nested["controllers"] == [CONTRACT_C, EOA]
+    assert "planes" not in nested  # no sub-plane recursion
+
+
+def test_multi_plane_convergent_planes_not_collapsed():
+    # Even when both planes converge on the SAME Safe, the walk records both
+    # planes and stays terminal:false — collapsing is the scorer's call, not ours.
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A: [
+                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+                {"address": CONTRACT_C, "resolved_type": "contract", "details": {}},
+            ],
+            CONTRACT_B: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
+            CONTRACT_C: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["status"] == "multi_plane"
+    assert record["terminal"] is False
+    assert record["address"] is None
+    assert {p["terminal_record"]["address"] for p in record["planes"]} == {SAFE}
 
 
 def test_two_getters_same_controller_not_ambiguous():

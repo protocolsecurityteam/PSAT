@@ -23,6 +23,12 @@ TERMINAL_PRINCIPAL_TYPES = frozenset({"safe", "eoa", "zero", "timelock", "proxy_
 # seen-set, so this only bounds genuinely-long acyclic chains.
 DEFAULT_TERMINAL_MAX_DEPTH = 4
 
+# Owner/authority/admin — the maximum number of parallel control planes a single
+# contract step can expose. Bounds the shared step budget so multi-plane
+# branching stays linear (pre-branch hops + one bounded walk per plane), never
+# exponential: a plane that itself forks fails closed instead of re-branching.
+_MAX_CONTROLLER_PLANES = 3
+
 
 def is_terminal_principal_type(resolved_type: str | None) -> bool:
     """Whether *resolved_type* names a settled controlling key / recognized
@@ -49,17 +55,24 @@ def resolve_terminal_principal(
     unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
 
     Returns a terminal record ``{terminal, resolved_type, address, chain,
-    status}`` (plus an optional ``controllers`` list). ``terminal`` is True only
-    when the walk reached a member of ``TERMINAL_PRINCIPAL_TYPES``; every
-    indeterminate outcome fails closed to ``terminal=False`` /
-    ``resolved_type="unknown"`` — the ``indeterminate -> unknown`` fallback the
-    witness bar requires, never a guessed key. Ambiguity is a fail-closed case:
-    when a step exposes MORE THAN ONE distinct controller (Solmate/Solady
-    ``Auth`` owner AND authority are parallel live control planes), the walk
-    stops with ``status="ambiguous_controllers"`` and records the witnessed set
-    on ``controllers`` — it must NOT name one plane as the settled key. Walking
-    each plane to its own terminal (weakest-path) is a deferred multi-chain
-    extension, not this function's job.
+    status}``. ``terminal`` is True only when a single-plane walk reached a member
+    of ``TERMINAL_PRINCIPAL_TYPES``; every indeterminate outcome fails closed to
+    ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
+    unknown`` fallback the witness bar requires, never a guessed key.
+
+    **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
+    ``depth_exceeded`` / ``unknown_unfetched`` (record shape unchanged, no extra
+    keys). When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
+    ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
+    walk does NOT name one as THE key; instead it walks EACH plane to its own
+    terminal and returns ``status="multi_plane"``, ``terminal=False``, a flat
+    ``controllers`` list (the immediate distinct controllers), and
+    ``planes=[{"controller", "terminal_record"}, ...]`` carrying each plane's own
+    walk so a weakest-path scorer can consume every plane. Planes are NOT
+    collapsed to one key even when they converge — that's the scorer's call.
+    Branching happens at most once: a plane that itself forks fails closed with
+    ``status="ambiguous_controllers"`` (no sub-plane recursion), keeping total
+    work linear in ``max_depth * (1 + planes)``.
     """
     start = (start_address or "").lower()
     if is_terminal_principal_type(start_type):
@@ -72,35 +85,76 @@ def resolve_terminal_principal(
             "status": "terminated",
         }
 
-    chain: list[str] = [start] if start else []
-    seen: set[str] = {start} if start else set()
-    current = start
+    # Shared step ceiling across the pre-branch walk + every plane walk, so
+    # branching can never blow up total work.
+    budget = [max(1, max_depth) * (1 + _MAX_CONTROLLER_PLANES)]
+    return _walk_terminal(
+        start,
+        resolve_controllers,
+        seen={start} if start else set(),
+        chain=[start] if start else [],
+        max_depth=max_depth,
+        budget=budget,
+        allow_branch=True,
+    )
 
-    def _unknown(status: str) -> dict[str, Any]:
-        return {"terminal": False, "resolved_type": "unknown", "address": None, "chain": chain, "status": status}
+
+def _distinct_controllers(steps: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """Distinct controller steps keyed by lowercased address, preserving the
+    owner/authority/admin probe order (case-insensitive dedup)."""
+    distinct: dict[str, Mapping[str, Any]] = {}
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        addr = str(step.get("address", "")).lower()
+        if addr.startswith("0x") and len(addr) == 42:
+            distinct.setdefault(addr, step)
+    return distinct
+
+
+def _walk_terminal(
+    current: str,
+    resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None],
+    *,
+    seen: set[str],
+    chain: list[str],
+    max_depth: int,
+    budget: list[int],
+    allow_branch: bool,
+) -> dict[str, Any]:
+    """One single-plane walk. ``allow_branch`` gates the ONE multi-plane branch:
+    True on the top-level walk (a fork -> ``multi_plane`` with each plane walked),
+    False inside a plane (a fork -> ``ambiguous_controllers`` fail-closed, no
+    recursion)."""
+
+    def _unknown(status: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "terminal": False,
+            "resolved_type": "unknown",
+            "address": None,
+            "chain": chain,
+            "status": status,
+            **extra,
+        }
 
     for _ in range(max(1, max_depth)):
+        if budget[0] <= 0:
+            return _unknown("depth_exceeded")
+        budget[0] -= 1
         steps = resolve_controllers(current)
         if not steps:
             # No controller fetched/verified -> unknown terminal.
             return _unknown("unknown_unfetched")
-        # Distinct controllers by address (case-insensitive), preserving the
-        # owner/authority/admin probe order.
-        distinct: dict[str, Mapping[str, Any]] = {}
-        for step in steps:
-            if not isinstance(step, Mapping):
-                continue
-            addr = str(step.get("address", "")).lower()
-            if addr.startswith("0x") and len(addr) == 42:
-                distinct.setdefault(addr, step)
+        distinct = _distinct_controllers(steps)
         if not distinct:
             return _unknown("unknown_unfetched")
         if len(distinct) > 1:
-            # Parallel live control planes — refuse to name one as THE key, but
-            # keep the witnessed set so no observed controller is lost.
-            record = _unknown("ambiguous_controllers")
-            record["controllers"] = list(distinct.keys())
-            return record
+            controllers = list(distinct.keys())
+            if not allow_branch:
+                # Nested fork inside a plane — fail this plane closed, do NOT
+                # recurse into sub-planes (keeps total work bounded).
+                return _unknown("ambiguous_controllers", controllers=controllers)
+            return _branch_planes(distinct, resolve_controllers, seen, chain, max_depth, budget)
 
         next_address, step = next(iter(distinct.items()))
         next_type = str(step.get("resolved_type", "unknown") or "unknown")
@@ -124,6 +178,61 @@ def resolve_terminal_principal(
         current = next_address
 
     return _unknown("depth_exceeded")
+
+
+def _branch_planes(
+    distinct: dict[str, Mapping[str, Any]],
+    resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None],
+    parent_seen: set[str],
+    parent_chain: list[str],
+    max_depth: int,
+    budget: list[int],
+) -> dict[str, Any]:
+    """Walk each parallel control plane to its own terminal and package them for a
+    weakest-path scorer — never collapsing to a single "the" key."""
+    planes: list[dict[str, Any]] = []
+    for controller_address, step in distinct.items():
+        controller_type = str(step.get("resolved_type", "unknown") or "unknown")
+        if is_terminal_principal_type(controller_type):
+            record: dict[str, Any] = {
+                "terminal": True,
+                "resolved_type": controller_type,
+                "address": controller_address,
+                "chain": [controller_address],
+                "status": "terminated",
+            }
+        elif controller_type == "contract":
+            # Each plane gets its own seen-set (a copy of the pre-branch path) so a
+            # plane can detect a cycle back into the walked prefix, while two planes
+            # reaching the same key independently are NOT treated as a cross-cycle.
+            record = _walk_terminal(
+                controller_address,
+                resolve_controllers,
+                seen=set(parent_seen) | {controller_address},
+                chain=[controller_address],
+                max_depth=max_depth,
+                budget=budget,
+                allow_branch=False,
+            )
+        else:
+            record = {
+                "terminal": False,
+                "resolved_type": "unknown",
+                "address": None,
+                "chain": [controller_address],
+                "status": "unknown_unfetched",
+            }
+        planes.append({"controller": controller_address, "terminal_record": record})
+
+    return {
+        "terminal": False,
+        "resolved_type": "unknown",
+        "address": None,
+        "chain": parent_chain,
+        "status": "multi_plane",
+        "controllers": list(distinct.keys()),
+        "planes": planes,
+    }
 
 
 def _function_principal_payload(

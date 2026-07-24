@@ -583,7 +583,12 @@ export function terminalControllerNote(principal) {
     if (tp.terminal === true && tp.address) {
       return { kind: "terminated", address: tp.address, resolvedType: String(tp.resolved_type || "unknown") };
     }
-    if (tp.status === "ambiguous_controllers") {
+    // Multiple parallel control planes (Solmate/Solady Auth owner + authority):
+    // `multi_plane` at the top level (each plane walked in `tp.planes`), or
+    // `ambiguous_controllers` for a nested plane that itself forked. Either way
+    // the honest render is "no single settled key" over the witnessed controller
+    // set — never one collapsed key.
+    if (tp.status === "multi_plane" || tp.status === "ambiguous_controllers") {
       const planes = Array.isArray(tp.controllers) ? tp.controllers : [];
       return { kind: "ambiguous", planes };
     }

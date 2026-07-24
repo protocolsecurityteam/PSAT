@@ -530,6 +530,28 @@ describe("terminalControllerNote — non-terminal way-points never read as settl
     expect(note.planes).toEqual(["0x1", "0x2"]);
   });
 
+  it("shows multiple control planes for a multi_plane walk, never one key", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: {
+          terminal: false,
+          resolved_type: "unknown",
+          address: null,
+          status: "multi_plane",
+          controllers: ["0x1", "0x2"],
+          planes: [
+            { controller: "0x1", terminal_record: { terminal: true, resolved_type: "safe", address: "0xsafe", status: "terminated" } },
+            { controller: "0x2", terminal_record: { terminal: false, resolved_type: "unknown", address: null, status: "unknown_unfetched" } },
+          ],
+        },
+      },
+    });
+    expect(note.kind).toBe("ambiguous");
+    expect(note.planes).toEqual(["0x1", "0x2"]);
+  });
+
   it("treats cycle / depth_exceeded / unfetched as honestly unresolved", () => {
     for (const status of ["cycle", "depth_exceeded", "unknown_unfetched"]) {
       const note = terminalControllerNote({
