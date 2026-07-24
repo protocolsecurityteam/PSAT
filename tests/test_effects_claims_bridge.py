@@ -102,6 +102,68 @@ def test_freeze_pause_maps_to_pause_set_only():
     assert claim is not None and claim["claim_id"] == "pause.set"
 
 
+def test_freeze_pause_projects_severity_fields_verdict318_shape():
+    # §1 A2: the fork pause recipe records observed_blast_radius / auto_expiry /
+    # duration_bound_seconds on the verdict witness (verdict 318's real shape); the
+    # projection must carry all three into claim.witness["observed"] so the scorer
+    # can tell a $3.4B/30-day freeze from a harmless one.
+    witness = {
+        "latch_flip": True,
+        "auto_expiry": True,
+        "scored_denominator": ["mintShares(address,uint256)", "transfer(address,uint256)", "unpauseUntil()"],
+        "pre_pause_succeeding": ["mintShares(address,uint256)", "transfer(address,uint256)"],
+        "observed_blast_radius": ["mintShares(address,uint256)", "transfer(address,uint256)"],
+        "duration_bound_seconds": 2592000,
+    }
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_FREEZE_PAUSE, tier=TIER_FORK, witness=witness))
+    assert claim is not None and claim["claim_id"] == "pause.set"
+    observed = claim["witness"]["observed"]
+    assert observed["observed_blast_radius"] == ["mintShares(address,uint256)", "transfer(address,uint256)"]
+    assert observed["auto_expiry"] is True
+    assert observed["duration_bound_seconds"] == 2592000
+
+
+def test_freeze_pause_indefinite_latch_fields_survive_as_none():
+    # duration None + auto_expiry None = indefinite latch = most severe; the
+    # projection must carry the None values through (present, not dropped) so the
+    # scorer sees "indefinite", never an absent-field default.
+    witness = {
+        "latch_flip": True,
+        "observed_blast_radius": ["freeze(uint256)"],
+        "auto_expiry": None,
+        "duration_bound_seconds": None,
+    }
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_FREEZE_PAUSE, tier=TIER_FORK, witness=witness))
+    assert claim is not None
+    observed = claim["witness"]["observed"]
+    assert observed["observed_blast_radius"] == ["freeze(uint256)"]
+    assert observed["auto_expiry"] is None
+    assert observed["duration_bound_seconds"] is None
+
+
+def test_no_blast_verdict_mints_no_behavioral_claim():
+    # The 58/65 no-blast verdicts take the fork unknown path — they must mint NO
+    # behavioral claim (absent blast radius is an unproven lower bound, not a proven
+    # "no freeze"). A verdict==unknown never mints regardless of its witness fields.
+    witness = {"observed_blast_radius": [], "scored_denominator": ["a()", "b()"]}
+    claim = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_FREEZE_PAUSE, verdict=VERDICT_UNKNOWN, tier=TIER_FORK, witness=witness)
+    )
+    assert claim is None
+
+
+def test_freeze_fields_absent_for_non_freeze_class():
+    # The added keep keys are a no-op for other classes: a value_out verdict whose
+    # witness happens to lack them projects no freeze fields (dict-comp keeps only
+    # present keys).
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}))
+    assert claim is not None
+    observed = claim["witness"].get("observed", {})
+    assert "observed_blast_radius" not in observed
+    assert "auto_expiry" not in observed
+    assert "duration_bound_seconds" not in observed
+
+
 def test_authority_change_maps_to_registered_authority_grant():
     # None of roles.grant / authority.replace / authorized_caller.rotate is honest
     # for a mechanism-agnostic gate-open; the bridge mints its own registered id.

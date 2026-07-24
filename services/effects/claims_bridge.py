@@ -179,7 +179,37 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     """A tiny, transcript-free summary of what was observed — enough to read the
     witness without opening the artifact. Never the raw transcript (§8.5)."""
     raw = verdict.witness if isinstance(verdict.witness, dict) else {}
-    keep = ("supply_delta_sign", "gate_mutation", "historical", "current_capability")
+    # ``observed_blast_radius`` / ``auto_expiry`` / ``duration_bound_seconds`` are the
+    # freeze-severity fields the fork pause recipe records on ``effect_verdicts.witness``
+    # (§4.1, ``anvil.pause_recipe``). The dict-comp keeps only keys PRESENT on the
+    # witness, so adding them is a no-op for every non-freeze class.
+    #
+    # CONTRACT for the eventual scorer that reads ``claim.witness["observed"]`` — these
+    # fallbacks are load-bearing; a consumer that ignores them re-introduces the exact
+    # "empty blast radius reads as harmless" bug this projection exists to fix:
+    #   * An absent/empty ``observed_blast_radius`` is NOT "no freeze" — it is an
+    #     UNPROVEN LOWER BOUND. Only 7/65 freeze_pause verdicts observe a radius; the
+    #     other 58 take the no-blast ``unknown`` path (``anvil.py``) and mint NO
+    #     behavioral claim at all (the ``_mints`` gate), keeping only a static
+    #     ``pause.set``. Score those from the static claim, flagged low-confidence —
+    #     never as a proven harmless pause.
+    #   * ``duration_bound_seconds`` is a STATIC read (``calldata.read_max_pause_duration``),
+    #     cross-checked on-fork only as an upper bound. Trust it as a severity-REDUCER
+    #     ONLY when ``auto_expiry is True``; ``auto_expiry is False`` means the fork
+    #     contradicted the static constant, so the bound is not a mitigation.
+    #   * ``duration_bound_seconds is None`` + ``auto_expiry is None`` = an INDEFINITE
+    #     LATCH = the MOST severe freeze, never zero/short.
+    #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
+    #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
+    keep = (
+        "supply_delta_sign",
+        "gate_mutation",
+        "historical",
+        "current_capability",
+        "observed_blast_radius",
+        "auto_expiry",
+        "duration_bound_seconds",
+    )
     summary = {k: raw[k] for k in keep if k in raw}
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not None:
         summary["current_check_passed"] = verdict.current_check_passed
