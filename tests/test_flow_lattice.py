@@ -228,9 +228,10 @@ contract Indirection {
         require(ok);
     }
 
-    // Entry forwards a caller parameter into a helper. Inside the helper a
-    // ``param`` origin is ambiguous (the entry could pass a fixed var OR a
-    // caller address), so it must degrade to indeterminate, not claim theft.
+    // Entry forwards a caller parameter into a helper. The value-flow walk is
+    // rooted at the single entry ``payForward``, so the argument forwarded into
+    // ``_pay`` is unambiguous: ``dest``/``amt`` are the entry's own caller-chosen
+    // params, recovered interprocedurally to ``param`` (a trace across the call).
     function payForward(address dest, uint256 amt) external { _pay(dest, amt); }
     function _pay(address d, uint256 a) internal {
         (bool ok,) = payable(d).call{value: a}("");
@@ -247,12 +248,14 @@ def test_state_var_survives_internal_call(tmp_path):
     assert flow["target_kind"]["kind"] == "immutable"
 
 
-def test_forwarded_param_is_indeterminate_in_callee(tmp_path):
+def test_forwarded_param_recovers_in_callee(tmp_path):
     contract = _compile(tmp_path, INDIRECTION_SRC, "Indirection")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payForward(address,uint256)"])
-    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
-    assert flow["amount_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    # The entry's caller-chosen ``dest``/``amt`` forwarded one hop into ``_pay``:
+    # recovered to ``param`` (a trace, since it crossed the internal-call boundary).
+    assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
+    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
 def test_lattice_reaches_the_claim_witness(tmp_path):

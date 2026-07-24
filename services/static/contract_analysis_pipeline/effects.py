@@ -860,11 +860,24 @@ class _UnitCtx:
       the collapsed value. (State-variable entrypoint Phis are excluded: their
       incoming versions are the same origin, not a cross-branch merge.)
     * ``nested`` — True when the unit is an internal callee, not the entry
-      point. A ``parameter`` origin inside a callee is ambiguous: the entry may
-      forward a fixed state var OR a caller-chosen argument into it, so we
-      cannot claim ``param`` (theft) — it degrades to ``indeterminate``. A state
+      point. A ``parameter`` origin inside a callee is not self-evidently
+      caller-directed: the entry may forward a fixed state var OR a
+      caller-chosen argument into it. But the value-flow walk is rooted at ONE
+      external entry, so the argument forwarded at each call site along that
+      single path is unambiguous. ``param_bindings`` carries that forwarded
+      origin (see below); a nested ``parameter`` is resolved through it to the
+      entry-rooted kind, and only degrades to ``indeterminate`` when the
+      binding is missing, unresolvable, or divergent across call sites. A state
       var / ``msg.sender`` / constant is contract-global and stays trustworthy
-      across the internal-call boundary."""
+      across the internal-call boundary regardless.
+    * ``param_bindings`` — for a nested unit, maps each of the unit's formal
+      parameter base names to the *neutral origin* (see ``_arg_origin``) the
+      entry-rooted walk forwarded into it at this call site: an entry parameter,
+      ``msg.sender``, ``tx.origin``, ``address(this)``, a constant, or a named
+      state variable. ``None`` on the entry itself (its own parameters ARE the
+      caller-directed origin). Threaded down ``walk`` per call site; a helper
+      reached from two sites with divergent bindings is re-walked so the
+      cross-site fold collapses the disagreement to ``indeterminate``."""
 
     def __init__(
         self,
@@ -874,6 +887,7 @@ class _UnitCtx:
         alias_indeterminate: set[str],
         setter_scan_complete: bool,
         nested: bool,
+        param_bindings: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         # Context-independent, shared across every entry that reaches this unit.
         self.engine = bundle.engine
@@ -886,6 +900,7 @@ class _UnitCtx:
         self.alias_indeterminate = alias_indeterminate
         self.setter_scan_complete = setter_scan_complete
         self.nested = nested
+        self.param_bindings = param_bindings
 
 
 class _EngineBundle:
@@ -917,6 +932,7 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
     cached = _ENGINE_BUNDLE.get(unit)
     if cached is not None:
         return cached
+    from slither.core.cfg.node import NodeType  # type: ignore[import]
     from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
     from slither.slithir.operations import Phi  # type: ignore[import]
 
@@ -928,11 +944,18 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
     merged: set[str] = set()
     def_by_id: dict[int, Any] = {}
     for node in getattr(unit, "nodes", []) or []:
+        # An ENTRYPOINT-node Phi is a parameter-binding phi (Slither's
+        # interprocedural SSA linking a callee param to its caller argument), NOT
+        # an intra-function cross-branch merge. Counting it as "merged" would
+        # spuriously force every forwarded-param destination in an internal
+        # helper to indeterminate. A genuine reassignment merge lives at an
+        # ENDIF/other body node and is still caught.
+        is_entrypoint = getattr(node, "type", None) == NodeType.ENTRYPOINT
         for ir in getattr(node, "irs_ssa", ()) or ():
             lvalue = getattr(ir, "lvalue", None)
             if lvalue is not None:
                 def_by_id[id(lvalue)] = ir
-            if isinstance(ir, Phi):
+            if isinstance(ir, Phi) and not is_entrypoint:
                 nsv = getattr(lvalue, "non_ssa_version", None) or lvalue
                 if isinstance(nsv, LocalVariable):
                     base = _base_name(getattr(lvalue, "name", None))
@@ -953,6 +976,7 @@ def _build_unit_ctx(
     setters: set[str],
     alias_indeterminate: set[str],
     setter_scan_complete: bool,
+    param_bindings: dict[str, tuple[str, ...]] | None = None,
 ) -> _UnitCtx:
     return _UnitCtx(
         _engine_bundle_for(unit),
@@ -961,6 +985,7 @@ def _build_unit_ctx(
         alias_indeterminate,
         setter_scan_complete,
         not is_entry,
+        param_bindings,
     )
 
 
@@ -1051,34 +1076,235 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
 
 
-def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
-    if not srcs or is_top(srcs):
-        return "indeterminate"
-    # ``computed`` is a wrapper tag Binary/Member ops attach alongside the real
-    # operand sources; it is never itself a destination origin.
-    meaningful = {s.kind for s in srcs} - {"computed"}
-    if len(meaningful) != 1:
-        # empty (only computed) or a cross-branch/Phi MIX -> never guess a member.
-        return "indeterminate"
-    kind = next(iter(meaningful))
+# A ``neutral origin`` is the entry-rooted source of a value forwarded across an
+# internal-call boundary, independent of whether the value is used as a
+# destination or an amount. One of: ``("param",)`` (an entry parameter, the
+# caller-directed origin), ``("msg_sender",)``, ``("caller_controlled",)``
+# (tx.origin), ``("self",)`` (address(this)), ``("constant",)``,
+# ``("state_variable", name)``, or ``("indeterminate",)``. ``_arg_origin``
+# computes it for a call-site argument (chaining through the caller's own
+# bindings); ``_origin_to_*_kind`` translates it back into the destination /
+# amount lattice at the use site.
+
+
+def _single_param_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
+    """The neutral origin one ``parameter`` source resolves to. On the entry its
+    own parameter IS the caller-directed origin → ``("param",)``. In a nested
+    callee look it up in the forwarded ``param_bindings``; a missing binding →
+    ``("indeterminate",)``."""
+    if not ctx.nested:
+        return ("param",)
+    if ctx.param_bindings is None:
+        return ("indeterminate",)
+    base = _base_name(source.parameter_name) if source.parameter_name else None
+    return ctx.param_bindings.get(base, ("indeterminate",)) if base else ("indeterminate",)
+
+
+def _source_neutral_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
+    """One provenance source → its neutral origin. A ``parameter`` chains through
+    the entry-rooted binding (``_single_param_origin``); every other kind maps to
+    a contract-global origin. Anything not a clean single origin (view/external
+    call, block context, signature recovery) → ``("indeterminate",)``.
+
+    This is what neutralizes Slither's entrypoint-Phi parameter binding: a nested
+    forwarded param carries BOTH its own ``parameter`` seed AND the caller's
+    argument source unioned in by the entry Phi. Resolving every source to a
+    neutral origin and demanding they AGREE turns a consistent echo into that one
+    origin, and any cross-site contamination into ``indeterminate``."""
+    kind = source.kind
+    if kind == "parameter":
+        return _single_param_origin(source, ctx)
     if kind == "msg_sender":
-        return "msg_sender"
+        return ("msg_sender",)
     if kind == "tx_origin":
         # The transaction origin (an EOA the caller controls) — a proven
         # caller-directed destination, theft-shaped like msg_sender/param, but a
         # distinct address fact so it is not folded into msg_sender.
-        return "caller_controlled"
+        return ("caller_controlled",)
     if kind == "self_address":
-        return "self"
-    if kind == "parameter":
-        return "indeterminate" if ctx.nested else "param"
+        return ("self",)
     if kind == "constant":
-        return "constant"
+        # Carry the literal so a provably-zero value call can be recognized as a
+        # non-flow. Classification only reads ``origin[0]`` so the extra element
+        # is inert for the target/amount lattice.
+        return ("constant", source.constant_value or "")
     if kind == "state_variable":
-        names = {s.state_variable_name for s in srcs if s.kind == "state_variable" and s.state_variable_name}
-        subs = {_state_var_target_kind(n, ctx) for n in names}
-        return next(iter(subs)) if len(subs) == 1 else "indeterminate"
+        return ("state_variable", source.state_variable_name) if source.state_variable_name else ("indeterminate",)
     # view_call, external_call, block_context, signature_recovery, top.
+    return ("indeterminate",)
+
+
+def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
+    """The neutral origin a single call-site argument forwards, resolved in the
+    caller's entry-rooted context. Every meaningful source resolves to a neutral
+    origin and they must AGREE; any merge / unresolvable / multi-origin shape →
+    ``("indeterminate",)`` — never a guessed member."""
+    if operand is None or _reaches_merged_local(operand, ctx):
+        return ("indeterminate",)
+    srcs = ctx.engine._sources_for_value(operand)
+    if not srcs or is_top(srcs):
+        return ("indeterminate",)
+    origins = {_source_neutral_origin(s, ctx) for s in srcs if s.kind != "computed"}
+    if len(origins) == 1 and ("indeterminate",) not in origins:
+        return next(iter(origins))
+    return ("indeterminate",)
+
+
+def _is_zero_literal(value: str) -> bool:
+    try:
+        return int(value, 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _amount_is_provably_zero(operand: Any, ctx: _UnitCtx) -> bool:
+    """True when a value-call's ``call_value`` provably resolves to constant zero,
+    threading the caller binding (OZ ``SafeERC20`` routes token transfers through
+    ``Address.functionCallWithValue(token, data, 0)`` — a ``.call{value: value}``
+    whose ``value`` param is bound to the literal ``0``). A zero-value call moves
+    no ETH, so it is not a value-out flow and must not fold with a real send."""
+    origin = _arg_origin(operand, ctx)
+    return origin[0] == "constant" and len(origin) > 1 and _is_zero_literal(origin[1])
+
+
+def _origin_to_target_kind(origin: tuple[str, ...], ctx: _UnitCtx) -> str:
+    tag = origin[0]
+    if tag == "param":
+        return "param"
+    if tag == "msg_sender":
+        return "msg_sender"
+    if tag == "caller_controlled":
+        return "caller_controlled"
+    if tag == "self":
+        return "self"
+    if tag == "constant":
+        return "constant"
+    if tag == "state_variable":
+        return _state_var_target_kind(origin[1], ctx)
+    return "indeterminate"
+
+
+def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
+    tag = origin[0]
+    if tag == "param":
+        return "param"
+    if tag == "constant":
+        return "fixed_constant"
+    if tag == "state_variable":
+        return "bounded_by_storage"
+    # An address origin (msg.sender / tx.origin / self) forwarded as an amount is
+    # not a meaningful value bound — stay indeterminate rather than invent one.
+    return "indeterminate"
+
+
+def _element_base_vars(operand: Any, ctx: _UnitCtx) -> set[str] | None:
+    """If ``operand`` reads a mapping/struct element rooted at state var(s)
+    (``map[k]`` / ``s.field`` / ``map[k].field``, possibly via a storage-pointer
+    local ``Req storage rq = _requests[id]; rq.recipient``), return the set of
+    base state-var names. ``None`` when it is not such an access.
+
+    This is a POSITIVE structural test on the operand's def-use chain — an
+    ``Index`` / ``Member`` op rooted at a state variable — so it distinguishes a
+    genuine mapping element (base state var + parameter KEY) from the
+    source-set-identical shape a forwarded param produces via the entrypoint Phi
+    (which has no Index/Member IR). Used for destination classification only."""
+    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+
+    seen: set[int] = set()
+    stack: list[Any] = [operand]
+    names: set[str] = set()
+    found_access = False
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        if isinstance(v, StateVariable) or isinstance(getattr(v, "non_ssa_version", None), StateVariable):
+            # A bare state-var read only counts as an element base when it was
+            # reached THROUGH an Index/Member (found_access) — a whole-var
+            # destination stays a plain state_variable classification.
+            continue
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn == "TypeConversion":
+            stack.append(getattr(ir, "variable", None))
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+        elif tn in ("Index", "Member"):
+            found_access = True
+            base = getattr(ir, "variable_left", None)
+            base_nsv = getattr(base, "non_ssa_version", None)
+            base_var = (
+                base if isinstance(base, StateVariable) else base_nsv if isinstance(base_nsv, StateVariable) else None
+            )
+            if base_var is not None:
+                if base_var.name:
+                    names.add(base_var.name)
+            else:
+                stack.append(base)
+        # An unknown def (call return, etc.) ends this branch.
+    return names if (found_access and names) else None
+
+
+def _element_target_kind(operand: Any, ctx: _UnitCtx) -> str | None:
+    """The base-storage-var classification of a mapping/struct element
+    destination — ``storage_setter`` when the base var has a redirecting writer,
+    ``storage_no_setter`` only when it provably has none and the scan is complete.
+    Classified from the BASE var only, NEVER the caller-supplied key/param, and
+    NEVER a false ``param``. ``None`` when the operand is not an element read."""
+    bases = _element_base_vars(operand, ctx)
+    if bases is None:
+        return None
+    kinds = {_state_var_target_kind(n, ctx) for n in bases}
+    return next(iter(kinds)) if len(kinds) == 1 else "indeterminate"
+
+
+def _forwarded_param_sources(srcs: Any, ctx: _UnitCtx) -> list[Any] | None:
+    """In a nested callee reached through a DIRECT forwarded read, the
+    ``parameter`` sources whose bindings are the authoritative single-entry-path
+    origin — or ``None`` when the drop-the-rest shortcut is not sound and the
+    caller must use the all-sources-agree path instead.
+
+    The other non-parameter sources present alongside a *directly-read* nested
+    parameter can only be Slither entrypoint-Phi echoes (the parameter's
+    interprocedural binding from OTHER call sites / entries) — a genuine in-body
+    second origin needs a body Phi, already caught by ``_reaches_merged_local``.
+    So for a direct read those echoes are safely dropped and the binding decides.
+
+    But a ``computed`` operand (``Binary`` / ``Member`` / ``Unary`` / ``Length`` /
+    ``SolidityCall`` attach a ``computed`` wrapper alongside ALL of their operand
+    sources) can combine the forwarded parameter with a genuine co-origin and no
+    Phi — ``dest = uint160(to) ^ uint160(owner)``. Dropping the co-origin there
+    would guess the ``param`` member of a real union and make the nested
+    classification MORE specific than the byte-identical entry-level code (which
+    sees ``{parameter, state_variable}`` and yields indeterminate). So a computed
+    operand returns ``None`` and falls through to the agreement path, where the
+    disagreement correctly yields indeterminate while a computed-but-single-origin
+    shape (a struct-member read of a forwarded param) still recovers."""
+    if not ctx.nested:
+        return None
+    if any(s.kind == "computed" for s in srcs):
+        return None
+    params = [s for s in srcs if s.kind == "parameter"]
+    return params or None
+
+
+def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
+    if not srcs or is_top(srcs):
+        return "indeterminate"
+    # ``computed`` is a wrapper tag Binary/Member ops attach alongside the real
+    # operand sources; it is never itself a destination origin. Every real source
+    # resolves to a neutral origin (a nested forwarded ``parameter`` through its
+    # binding); a single agreeing origin classifies, any MIX -> indeterminate.
+    forwarded = _forwarded_param_sources(srcs, ctx)
+    if forwarded is not None:
+        kinds = {_origin_to_target_kind(_single_param_origin(s, ctx), ctx) for s in forwarded}
+    else:
+        kinds = {_origin_to_target_kind(_source_neutral_origin(s, ctx), ctx) for s in srcs if s.kind != "computed"}
+    if len(kinds) == 1 and "indeterminate" not in kinds:
+        return next(iter(kinds))
     return "indeterminate"
 
 
@@ -1097,15 +1323,13 @@ def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
         if has_balance and not has_value:
             return "whole_balance"
         return "indeterminate"
-    if len(meaningful) != 1:
-        return "indeterminate"
-    kind = next(iter(meaningful))
-    if kind == "parameter":
-        return "indeterminate" if ctx.nested else "param"
-    if kind == "constant":
-        return "fixed_constant"
-    if kind == "state_variable":
-        return "bounded_by_storage"
+    forwarded = _forwarded_param_sources(srcs, ctx)
+    if forwarded is not None:
+        kinds = {_origin_to_amount_kind(_single_param_origin(s, ctx)) for s in forwarded}
+    else:
+        kinds = {_origin_to_amount_kind(_source_neutral_origin(s, ctx)) for s in srcs if s.kind != "computed"}
+    if len(kinds) == 1 and "indeterminate" not in kinds:
+        return next(iter(kinds))
     return "indeterminate"
 
 
@@ -1118,11 +1342,24 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     silently picked from an ambiguous set."""
     if operand is None or _reaches_merged_local(operand, ctx):
         return ("indeterminate", "static_trace")
+    # A mapping/struct element destination is classified by its base storage var,
+    # detected positively from the operand IR so it is not confused with a
+    # forwarded parameter (source-set-identical via the entrypoint Phi).
+    if not amount:
+        elem = _element_target_kind(operand, ctx)
+        if elem is not None:
+            return (elem, "static_trace") if elem != "indeterminate" else ("indeterminate", "static_trace")
     srcs = ctx.engine._sources_for_value(operand)
     kind = _amount_kind_from_sources(srcs, ctx) if amount else _target_kind_from_sources(srcs, ctx)
     if kind == "indeterminate":
         return ("indeterminate", "static_trace")
-    tier = "dispositive_ast" if _operand_is_direct(operand, ctx.param_names) else "static_trace"
+    # A ``parameter`` operand resolved inside a nested callee was recovered by
+    # threading the caller's binding across the internal-call boundary — a trace,
+    # not a dispositive AST fact at the entry. State-var / msg.sender reads are
+    # contract-global and stay dispositive regardless of nesting.
+    forwarded_param = ctx.nested and any(s.kind == "parameter" for s in srcs)
+    direct = _operand_is_direct(operand, ctx.param_names) and not forwarded_param
+    tier = "dispositive_ast" if direct else "static_trace"
     return (kind, tier)
 
 
@@ -1140,6 +1377,29 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
     return {"kind": next(iter(kinds)), "tier": tier}
 
 
+# Re-walk insurance: bounds interprocedural recursion when a helper is reached
+# with many distinct forwarded-binding signatures (a wide call DAG). Real helper
+# chains are a handful of hops deep; a cutoff only drops sends past a depth no
+# real destination reaches, in the safe direction (a missing flow, never a
+# guessed one). The per-(unit, bindings) ``visited`` set already guarantees
+# termination — this is belt-and-suspenders against pathological blow-up.
+_VALUE_WALK_DEPTH_CAP = 128
+
+
+def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> dict[str, tuple[str, ...]]:
+    """The param→neutral-origin map forwarded at one internal/library call site,
+    resolved in the caller's ``ctx``. Each callee formal parameter binds to the
+    entry-rooted origin of its positional argument (``_arg_origin``), chaining
+    through the caller's own bindings so a multi-hop forward stays exact."""
+    bindings: dict[str, tuple[str, ...]] = {}
+    args = list(getattr(ir, "arguments", []) or [])
+    for param, arg in zip(getattr(callee, "parameters", []) or [], args):
+        base = _base_name(getattr(param, "name", None))
+        if base:
+            bindings[base] = _arg_origin(arg, ctx)
+    return bindings
+
+
 def _value_flow_facts(function: Any) -> list[ValueFlow]:
     """Value movement facts, transitively. ``transferFrom`` whose ``from``
     is ``address(this)`` flows *out*; native ``transfer``/``send`` are value
@@ -1153,7 +1413,10 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     the first-seen winner."""
     flows: list[ValueFlow] = []
     seen: set[tuple[str, str | None, str, bool, str]] = set()
-    visited: set[int] = set()
+    # Keyed by (unit id, forwarded-binding signature): a helper reached with the
+    # SAME bindings is deduped, but one reached with DIVERGENT bindings across
+    # call sites is re-walked so the cross-site fold collapses to indeterminate.
+    visited: set[tuple[int, Any]] = set()
     target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
 
@@ -1164,14 +1427,13 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     setters = _setter_state_vars(contract) if contract is not None else set()
     alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
     scan_complete = _setter_scan_complete(contract) if contract is not None else False
-    ctx_cache: dict[int, _UnitCtx] = {}
 
-    def unit_ctx(unit: Any, is_entry: bool) -> _UnitCtx:
-        cached = ctx_cache.get(id(unit))
-        if cached is None:
-            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters, alias_indeterminate, scan_complete)
-            ctx_cache[id(unit)] = cached
-        return cached
+    def unit_ctx(unit: Any, is_entry: bool, param_bindings: dict[str, tuple[str, ...]] | None) -> _UnitCtx:
+        # Fresh per (unit, bindings); the expensive per-unit ProvenanceEngine is
+        # memoized inside ``_engine_bundle_for``, so this wrapper is cheap.
+        return _build_unit_ctx(
+            unit, is_entry, state_vars_by_name, setters, alias_indeterminate, scan_complete, param_bindings
+        )
 
     def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx) -> None:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
@@ -1182,12 +1444,15 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         seen.add(key)
         flows.append(flow)
 
-    def walk(unit: Any, origin: str, is_entry: bool) -> None:
-        key = id(unit)
-        if key in visited:
+    def walk(
+        unit: Any, origin: str, is_entry: bool, param_bindings: dict[str, tuple[str, ...]] | None, depth: int
+    ) -> None:
+        sig = None if param_bindings is None else frozenset(param_bindings.items())
+        key = (id(unit), sig)
+        if key in visited or depth > _VALUE_WALK_DEPTH_CAP:
             return
         visited.add(key)
-        ctx: _UnitCtx | None = None  # built lazily only if the unit moves value
+        ctx: _UnitCtx | None = None  # built lazily only if the unit moves value or forwards args
 
         this_ids: set[int] = set()
         this_names: set[str] = set()
@@ -1209,7 +1474,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 op = type(ir).__name__
                 if op in ("Transfer", "Send"):
                     if ctx is None:
-                        ctx = unit_ctx(unit, is_entry)
+                        ctx = unit_ctx(unit, is_entry, param_bindings)
                     add(
                         {
                             "kind": "native_transfer_send",
@@ -1229,7 +1494,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         from_arg = arguments[0] if arguments else None
                         from_self = _arg_is_address_this(from_arg, this_ids, this_names)
                         if ctx is None:
-                            ctx = unit_ctx(unit, is_entry)
+                            ctx = unit_ctx(unit, is_entry, param_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -1244,7 +1509,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         if ctx is None:
-                            ctx = unit_ctx(unit, is_entry)
+                            ctx = unit_ctx(unit, is_entry, param_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -1259,26 +1524,35 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
                     if ctx is None:
-                        ctx = unit_ctx(unit, is_entry)
-                    add(
-                        {
-                            "kind": "low_level_value_call",
-                            "selector": None,
-                            "direction": "out",
-                            "from_is_self": True,
-                            "origin": origin,
-                        },
-                        getattr(ir, "destination", None),
-                        getattr(ir, "call_value", None),
-                        ctx,
-                    )
+                        ctx = unit_ctx(unit, is_entry, param_bindings)
+                    call_value = getattr(ir, "call_value", None)
+                    # A provably-zero value call (OZ SafeERC20's
+                    # ``functionCallWithValue(token, data, 0)``) moves no ETH — not
+                    # a value-out flow, and must not fold with a real send on the
+                    # same function's flow key.
+                    if not _amount_is_provably_zero(call_value, ctx):
+                        add(
+                            {
+                                "kind": "low_level_value_call",
+                                "selector": None,
+                                "direction": "out",
+                                "from_is_self": True,
+                                "origin": origin,
+                            },
+                            getattr(ir, "destination", None),
+                            call_value,
+                            ctx,
+                        )
                 if op in ("InternalCall", "LibraryCall"):
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-                        walk(callee, child_origin, False)
+                        if ctx is None:
+                            ctx = unit_ctx(unit, is_entry, param_bindings)
+                        child_bindings = _bindings_for_call(ir, callee, ctx)
+                        walk(callee, child_origin, False, child_bindings, depth + 1)
 
-    walk(function, "body", True)
+    walk(function, "body", True, None, 0)
     for flow in flows:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target = _fold_sites(target_sites.get(key, []))
