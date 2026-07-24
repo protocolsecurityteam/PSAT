@@ -629,11 +629,18 @@ def _base_name(name: Any) -> str | None:
 
 
 # Contract-level setter set: state vars written by any non-constructor function
-# body. A setter's existence is a dispositive fact; its *absence* across the
-# whole contract's code is a sound proof that a non-immutable var cannot be
-# redirected post-deploy (Solidity storage is only writable by the owning
-# contract's own code). Memoized per contract for the build pass.
+# body, as Slither attributes writes. A setter's *existence* is a dispositive
+# fact. Its *absence* is only a sound proof that a non-immutable var cannot be
+# redirected post-deploy when the scan is DISPOSITIVELY COMPLETE — i.e. Slither
+# attributed every write in the contract's code. Two blind spots break that
+# precondition and are checked by ``_setter_scan_complete``: a raw/computed-slot
+# ``sstore`` (Slither attributes ``x.slot`` writes to ``x`` but not
+# ``sstore(0, …)`` / keccak-slot writes), and any ``delegatecall`` (foreign code
+# can write any slot as this contract). When the scan is incomplete, "no setter"
+# degrades to ``indeterminate`` — never a proven-negative "fixed destination".
+# Memoized per contract for the build pass.
 _SETTER_VARS: WeakKeyDictionary[Any, set[str]] = WeakKeyDictionary()
+_SETTER_SCAN_COMPLETE: WeakKeyDictionary[Any, bool] = WeakKeyDictionary()
 
 
 def _setter_state_vars(contract: Any) -> set[str]:
@@ -654,6 +661,45 @@ def _setter_state_vars(contract: Any) -> set[str]:
                 setters.add(name)
     _SETTER_VARS[contract] = setters
     return setters
+
+
+def _setter_scan_complete(contract: Any) -> bool:
+    """True iff Slither's write attribution is exhaustive for this contract, so
+    the *absence* of a setter is dispositive. False when a value could be
+    written through a channel the attributed-write scan cannot see:
+
+    * an unattributed assembly ``sstore`` — Slither lowers ``sstore(x.slot, …)``
+      to an attributed write of ``x`` (no ``sstore`` IR survives), so a residual
+      ``SolidityCall sstore(...)`` IR is exactly the raw-numeric / computed-slot
+      write it could not attribute;
+    * a ``delegatecall`` / ``callcode`` — foreign code executes in this
+      contract's storage context and may write any slot.
+
+    Modifiers are scanned too (assembly can live in a guard body). Memoized."""
+    cached = _SETTER_SCAN_COMPLETE.get(contract)
+    if cached is not None:
+        return cached
+    units = list(getattr(contract, "functions", []) or []) + list(getattr(contract, "modifiers", []) or [])
+    complete = True
+    for unit in units:
+        if not complete:
+            break
+        for node in getattr(unit, "nodes", []) or []:
+            for ir in _node_irs(node):
+                tn = type(ir).__name__
+                if tn == "LowLevelCall":
+                    if getattr(ir, "function_name", None) in ("delegatecall", "callcode"):
+                        complete = False
+                        break
+                elif tn == "SolidityCall":
+                    name = getattr(getattr(ir, "function", None), "name", "") or ""
+                    if name.startswith(("sstore(", "delegatecall(", "callcode(")):
+                        complete = False
+                        break
+            if not complete:
+                break
+    _SETTER_SCAN_COMPLETE[contract] = complete
+    return complete
 
 
 class _UnitCtx:
@@ -682,6 +728,7 @@ class _UnitCtx:
         def_by_id: dict[int, Any],
         state_vars_by_name: dict[str, Any],
         setters: set[str],
+        setter_scan_complete: bool,
         nested: bool,
     ) -> None:
         self.engine = engine
@@ -690,10 +737,17 @@ class _UnitCtx:
         self.def_by_id = def_by_id
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
+        self.setter_scan_complete = setter_scan_complete
         self.nested = nested
 
 
-def _build_unit_ctx(unit: Any, is_entry: bool, state_vars_by_name: dict[str, Any], setters: set[str]) -> _UnitCtx:
+def _build_unit_ctx(
+    unit: Any,
+    is_entry: bool,
+    state_vars_by_name: dict[str, Any],
+    setters: set[str],
+    setter_scan_complete: bool,
+) -> _UnitCtx:
     from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
     from slither.slithir.operations import Phi  # type: ignore[import]
 
@@ -715,7 +769,9 @@ def _build_unit_ctx(unit: Any, is_entry: bool, state_vars_by_name: dict[str, Any
                     base = _base_name(getattr(lvalue, "name", None))
                     if base:
                         merged.add(base)
-    return _UnitCtx(engine, param_names, merged, def_by_id, state_vars_by_name, setters, not is_entry)
+    return _UnitCtx(
+        engine, param_names, merged, def_by_id, state_vars_by_name, setters, setter_scan_complete, not is_entry
+    )
 
 
 def _ir_source_operands(ir: Any) -> list[Any]:
@@ -785,7 +841,12 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
         return "constant"
     if getattr(var, "is_immutable", False):
         return "immutable"
-    return "storage_setter" if name in ctx.setters else "storage_no_setter"
+    if name in ctx.setters:
+        return "storage_setter"
+    # No attributed setter. Only a *complete* scan makes that a proven negative
+    # ("fixed destination"); an assembly-sstore/delegatecall blind spot leaves it
+    # unknown — never assert immutability we could not prove.
+    return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
 
 
 def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
@@ -895,12 +956,13 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
     }
     setters = _setter_state_vars(contract) if contract is not None else set()
+    scan_complete = _setter_scan_complete(contract) if contract is not None else False
     ctx_cache: dict[int, _UnitCtx] = {}
 
     def unit_ctx(unit: Any, is_entry: bool) -> _UnitCtx:
         cached = ctx_cache.get(id(unit))
         if cached is None:
-            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters)
+            cached = _build_unit_ctx(unit, is_entry, state_vars_by_name, setters, scan_complete)
             ctx_cache[id(unit)] = cached
         return cached
 

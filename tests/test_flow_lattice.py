@@ -272,3 +272,77 @@ def test_lattice_reaches_the_claim_witness(tmp_path):
 
     routing = flow_out_witness("withdrawEther()")
     assert any(e.get("target_kind") == {"kind": "immutable", "tier": "static_trace"} for e in routing)
+
+
+# ---------------------------------------------------------------------------
+# Setter-scan completeness: ``storage_no_setter`` is a proven negative only when
+# Slither's write attribution is exhaustive. A raw/computed-slot ``sstore`` or a
+# ``delegatecall`` is a write channel the scan cannot see, so "no attributed
+# setter" must NOT be read as "fixed destination" — it degrades to indeterminate
+# (never storage_setter, which would assert an unproven positive).
+# ---------------------------------------------------------------------------
+
+_RAW_SLOT_SRC = """
+pragma solidity ^0.8.20;
+contract RawSlot {
+    address public collector;                       // no Solidity setter
+    function setRaw(address t) external { assembly { sstore(0, t) } }  // unattributed
+    function pay() external { (bool ok,) = payable(collector).call{value: 1}(""); require(ok); }
+}
+"""
+
+_DELEGATECALL_SRC = """
+pragma solidity ^0.8.20;
+contract Dele {
+    address public collector;                       // no setter
+    function forward(address a, bytes calldata d) external { (bool ok,) = a.delegatecall(d); require(ok); }
+    function pay() external { (bool ok,) = payable(collector).call{value: 1}(""); require(ok); }
+}
+"""
+
+_SLOT_SYMBOL_SRC = """
+pragma solidity ^0.8.20;
+contract SlotSym {
+    address public collector;
+    function setAttr(address t) external { assembly { sstore(collector.slot, t) } }  // attributed to collector
+    function pay() external { (bool ok,) = payable(collector).call{value: 1}(""); require(ok); }
+}
+"""
+
+_CLEAN_NO_SETTER_SRC = """
+pragma solidity ^0.8.20;
+contract Clean {
+    address public collector;                       // set once in ctor, never again
+    constructor(address c) { collector = c; }
+    function pay() external { (bool ok,) = payable(collector).call{value: 1}(""); require(ok); }
+}
+"""
+
+
+def test_raw_slot_sstore_defeats_no_setter_proof(tmp_path):
+    contract = _compile(tmp_path, _RAW_SLOT_SRC, "RawSlot")
+    effects = build_effects(contract)
+    # An unattributed sstore to a raw slot could redirect collector; the absence
+    # of an attributed setter is no longer dispositive.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
+
+
+def test_delegatecall_defeats_no_setter_proof(tmp_path):
+    contract = _compile(tmp_path, _DELEGATECALL_SRC, "Dele")
+    effects = build_effects(contract)
+    # Foreign code via delegatecall can write any slot as this contract.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
+
+
+def test_slot_symbol_sstore_counts_as_setter(tmp_path):
+    contract = _compile(tmp_path, _SLOT_SYMBOL_SRC, "SlotSym")
+    effects = build_effects(contract)
+    # ``sstore(collector.slot, …)`` IS attributed to collector -> a real setter.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_clean_no_setter_stays_proven_negative(tmp_path):
+    contract = _compile(tmp_path, _CLEAN_NO_SETTER_SRC, "Clean")
+    effects = build_effects(contract)
+    # No delegatecall, no assembly sstore, no setter -> the sound case survives.
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
