@@ -473,21 +473,22 @@ def _extract_value_flows(function) -> list[dict]:
     ETH send has no token). ``is_parameter`` says that address is one of THIS
     function's own parameters — a nested helper's formal is not an ABI slot and
     so is never reported here (the effects lattice's ``target_param_index``
-    resolves those interprocedurally)."""
+    resolves those interprocedurally).
+
+    Every fact below is read off the IR object (``destination``, ``call_value``,
+    the resolved callee): the call's ``repr`` is a debug rendering that can be
+    reformatted upstream without any signal that this stopped working."""
     flows: list[dict] = []
-    param_names = {p.name.lower() for p in function.parameters}
+    parameters = {id(p) for p in function.parameters}
 
     for _ct, call_ir in function.all_high_level_calls():
-        ir_str = str(call_ir)
-        if "dest:" not in ir_str:
+        destination = getattr(call_ir, "destination", None)
+        if destination is None:
             continue
-
-        # Extract dest var name and function name
-        dest_part = ir_str.split("dest:")[1]
-        var_name = dest_part.split("(")[0].strip()
-        var_type = ""
-        if "(" in dest_part:
-            var_type = dest_part.split("(")[1].split(")")[0]
+        var_name = getattr(destination, "name", None)
+        if not isinstance(var_name, str) or not var_name:
+            continue
+        var_type = str(getattr(destination, "type", "") or "")
 
         signature = _callee_signature_from_ir(call_ir)
         selector = _selector_for_signature(signature)
@@ -501,7 +502,7 @@ def _extract_value_flows(function) -> list[dict]:
                 "token_var": var_name,
                 "token_type": var_type or None,
                 "method": signature or selector,
-                "is_parameter": var_name.lower() in param_names,
+                "is_parameter": id(destination) in parameters,
             }
         )
 
@@ -515,25 +516,24 @@ def _extract_value_flows(function) -> list[dict]:
         visited.add(fn_id)
         for node in fn.nodes:
             for ir in node.irs:
-                ir_str = str(ir)
-                if "LOW_LEVEL_CALL" in ir_str and "value:" in ir_str:
-                    # Only a send sited in the entry's OWN body can name its
-                    # recipient in the entry's ABI; one hop inside a helper the
-                    # destination is a callee formal, meaningless to a caller, so
-                    # it stays unnamed here rather than being asserted fixed.
-                    dest = getattr(ir, "destination", None) if is_entry else None
-                    dest_name = getattr(dest, "name", None)
-                    recipient = dest_name if isinstance(dest_name, str) and dest_name.lower() in param_names else None
-                    flows.append(
-                        {
-                            "direction": "eth_out",
-                            "token_var": recipient,
-                            "token_type": "ETH",
-                            "method": "call{value}",
-                            "is_parameter": recipient is not None,
-                        }
-                    )
-                    return
+                if type(ir).__name__ != "LowLevelCall" or getattr(ir, "call_value", None) is None:
+                    continue
+                # Only a send sited in the entry's OWN body can name its
+                # recipient in the entry's ABI; one hop inside a helper the
+                # destination is a callee formal, meaningless to a caller, so
+                # it stays unnamed here rather than being asserted fixed.
+                dest = getattr(ir, "destination", None) if is_entry else None
+                recipient = getattr(dest, "name", None) if dest is not None and id(dest) in parameters else None
+                flows.append(
+                    {
+                        "direction": "eth_out",
+                        "token_var": recipient,
+                        "token_type": "ETH",
+                        "method": "call{value}",
+                        "is_parameter": recipient is not None,
+                    }
+                )
+                return
         for call in _call_or_value(fn, "all_internal_calls"):
             callee = getattr(call, "function", call) if not callable(call) else call
             if hasattr(callee, "nodes"):

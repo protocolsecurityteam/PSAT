@@ -745,9 +745,17 @@ _BURN_ADDRESS = "0x" + "00" * 18 + "dead"
 # ``*StorageLocation`` suffix): ``_OWNER_SLOT`` → owner(); OZ-v5
 # ``OwnableStorageLocation`` → owner() (note "ownable", not "owner");
 # ``_GOVERNOR_SLOT`` / ``GovernorStorageLocation`` → governor();
-# ``_AUTHORITY_SLOT`` / ``AuthorityStorageLocation`` → authority(). governor /
-# authority are checked before owner so a name carrying both resolves to the
-# more specific one.
+# ``_AUTHORITY_SLOT`` / ``AuthorityStorageLocation`` → authority().
+#
+# This is the one authority selection in this module that a NAME decides, and the
+# read it drives is published as the principal. The slot's own value is not on the
+# operand (provenance carries only the identifier for a ``state_variable``
+# source), so there is nothing here to cross-check the getter's return against.
+# Two things bound the damage: a name matching keywords for MORE THAN ONE role is
+# refused outright rather than silently resolved to whichever came first, and the
+# winning candidate stamps its basis into the capability trace
+# (``authority_getter_basis``) so a consumer can see the principal rests on the
+# identifier.
 _SLOT_KEYWORD_TO_GETTER = (
     ("governor", _GOVERNOR_SELECTOR),
     ("authority", _AUTHORITY_SELECTOR),
@@ -915,9 +923,21 @@ def _live_resolve_authority_slot(
     )
 
 
-def _resolve_authority_via_getters(ctx: EvaluationContext | None, selectors: list[str | None]) -> CapabilityExpr | None:
+def _resolve_authority_via_getters(
+    ctx: EvaluationContext | None,
+    selectors: list[str | None],
+    *,
+    bases: list[str] | None = None,
+) -> CapabilityExpr | None:
     """Read an authority through the first of ``selectors`` that gives a concrete
     answer.
+
+    ``bases`` names, per candidate, WHY that selector was tried — the compiler's
+    ABI rule (``auto_getter``), a naming convention (``internal_accessor``,
+    ``slot_name_keyword``), or the operand's own recorded selector. The winning
+    candidate's basis is stamped into the returned capability's trace, so a
+    published principal that rests on an identifier says so on the wire instead
+    of looking as evidenced as one the ABI forced.
 
     Short-circuits only on a *resolved* read (``membership_quality == "exact"`` —
     a real address, or a confirmed renounced/zero), so a literal getter that
@@ -929,13 +949,16 @@ def _resolve_authority_via_getters(ctx: EvaluationContext | None, selectors: lis
     nothing was attempted (no candidate selector, no reachable RPC) so the caller
     can label the placeholder ``not_read``."""
     attempted_failure: CapabilityExpr | None = None
-    for selector in selectors:
+    for index, selector in enumerate(selectors):
         if selector is None:
             continue
         live = _live_resolve_authority(ctx, selector)
         if live is None:
             continue
         if live.membership_quality == "exact":
+            basis = bases[index] if bases is not None and index < len(bases) else None
+            if basis is not None:
+                live.trace.append({"step": "authority_getter_basis", "basis": basis, "selector": selector})
             return live
         attempted_failure = live
     return attempted_failure
@@ -1013,10 +1036,13 @@ def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
     if not _is_storage_layout_constant(name):
         return None
     lowered = name.lower()
-    for keyword, selector in _SLOT_KEYWORD_TO_GETTER:
-        if keyword in lowered:
-            return selector
-    return None
+    matched = {selector for keyword, selector in _SLOT_KEYWORD_TO_GETTER if keyword in lowered}
+    # A locator naming two different roles (``AuthorityOwnableStorageLocation``)
+    # gives no basis for preferring either; picking the first would publish one
+    # real address where the other is equally supported. Refuse instead.
+    if len(matched) != 1:
+        return None
+    return next(iter(matched))
 
 
 # Authority roles whose ``pending`` half names an accept-side 2-step transfer:
@@ -1038,6 +1064,36 @@ def _pending_authority_base(name: str | None) -> str | None:
         return None
     base = bare[len("pending") :]
     return base if base in _PENDING_AUTHORITY_BASENAMES else None
+
+
+def _pending_ceiling_capability(op: dict[str, Any], read_outcome: CapabilityExpr | None) -> CapabilityExpr:
+    """The accept-side ceiling, carrying the evidence it actually rests on.
+
+    The verdict itself is unchanged, but it is NOT read-confirmed: it is reached
+    precisely when nothing could be read (the pending getter reverted, returned
+    empty, or — for the OZ struct member — does not exist). What identifies the
+    gate as the accept half of a 2-step handover is the accessor's ``pending``
+    prefix, i.e. an identifier. The trace records that basis and which read
+    outcome preceded it, so a consumer can tell this ``resolved_empty`` apart
+    from one a live zero-read confirmed."""
+    source = op.get("source")
+    accessor = op.get("callee_signature") if source == "view_call" else op.get("state_variable_name")
+    accessor = accessor if isinstance(accessor, str) else None
+    bare = accessor[:-2] if accessor and accessor.endswith("()") else accessor
+    return CapabilityExpr.finite_set(
+        [],
+        quality="exact",
+        empty_reason="empty_by_design",
+        trace=[
+            {
+                "step": "pending_transfer_ceiling",
+                "basis": "accessor_name",
+                "accessor": accessor,
+                "role": _pending_authority_base(bare),
+                "read_outcome": (read_outcome.empty_reason if read_outcome is not None else "not_attempted"),
+            }
+        ],
+    )
 
 
 def _is_pending_authority_accessor_operand(op: dict[str, Any]) -> bool:
@@ -1280,6 +1336,7 @@ def _resolve_equality_principal(
                     _public_getter_selector_for_internal_accessor(f"{name}()") if name else None,
                     _canonical_authority_selector_for_slot(name),
                 ],
+                bases=["auto_getter", "internal_accessor_convention", "slot_name_keyword"],
             )
         elif op.get("member_path") == ["_owner"]:
             result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
@@ -1308,7 +1365,7 @@ def _resolve_equality_principal(
         # getter to read — is uncallable until a transfer is queued. That is
         # empty-by-design, not an unresolved gap.
         if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
-            return CapabilityExpr.finite_set([], quality="exact", empty_reason="empty_by_design")
+            return _pending_ceiling_capability(cast(dict[str, Any], op), result)
         if result is not None:
             return result  # carries unreadable_revert / unreadable_empty
         # Fallback: a guarding state-var with no getter attempted (struct member /
@@ -1387,7 +1444,13 @@ def _resolve_equality_principal(
                 canonical_selector = _oz_v5_namespaced_authority_selector(signature)
         # Canonical public getter first (when the operand is an internal authority
         # accessor its own selector is dead); otherwise the literal selector.
-        result = _resolve_authority_via_getters(ctx, list(dict.fromkeys((canonical_selector, selector))))
+        candidates = dict.fromkeys((canonical_selector, selector))
+        candidate_basis = {selector: "callee_selector", canonical_selector: "internal_accessor_convention"}
+        result = _resolve_authority_via_getters(
+            ctx,
+            list(candidates),
+            bases=[candidate_basis[c] for c in candidates],
+        )
         if result is not None and result.membership_quality == "exact":
             return result
         # Getter-less slot-backed accessor (Governable ``_pendingGovernor`` reads a
@@ -1411,7 +1474,7 @@ def _resolve_equality_principal(
         # ``_pendingDefaultAdmin.newAdmin`` struct member, which has no nullary
         # getter) is uncallable until a transfer is queued — empty-by-design.
         if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
-            return CapabilityExpr.finite_set([], quality="exact", empty_reason="empty_by_design")
+            return _pending_ceiling_capability(cast(dict[str, Any], op), result)
         if result is not None:
             return result  # carries unreadable_revert / unreadable_empty
         return CapabilityExpr.finite_set(

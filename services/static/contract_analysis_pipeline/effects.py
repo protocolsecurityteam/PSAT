@@ -556,40 +556,166 @@ def _transitive_member_writes(function: Any, wanted: set[str]) -> dict[str, set[
     return out
 
 
-def _looks_like_storage_location(name: str) -> bool:
-    low = name.lower()
-    return "storagelocation" in low or low.endswith("_slot") or low.endswith("slot") or low.endswith("_storage")
+_SLOT_POINTER_CONSTANTS: WeakKeyDictionary[Any, frozenset[str]] = WeakKeyDictionary()
 
 
+def _units_of(contract: Any) -> list[Any]:
+    """Every code unit whose IR belongs to ``contract`` — functions plus
+    modifiers, the two places Slither lowers a body into nodes."""
+    return [*(getattr(contract, "functions", []) or []), *(getattr(contract, "modifiers", []) or [])]
+
+
+def _collect_slot_pointer_constants(contract: Any) -> frozenset[str]:
+    """Constant state vars PROVEN by the lowered IR to denote a storage SLOT.
+
+    Two assembly shapes, both facts of the IR rather than of the identifier:
+
+    * ``assembly { $.slot := C }`` lowers to an ``Assignment`` that binds a
+      *storage-location* local (``is_storage``) from the constant — the ERC-7201
+      namespaced-struct form (OZ v5 ``_getXStorage()``).
+    * ``assembly { sstore(C, v) }`` lowers to an ``Assignment`` whose *lvalue*
+      IS the constant. Solidity forbids assigning to a constant, so outside the
+      synthetic constant-initializer unit (``is_constructor_variables``) this can
+      only be the constant used as a slot number — the Solady / EIP-1967 form.
+
+    Those same two shapes are why Slither attributes a "write" to the constant at
+    all, so the set is exactly the population this classification has to judge.
+    An ordinary ``bytes32`` constant (a role id, a keccak'd domain separator)
+    reaches neither shape and stays a plain ``constant``."""
+    cached = _SLOT_POINTER_CONSTANTS.get(contract)
+    if cached is not None:
+        return cached
+    constants = {
+        name
+        for variable in _all_state_variables(contract)
+        if bool(getattr(variable, "is_constant", False)) and (name := getattr(variable, "name", "") or "")
+    }
+    found: set[str] = set()
+    if constants:
+        for unit in _units_of(contract):
+            initializer = bool(getattr(unit, "is_constructor_variables", False))
+            for node in getattr(unit, "nodes", []) or []:
+                for ir in _node_irs(node):
+                    if type(ir).__name__ != "Assignment":
+                        continue
+                    lvalue = getattr(ir, "lvalue", None)
+                    rvalue = getattr(ir, "rvalue", None)
+                    if bool(getattr(lvalue, "is_storage", False)):
+                        rname = getattr(rvalue, "name", "") or ""
+                        if rname in constants:
+                            found.add(rname)
+                    if initializer:
+                        continue
+                    lname = getattr(lvalue, "name", "") or ""
+                    if lname in constants:
+                        found.add(lname)
+    result = frozenset(found)
+    _SLOT_POINTER_CONSTANTS[contract] = result
+    return result
+
+
+_REENTRANCY_GUARDS: WeakKeyDictionary[Any, frozenset[str]] = WeakKeyDictionary()
+
+# Bounds the transitive walk for the set/restore shape. Guard helpers are one or
+# two hops (``nonReentrant`` -> ``_nonReentrantBefore`` -> ``_reentrancyGuardStorage``);
+# the ``seen`` set already guarantees termination.
+_GUARD_WALK_DEPTH = 6
+
+
+def _nodes_state_writes(nodes: list[Any], seen: set[int], depth: int) -> set[str]:
+    """State-var names written by ``nodes``, following internal/library callees
+    (OZ v5 splits the guard's set and restore into helper calls)."""
+    names: set[str] = set()
+    for node in nodes:
+        names.update(_node_kind_state_writes(node))
+        if depth >= _GUARD_WALK_DEPTH:
+            continue
+        for ir in _node_irs(node):
+            if type(ir).__name__ not in ("InternalCall", "LibraryCall"):
+                continue
+            callee = getattr(ir, "function", None)
+            key = id(callee)
+            if callee is None or key in seen or not getattr(callee, "nodes", None):
+                continue
+            names |= _nodes_state_writes(list(callee.nodes), seen | {key}, depth + 1)
+    return names
+
+
+def _nodes_around_placeholder(modifier: Any) -> tuple[list[Any], list[Any]] | None:
+    """``(pre, post)`` node lists split at the modifier's ``_;`` placeholder, or
+    ``None`` when the modifier has no placeholder."""
+    nodes = list(getattr(modifier, "nodes", []) or [])
+    for index, node in enumerate(nodes):
+        if str(getattr(node, "type", "")).endswith("PLACEHOLDER"):
+            return (nodes[:index], nodes[index + 1 :])
+    return None
+
+
+def _collect_reentrancy_guard_vars(contract: Any) -> frozenset[str]:
+    """State vars PROVEN by the IR to be reentrancy guards: written on BOTH
+    sides of a modifier's ``_;`` placeholder.
+
+    Set-at-entry / restore-at-exit around the wrapped body is the defining shape
+    of a guard and of nothing else — an authority pointer, a pause latch or an
+    accounting balance is never restored to its prior value as the call unwinds.
+    The walk follows internal/library callees, so the OZ form
+    (``nonReentrant`` -> ``_nonReentrantBefore()`` / ``_nonReentrantAfter()``)
+    is recognized as well as the inline Solmate/OZ-v4 form."""
+    cached = _REENTRANCY_GUARDS.get(contract)
+    if cached is not None:
+        return cached
+    guards: set[str] = set()
+    for modifier in getattr(contract, "modifiers", []) or []:
+        split = _nodes_around_placeholder(modifier)
+        if split is None:
+            continue
+        pre, post = split
+        guards |= _nodes_state_writes(pre, set(), 0) & _nodes_state_writes(post, set(), 0)
+    result = frozenset(guards)
+    _REENTRANCY_GUARDS[contract] = result
+    return result
+
+
+# Suppress-only name fallback for reentrancy guards. ``reentrancy_guard`` is a
+# pure SUPPRESSOR — no consumer reads it to admit a fact, they only require
+# ``normal`` — so an extra name-driven hit can withhold a fact but can never
+# publish one, and the invariant "never fail toward an assertion" holds in the
+# direction that matters. It stays because :func:`_collect_reentrancy_guard_vars`
+# only sees the modifier form: a guard set and restored inline in a function body
+# has no placeholder to split on, and letting a ``bool`` one through would put it
+# in front of the pause-latch matcher as a flag some gate reverts on.
 _REENTRANCY_GUARD_NAMES = frozenset(
     {"_status", "_reentrancyguard", "_reentrancystatus", "reentrancylock", "_locked", "locked", "_lock"}
 )
 
 
-def _is_reentrancy_guard_var(variable: Any) -> bool:
-    name = (getattr(variable, "name", "") or "").lower()
+def _is_reentrancy_guard_var(variable: Any, guards: frozenset[str]) -> bool:
+    name = getattr(variable, "name", "") or ""
     if not name:
         return False
-    return "reentran" in name or name in _REENTRANCY_GUARD_NAMES
+    if name in guards:
+        return True
+    low = name.lower()
+    return "reentran" in low or low in _REENTRANCY_GUARD_NAMES
 
 
-def _hygiene_class_for_var(variable: Any, function: Any) -> str:
+def _hygiene_class_for_var(variable: Any, function: Any, contract: Any) -> str:
     """Classify a write for role-fact hygiene. A view/pure function that
-    "writes" is a Slither attribution ghost (OZ v5 namespaced getters);
-    ``*StorageLocation`` / ``*_SLOT`` bytes32 constants are slot pseudo-vars,
-    not the value they point at; reentrancy guards are control noise. All
-    of these must be excluded from role facts but remain raw writes."""
+    "writes" is a Slither attribution ghost (OZ v5 namespaced getters); a
+    constant proven to be an assembly slot locator is a pseudo-var, not the
+    value it points at; reentrancy guards are control noise. All of these must
+    be excluded from role facts but remain raw writes."""
     if _is_view_or_pure(function):
         return "view_writer"
     if variable is None:
         return "normal"
-    type_str = str(getattr(variable, "type", "") or "")
     name = getattr(variable, "name", "") or ""
     if bool(getattr(variable, "is_constant", False)):
-        if type_str == "bytes32" and _looks_like_storage_location(name):
+        if contract is not None and name in _collect_slot_pointer_constants(contract):
             return "storage_location_pseudo"
         return "constant"
-    if _is_reentrancy_guard_var(variable):
+    guards = _collect_reentrancy_guard_vars(contract) if contract is not None else frozenset()
+    if _is_reentrancy_guard_var(variable, guards):
         return "reentrancy_guard"
     return "normal"
 
@@ -623,7 +749,7 @@ def _state_write_facts(function: Any, sinks: list[SinkRecord]) -> list[StateWrit
             )
             continue
         variable = by_name.get(target)
-        hygiene = _hygiene_class_for_var(variable, function)
+        hygiene = _hygiene_class_for_var(variable, function, contract)
         declared_type = str(getattr(variable, "type", "") or "")
         members = member_writes.get(target)
         if members:
@@ -2083,43 +2209,143 @@ _VALUE_WALK_DEPTH_CAP = 128
 # The token-first safe-transfer library idiom (Solmate / Solady ``SafeTransferLib``,
 # OZ ``SafeERC20``): the token is the FIRST argument, so the ``(to, amount)`` /
 # ``(from, to, amount)`` slots are shifted one right of the bare ERC-20 selectors.
-# Their canonical signatures — ``safeTransfer(ERC20,address,uint256)`` /
+# Their own canonical signatures — ``safeTransfer(ERC20,address,uint256)`` /
 # ``safeTransferFrom(ERC20,address,address,uint256)`` — hash to selectors NOT in
 # the bare ERC-20 sets, and Slither lowers them to ``LibraryCall`` (or, when the
-# helper is a plain internal, ``InternalCall``) whose body is pure inline
-# assembly, so the value move is invisible to both the selector scan and the
-# body walk. We recognize the shape by the callee's name + trailing argument
-# types (not a selector, so it holds whichever token type the library was
-# instantiated with) to surface a value move that a router forwards into an
-# in-unit callee. This runs ONLY across a crossed contract boundary
-# (``value_router`` flows); the same-contract classification is left byte-for-byte
-# unchanged, so a contract using ``SafeTransferLib`` in its OWN body keeps its
-# current (empty) flow set.
-_TOKEN_FIRST_SEND_NAMES = frozenset({"safeTransfer", "transfer"})
-_TOKEN_FIRST_PULL_NAMES = frozenset({"safeTransferFrom", "transferFrom"})
+# helper is a plain internal, ``InternalCall``), so the value move is invisible to
+# the selector scan. What identifies the shape is the ERC-20 selector the callee
+# BODY provably issues (below), never the callee's identifier. This runs ONLY
+# across a crossed contract boundary (``value_router`` flows); the same-contract
+# classification is left byte-for-byte unchanged, so a contract using
+# ``SafeTransferLib`` in its OWN body keeps its current (empty) flow set.
+_ERC20_TRANSFER_SELECTOR = _selector_for("transfer(address,uint256)")
+_ERC20_TRANSFER_FROM_SELECTOR = _selector_for("transferFrom(address,address,uint256)")
+
+# How far into the callee to look for the issued selector. Solmate/Solady build
+# it in the helper's own assembly and OZ SafeERC20 builds it in the helper's own
+# ``abi.encodeCall``, so one extra hop only covers a thin wrapper; going deeper
+# would start attributing a nested helper's transfer to an unrelated caller.
+_TOKEN_FIRST_BODY_DEPTH = 1
+
+
+def _selector_of_constant(operand: Any) -> str | None:
+    """The 4-byte selector a constant operand denotes, or ``None``.
+
+    Two encodings, both pure value facts:
+    ``abi.encodeWithSelector(token.transfer.selector, …)`` folds to a ``bytes4``
+    constant equal to the selector; the assembly form
+    ``mstore(ptr, 0xa9059cbb00…00)`` folds to a 32-byte word carrying the
+    selector left-aligned in its top four bytes and zeros below."""
+    value = getattr(operand, "value", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    if value < 1 << 32:
+        return f"0x{value:08x}"
+    if value >> 224 and not value & ((1 << 224) - 1):
+        return f"0x{value >> 224:08x}"
+    return None
+
+
+def _selector_of_member_access(ir: Any) -> str | None:
+    """The selector behind ``<var>.<fn>`` on a contract/interface-typed variable
+    (``abi.encodeCall(token.transfer, …)``), or ``None``.
+
+    The member name is resolved against the DECLARED type's own function list —
+    the compiler's binding — and the selector comes from that declaration's
+    canonical signature. An overloaded or unresolvable member yields ``None``."""
+    if type(ir).__name__ != "Member":
+        return None
+    member = getattr(getattr(ir, "variable_right", None), "value", None)
+    if not isinstance(member, str) or not member:
+        return None
+    declared = getattr(getattr(ir, "variable_left", None), "type", None)
+    target = getattr(declared, "type", None)
+    candidates = [fn for fn in (getattr(target, "functions", None) or []) if (getattr(fn, "name", "") or "") == member]
+    if len(candidates) != 1:
+        return None
+    return _selector_for(_function_full_name(candidates[0]))
+
+
+def _ir_operands(ir: Any) -> list[Any]:
+    """Every value operand of one IR, flattening the argument tuples
+    ``abi.encodeCall`` nests."""
+    operands: list[Any] = []
+    for attr in ("rvalue", "variable", "variable_left", "variable_right"):
+        value = getattr(ir, attr, None)
+        if value is not None:
+            operands.append(value)
+    for argument in getattr(ir, "arguments", None) or []:
+        operands.extend(argument if isinstance(argument, (list, tuple)) else [argument])
+    return operands
+
+
+def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> set[str]:
+    """The bare ERC-20 move selectors ``unit``'s body provably issues.
+
+    Evidence is a resolved external call whose canonical signature IS an ERC-20
+    move, a selector VALUE the body materializes (assembly literal or
+    ``abi.encodeWithSelector`` constant), or a member access the compiler bound
+    to an ERC-20 declaration (``abi.encodeCall``). None of it reads an identifier
+    of the unit itself."""
+    found: set[str] = set()
+    if unit is None or depth > _TOKEN_FIRST_BODY_DEPTH:
+        return found
+    wanted = {_ERC20_TRANSFER_SELECTOR, _ERC20_TRANSFER_FROM_SELECTOR}
+    for node in getattr(unit, "nodes", []) or []:
+        for ir in _node_irs(node):
+            op = type(ir).__name__
+            if op == "HighLevelCall":
+                called = _selector_for(_callee_signature(ir))
+                if called in wanted:
+                    found.add(str(called))
+            for operand in _ir_operands(ir):
+                selector = _selector_of_constant(operand)
+                if selector in wanted:
+                    found.add(str(selector))
+            member = _selector_of_member_access(ir)
+            if member in wanted:
+                found.add(str(member))
+            if op in ("InternalCall", "LibraryCall"):
+                callee = getattr(ir, "function", None)
+                key = id(callee)
+                if callee is not None and key not in seen and getattr(callee, "nodes", None):
+                    found |= _erc20_selectors_issued(callee, seen | {key}, depth + 1)
+    return found
 
 
 def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
     """Classify a token-first library/internal transfer call, or ``None``.
 
-    Returns ``("send", to, amount)`` for ``safeTransfer(<Token>, to, amount)`` and
-    ``("pull", from, to, amount)`` for ``safeTransferFrom(<Token>, from, to,
-    amount)`` — the operands being the call-site arguments in the SHIFTED
-    positions. The trailing types must match exactly, which discriminates the
-    token-first form from the bare ``transfer(address,uint256)`` /
-    ``transferFrom(address,address,uint256)`` (2 / 3 args) the selector scan
-    already handles, and from ERC-721 ``safeTransferFrom(...,bytes)`` (a ``bytes``
-    tail)."""
+    Returns ``("send", to, amount)`` for ``<helper>(<Token>, to, amount)`` and
+    ``("pull", from, to, amount)`` for ``<helper>(<Token>, from, to, amount)`` —
+    the operands being the call-site arguments in the SHIFTED positions.
+
+    Two independent facts must agree, and neither is the helper's name. The
+    callee's body must provably issue exactly ONE bare ERC-20 move selector,
+    which is what picks send vs pull; a body issuing both (or neither) is
+    ``None``. The trailing argument types must then match that selector's ABI
+    tail, which discriminates the token-first form from the bare
+    ``transfer(address,uint256)`` / ``transferFrom(address,address,uint256)``
+    (2 / 3 args) the selector scan already handles, and from ERC-721
+    ``safeTransferFrom(...,bytes)`` (a ``bytes`` tail). With the token occupying
+    the leading slot, the remaining formals are the only type-consistent
+    carriers of the ABI tail the callee forwards."""
+    callee = getattr(ir, "function", None)
+    if callee is None or not getattr(callee, "nodes", None):
+        return None
     signature = _callee_signature(ir)
     if not signature or "(" not in signature or not signature.endswith(")"):
         return None
-    name = signature[: signature.index("(")]
     inner = signature[signature.index("(") + 1 : -1]
     types = [t.strip() for t in inner.split(",")] if inner else []
     args = list(getattr(ir, "arguments", []) or [])
-    if name in _TOKEN_FIRST_SEND_NAMES and types[1:] == ["address", "uint256"] and len(args) >= 3:
+    issued = _erc20_selectors_issued(callee, frozenset({id(callee)}), 0)
+    if len(issued) != 1:
+        return None
+    selector = next(iter(issued))
+    if selector == _ERC20_TRANSFER_SELECTOR and types[1:] == ["address", "uint256"] and len(args) >= 3:
         return ("send", args[1], args[2])
-    if name in _TOKEN_FIRST_PULL_NAMES and types[1:] == ["address", "address", "uint256"] and len(args) >= 4:
+    if selector == _ERC20_TRANSFER_FROM_SELECTOR and types[1:] == ["address", "address", "uint256"] and len(args) >= 4:
         return ("pull", args[1], args[2], args[3])
     return None
 
