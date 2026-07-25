@@ -58,7 +58,7 @@ from .summaries import (
 )
 from .token_slots import derive_token_slots
 
-SCHEMA_VERSION = "semantic-2"
+SCHEMA_VERSION = "semantic-3"
 
 
 class SinkRecord(TypedDict):
@@ -135,6 +135,13 @@ class ValueFlow(TypedDict):
     # argument). Consumers plant a probe address in that ABI slot, so a guessed
     # index would probe the wrong argument — absent means "do not guess".
     target_param_index: NotRequired[int]
+    # Positional index of the ENTRY function's parameter carrying the AMOUNT,
+    # under exactly the ``target_param_index`` discipline: present only when
+    # ``amount_kind`` is ``param`` and every contributing site agreed on the slot.
+    # This is the dispositive answer to "which argument is the quantity", which a
+    # prober needs before it substitutes a nonzero value — a quantity written into
+    # an id/index/deadline argument is how a probe reverts on its own input.
+    amount_param_index: NotRequired[int]
 
 
 class EffectInfo(TypedDict):
@@ -155,6 +162,16 @@ class EffectInfo(TypedDict):
     # state-changing entry point that produced no sink (e.g. an inline-assembly
     # writer) as an honest unsupported row.
     state_changing: bool
+    # Declared parameter names, positionally aligned with ``abi_signature``'s
+    # types (empty string where the source declared none). The prober reads them
+    # to tell a quantity argument from an id/index/deadline before substituting a
+    # value; the name is the only place that role is written down for a parameter
+    # no gate and no value flow mentions.
+    parameter_names: list[str]
+    # ABI payability. A probe that attaches ``msg.value`` to a NON-payable target
+    # reverts with EMPTY data before the body runs, so the attempt witnesses
+    # nothing and the prober skips it.
+    payable: bool
     # True when at least one sink on this function originated from inline
     # assembly (sstore/delegatecall lowered to a SolidityCall IR). The gate
     # guarding such a write may itself be inline assembly and therefore
@@ -1710,6 +1727,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
+    amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
 
     contract = getattr(function, "contract", None)
     state_vars_by_name: dict[str, Any] = {
@@ -1743,6 +1761,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
         amount_sites.setdefault(key, []).append(_classify_site(amount, ctx, amount=True))
         target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
+        amount_indexes.setdefault(key, []).append(_operand_param_index(amount, ctx))
         if key in seen:
             return
         seen.add(key)
@@ -1877,17 +1896,20 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 flow["target_param_index"] = index
         if amount is not None:
             flow["amount_kind"] = amount
+            index = _fold_param_index(amount, amount_indexes.get(key, []))
+            if index is not None:
+                flow["amount_param_index"] = index
     return flows
 
 
-def _fold_param_index(target: KindTier, indexes: list[int | None]) -> int | None:
-    """The one entry-parameter slot every contributing site sent funds to.
+def _fold_param_index(kind: KindTier, indexes: list[int | None]) -> int | None:
+    """The one entry-parameter slot every contributing site resolved to.
 
-    Requires the folded kind to BE ``param`` (so the destination is an entry
-    parameter at all) and every site to have resolved the same index. A site that
-    resolved none, or two sites resolving different positions, yields ``None``:
-    the flow is still a ``param`` destination, we just cannot say which slot."""
-    if target["kind"] != "param" or not indexes:
+    Requires the folded kind to BE ``param`` (so the value is an entry parameter
+    at all) and every site to have resolved the same index. A site that resolved
+    none, or two sites resolving different positions, yields ``None``: the flow
+    still has a ``param`` origin, we just cannot say which slot."""
+    if kind["kind"] != "param" or not indexes:
         return None
     distinct = set(indexes)
     if len(distinct) != 1:
@@ -2020,6 +2042,8 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "action_summary": summary,
         "writer_selectors": _writer_selectors_for(function, sinks),
         "state_changing": _is_state_changing_entry_point(function),
+        "parameter_names": [str(getattr(p, "name", "") or "") for p in (getattr(function, "parameters", None) or [])],
+        "payable": bool(getattr(function, "payable", False)),
         "assembly_state_access": any(
             s["kind"] in ("state_write", "delegatecall")
             and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
