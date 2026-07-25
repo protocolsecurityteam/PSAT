@@ -452,8 +452,8 @@ def test_supply_mint_unbacked_emits_backing_inflow_false():
     backing = eff.details["backing"]
     assert backing["inflow_observed"] is False
     assert backing["minted"] is True
-    assert backing["inflow_transfers"] == 0
-    assert backing["mint_transfers"] == 1
+    assert eff.concrete["backing_inflow_transfers"] == 0
+    assert eff.concrete["backing_mint_transfers"] == 1
 
 
 def test_self_mint_into_the_vault_is_not_backing():
@@ -483,10 +483,10 @@ def test_self_mint_into_the_vault_is_not_backing():
     assert eff.verdict == VERDICT_PROVEN
     backing = eff.details["backing"]
     assert backing["inflow_observed"] is False
-    assert backing["inflow_transfers"] == 0
+    assert eff.concrete["backing_inflow_transfers"] == 0
     # ...and the mint itself is still witnessed.
     assert backing["minted"] is True
-    assert backing["mint_transfers"] == 1
+    assert eff.concrete["backing_mint_transfers"] == 1
 
 
 def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
@@ -511,7 +511,7 @@ def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
         simulate_supported=True,
     )
     assert eff.details["backing"]["inflow_observed"] is True
-    assert eff.details["backing"]["inflow_transfers"] == 1
+    assert eff.concrete["backing_inflow_transfers"] == 1
 
 
 def test_supply_mint_counts_only_the_measured_token_as_minted():
@@ -537,7 +537,7 @@ def test_supply_mint_counts_only_the_measured_token_as_minted():
         simulate_supported=True,
     )
     assert eff.details["backing"]["minted"] is False
-    assert eff.details["backing"]["mint_transfers"] == 0
+    assert eff.concrete["backing_mint_transfers"] == 0
 
 
 def test_supply_mint_backed_emits_backing_inflow_true():
@@ -569,7 +569,7 @@ def test_supply_mint_backed_emits_backing_inflow_true():
     assert eff.verdict == VERDICT_PROVEN
     backing = eff.details["backing"]
     assert backing["inflow_observed"] is True
-    assert backing["inflow_transfers"] == 1
+    assert eff.concrete["backing_inflow_transfers"] == 1
     assert backing["minted"] is True
 
 

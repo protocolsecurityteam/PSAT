@@ -191,7 +191,17 @@ _RESIDUE_PROBE_MAX_ATTEMPTS = 2
 # State-plane residue that has no column of its own and rides ``observed_residue``.
 # A strict whitelist: ``concrete`` is what a recipe chose to hand back, and only
 # these keys are per-deployment facts this table is meant to publish.
-_RESIDUE_JSON_KEYS = ("observed_reach_value_usd", "observed_reach_holders", "reach_indeterminate")
+_RESIDUE_JSON_KEYS = (
+    "observed_reach_value_usd",
+    "observed_reach_holders",
+    "reach_indeterminate",
+    # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
+    # code-plane witness and stay on ``details``; how many Transfer logs one
+    # execution emitted is an observation of this deployment at this block and
+    # would otherwise be republished as every bytecode twin's own count (inv. 3).
+    "backing_inflow_transfers",
+    "backing_mint_transfers",
+)
 
 
 def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:

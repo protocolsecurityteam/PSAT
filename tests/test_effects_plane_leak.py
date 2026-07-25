@@ -34,7 +34,8 @@ from db.models import (  # noqa: E402
     Protocol,
 )
 from db.queue import create_job  # noqa: E402
-from services.effects import claims_bridge  # noqa: E402
+from services.effects import anvil, claims_bridge  # noqa: E402
+from services.effects.anvil import EntryPoint  # noqa: E402
 from services.effects.config import EFFECT_CLASS_VALUE_OUT, SCOPE_KERNEL, VERDICT_PROVEN  # noqa: E402
 from services.effects.harness import SimContext  # noqa: E402
 from services.effects.orchestrator import ProbePlan  # noqa: E402
@@ -210,16 +211,45 @@ def _flat_values(obj: Any):
         yield obj
 
 
+# Integer-valued keys a CACHEABLE ``details`` payload may legitimately carry, with
+# the code-plane justification for each. Everything else numeric is a per-execution
+# measurement (a count of logs, a balance, a USD figure) and belongs on the
+# deployment's own row: the cache re-publishes ``details`` verbatim to every other
+# deployment of the bytecode, so a count observed on one becomes a claim about all.
+_CODE_PLANE_INT_KEYS = {
+    # Read out of THIS bytecode's own source/guard constants (calldata.read_max_pause_duration).
+    "duration_bound_seconds",
+    # How many random identities the prober used — a constant of the probe, not of the deployment.
+    "identities",
+}
+
+
 def _plane_violations(details: dict[str, Any] | None) -> list[Any]:
     """Anything in a CACHEABLE ``details`` payload that is per-deployment: an
-    address, or a float (every float the recipes produce is a USD/amount figure —
-    the code-plane fields are all bools, small ints, names and selectors)."""
+    address, a float (every float the recipes produce is a USD/amount figure), or
+    a bare int outside the allowlist above — the code-plane fields are otherwise
+    all bools, names and selectors."""
     bad: list[Any] = []
-    for value in _flat_values(details or {}):
-        if isinstance(value, float):
-            bad.append(value)
-        elif isinstance(value, str) and value.startswith("0x") and len(value) == 42:
-            bad.append(value)
+
+    def walk(node: Any, key: str | None) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, str(k))
+            return
+        if isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v, key)
+            return
+        if isinstance(node, bool):
+            return
+        if isinstance(node, float):
+            bad.append((key, node))
+        elif isinstance(node, int) and key not in _CODE_PLANE_INT_KEYS:
+            bad.append((key, node))
+        elif isinstance(node, str) and node.startswith("0x") and len(node) == 42:
+            bad.append((key, node))
+
+    walk(details or {}, None)
     return bad
 
 
@@ -290,12 +320,46 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         impl_before="0x" + "dd" * 20,
     )
 
-    for eff in (v, s, u):
+    # §4.4 authority-change: two randoms rejected, then all accepted.
+    rejected = SimCallResult(False, "0x", "0xdeadbeef", ())
+    randoms = ["0x" + "31" * 20, "0x" + "32" * 20]
+    a = recipes.authority_change(
+        simulate=lambda *_a: SimResult(calls=(rejected, rejected, ok(), ok(), ok())),
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT_A,
+        principal=PRINCIPAL,
+        mutate_calldata="0x2f2ff15d" + "00" * 64,
+        probe_calldata="0x8456cb59",
+        randoms=randoms,
+    )
+
+    # §4.1 freeze/pause on the fork tier — the class with the richest ``details``.
+    from tests.test_effects_anvil import GUARDED, PAUSE, StubAnvil
+
+    p = anvil.pause_recipe(
+        transport=StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600),
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT_A,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=[EntryPoint(key="foo", calldata=GUARDED), EntryPoint(key="ping", calldata="0xffffffff")],
+        predicted_guard_set=["foo"],
+        max_pause_duration=3600,
+    )
+
+    for eff in (v, s, u, a, p):
         assert _plane_violations(eff.details) == [], f"{eff.effect_class}: {_plane_violations(eff.details)}"
     # ...and the per-deployment values are not simply lost — they are on the
     # state-plane side of the same verdict.
     assert v.concrete["observed_reach_holders"] == [HOLDER.lower()]
     assert u.concrete["impl_before"] == "0x" + "dd" * 20
+    assert s.concrete["backing_inflow_transfers"] == 1
+    # The code-plane witness the counts were extracted from is still there.
+    assert s.details["backing"]["inflow_observed"] is True
+    assert a.details["gate_mutation"] is True
+    assert p.details["observed_blast_radius"] == ["foo"]
 
 
 @requires_postgres
