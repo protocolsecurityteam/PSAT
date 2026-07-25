@@ -32,6 +32,7 @@ from services.effects.seeding import (
     SEED_AMOUNT,
     SEED_ETH_VALUE,
     AnchorSlot,
+    SeedBudget,
     SimulateSeeder,
     discover_token_layout,
 )
@@ -558,3 +559,123 @@ def test_no_seeder_without_simulate_support():
         transcript_store=RecordingStore(),
     )
     assert ctx.effective_seeder() is None
+
+
+# ---------------------------------------------------------------------------
+# Per-job cost ceiling (SeedBudget)
+#
+# The retry path fires on the COMMON case — an unseeded probe that reverted —
+# not the rare one, so its cost scales with the protocol's distinct vaults and
+# tokens with nothing holding it down. These tests pin the ceiling, the degrade
+# (exactly the pre-seeding probe, never a guess), the log, and the counters that
+# let the next live run judge the spend on evidence rather than a projection.
+# ---------------------------------------------------------------------------
+
+
+def test_layout_budget_stops_discovery_and_degrades_to_the_unseeded_probe(caplog):
+    budget = SeedBudget(max_identity_probes=8, max_layout_discoveries=0, max_probe_retries=8)
+    chain = FakeChain()
+    inputs = _wrap_inputs(chain)
+    inputs["seeder"] = SimulateSeeder(chain, chain_id=1, budget=budget)
+
+    with caplog.at_level("WARNING", logger="services.effects.seeding"):
+        eff = _supply(chain, RecordingStore(), **inputs)
+
+    # Exactly the pre-seeding verdict.
+    assert eff.verdict == VERDICT_UNKNOWN and eff.reason == "mint_call_reverted"
+    assert budget.layout_discoveries == 0
+    assert budget.skipped_layout_discoveries >= 1
+    assert budget.metrics()["seed_budget_skips"] >= 1
+    # Not silent: the message names what was skipped.
+    assert any(ASSET.lower() in r.getMessage().lower() for r in caplog.records)
+    assert budget.exhausted_any is True
+    assert ASSET.lower() in " ".join(budget.skipped_names).lower()
+
+
+def test_retry_budget_stops_the_seeded_attempt_entirely(caplog):
+    budget = SeedBudget(max_identity_probes=8, max_layout_discoveries=8, max_probe_retries=0)
+    chain = FakeChain()
+    inputs = _wrap_inputs(chain)
+    inputs["seeder"] = SimulateSeeder(chain, chain_id=1, budget=budget)
+
+    with caplog.at_level("WARNING", logger="services.effects.seeding"):
+        eff = _supply(chain, RecordingStore(), **inputs)
+
+    assert eff.verdict == VERDICT_UNKNOWN and eff.reason == "mint_call_reverted"
+    # One block only — the unseeded read/mint/read. No identity, no discovery,
+    # no seeded attempt, no seeded sentinel.
+    assert len(chain.blocks) == 1
+    assert budget.identity_probes == 0 and budget.layout_discoveries == 0
+    assert budget.skipped_probe_retries == 1
+    assert any("retry" in r.getMessage() for r in caplog.records)
+
+
+def test_budget_counters_report_the_spend_and_the_yield():
+    budget = SeedBudget()
+    chain = FakeChain()
+    inputs = _wrap_inputs(chain)
+    inputs["seeder"] = SimulateSeeder(chain, chain_id=1, budget=budget)
+
+    eff = _supply(chain, RecordingStore(), **inputs)
+
+    assert eff.verdict == VERDICT_PROVEN
+    metrics = budget.metrics()
+    assert metrics["seed_probe_retries"] == 1
+    assert metrics["seed_identity_probes"] == 1
+    assert metrics["seed_layout_discoveries"] == 1
+    assert metrics["seed_probes_executed"] == 1
+    assert metrics["seed_verdicts_proven"] == 1
+    assert metrics["seed_budget_skips"] == 0
+    assert budget.exhausted_any is False
+
+
+def test_a_probe_that_succeeds_unseeded_spends_nothing():
+    """No retry, so no identity probe, no discovery and no budget consumed — the
+    common admin-mint case must stay free."""
+    budget = SeedBudget()
+    chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
+    inputs = _wrap_inputs(chain)
+    inputs["seeder"] = SimulateSeeder(chain, chain_id=1, budget=budget)
+
+    eff = _supply(chain, RecordingStore(), **inputs)
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert len(chain.blocks) == 1
+    assert budget.metrics() == {
+        "seed_identity_probes": 0,
+        "seed_layout_discoveries": 0,
+        "seed_probe_retries": 0,
+        "seed_probes_executed": 0,
+        "seed_verdicts_proven": 0,
+        "seed_budget_skips": 0,
+    }
+
+
+def test_self_token_discovery_is_skipped_once_a_named_asset_anchors():
+    """``__self__`` is the always-appended fallback and resolves with no wire
+    call, so every reverting probe used to pay a full 548-override discovery
+    block for the probe target itself. A specific hint that already anchored is
+    the asset static actually saw flow in."""
+    budget = SeedBudget()
+    chain = FakeChain()
+    inputs = _wrap_inputs(chain)
+    seeder = SimulateSeeder(chain, chain_id=1, budget=budget)
+    inputs["seeder"] = seeder
+
+    eff = _supply(chain, RecordingStore(), **inputs)
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert "__self__" in inputs["input_token_hints"]
+    assert budget.layout_discoveries == 1  # the asset only, not the vault
+    assert VAULT.lower() not in seeder._layouts
+
+
+def test_self_token_is_still_discovered_when_nothing_else_anchors():
+    """The withdrawal-burns-your-own-shares shape keeps its discovery: the skip
+    is conditional on another candidate having anchored, not unconditional."""
+    budget = SeedBudget()
+    chain = FakeChain()
+    seeder = SimulateSeeder(chain, chain_id=1, budget=budget)
+    seeder(recipes.SeedRequest(spender=VAULT, principal=PRINCIPAL, token_hints=("__self__",), block_tag="0x1"))
+    assert budget.layout_discoveries == 1
+    assert VAULT.lower() in seeder._layouts

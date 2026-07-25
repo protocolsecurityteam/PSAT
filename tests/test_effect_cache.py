@@ -325,18 +325,63 @@ def _write(session, **kw):
 @requires_postgres
 def test_cache_hit_rewrite_preserves_state_plane_residue(clean_effects):
     """The exact live-DB failure: a cold write captures the destination, a later
-    cache-HIT job re-writes the same identity carrying none, and the residue must
-    survive — while the verdict itself still tracks the newest resolution."""
+    cache-HIT job re-writes the SAME verdict carrying none, and the residue must
+    survive — while the resolution facts still track the newest write."""
     session = clean_effects
     _write(session, concrete_destination=DEST, current_check_passed=True, witness={"destination_shape": "param"})
 
-    row = _write(session, verdict="unknown", tier="tier0", concrete_destination=None, current_check_passed=None)
+    row = _write(session, tier="tier0", concrete_destination=None, current_check_passed=None)
 
     assert row.concrete_destination == DEST
     assert row.current_check_passed is True
-    # Current resolution facts still move to the newest values.
-    assert row.verdict == "unknown"
+    assert row.verdict == "proven"
     assert row.tier == "tier0"
+
+
+@requires_postgres
+def test_downgraded_verdict_drops_the_residue_that_justified_it(clean_effects):
+    """Residue must not outlive the evidence for it. The witness and transcript
+    are already overwritten on a downgrade precisely so a *proven* witness never
+    sits beside an ``unknown`` verdict; an orphaned ``concrete_destination`` is
+    the same contradiction in another column — and ``find_verdict_residue_batch``
+    reads it, so the orphan would also suppress re-observation forever."""
+    session = clean_effects
+    _write(
+        session,
+        concrete_destination=DEST,
+        current_check_passed=True,
+        observed_residue={"observed_reach_value_usd": 5_000_000.0},
+        witness={"destination_shape": "param"},
+    )
+
+    row = _write(session, verdict="unknown", concrete_destination=None, current_check_passed=None)
+
+    assert row.verdict == "unknown"
+    assert row.concrete_destination is None
+    assert row.current_check_passed is None
+    assert row.observed_residue is None
+    assert row.witness is None
+
+
+@requires_postgres
+def test_observed_residue_merges_key_wise_across_observation_less_rewrites(clean_effects):
+    """``observed_residue`` is a bag of independent residue facts written by
+    different paths (§5b reach on a cold probe, re-probe bookkeeping on a hit), so
+    a write carrying only some keys must leave the others standing."""
+    session = clean_effects
+    _write(session, observed_residue={"observed_reach_value_usd": 42.0, "observed_reach_holders": ["0xaa"]})
+
+    row = _write(session, observed_residue={"destination_probe_attempts": 1})
+
+    assert row.observed_residue == {
+        "observed_reach_value_usd": 42.0,
+        "observed_reach_holders": ["0xaa"],
+        "destination_probe_attempts": 1,
+    }
+    # A fresh observation of the same key still wins.
+    row = _write(session, observed_residue={"observed_reach_value_usd": 7.0})
+    assert row.observed_residue["observed_reach_value_usd"] == 7.0
+    assert row.observed_residue["destination_probe_attempts"] == 1
 
 
 @requires_postgres
@@ -355,11 +400,17 @@ def test_behavior_hash_change_drops_stale_residue(clean_effects):
     """Residue is code-relative: an upgraded implementation must not inherit the
     previous one's observed destination just because the address is unchanged."""
     session = clean_effects
-    _write(session, concrete_destination=DEST, current_check_passed=True)
+    _write(
+        session,
+        concrete_destination=DEST,
+        current_check_passed=True,
+        observed_residue={"observed_reach_value_usd": 9.0},
+    )
     row = _write(session, behavior_hash="bh_after_upgrade", concrete_destination=None, current_check_passed=None)
     assert row.behavior_hash == "bh_after_upgrade"
     assert row.concrete_destination is None
     assert row.current_check_passed is None
+    assert row.observed_residue is None
 
 
 @requires_postgres

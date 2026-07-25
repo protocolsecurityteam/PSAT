@@ -128,6 +128,28 @@ def test_transfers_in_extracts_only_dest_receives():
     assert ins[0][1] == CONTRACT.lower()
 
 
+def test_transfers_in_can_exclude_the_emitting_asset():
+    # A ``Transfer`` topic says nothing about WHICH contract emitted it, so a
+    # caller asking "did some other asset arrive" must pin ``SimLog.address``.
+    from services.effects.simulate import transfers_in
+
+    other = "0x" + "77" * 20
+    call = ok(logs=[transfer_log(CONTRACT, PRINCIPAL, CONTRACT, 5), transfer_log(other, PRINCIPAL, CONTRACT, 9)])
+    assert len(transfers_in(call, CONTRACT)) == 2
+    kept = transfers_in(call, CONTRACT, exclude_asset=CONTRACT)
+    assert len(kept) == 1
+    assert kept[0][2] == "0x" + (9).to_bytes(32, "big").hex()
+
+
+def test_transfers_out_can_pin_the_emitting_asset():
+    other = "0x" + "77" * 20
+    call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(other, CONTRACT, SENTINEL, 9)])
+    assert len(transfers_out(call, CONTRACT)) == 2
+    kept = transfers_out(call, CONTRACT, only_asset=other)
+    assert len(kept) == 1
+    assert kept[0][2] == "0x" + (9).to_bytes(32, "big").hex()
+
+
 # ---------------------------------------------------------------------------
 # preflight (inv. 14)
 # ---------------------------------------------------------------------------
@@ -180,11 +202,37 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # A proven caller_arbitrary carries the sentinel it provably reached as its
-    # concrete state-plane destination (never empty on a proven move).
-    assert eff.concrete["destination"] == SENTINEL.lower()
+    # The caller_arbitrary PROOF lives in the shape; the sentinel is an address
+    # this prober invented, so it must never be published in the column that
+    # otherwise means "the address value actually left to". The concrete
+    # destination stays the one the BASE probe really observed.
+    assert eff.concrete["destination"] == "0x" + "ab" * 20
+    assert SENTINEL.lower() not in str(eff.concrete)
     assert eff.discrepancy is None
     assert eff.transcript_ptr is not None
+
+
+def test_sentinel_only_caller_arbitrary_publishes_no_destination():
+    # The sentinel lands but the base probe moved nothing: caller_arbitrary is
+    # still proven, and the concrete destination is EMPTY rather than the
+    # fabricated probe address (nothing was observed leaving).
+    base = SimResult(calls=(ok(),))
+    sentinel = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 3)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base, sentinel),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+        sentinel_address=SENTINEL,
+        sentinel_calldata="0xdeadbeef" + "ee" * 32,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
+    assert eff.details["value_moved"] is False
+    assert "destination" not in eff.concrete
 
 
 def test_value_out_value_moved_records_single_observed_destination():
@@ -408,6 +456,90 @@ def test_supply_mint_unbacked_emits_backing_inflow_false():
     assert backing["mint_transfers"] == 1
 
 
+def test_self_mint_into_the_vault_is_not_backing():
+    # THE over-claim: ``_mint(address(this), fee)`` emits Transfer(0x0 -> vault)
+    # FROM the minted token itself. Matching only on the recipient counted that as
+    # an asset inflow, so the purest case of unbacked issuance produced a
+    # ``backing`` object byte-identical to a real deposit-backed conversion.
+    # Backing means an inflow of some OTHER asset; freshly-printed units of the
+    # token whose supply just rose back nothing.
+    zero = "0x" + "00" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1000)),
+            ok(logs=[transfer_log(TOKEN, zero, TOKEN, 500)]),  # mint TO the vault, of the vault's own token
+            ok(uint_ret(1500)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    backing = eff.details["backing"]
+    assert backing["inflow_observed"] is False
+    assert backing["inflow_transfers"] == 0
+    # ...and the mint itself is still witnessed.
+    assert backing["minted"] is True
+    assert backing["mint_transfers"] == 1
+
+
+def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
+    # The mirror of the test above: the same shape with a DIFFERENT token emitting
+    # the inbound Transfer is a genuine inflow and must keep reporting True.
+    zero = "0x" + "00" * 20
+    asset = "0x" + "77" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1000)),
+            ok(logs=[transfer_log(asset, zero, TOKEN, 500), transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
+            ok(uint_ret(1500)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.details["backing"]["inflow_observed"] is True
+    assert eff.details["backing"]["inflow_transfers"] == 1
+
+
+def test_supply_mint_counts_only_the_measured_token_as_minted():
+    # The mirror-image of the backing defect on ``transfers_out``: ``totalSupply``
+    # was measured on ONE token, so an unrelated token minting inside the same
+    # call must not stand in for its mint witness.
+    zero = "0x" + "00" * 20
+    other = "0x" + "88" * 20
+    res = SimResult(
+        calls=(
+            ok(uint_ret(1000)),
+            ok(logs=[transfer_log(other, zero, PRINCIPAL, 500)]),  # a DIFFERENT token's mint
+            ok(uint_ret(1500)),
+        )
+    )
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(res),
+        store=RecordingStore(),
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.details["backing"]["minted"] is False
+    assert eff.details["backing"]["mint_transfers"] == 0
+
+
 def test_supply_mint_backed_emits_backing_inflow_true():
     # §5a: a proportional asset Transfer INTO the vault co-occurs with the mint
     # (deposit-backed conversion) → inflow_observed True.
@@ -525,9 +657,14 @@ def test_value_out_reach_measures_downstream_holder_loss():
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
-    assert eff.details["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
-    assert "reach_indeterminate" not in eff.details
+    # Reach is STATE-plane (holder addresses + this protocol's USD), so it rides
+    # ``concrete`` — ``details`` is what the cross-deployment behavioral cache
+    # stores and re-publishes to every twin of this bytecode (inv. 3).
+    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
+    assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
+    assert "reach_indeterminate" not in eff.concrete
+    assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
+    assert lp.lower() not in str(eff.details)
 
 
 def test_value_out_reach_floors_and_flags_when_no_holder_moved():
@@ -548,9 +685,10 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["observed_reach_value_usd"] == 221_000_000.0
-    assert eff.details["reach_indeterminate"] is True
-    assert "observed_reach_holders" not in eff.details
+    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0
+    assert eff.concrete["reach_indeterminate"] is True
+    assert "observed_reach_holders" not in eff.concrete
+    assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
 
 
 def test_value_out_reach_absent_without_holder_set():
@@ -567,6 +705,8 @@ def test_value_out_reach_absent_without_holder_set():
         simulate_supported=True,
     )
     assert eff.verdict == VERDICT_PROVEN
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert "reach_indeterminate" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.details
     assert "reach_indeterminate" not in eff.details
 

@@ -44,6 +44,7 @@ from services.effects.seeding import (
     Seeder,
     Seeding,
     SeedRequest,
+    budget_of,
     eth_value_override,
 )
 from services.effects.simulate import (
@@ -147,8 +148,15 @@ def _seed_attempts(
       inflow a witnessed REQUIREMENT.
 
     An unresolvable token yields the payable attempt alone; nothing resolvable at
-    all yields no attempt, and the probe keeps exactly today's verdict."""
+    all yields no attempt, and the probe keeps exactly today's verdict.
+
+    The whole path is charged to the job's :class:`~services.effects.seeding.SeedBudget`
+    FIRST — an exhausted budget returns no attempt at all, which is the exact
+    pre-seeding probe, never a less careful one."""
     if seeder is None or not principal or not seeded_calldata:
+        return []
+    budget = budget_of(seeder)
+    if budget is not None and not budget.take_retry(contract_address.lower()):
         return []
     seeding: Seeding | None = None
     if token_hints:
@@ -288,8 +296,11 @@ def value_out(
             observed = seeded_result
     moved = transfers_out(observed, contract_address)
     value_moved = bool(moved)
+    budget = budget_of(seeder)
     if used is not None:
         tr["input_seeded"] = True
+        if budget is not None:
+            budget.record_executed()
 
     sentinel_transfers = _run_sentinel(
         simulate,
@@ -334,8 +345,11 @@ def value_out(
                 discrepancy=disc,
             ),
         )
-    # §5b downstream value-reach rides the proven flow.out verdict only.
-    _add_reach(details, base_res.calls[0], value_holders, acting_balance_usd)
+    # §5b downstream value-reach rides the proven flow.out verdict only, and is
+    # STATE-plane (holder addresses + this protocol's USD) — hence ``concrete``.
+    _add_reach(concrete, base_res.calls[0], value_holders, acting_balance_usd)
+    if budget is not None and used is not None:
+        budget.record_proven()
     eff = proven(
         EFFECT_CLASS_VALUE_OUT,
         gate_ref=gate_ref,
@@ -616,6 +630,9 @@ def supply(
         if seeded is not None:
             before_c, mint_c, after_c = seeded
             tr["input_seeded"] = True
+            budget = budget_of(seeder)
+            if budget is not None:
+                budget.record_executed()
     if not (before_c.success and after_c.success):
         return emit(
             store,
@@ -640,7 +657,10 @@ def supply(
             unknown(EFFECT_CLASS_SUPPLY, gate_ref=gate_ref, reason="no_supply_delta", transcript=tr),
         )
     sign = "mint" if delta > 0 else "burn"
-    minted = transfers_out(mint_c, "0x" + "00" * 20)  # mint = Transfer from the zero address
+    # mint = Transfer from the zero address, EMITTED BY the token whose
+    # ``totalSupply`` moved. Any other token minting inside the same call is a
+    # different asset's supply event and must not stand in for this one's.
+    minted = transfers_out(mint_c, "0x" + "00" * 20, only_asset=token_address)
     _, _, _, disc = _resolve_destination_shape(
         effect_class=EFFECT_CLASS_SUPPLY,
         base_transfers=minted,
@@ -653,6 +673,7 @@ def supply(
             used.sentinel_calldata if used is not None else sentinel_calldata,
             sentinel_address,
             mint_from_zero=True,
+            only_asset=token_address,
             attempt=used,
         ),
         taint_param_reaches_sink=taint_param_reaches_sink,
@@ -673,7 +694,14 @@ def supply(
         # the assets differ in token/decimals, so the recipe does NOT collapse them
         # to a ratio here. NEVER inferred from static flow.in + supply.mint
         # co-occurrence (that proves neither causation nor proportionality).
-        inflow = transfers_in(mint_c, token_address)
+        #
+        # The inflow must be an asset OTHER than the one just minted: a mint that
+        # credits the vault itself (``_mint(address(this), fee)``) emits a
+        # ``Transfer(0x0 -> vault)`` from the minted token, which is the dilution
+        # being measured, not backing for it. Counting it produced a
+        # ``backing.inflow_observed: true`` byte-identical to a real deposit-backed
+        # conversion on the purest case of unbacked issuance.
+        inflow = transfers_in(mint_c, token_address, exclude_asset=token_address)
         details["backing"] = {
             "inflow_observed": bool(inflow),
             "minted": bool(minted),
@@ -688,6 +716,10 @@ def supply(
             # unaffected by any of this.
             "input_seeded": used is not None,
         }
+    if used is not None:
+        seed_budget = budget_of(seeder)
+        if seed_budget is not None:
+            seed_budget.record_proven()
     eff = proven(
         EFFECT_CLASS_SUPPLY,
         gate_ref=gate_ref,
@@ -784,6 +816,7 @@ def _run_sentinel(
     sentinel_address: str | None,
     *,
     mint_from_zero: bool = False,
+    only_asset: str | None = None,
     attempt: _SeedAttempt | None = None,
 ) -> list[tuple[str, str, str]] | None:
     """Run the attacker-sentinel probe if one was supplied, returning its
@@ -807,7 +840,7 @@ def _run_sentinel(
     if attempt is not None and not _readback_ok(attempt, res.calls):
         return None
     src = "0x" + "00" * 20 if mint_from_zero else source_address
-    return transfers_out(res.calls[len(readback)], src)
+    return transfers_out(res.calls[len(readback)], src, only_asset=only_asset)
 
 
 def _resolve_destination_shape(
@@ -827,15 +860,30 @@ def _resolve_destination_shape(
     simulation) → static's positive proof of a fixed shape (universal) → the
     rule-8.1 discrepancy when taint said the param reaches the sink but the
     sentinel moved nothing → otherwise ``unknown`` (an observation of one
-    destination can't prove "fixed" — §8 rule 1)."""
+    destination can't prove "fixed" — §8 rule 1).
+
+    ``concrete_destination`` means one thing everywhere it is returned: an address
+    value that was OBSERVED to receive the outflow (or, on the static branch, the
+    fixed address static positively proved). It is deliberately computed from the
+    BASE probe's transfers and never from the sentinel: the sentinel is an address
+    this prober invented, so publishing it in the column that otherwise means
+    "where the money went" would present a fabricated address as an observation.
+    The caller_arbitrary PROOF loses nothing by that — it lives in
+    ``destination_shape``/``shape_proved_by``, which is where a consumer reads
+    "the caller chooses this destination"; the sentinel's own address adds no
+    information (it is recomputable, and it is in the transcript)."""
+    # State-plane residue: the address value actually left to THIS run. Capture it
+    # whenever every observed outflow converged on a single destination — a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to
+    # the same address) still has one concrete destination. Divergent destinations
+    # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
+    # single observation can't prove "always this address").
+    out_destinations = {to for _f, to, _v in base_transfers}
+    observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            # The attacker sentinel is the PROVEN caller-chosen destination — the
-            # state-plane residue of a caller_arbitrary verdict. Record it so a
-            # proven caller_arbitrary carries its concrete witness address rather
-            # than an empty destination (the address is never a cache key — inv.3).
-            return SHAPE_CALLER_ARBITRARY, "simulation", sentinel_address.lower(), None
+            return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
     if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED) and static_destination:
         return static_shape, "static", static_destination, None
     if taint_param_reaches_sink and sentinel_transfers is not None:
@@ -846,21 +894,12 @@ def _resolve_destination_shape(
             effect_class=effect_class,
             detail={"sentinel_address": sentinel_address},
         )
-        return SHAPE_UNKNOWN, "none", None, disc
-    # State-plane residue: the address value actually left to THIS run. Capture it
-    # whenever every observed outflow converged on a single destination — a
-    # withdrawal that emits several Transfer logs (burn + send, or send + fee to
-    # the same address) still has one concrete destination. Divergent destinations
-    # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
-    # single observation can't prove "always this address"); the shape stays
-    # unknown while the concrete destination is recorded for the state plane.
-    out_destinations = {to for _f, to, _v in base_transfers}
-    observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
+        return SHAPE_UNKNOWN, "none", observed_dest, disc
     return SHAPE_UNKNOWN, "none", observed_dest, None
 
 
 def _add_reach(
-    details: dict[str, Any],
+    concrete: dict[str, Any],
     base_call: SimCallResult,
     value_holders: Sequence[tuple[str, float]],
     acting_balance_usd: float,
@@ -874,7 +913,14 @@ def _add_reach(
     downstream reach was not witnessed. Downstream value is NEVER imputed via the
     control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
     edge). Skipped entirely when no value-holder set was supplied (nothing to
-    measure), leaving the verdict shape unchanged."""
+    measure), leaving the verdict shape unchanged.
+
+    Writes to ``concrete``, NOT ``details`` (inv. 3). Every value here is
+    per-deployment — the holders are addresses and the USD is this protocol's
+    balance sheet at this block — while ``details`` is the code-plane witness the
+    behavioral cache stores and re-publishes to every OTHER deployment sharing the
+    bytecode. Reach in ``details`` meant a second deployment's verdict named the
+    first one's holders and USD as its own."""
     if not value_holders:
         return
     reached_usd = 0.0
@@ -884,11 +930,11 @@ def _add_reach(
             reach_holders.append(holder.lower())
             reached_usd += usd
     if reach_holders:
-        details["observed_reach_value_usd"] = reached_usd
-        details["observed_reach_holders"] = sorted(reach_holders)
+        concrete["observed_reach_value_usd"] = reached_usd
+        concrete["observed_reach_holders"] = sorted(reach_holders)
     else:
-        details["observed_reach_value_usd"] = acting_balance_usd
-        details["reach_indeterminate"] = True
+        concrete["observed_reach_value_usd"] = acting_balance_usd
+        concrete["reach_indeterminate"] = True
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

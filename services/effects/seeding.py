@@ -58,6 +58,161 @@ def input_seeding_enabled() -> bool:
     return os.getenv("PSAT_EFFECTS_INPUT_SEEDING", "1").strip().lower() in _TRUTHY
 
 
+# --------------------------------------------------------------------------
+# Per-job cost ceiling
+# --------------------------------------------------------------------------
+# The seeded retry fires on the COMMON path, not the rare one: it runs whenever
+# an unseeded value_out/supply probe reverted, and reverting is what most probes
+# do (5 of 34 value_out probes proved on the last live run). Each retry costs a
+# token-identity block, a layout-discovery block (548 storage overrides, ~70KB of
+# JSON, plus a ``narrow`` retry when the wide write breaks the getter), up to two
+# seeded attempts and a seeded sentinel re-run. Memoization bounds identity and
+# layout per DISTINCT spender/token, which is the right shape but has no ceiling:
+# a protocol with many distinct vaults scales all of it linearly, on a branch
+# whose other half exists to cut effects wall time.
+#
+# These caps are that ceiling. Exceeding one degrades the probe to EXACTLY its
+# pre-seeding behavior (unseeded call, no discovery) — never to a guess — and
+# says so in the log and the stage metrics. Raise them per-deployment via env
+# when a protocol genuinely needs more.
+_DEFAULT_MAX_IDENTITY_PROBES = 16
+_DEFAULT_MAX_LAYOUT_DISCOVERIES = 8
+_DEFAULT_MAX_PROBE_RETRIES = 24
+
+# How many distinct skipped identities to keep for the log line. The counters
+# carry the totals; this is only so the message names something concrete.
+_SKIP_SAMPLE = 8
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+@dataclass
+class SeedBudget:
+    """Per-job ceiling + counters for the seeded-retry path.
+
+    One instance per job (the seeder is memoized per ``ProbeContext``). Every
+    ``take_*`` is called immediately before the wire work it authorizes, so a
+    refusal is exactly one skipped RPC block. A cap of ``0`` disables that kind
+    of work outright.
+    """
+
+    max_identity_probes: int = _DEFAULT_MAX_IDENTITY_PROBES
+    max_layout_discoveries: int = _DEFAULT_MAX_LAYOUT_DISCOVERIES
+    max_probe_retries: int = _DEFAULT_MAX_PROBE_RETRIES
+
+    identity_probes: int = 0
+    layout_discoveries: int = 0
+    probe_retries: int = 0
+    # Retries whose seeded attempt actually EXECUTED the target call the unseeded
+    # attempt could not, and the subset of those that ended in a proven verdict.
+    # Without these the next live run can only re-measure the cost, not the yield.
+    probes_executed: int = 0
+    verdicts_proven_seeded: int = 0
+
+    skipped_identity_probes: int = 0
+    skipped_layout_discoveries: int = 0
+    skipped_probe_retries: int = 0
+    skipped_names: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_env(cls) -> "SeedBudget":
+        return cls(
+            max_identity_probes=_int_env("PSAT_EFFECTS_SEED_MAX_IDENTITY_PROBES", _DEFAULT_MAX_IDENTITY_PROBES),
+            max_layout_discoveries=_int_env("PSAT_EFFECTS_SEED_MAX_DISCOVERIES", _DEFAULT_MAX_LAYOUT_DISCOVERIES),
+            max_probe_retries=_int_env("PSAT_EFFECTS_SEED_MAX_RETRIES", _DEFAULT_MAX_PROBE_RETRIES),
+        )
+
+    def _deny(self, kind: str, name: str, used: int, cap: int) -> None:
+        if len(self.skipped_names) < _SKIP_SAMPLE:
+            self.skipped_names.append(f"{kind}:{name}")
+        # WARNING exactly once per kind (the first denial), so the truncation is
+        # never silent but a large protocol does not flood the log.
+        level = logging.WARNING if used == cap else logging.DEBUG
+        logger.log(
+            level,
+            "effects seeding: %s budget exhausted (%d/%d) — skipping %s; probe degrades to unseeded",
+            kind,
+            used,
+            cap,
+            name,
+        )
+
+    def take_identity(self, spender: str) -> bool:
+        if self.identity_probes >= self.max_identity_probes:
+            self.skipped_identity_probes += 1
+            self._deny("identity", spender, self.identity_probes, self.max_identity_probes)
+            return False
+        self.identity_probes += 1
+        return True
+
+    def take_layout(self, token: str) -> bool:
+        if self.layout_discoveries >= self.max_layout_discoveries:
+            self.skipped_layout_discoveries += 1
+            self._deny("layout", token, self.layout_discoveries, self.max_layout_discoveries)
+            return False
+        self.layout_discoveries += 1
+        return True
+
+    def take_retry(self, target: str) -> bool:
+        if self.probe_retries >= self.max_probe_retries:
+            self.skipped_probe_retries += 1
+            self._deny("retry", target, self.probe_retries, self.max_probe_retries)
+            return False
+        self.probe_retries += 1
+        return True
+
+    def record_executed(self) -> None:
+        self.probes_executed += 1
+
+    def record_proven(self) -> None:
+        self.verdicts_proven_seeded += 1
+
+    def metrics(self) -> dict[str, int]:
+        return {
+            "seed_identity_probes": self.identity_probes,
+            "seed_layout_discoveries": self.layout_discoveries,
+            "seed_probe_retries": self.probe_retries,
+            "seed_probes_executed": self.probes_executed,
+            "seed_verdicts_proven": self.verdicts_proven_seeded,
+            "seed_budget_skips": (
+                self.skipped_identity_probes + self.skipped_layout_discoveries + self.skipped_probe_retries
+            ),
+        }
+
+    @property
+    def exhausted_any(self) -> bool:
+        return bool(self.skipped_identity_probes or self.skipped_layout_discoveries or self.skipped_probe_retries)
+
+    def summary(self) -> str:
+        return (
+            f"identity={self.identity_probes}/{self.max_identity_probes} "
+            f"layout={self.layout_discoveries}/{self.max_layout_discoveries} "
+            f"retries={self.probe_retries}/{self.max_probe_retries} "
+            f"executed={self.probes_executed} proven={self.verdicts_proven_seeded} "
+            f"skipped(identity/layout/retry)="
+            f"{self.skipped_identity_probes}/{self.skipped_layout_discoveries}/{self.skipped_probe_retries} "
+            f"sample={self.skipped_names}"
+        )
+
+
+def budget_of(seeder: object) -> "SeedBudget | None":
+    """The :class:`SeedBudget` a seeder carries, if any.
+
+    ``Seeder`` is a plain callable seam (tests inject lambdas), so the budget is
+    read structurally rather than widening the alias into a Protocol every stub
+    would then have to satisfy."""
+    budget = getattr(seeder, "budget", None)
+    return budget if isinstance(budget, SeedBudget) else None
+
+
 # Balance / shares / allowance handed to the principal. Same constant the pause
 # recipe seeds with: far above any probe amount so a ``>=`` precondition always
 # clears, far below 2**256 so a ``balance + amount`` path cannot overflow.
@@ -354,15 +509,24 @@ class SimulateSeeder:
     Memoized twice over its lifetime (one per job): token identity per
     ``spender`` and storage layout per token. A protocol's many candidates on one
     vault therefore pay discovery once, and its handful of distinct input assets
-    pay layout discovery once each."""
+    pay layout discovery once each. :class:`SeedBudget` caps how many DISTINCT
+    ones a single job may pay for at all."""
 
-    def __init__(self, simulate: Simulate, *, chain_id: int = 0, max_tokens: int = 3) -> None:
+    def __init__(
+        self,
+        simulate: Simulate,
+        *,
+        chain_id: int = 0,
+        max_tokens: int = 3,
+        budget: SeedBudget | None = None,
+    ) -> None:
         self._simulate = simulate
         self._chain_id = chain_id
         self._max_tokens = max_tokens
         self._tokens: dict[tuple[str, tuple[str, ...]], tuple[str, ...]] = {}
         self._layouts: dict[str, TokenLayout] = {}
         self.request_count = 0
+        self.budget = budget if budget is not None else SeedBudget.from_env()
 
     def __call__(self, request: SeedRequest) -> Seeding | None:
         tokens = self._resolve_tokens(request)
@@ -374,6 +538,19 @@ class SimulateSeeder:
         seeded: list[str] = []
         decimals = _DEFAULT_DECIMALS
         for token in tokens:
+            if token == request.spender.lower() and seeded:
+                # ``__self__`` is the always-appended fallback candidate (the
+                # withdrawal-burns-your-own-shares shape) and it resolves without
+                # a wire call, so EVERY reverting probe would otherwise pay a
+                # layout discovery for the probe target itself. A specific hint
+                # that already yielded anchors is the asset static actually saw
+                # flow in, so the fallback adds a discovery block for a seed the
+                # call has no evidence of needing. Ordered last by
+                # ``_resolve_tokens``, so ``seeded`` here holds only non-self
+                # candidates. Cost: a function that pulls one asset AND burns the
+                # caller's own shares gets only the former seeded and may stay
+                # ``unknown`` — the fail-closed direction.
+                continue
             layout = self._layout(token, request)
             if not layout.anchors:
                 continue
@@ -415,9 +592,7 @@ class SimulateSeeder:
             return cached
         getters = [h for h in request.token_hints if h != "__self__"]
         resolved: list[str] = []
-        if "__self__" in request.token_hints:
-            resolved.append(request.spender.lower())
-        if getters:
+        if getters and self.budget.take_identity(request.spender.lower()):
             calls = [SimCall(to=request.spender, data=selector_of(sig)) for sig in getters]
             try:
                 self.request_count += 1
@@ -431,6 +606,15 @@ class SimulateSeeder:
                 address = _to_address(call_result.return_data)
                 if address and address not in resolved:
                     resolved.append(address)
+        # ``__self__`` LAST, not first: it costs no wire call to resolve, but it
+        # sets the seeded probe's decimals when it is seeded first — and the
+        # amount is meant to be one whole unit of the INPUT asset static named,
+        # not of the probe target. Ordering it last also lets ``__call__`` drop
+        # its discovery once a specific hint has produced anchors.
+        if "__self__" in request.token_hints:
+            self_token = request.spender.lower()
+            if self_token not in resolved:
+                resolved.append(self_token)
         tokens = tuple(resolved[: self._max_tokens])
         self._tokens[key] = tokens
         return tokens
@@ -439,6 +623,13 @@ class SimulateSeeder:
         cached = self._layouts.get(token)
         if cached is not None:
             return cached
+        if not self.budget.take_layout(token):
+            # Memoized as "no layout" so the refusal costs one check, not one per
+            # candidate. A capped job seeds nothing further for this token and
+            # its probes stay exactly as unseeded as they were before seeding
+            # existed.
+            self._layouts[token] = TokenLayout(token=token)
+            return self._layouts[token]
         self.request_count += 1
         layout = discover_token_layout(
             self._simulate,

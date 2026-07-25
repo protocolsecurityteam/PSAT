@@ -60,7 +60,14 @@ from services.effects.selection import Candidate  # noqa: E402
 from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
 from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
-from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
+from workers.effects_worker import (  # noqa: E402
+    _RESIDUE_KEY,
+    _RESIDUE_PROBE_MAX_ATTEMPTS,
+    EffectsWorker,
+    _is_cacheable,
+    _residue_observable,
+    _Seams,
+)
 
 CONTRACT_A = "0x" + "a1" * 20
 CONTRACT_B = "0x" + "b2" * 20
@@ -366,45 +373,83 @@ def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkey
     assert metrics["residue_observations"] == 0
 
 
+def test_code_upgrade_residue_branch_is_unreachable_and_gone():
+    """``_residue_observable``'s ``code_upgrade`` arm required ``TIER_HISTORICAL``,
+    but ``_is_cacheable`` refuses to cache Tier-0 verdicts at all (inv. 13) — so no
+    cached row could ever satisfy it. The arm was dead code and was REMOVED; this
+    pins the premise so a change to either side is caught."""
+    historical = proven(
+        EFFECT_CLASS_CODE_UPGRADE,
+        tier=TIER_HISTORICAL,
+        reason="indexed_upgrade_plus_current_state",
+        details={"historical": True, "current_capability": True},
+        concrete={"current_check_passed": True},
+    )
+    assert _is_cacheable(historical) is False
+
+    row = EffectBehaviorCache(
+        behavior_hash=BEHAVIOR_HASH,
+        effect_class=EFFECT_CLASS_CODE_UPGRADE,
+        scope=SCOPE_KERNEL,
+        verdict=VERDICT_PROVEN,
+        tier=TIER_HISTORICAL,
+    )
+    assert _residue_observable(row, EFFECT_CLASS_CODE_UPGRADE) is False
+    assert EFFECT_CLASS_CODE_UPGRADE not in _RESIDUE_KEY
+
+
 @requires_postgres
-def test_code_upgrade_hit_recovers_the_current_state_check(clean_effects, monkeypatch):
-    """The other residue column. The Tier-0 branch is resolved entirely off the
-    wire (impl slot + resolved authority, both read at plan time), so this
-    observation costs no RPC at all."""
+def test_residue_reprobe_is_bounded_per_deployment(clean_effects, monkeypatch):
+    """A behavior that is proven IN THE CACHE but that THIS deployment cannot
+    reproduce leaves ``concrete_destination`` NULL forever. Re-flagging on "still
+    NULL" alone re-probed it on every job of every run; the stored attempt count
+    bounds it at ``_RESIDUE_PROBE_MAX_ATTEMPTS``."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-upgrade")
     cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    _seed_cache(
-        session,
-        effect_class=EFFECT_CLASS_CODE_UPGRADE,
-        tier=TIER_HISTORICAL,
-        details={"historical": True, "current_capability": True},
-    )
+    _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
 
-    sim = MagicMock(side_effect=AssertionError("tier-0 residue observation touched the wire"))
-    prober = _CountingProber(
-        lambda c, ctx: proven(
-            EFFECT_CLASS_CODE_UPGRADE,
-            tier=TIER_HISTORICAL,
-            gate_ref="role:X",
-            reason="indexed_upgrade_plus_current_state",
-            details={"historical": True, "current_capability": True},
-            concrete={"current_check_passed": True},
-        ),
-        effect_class=EFFECT_CLASS_CODE_UPGRADE,
-    )
-    worker = EffectsWorker(
-        prober=prober,
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job, simulate=sim),
-    )
-    _errors, metrics = _run(worker, session, job)
+    prober = _CountingProber(lambda c, ctx: _value_out_effect(destination=None))
+    for n in range(4):
+        job = _make_job(session, pid, f"residue-bound-{n}")
+        worker = EffectsWorker(
+            prober=prober,
+            hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
+            seams=_seams(session, job),
+        )
+        _run(worker, session, job)
+        session.expire_all()
 
-    assert session.query(EffectVerdict).one().current_check_passed is True
-    assert metrics["residue_observations"] == 1
-    assert sim.call_count == 0
+    assert len(prober.runs) == _RESIDUE_PROBE_MAX_ATTEMPTS
+    row = session.query(EffectVerdict).one()
+    assert row.concrete_destination is None
+    assert row.observed_residue == {"destination_probe_attempts": _RESIDUE_PROBE_MAX_ATTEMPTS}
+
+
+@requires_postgres
+def test_residue_reprobe_that_succeeds_stops_immediately(clean_effects, monkeypatch):
+    """The bound never costs a real observation: a probe that resolves the
+    destination closes the gap on the first attempt and is not re-run."""
+    session = clean_effects
+    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
+    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
+    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
+    _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
+
+    prober = _CountingProber(lambda c, ctx: _value_out_effect())
+    for n in range(3):
+        job = _make_job(session, pid, f"residue-closed-{n}")
+        worker = EffectsWorker(
+            prober=prober,
+            hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
+            seams=_seams(session, job),
+        )
+        _run(worker, session, job)
+        session.expire_all()
+
+    assert len(prober.runs) == 1
+    assert session.query(EffectVerdict).one().concrete_destination == DESTINATION
 
 
 @requires_postgres
@@ -587,8 +632,8 @@ def test_residue_gap_lookup_is_one_query_for_the_whole_worklist(clean_effects):
         sa_event.remove(session.get_bind(), "before_cursor_execute", before_cursor)
 
     assert len(seen) == 1
-    assert got[(CONTRACT_A.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (DESTINATION, None)
-    assert got[(CONTRACT_B.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (None, None)
+    assert got[(CONTRACT_A.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (DESTINATION, None, None)
+    assert got[(CONTRACT_B.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (None, None, None)
     assert ("0x" + "ee" * 20, SELECTOR, EFFECT_CLASS_VALUE_OUT) not in got
 
 

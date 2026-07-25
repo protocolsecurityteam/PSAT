@@ -38,7 +38,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -58,7 +58,6 @@ from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job
 from db.queue import advance_job, store_artifact
 from services.effects import claims_bridge
 from services.effects.config import (
-    EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
     TIER_CALL,
@@ -77,6 +76,8 @@ from services.effects.orchestrator import (
 )
 from services.effects.prefetch import clear_prefetch, install_prefetch
 from services.effects.preflight import CapabilityStore, InMemoryCapabilityStore, probe_simulate_support
+from services.effects.seeding import SimulateSeeder, input_seeding_enabled
+from services.effects.seeding import budget_of as seeding_budget_of
 from services.effects.selection import Candidate, JobScope, record_empty_planning, select_candidates
 from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
@@ -154,23 +155,43 @@ def _fork_enabled() -> bool:
 # cache's purpose (61% hit rate on the last live run), so an observation runs
 # only when ALL of these hold:
 #   * the class has residue this schema can store — ``value_out``'s destination
-#     and ``code_upgrade``'s current-state check are the only two columns on
-#     ``effect_verdicts``; ``authority_change``/``supply``/``freeze_pause``
-#     recipes emit no ``concrete`` at all, so there is nothing to go and get;
+#     is the only such column reachable from a cache hit;
+#     ``authority_change``/``supply``/``freeze_pause`` recipes emit no
+#     ``concrete`` at all, so there is nothing to go and get, and
+#     ``code_upgrade``'s ``current_check_passed`` belongs exclusively to the
+#     Tier-0 branch, which ``_is_cacheable`` refuses to cache (so no cache HIT
+#     can ever want it — see ``_residue_observable``);
 #   * the CACHED verdict is one that can carry residue (below), so a probe that
 #     provably cannot produce a value is never issued;
-#   * the persisted row for THIS deployment lacks the value — one batched read
-#     per job answers that for every hit at once. A row that already has it
-#     needs nothing, so this is once per deployment ever, not once per run.
+#   * the persisted row for THIS deployment lacks the value AND has not already
+#     spent its attempts — one batched read per job answers both for every hit at
+#     once. That bound is what makes this once per deployment EVER: without it a
+#     behavior that is proven in the cache but unreproducible at THIS deployment
+#     (a precondition only the first-sighting contract met) re-probes on every
+#     job of every run, forever, always for the same NULL.
 #
-# Cost: exactly one Tier-1 probe per gap, and only classes whose probe is cheap
-# are listed. ``freeze_pause`` is excluded on cost as well as content — its
+# Cost: at most ``_RESIDUE_PROBE_MAX_ATTEMPTS`` Tier-1 probes per deployment and
+# class, ever. ``freeze_pause`` is excluded on cost as well as content — its
 # observation needs the Tier-2 anvil fork, the single most expensive thing the
 # stage does.
 _RESIDUE_KEY = {
     EFFECT_CLASS_VALUE_OUT: "destination",
-    EFFECT_CLASS_CODE_UPGRADE: "current_check_passed",
 }
+
+# ``observed_residue`` key holding how many hit-path observations this deployment
+# has already spent on its destination. Bookkeeping, not a published fact — the
+# claims bridge projects a fixed whitelist and never sees it.
+_RESIDUE_ATTEMPTS_KEY = "destination_probe_attempts"
+
+# Two, not one: a first attempt lost to an RPC flake gets exactly one retry, and
+# then the gap is accepted as genuine rather than re-probed for the life of the
+# deployment.
+_RESIDUE_PROBE_MAX_ATTEMPTS = 2
+
+# State-plane residue that has no column of its own and rides ``observed_residue``.
+# A strict whitelist: ``concrete`` is what a recipe chose to hand back, and only
+# these keys are per-deployment facts this table is meant to publish.
+_RESIDUE_JSON_KEYS = ("observed_reach_value_usd", "observed_reach_holders", "reach_indeterminate")
 
 
 def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
@@ -180,19 +201,40 @@ def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
     unknown returns drop ``concrete``), so an unknown hit would burn two
     ``eth_simulateV1`` calls for a guaranteed NULL.
 
-    ``code_upgrade`` records ``current_check_passed`` only on the Tier-0
-    historical branch — which is also the branch that touches no wire at all
-    (the check is a DB/static read resolved at plan time), so that observation is
-    free. The Tier-1 branch's residue is ``impl_before``/``impl_after``, which
-    this schema does not store, and it costs a simulation; ``tier`` tells the two
-    apart exactly, because the cached row was written by the same branch the
-    re-probe of the same behavior will take.
+    ``code_upgrade`` is deliberately absent. Its only storable residue
+    (``current_check_passed``) comes from the Tier-0 historical branch, and
+    ``_is_cacheable`` refuses to cache Tier-0 verdicts at all (inv. 13) — so no
+    cached row can exist for that branch and the arm that used to test for one
+    was unreachable. Its Tier-1 branch yields ``impl_before``/``impl_after``,
+    which this schema does not store.
     """
     if effect_class == EFFECT_CLASS_VALUE_OUT:
         return cached.verdict == VERDICT_PROVEN
-    if effect_class == EFFECT_CLASS_CODE_UPGRADE:
-        return cached.tier == TIER_HISTORICAL
     return False
+
+
+def _residue_attempts(residue: Any) -> int:
+    value = residue.get(_RESIDUE_ATTEMPTS_KEY) if isinstance(residue, dict) else None
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _observed_residue(it: "_Item", concrete: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The ``effect_verdicts.observed_residue`` payload for one write.
+
+    Two things live here, both per-deployment: the §5b value-reach figures (holder
+    ADDRESSES and this protocol's USD — state-plane, so they must never travel on
+    the behavioral cache the way they did while they sat in ``details``), and the
+    hit-path re-probe attempt count that bounds ``_mark_residue_gaps``. The column
+    is merged key-wise on conflict, so a write carrying only one of them leaves
+    the other standing."""
+    payload: dict[str, Any] = {}
+    if concrete:
+        payload.update({k: concrete[k] for k in _RESIDUE_JSON_KEYS if k in concrete})
+    if it.residue_probe:
+        # Counted whether or not the probe produced anything: an attempt that
+        # yielded nothing is exactly the case the bound exists for.
+        payload[_RESIDUE_ATTEMPTS_KEY] = it.residue_attempts + 1
+    return payload or None
 
 
 def _residue_only(concrete: dict[str, Any] | None, effect_class: str) -> dict[str, Any] | None:
@@ -279,6 +321,9 @@ class _Item:
     # run the plan for its ``concrete`` alone (see ``_RESIDUE_KEY``). Never set
     # on a miss or an audit — both already probe.
     residue_probe: bool = False
+    # Hit-path observations this deployment has already spent on that gap, read
+    # from the stored row so the re-probe is bounded across jobs and runs.
+    residue_attempts: int = 0
 
 
 @dataclass
@@ -296,6 +341,8 @@ class _Counters:
     skipped: int = 0
     residue_observations: int = 0
     contracts_planned_empty: int = 0
+    # Input-asset seeding spend/yield for the job (see ``SeedBudget.metrics``).
+    seed_metrics: dict[str, int] = field(default_factory=dict)
 
 
 class EffectsWorker(BaseWorker):
@@ -320,6 +367,9 @@ class EffectsWorker(BaseWorker):
         # Tier-2 plan and closed in ``process()``'s finally.
         self._anvil: Any = None
         self._anvil_error: Exception | None = None
+        # Per-job input-asset seeder, rebuilt in ``_probe_context`` so its budget
+        # counters start at zero for every job.
+        self._seeder: SimulateSeeder | None = None
 
     # -- seam construction (lazy; real I/O only here) ----------------------
 
@@ -500,6 +550,7 @@ class EffectsWorker(BaseWorker):
             ph["verdicts_written"] = counters.verdicts_written
             ph["labeled"] = self._bridge_claims(session, items)
 
+        self._record_seed_metrics(counters)
         self._record_metrics(counters)
         logger.info(
             "Effects stage complete for job %s: %d candidates, %d verdicts, "
@@ -586,6 +637,16 @@ class EffectsWorker(BaseWorker):
         def on_requests(n: int) -> None:
             counters.upstream_requests += max(0, n)
 
+        # The input-asset seeder is built HERE rather than lazily inside
+        # ``ProbeContext`` so the job owns its cost ceiling and can report what it
+        # spent: the seeded retry runs on the common (reverted) path, and without
+        # a budget its discovery blocks scale with the protocol's distinct
+        # vaults/tokens. Same construction conditions the lazy path used, so an
+        # unsupported simulate or the kill-valve still means no seeder at all.
+        self._seeder = None
+        if supported and input_seeding_enabled():
+            self._seeder = SimulateSeeder(seams.simulate, chain_id=seams.chain_id)
+
         return ProbeContext(
             chain_id=seams.chain_id,
             block=block,
@@ -596,7 +657,24 @@ class EffectsWorker(BaseWorker):
             call_batch=seams.call_batch,
             anvil_factory=seams.anvil_factory,
             on_requests=on_requests,
+            seeder=self._seeder,
         )
+
+    def _record_seed_metrics(self, counters: _Counters) -> None:
+        """Fold the job's seeding spend into the stage metrics + one log line.
+
+        Without this the retry path is invisible: the next live run could measure
+        that effects got slower but not whether seeding was why, nor whether the
+        spend bought any verdict."""
+        seeder = getattr(self, "_seeder", None)
+        budget = seeding_budget_of(seeder) if seeder is not None else None
+        if budget is None:
+            return
+        counters.seed_metrics = budget.metrics()
+        if budget.exhausted_any:
+            logger.warning("effects input seeding hit its per-job budget: %s", budget.summary())
+        elif budget.probe_retries:
+            logger.info("effects input seeding: %s", budget.summary())
 
     def _plan(
         self,
@@ -705,7 +783,8 @@ class EffectsWorker(BaseWorker):
                 clear_prefetch(session)
 
     def _mark_residue_gaps(self, session: Session, items: list[_Item], chain_id: int) -> None:
-        """Flag the cache hits whose persisted verdict row still has no residue.
+        """Flag the cache hits whose persisted verdict row still has no residue
+        AND has attempts left.
 
         One batched read for the whole worklist, so the check that makes the
         re-observation cheap does not itself reintroduce an N+1."""
@@ -729,12 +808,12 @@ class EffectsWorker(BaseWorker):
         for it in wanted:
             row = stored.get((it.candidate.probe_target.lower(), it.candidate.selector or "", it.effect_class))
             if row is None:
+                # No verdict row yet: the first sighting of this deployment.
                 it.residue_probe = True
                 continue
-            destination, current_check = row
-            it.residue_probe = (
-                destination is None if it.effect_class == EFFECT_CLASS_VALUE_OUT else current_check is None
-            )
+            destination, _current_check, residue = row
+            it.residue_attempts = _residue_attempts(residue)
+            it.residue_probe = destination is None and it.residue_attempts < _RESIDUE_PROBE_MAX_ATTEMPTS
 
     def _mark_empty_planning(
         self,
@@ -841,6 +920,7 @@ class EffectsWorker(BaseWorker):
                 tier=tier,
                 concrete_destination=concrete.get("destination") if concrete else None,
                 current_check_passed=concrete.get("current_check_passed") if concrete else None,
+                observed_residue=_observed_residue(it, concrete),
                 witness=details or None,
                 transcript_ptr=transcript_ptr,
             )
@@ -1012,6 +1092,8 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("peak_anvil_rss_mb", counters.peak_anvil_rss_mb)
         record_stage_metric("residue_observations", counters.residue_observations)
         record_stage_metric("contracts_planned_empty", counters.contracts_planned_empty)
+        for name, value in counters.seed_metrics.items():
+            record_stage_metric(name, value)
 
     def _finalize_terminal_failure(
         self,

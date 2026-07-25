@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, func, select, text, tuple_
+from sqlalchemy import and_, case, func, null, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -156,13 +156,13 @@ def find_verdict_residue_batch(
     *,
     chain_id: int,
     identities: "Any",
-) -> dict[tuple[str, str, str], tuple[str | None, bool | None]]:
+) -> dict[tuple[str, str, str], tuple[str | None, bool | None, dict[str, Any] | None]]:
     """State-plane residue already persisted for a set of deployment identities.
 
     ``identities`` is any iterable of ``(contract_address, selector,
     effect_class)``. Returns ``{identity: (concrete_destination,
-    current_check_passed)}`` for the rows that exist — a key absent from the
-    result has no verdict row at all, which is also "no residue".
+    current_check_passed, observed_residue)}`` for the rows that exist — a key
+    absent from the result has no verdict row at all, which is also "no residue".
 
     Read-only and batched (one composite ``IN``) because the caller asks it once
     per job about every cache HIT: a hit carries no state-plane observation of
@@ -181,6 +181,7 @@ def find_verdict_residue_batch(
             EffectVerdict.effect_class,
             EffectVerdict.concrete_destination,
             EffectVerdict.current_check_passed,
+            EffectVerdict.observed_residue,
         ).where(
             EffectVerdict.chain_id == chain_id,
             tuple_(
@@ -190,7 +191,7 @@ def find_verdict_residue_batch(
             ).in_(list(keys)),
         )
     ).all()
-    return {(r[0], r[1], r[2]): (r[3], r[4]) for r in rows}
+    return {(r[0], r[1], r[2]): (r[3], r[4], r[5]) for r in rows}
 
 
 def upsert_cached_verdict(
@@ -340,13 +341,15 @@ def record_effect_verdict(
     behavior_hash: str | None = None,
     concrete_destination: str | None = None,
     current_check_passed: bool | None = None,
+    observed_residue: dict[str, Any] | None = None,
     witness: dict[str, Any] | None = None,
     transcript_ptr: str | None = None,
 ) -> None:
     """Upsert the per contract-function state-plane residue for one deployment.
 
     This is where the concrete values live — the exact destination address, the
-    exact target impl, the Tier-0 current-state check — NEVER the
+    exact target impl, the Tier-0 current-state check, and (in
+    ``observed_residue``) the §5b value-reach holders/USD — NEVER the
     ``effect_behavior_cache`` (inv. 3). Keyed on the deployment coordinates
     ``(chain_id, contract_address, selector, effect_class)``; the empty-string
     ``selector`` sentinel keeps the identity constraint portable for
@@ -374,6 +377,10 @@ def record_effect_verdict(
             tier=tier,
             concrete_destination=concrete_destination,
             current_check_passed=current_check_passed,
+            # Explicit SQL NULL: a JSONB column turns a Python ``None`` into the
+            # jsonb scalar ``null``, which is a VALUE — it would defeat both the
+            # merge above and the "no residue" reading everywhere downstream.
+            observed_residue=observed_residue if observed_residue is not None else null(),
             witness=witness,
             transcript_ptr=transcript_ptr,
         )
@@ -384,14 +391,43 @@ def record_effect_verdict(
         # at this address. Carrying it across a behavior_hash change would let a
         # pre-upgrade destination masquerade as the new implementation's.
         same_code = stmt.excluded.behavior_hash.is_not_distinct_from(existing.behavior_hash)
+        # ...and the same ANSWER? Residue is the concrete detail OF a verdict, so
+        # it is only still true while that verdict is. A proven value-move
+        # rewritten as ``unknown`` keeps neither its witness nor its transcript
+        # (below) precisely so a proven witness never sits beside a downgraded
+        # verdict; an orphaned ``concrete_destination`` is that same contradiction
+        # in another column, and ``find_verdict_residue_batch`` reads it, so the
+        # orphan also permanently suppresses re-observation.
+        same_verdict = stmt.excluded.verdict.is_not_distinct_from(existing.verdict)
+        residue_still_stands = and_(same_code, same_verdict)
 
         def keep_residue(incoming, stored):
             """State-plane residue: an absent incoming value means *this* write had
             no state-plane observation, NOT that none exists. A cache-HIT resolution
             structurally carries none (inv. 3 — the code-plane cache holds no
             concrete values), so an unconditional overwrite would erase the
-            first-sighting observation on every subsequent hit."""
-            return case((incoming.is_not(None), incoming), (same_code, stored), else_=None)
+            first-sighting observation on every subsequent hit — but only while the
+            verdict it describes is unchanged."""
+            return case((incoming.is_not(None), incoming), (residue_still_stands, stored), else_=None)
+
+        def merge_residue(incoming, stored):
+            """``observed_residue`` is a BAG of independent residue facts (§5b
+            reach, re-probe bookkeeping) written by different paths, so absent
+            keys must survive an incoming write that carries only some of them —
+            a key-wise ``keep_residue``. Same lifecycle: a changed verdict or a
+            changed behavior hash drops the whole bag.
+
+            ``_object`` is not defensive padding: a JSONB column renders a Python
+            ``None`` as the jsonb scalar ``null`` rather than SQL NULL, and
+            ``jsonb_object || jsonb_null`` concatenates into a two-element ARRAY
+            instead of merging. Both sides are normalized to an object first."""
+            empty = text("'{}'::jsonb")
+
+            def _object(col):
+                return func.coalesce(func.nullif(col, text("'null'::jsonb")), empty)
+
+            merged = func.nullif(_object(stored).op("||")(_object(incoming)), empty)
+            return case((residue_still_stands, merged), else_=incoming)
 
         return stmt.on_conflict_do_update(
             constraint="uq_effect_verdicts_identity",
@@ -408,6 +444,7 @@ def record_effect_verdict(
                 # State-plane residue — preserved across observation-less rewrites.
                 "concrete_destination": keep_residue(stmt.excluded.concrete_destination, existing.concrete_destination),
                 "current_check_passed": keep_residue(stmt.excluded.current_check_passed, existing.current_check_passed),
+                "observed_residue": merge_residue(stmt.excluded.observed_residue, existing.observed_residue),
                 # Evidence FOR the verdict above, so it moves with it: preserving a
                 # "proven" witness next to a downgraded ``unknown`` verdict would
                 # publish a contradiction. Deliberately not residue-preserved.

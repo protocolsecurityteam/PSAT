@@ -113,6 +113,8 @@ class VerdictLike(Protocol):
     def current_check_passed(self) -> bool | None: ...
     @property
     def witness(self) -> dict[str, Any] | None: ...
+    @property
+    def observed_residue(self) -> dict[str, Any] | None: ...
 
 
 def _claim_id_for(verdict: VerdictLike) -> str | None:
@@ -207,12 +209,6 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     # dilution signal (supply rose with no asset inflow in the same call); the
     # scorer must NOT read absence of this key as "backed".
     #
-    # ``observed_reach_value_usd`` / ``observed_reach_holders`` / ``reach_indeterminate``
-    # (§5b) ride the fork flow.out verdict. The reach USD is a conservative upper
-    # bound (a holder's full on-chain balance attributed when value provably leaves
-    # it, inv. 5/7); ``reach_indeterminate is True`` means downstream reach was
-    # fork-observed to be nothing, so the value is FLOORED to the acting deployment's
-    # own balance — never inflated via a control-graph heuristic.
     keep = (
         "supply_delta_sign",
         "gate_mutation",
@@ -223,14 +219,35 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "auto_expiry",
         "duration_bound_seconds",
         "backing",
-        "observed_reach_value_usd",
-        "observed_reach_holders",
-        "reach_indeterminate",
     )
     summary = {k: raw[k] for k in keep if k in raw}
+    summary.update(_reach_summary(verdict))
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not None:
         summary["current_check_passed"] = verdict.current_check_passed
     return summary
+
+
+# §5b downstream value-reach. Read from ``effect_verdicts.observed_residue``, NOT
+# from ``witness``: holder addresses and USD are per-deployment state, and while
+# they lived on the witness they were copied into the code-plane behavioral cache
+# and re-published as a DIFFERENT deployment's observation on every cache hit.
+# ``observed_residue`` is the state-plane column and is never a cache key (inv. 3).
+#
+# CONTRACT for the eventual scorer: the reach USD is a conservative upper bound (a
+# holder's full on-chain balance attributed when value provably leaves it, inv.
+# 5/7); ``reach_indeterminate is True`` means downstream reach was fork-observed to
+# be nothing, so the value is FLOORED to the acting deployment's own balance —
+# never inflated via a control-graph heuristic. ABSENCE of all three keys is NOT
+# "no reach": it means this deployment has no fork observation of its own yet (its
+# verdict came from a cache hit), so reach is simply unmeasured here.
+_REACH_KEYS = ("observed_reach_value_usd", "observed_reach_holders", "reach_indeterminate")
+
+
+def _reach_summary(verdict: VerdictLike) -> dict[str, Any]:
+    residue = getattr(verdict, "observed_residue", None)
+    if not isinstance(residue, dict):
+        return {}
+    return {k: residue[k] for k in _REACH_KEYS if k in residue}
 
 
 def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:

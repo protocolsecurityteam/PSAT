@@ -1483,6 +1483,12 @@ class EffectVerdict(Base):
     # State-plane concrete values — the reason this row is not the cache.
     concrete_destination: Mapped[str | None] = mapped_column(String(42), nullable=True)
     current_check_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The state-plane residue with no column of its own: §5b downstream value
+    # reach (holder ADDRESSES + their USD) and the bookkeeping that bounds the
+    # hit-path residue re-probe. Deliberately NOT ``witness`` — witness carries
+    # the code-plane structural details a cache hit re-publishes verbatim, so
+    # anything per-deployment placed there travels to other deployments.
+    observed_residue: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     witness: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)

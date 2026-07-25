@@ -45,6 +45,7 @@ def _verdict(
     verdict: str = VERDICT_PROVEN,
     tier: str = TIER_CALL,
     witness: dict[str, Any] | None = None,
+    observed_residue: dict[str, Any] | None = None,
     current_check_passed: bool | None = None,
     behavior_hash: str = "bh",
     vid: int = 1,
@@ -57,6 +58,7 @@ def _verdict(
         behavior_hash=behavior_hash,
         current_check_passed=current_check_passed,
         witness=witness,
+        observed_residue=observed_residue,
     )
 
 
@@ -114,13 +116,15 @@ def test_freeze_pause_maps_to_pause_set_only():
 
 
 def test_value_out_projects_reach_into_observed_witness():
-    # §5b: the fork downstream-reach fields ride the flow.out claim witness.
-    witness = {
-        "value_moved": True,
+    # §5b: the fork downstream-reach fields ride the flow.out claim witness — read
+    # from the per-deployment ``observed_residue`` column, never the witness.
+    residue = {
         "observed_reach_value_usd": 55_200_000.0,
         "observed_reach_holders": ["0x" + "55" * 20],
     }
-    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    claim = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}, observed_residue=residue)
+    )
     assert claim is not None and claim["claim_id"] == "flow.out"
     observed = claim["witness"]["observed"]
     assert observed["observed_reach_value_usd"] == 55_200_000.0
@@ -130,12 +134,33 @@ def test_value_out_projects_reach_into_observed_witness():
 def test_value_out_projects_reach_indeterminate_floor():
     # §5b floor: reach_indeterminate + floored value both survive projection so the
     # scorer sees "downstream reach not witnessed, floored to own balance".
-    witness = {"value_moved": True, "observed_reach_value_usd": 221_000_000.0, "reach_indeterminate": True}
-    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    residue = {"observed_reach_value_usd": 221_000_000.0, "reach_indeterminate": True}
+    claim = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}, observed_residue=residue)
+    )
     assert claim is not None
     observed = claim["witness"]["observed"]
     assert observed["reach_indeterminate"] is True
     assert observed["observed_reach_value_usd"] == 221_000_000.0
+
+
+def test_reach_is_never_read_off_the_cacheable_witness():
+    # The plane leak this fix closes: while reach sat on ``witness`` it was
+    # written to the CROSS-DEPLOYMENT behavioral cache and re-published as another
+    # deployment's observation on every hit. Witness-borne reach values are the
+    # contaminated shape and must not project.
+    contaminated = {
+        "value_moved": True,
+        "observed_reach_value_usd": 5_000_000.0,
+        "observed_reach_holders": ["0x" + "aa" * 20],
+        "reach_indeterminate": True,
+    }
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=contaminated))
+    assert claim is not None
+    observed = claim["witness"].get("observed", {})
+    assert "observed_reach_value_usd" not in observed
+    assert "observed_reach_holders" not in observed
+    assert "reach_indeterminate" not in observed
 
 
 def test_freeze_pause_projects_severity_fields_verdict318_shape():
