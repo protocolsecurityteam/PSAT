@@ -123,10 +123,10 @@ class ValueFlow(TypedDict):
     from_is_self: bool
     origin: str  # body | guard
     # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
-    #   param, msg_sender, caller_controlled, self, indeterminate}
+    #   param, msg_sender, caller_controlled, self, token_owner, indeterminate}
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
-    #   fixed_constant, indeterminate}
+    #   fixed_constant, balance_delta, indeterminate}
     amount_kind: NotRequired[KindTier]
     # Positional index of the ENTRY function's parameter the destination
     # resolves to. Present ONLY when ``target_kind`` is ``param`` and every
@@ -1203,6 +1203,9 @@ def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
         return elem
     if _reaches_merged_local(operand, ctx):
         return ("indeterminate",)
+    call = _call_origin(operand, ctx)
+    if call is not None:
+        return call
     srcs = ctx.engine._sources_for_value(operand)
     if not srcs or is_top(srcs):
         return ("indeterminate",)
@@ -1312,6 +1315,8 @@ def _origin_to_target_kind(origin: tuple[str, ...], ctx: _UnitCtx) -> str:
         return "self"
     if tag == "constant":
         return "constant"
+    if tag == "token_owner":
+        return "token_owner"
     if tag == "state_variable":
         return _state_var_target_kind(origin[1], ctx)
     return "indeterminate"
@@ -1323,6 +1328,13 @@ def _is_derivation(computed_kind: str | None) -> bool:
     merely names the value read (``msg.value``, ``balance(address)``,
     ``member.<field>``)."""
     return computed_kind is not None and computed_kind.startswith(("BinaryType.", "UnaryType."))
+
+
+def _is_subtraction(computed_kind: str | None) -> bool:
+    """True for the one arithmetic op that makes a balance read a DELTA. A
+    comparison (``Math.min``'s ``a < b``) or a scaling (``balance / 2``) is not a
+    delta and must not borrow the name."""
+    return computed_kind == "BinaryType.SUBTRACTION"
 
 
 def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
@@ -1423,6 +1435,72 @@ def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
     return root if root[0] in _ELEMENT_ROOT_TAGS else None
 
 
+# ERC-721 ``ownerOf(uint256)``. A destination read back from it is the CURRENT
+# owner of the token id the caller passed: the caller chooses the id, the token's
+# transfer history chooses the address. That is neither a caller-supplied
+# argument (``param`` — the caller cannot name the payee) nor a fixed or
+# admin-settable one (``storage_*`` — no setter redirects it), so it gets its own
+# kind rather than being folded into a neighbour it would misdescribe.
+_TOKEN_OWNER_SELECTOR = "0x6352211e"
+
+# Def-chain edges that preserve "this value IS that call's return value".
+_CALL_WALK_DEFS = ("TypeConversion", "Assignment")
+_CALL_IR_OPS = ("InternalCall", "LibraryCall", "HighLevelCall")
+
+
+def _call_standard_origin(ir: Any) -> tuple[str, ...]:
+    """The neutral origin a recognized STANDARD callee returns. An unrecognized
+    callee is ``("indeterminate",)`` — a return value we cannot name, NOT a value
+    to keep resolving from the callee's internals."""
+    if _selector_for(_callee_signature(ir)) == _TOKEN_OWNER_SELECTOR:
+        return ("token_owner",)
+    return ("indeterminate",)
+
+
+def _call_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
+    """The neutral origin of an operand that IS a call's return value. ``None``
+    only when the operand does not resolve — through casts/copies alone — to
+    exactly one call, in which case the caller falls through to the source set.
+
+    A POSITIVE test on the def-use chain, not on the source set, for two reasons.
+    A set-membership test would fire on a value merely TAINTED by the call
+    (``ownerOf(id) ^ salt``) rather than one that IS its result. And going the
+    other way, the source set of a DIRECTLY-READ nested parameter can carry a
+    call tag as a Slither entrypoint-Phi echo from a sibling call site — blocking
+    on that would degrade a perfectly resolvable forwarded parameter.
+
+    Answering here is what keeps ``_forwarded_param_sources`` honest for call
+    results. ``_handle_internal_call`` sets its lvalue to the callee's return
+    sources UNIONED with the call tag, so ``ownerOf(id)`` carries
+    ``{view_call, state_variable _owners, parameter id}`` — where the parameter
+    is the mapping KEY, not the value. Falling through to the source set there
+    lets the drop-the-rest shortcut pick ``param`` out of a real union and report
+    a token-owner payout as a caller-chosen destination."""
+    seen: set[int] = set()
+    stack: list[Any] = [operand]
+    origins: set[tuple[str, ...] | None] = set()
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn == "TypeConversion":
+            stack.append(getattr(ir, "variable", None))
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+        elif tn in _CALL_IR_OPS:
+            origins.add(_call_standard_origin(ir))
+    # Two calls reaching one operand require a Phi between them, so >1 origin is
+    # a merge and must not resolve to either member.
+    if len(origins) != 1:
+        return ("indeterminate",) if origins else None
+    return next(iter(origins))
+
+
 def _element_kind(operand: Any, ctx: _UnitCtx, *, amount: bool) -> str | None:
     """An element read's destination/amount kind. A storage root yields the base
     var's mutability (``storage_setter`` / ``storage_no_setter`` /
@@ -1455,7 +1533,12 @@ def _forwarded_param_sources(srcs: Any, ctx: _UnitCtx) -> list[Any] | None:
     sees ``{parameter, state_variable}`` and yields indeterminate). So a computed
     operand returns ``None`` and falls through to the agreement path, where the
     disagreement correctly yields indeterminate while a computed-but-single-origin
-    shape (a struct-member read of a forwarded param) still recovers."""
+    shape (a struct-member read of a forwarded param) still recovers.
+
+    A CALL RESULT is the same trap without a ``computed`` wrapper to mark it, but
+    it is intercepted upstream by ``_call_origin`` rather than here: the source
+    set alone cannot tell a call the operand IS from a call tag echoed onto a
+    forwarded parameter by a sibling call site."""
     if not ctx.nested:
         return None
     if any(s.kind == "computed" for s in srcs):
@@ -1484,27 +1567,32 @@ def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
 def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     if not srcs or is_top(srcs):
         return "indeterminate"
+    computed_kinds = {s.computed_kind for s in srcs if s.kind == "computed"}
+    has_value = any(c == "msg.value" for c in computed_kinds)
+    has_balance = any(c and "balance" in c for c in computed_kinds)
+    if has_balance and not has_value and any(_is_derivation(c) for c in computed_kinds):
+        # Arithmetic ON a balance read. Subtraction is a DELTA
+        # (``address(this).balance - prevBalance``, ``balance - locked``) and gets
+        # named; any other derivation (``balance / 2``) has no bound we can name.
+        # Either way the OTHER operand must not win alone: reporting
+        # ``balance - locked`` as ``bounded_by_storage``, or ``balance / 2`` as
+        # ``fixed_constant``, credits that operand with bounding an amount that
+        # actually tracks the balance. This runs ahead of the meaningful-source
+        # split precisely because that operand is usually the only non-``computed``
+        # source and would otherwise be the whole answer.
+        return "balance_delta" if any(_is_subtraction(c) for c in computed_kinds) else "indeterminate"
     meaningful = {s.kind for s in srcs} - {"computed"}
     if not meaningful:
-        # Pure computed: only ``msg.value`` and ``address(this).balance`` are
-        # unambiguous amount origins; arithmetic/hash mixes stay indeterminate.
-        computed_kinds = {s.computed_kind for s in srcs if s.kind == "computed"}
-        has_value = any(c == "msg.value" for c in computed_kinds)
-        has_balance = any(c and "balance" in c for c in computed_kinds)
+        # Pure computed: only ``msg.value`` and a bare ``address(this).balance``
+        # read are unambiguous amount origins; hash/mixed tags stay indeterminate.
         if has_value and not has_balance:
             # A msg.value derivation (``msg.value - fee``) is still bounded by
             # what the caller attached to THIS call, so the label does not
-            # over-claim the way the balance case below would.
+            # over-claim the way a bare balance read would.
             return "msg_value"
         if has_balance and not has_value:
-            # ``whole_balance`` asserts the send can drain everything the
-            # contract holds. That is only true of a bare balance READ. Balance
-            # ARITHMETIC is a delta — EtherFiRedemptionManager's
-            # ``address(this).balance - prevBalance`` is bounded by what the
-            # liquidity pool just paid in — and we have no bound for it, so it is
-            # indeterminate rather than a full-drain alarm.
-            if any(_is_derivation(c) for c in computed_kinds):
-                return "indeterminate"
+            # ``whole_balance`` asserts the send can drain everything the contract
+            # holds — true only of a bare READ, and every derivation is gone by here.
             return "whole_balance"
         return "indeterminate"
     forwarded = _forwarded_param_sources(srcs, ctx)
@@ -1538,6 +1626,12 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
         return (elem, "static_trace")
     if _reaches_merged_local(operand, ctx):
         return ("indeterminate", "static_trace")
+    # A recognized call's return value classifies from the callee's STANDARD
+    # identity — a trace through the call, never a dispositive AST read.
+    call = _call_origin(operand, ctx)
+    if call is not None:
+        kind = _origin_to_amount_kind(call) if amount else _origin_to_target_kind(call, ctx)
+        return (kind, "static_trace")
     srcs = ctx.engine._sources_for_value(operand)
     kind = _amount_kind_from_sources(srcs, ctx) if amount else _target_kind_from_sources(srcs, ctx)
     if kind == "indeterminate":
