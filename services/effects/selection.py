@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, exists, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 
 from db.models import (
@@ -32,6 +34,7 @@ from db.models import (
     ContractBalance,
     ControlGraphEdge,
     EffectiveFunction,
+    EffectsPlanMarker,
     EffectVerdict,
     FunctionPrincipal,
     Job,
@@ -209,10 +212,17 @@ class JobScope:
 
     ``address`` is the CODE-bearing ``contracts.address`` the job was created for;
     ownership is matched on that, never on a proxy deployment address.
+
+    ``planned_since`` is the reading job's own ``created_at``. It bounds how long
+    an :class:`~db.models.EffectsPlanMarker` counts as ownership — see
+    :func:`_scope_predicate` rule 4. ``None`` disables that rule entirely, which
+    is the conservative direction (re-sweep rather than skip), so a caller with
+    no timestamp loses efficiency and never coverage.
     """
 
     address: str
     chain_id: int
+    planned_since: datetime | None = None
 
 
 def _chain_name(chain_id: int) -> str:
@@ -254,7 +264,21 @@ def _scope_predicate(protocol_id: int, scope: JobScope):
        re-sweep them forever); or
     3. its functions already carry verdicts — which is what a *sweep* leaves
        behind, and is what stops a sweep repeating across a run: the first job to
-       sweep a contract marks it planned for every job after it.
+       sweep a contract marks it planned for every job after it; or
+    4. a sweep planned it and it yielded NO plans, recorded as an
+       ``effects_plan_markers`` row (rule 3's blind spot: an empty planning pass
+       writes no verdict, so a contract with no job of its own left no trace at
+       all and was re-swept by every later job forever).
+
+    Rule 4 is the only one that expires, and deliberately: a marker counts only
+    while it is at least as new as the reading job (``scope.planned_since``).
+    Planning inputs change out from under a contract — an ``upgrade_events`` row
+    lands from the indexer, a re-analysis rewrites ``effective_functions`` — so an
+    eternal "yielded nothing" would strand a contract that has since become
+    plannable, which is silent recall loss. Bounding it to the reading job's own
+    lifetime kills the intra-run re-sweep (every job of a wave was created before
+    the marker its siblings wrote) while guaranteeing the next wave re-plans it.
+    Rules 1-3 need no such bound: each is re-established by the new run's own job.
 
     Together these make the union over a protocol's jobs the whole protocol-wide
     set — every contract is owned (planned by its owner) or unowned (planned by
@@ -292,7 +316,20 @@ def _scope_predicate(protocol_id: int, scope: JobScope):
         .where(swept_function.contract_id == Contract.id)
         .correlate(Contract)
     )
-    owned = or_(in_flight, planned_by_own_job, planned_by_a_sweep)
+    clauses = [in_flight, planned_by_own_job, planned_by_a_sweep]
+    if scope.planned_since is not None:
+        clauses.append(
+            exists(
+                select(literal(1))
+                .select_from(EffectsPlanMarker)
+                .where(
+                    EffectsPlanMarker.contract_id == Contract.id,
+                    EffectsPlanMarker.planned_at >= scope.planned_since,
+                )
+                .correlate(Contract)
+            )
+        )
+    owned = or_(*clauses)
     return or_(func.lower(Contract.address) == scope.address.lower(), ~owned)
 
 
@@ -459,6 +496,49 @@ def select_candidates(
         return kept
 
     return candidates
+
+
+def record_empty_planning(
+    session: Session,
+    *,
+    job_id: Any,
+    candidates_by_contract: dict[int, int],
+) -> int:
+    """Mark contracts whose candidates were fully planned and yielded NO plans.
+
+    ``candidates_by_contract`` maps ``contracts.id`` → how many of its candidates
+    the caller planned. The caller must pass ONLY contracts whose every candidate
+    was resolved and probed without error: a candidate skipped for a missing
+    behavioral hash, or a prober that raised, is a transient failure and marking
+    it would suppress the retry. This is rule 4 of :func:`_scope_predicate`; see
+    :class:`~db.models.EffectsPlanMarker` for why the row is time-bounded.
+
+    Returns the number of contracts marked.
+    """
+    if not candidates_by_contract:
+        return 0
+    now = datetime.now(timezone.utc)
+    stmt = pg_insert(EffectsPlanMarker).values(
+        [
+            {"contract_id": cid, "job_id": job_id, "candidates_planned": n, "planned_at": now}
+            for cid, n in sorted(candidates_by_contract.items())
+        ]
+    )
+    session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[EffectsPlanMarker.contract_id],
+            # Refresh unconditionally: the newest empty planning pass is the one
+            # whose freshness rule 4 compares against, and an older ``planned_at``
+            # would only cause an extra sweep.
+            set_={
+                "job_id": stmt.excluded.job_id,
+                "candidates_planned": stmt.excluded.candidates_planned,
+                "planned_at": stmt.excluded.planned_at,
+            },
+        )
+    )
+    session.flush()
+    return len(candidates_by_contract)
 
 
 def _log_dropped(protocol_id: int, resource_cap: int, dropped: list[Candidate]) -> None:

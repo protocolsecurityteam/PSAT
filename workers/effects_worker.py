@@ -48,6 +48,7 @@ from db.effect_cache import (
     bump_hit,
     find_cached_verdict,
     find_cached_verdicts_batch,
+    find_verdict_residue_batch,
     kernel_verdicts_agree,
     mark_audited,
     record_effect_verdict,
@@ -57,6 +58,8 @@ from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job
 from db.queue import advance_job, store_artifact
 from services.effects import claims_bridge
 from services.effects.config import (
+    EFFECT_CLASS_CODE_UPGRADE,
+    EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
     TIER_CALL,
     TIER_HISTORICAL,
@@ -74,7 +77,7 @@ from services.effects.orchestrator import (
 )
 from services.effects.prefetch import clear_prefetch, install_prefetch
 from services.effects.preflight import CapabilityStore, InMemoryCapabilityStore, probe_simulate_support
-from services.effects.selection import Candidate, JobScope, select_candidates
+from services.effects.selection import Candidate, JobScope, record_empty_planning, select_candidates
 from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -130,6 +133,86 @@ def _fork_enabled() -> bool:
     already behind ``PSAT_EFFECTS_STAGE`` (default off), so this exists to disable
     forking alone (a host without foundry, an incident) without losing Tier 0/1."""
     return os.getenv("PSAT_EFFECTS_FORK", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+# --------------------------------------------------------------------------
+# State-plane residue re-observation on a cache HIT
+# --------------------------------------------------------------------------
+# A cache hit resolves the code-plane question and carries NO concrete values
+# (inv. 3), so ``_resolve_item`` returns ``concrete=None`` on both hit paths.
+# That is right for the CACHE, but it leaves a hole in ``effect_verdicts``: a
+# deployment whose FIRST write is a hit — the second deployment of a behavior
+# some other contract already cached — gets NULL residue and, because a later
+# hit carries none either, never acquires any. In a protocol built from repeated
+# deployment patterns that blank is permanent.
+#
+# The fix re-runs the plan for its ``concrete`` ONLY. The verdict, tier, details
+# and transcript still come from the cache — the cache remains the code-plane
+# answer and nothing observed here is ever written back to it.
+#
+# Scoping is what makes this affordable. Re-observing every hit would delete the
+# cache's purpose (61% hit rate on the last live run), so an observation runs
+# only when ALL of these hold:
+#   * the class has residue this schema can store — ``value_out``'s destination
+#     and ``code_upgrade``'s current-state check are the only two columns on
+#     ``effect_verdicts``; ``authority_change``/``supply``/``freeze_pause``
+#     recipes emit no ``concrete`` at all, so there is nothing to go and get;
+#   * the CACHED verdict is one that can carry residue (below), so a probe that
+#     provably cannot produce a value is never issued;
+#   * the persisted row for THIS deployment lacks the value — one batched read
+#     per job answers that for every hit at once. A row that already has it
+#     needs nothing, so this is once per deployment ever, not once per run.
+#
+# Cost: exactly one Tier-1 probe per gap, and only classes whose probe is cheap
+# are listed. ``freeze_pause`` is excluded on cost as well as content — its
+# observation needs the Tier-2 anvil fork, the single most expensive thing the
+# stage does.
+_RESIDUE_KEY = {
+    EFFECT_CLASS_VALUE_OUT: "destination",
+    EFFECT_CLASS_CODE_UPGRADE: "current_check_passed",
+}
+
+
+def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
+    """Can a re-probe of this cached behavior actually yield residue?
+
+    ``value_out`` records a destination only on the PROVEN branch (both the
+    unknown returns drop ``concrete``), so an unknown hit would burn two
+    ``eth_simulateV1`` calls for a guaranteed NULL.
+
+    ``code_upgrade`` records ``current_check_passed`` only on the Tier-0
+    historical branch — which is also the branch that touches no wire at all
+    (the check is a DB/static read resolved at plan time), so that observation is
+    free. The Tier-1 branch's residue is ``impl_before``/``impl_after``, which
+    this schema does not store, and it costs a simulation; ``tier`` tells the two
+    apart exactly, because the cached row was written by the same branch the
+    re-probe of the same behavior will take.
+    """
+    if effect_class == EFFECT_CLASS_VALUE_OUT:
+        return cached.verdict == VERDICT_PROVEN
+    if effect_class == EFFECT_CLASS_CODE_UPGRADE:
+        return cached.tier == TIER_HISTORICAL
+    return False
+
+
+def _residue_only(concrete: dict[str, Any] | None, effect_class: str) -> dict[str, Any] | None:
+    """The one residue key this class is allowed to contribute from a hit.
+
+    A whitelist rather than the raw ``concrete`` dict: the observation exists to
+    fill a specific blank, and must not become a side channel for anything else a
+    recipe happens to put there."""
+    key = _RESIDUE_KEY.get(effect_class)
+    if not concrete or key is None:
+        return None
+    value = concrete.get(key)
+    return {key: value} if value is not None else None
+
+
+def _residue_probe_enabled() -> bool:
+    """Kill-valve for the hit-path residue re-observation. Default ON; turning it
+    off restores the previous behavior exactly (hits write NULL residue and the
+    upsert's preservation guard keeps whatever is already stored)."""
+    return os.getenv("PSAT_EFFECTS_RESIDUE_PROBE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _batch_plan_enabled() -> bool:
@@ -192,6 +275,10 @@ class _Item:
     cached: EffectBehaviorCache | None
     needs_audit: bool
     probed: ObservedEffect | None = None
+    # A cache HIT whose persisted verdict row has no state-plane residue yet:
+    # run the plan for its ``concrete`` alone (see ``_RESIDUE_KEY``). Never set
+    # on a miss or an audit — both already probe.
+    residue_probe: bool = False
 
 
 @dataclass
@@ -207,6 +294,8 @@ class _Counters:
     upstream_requests: int = 0
     peak_anvil_rss_mb: int = 0
     skipped: int = 0
+    residue_observations: int = 0
+    contracts_planned_empty: int = 0
 
 
 class EffectsWorker(BaseWorker):
@@ -396,7 +485,7 @@ class EffectsWorker(BaseWorker):
 
         # cache_lookup → build the worklist, partition hits/misses/audits.
         with log_timed_phase(logger, "cache_lookup", durations_ms=durations_ms) as ph:
-            items = self._plan(session, candidates, ctx, hash_resolver, counters)
+            items = self._plan(session, candidates, ctx, hash_resolver, counters, job=job)
             ph["planned"] = len(items)
 
         # tier1_probes / tier2_fork → run recipes for misses + audit re-runs.
@@ -438,7 +527,13 @@ class EffectsWorker(BaseWorker):
             return []
         address = getattr(job, "address", None)
         scope = (
-            JobScope(address=address, chain_id=_chain_id_for_job(job))
+            JobScope(
+                address=address,
+                chain_id=_chain_id_for_job(job),
+                # Only an empty-planning marker at least as new as this job counts
+                # as ownership — see ``_scope_predicate`` rule 4.
+                planned_since=getattr(job, "created_at", None),
+            )
             if isinstance(address, str) and address.strip()
             else None
         )
@@ -510,6 +605,8 @@ class EffectsWorker(BaseWorker):
         ctx: ProbeContext,
         hash_resolver: HashResolver,
         counters: _Counters,
+        *,
+        job: Job | None = None,
     ) -> list[_Item]:
         # Bulk-load every per-candidate keyed row up front (bytecode, proxy
         # Contract/UpgradeEvent, pause claim + principal maps) so the deep
@@ -523,17 +620,26 @@ class EffectsWorker(BaseWorker):
             # Pass 1: resolve hashes + build plans, staging each plan's cache
             # identity. No verdict lookups yet — those are batched below.
             staged: list[tuple[Candidate, Any, str, str]] = []
+            # Per-contract planning outcome, for the empty-planning marker. A
+            # contract only qualifies when EVERY candidate of its was planned
+            # cleanly: a missing hash or a raising prober is transient, and
+            # marking it would suppress the retry rather than record a fact.
+            planned_per_contract: dict[int, int] = {}
+            unclean_contracts: set[int] = set()
+            contracts_with_plans: set[int] = set()
             for cand in candidates:
                 try:
                     resolved = hash_resolver(session, cand)
                 except Exception as exc:
                     record_degraded(phase="effects_hash", exc=exc, context={"function_id": cand.function_id})
                     counters.skipped += 1
+                    unclean_contracts.add(cand.contract_id)
                     continue
                 if resolved is None:
                     # No behavioral hash (no cached bytecode) — withhold rather
                     # than guess (per-behavior fail-forward, inv. 15).
                     counters.skipped += 1
+                    unclean_contracts.add(cand.contract_id)
                     continue
                 kernel_hash, surface_hash = resolved
                 try:
@@ -541,11 +647,18 @@ class EffectsWorker(BaseWorker):
                 except Exception as exc:
                     record_degraded(phase="effects_plan", exc=exc, context={"function_id": cand.function_id})
                     counters.skipped += 1
+                    unclean_contracts.add(cand.contract_id)
                     continue
+                planned_per_contract[cand.contract_id] = planned_per_contract.get(cand.contract_id, 0) + 1
+                if plans:
+                    contracts_with_plans.add(cand.contract_id)
                 for plan in plans:
                     behavior_hash = plan.behavior_hash or kernel_hash
                     surface = surface_hash if plan.scope != SCOPE_KERNEL else ""
                     staged.append((cand, plan, behavior_hash, surface))
+            self._mark_empty_planning(
+                session, job, planned_per_contract, unclean_contracts, contracts_with_plans, counters
+            )
 
             # Pass 2: one composite verdict lookup for the whole plan set
             # (collapses the per-plan single-row SELECTs), then assemble items.
@@ -585,10 +698,74 @@ class EffectsWorker(BaseWorker):
                         needs_audit=needs_audit,
                     )
                 )
+            self._mark_residue_gaps(session, items, ctx.chain_id)
             return items
         finally:
             if batched:
                 clear_prefetch(session)
+
+    def _mark_residue_gaps(self, session: Session, items: list[_Item], chain_id: int) -> None:
+        """Flag the cache hits whose persisted verdict row still has no residue.
+
+        One batched read for the whole worklist, so the check that makes the
+        re-observation cheap does not itself reintroduce an N+1."""
+        if not _residue_probe_enabled():
+            return
+        wanted = [
+            it
+            for it in items
+            if it.cached is not None
+            and not it.needs_audit
+            and it.effect_class in _RESIDUE_KEY
+            and _residue_observable(it.cached, it.effect_class)
+        ]
+        if not wanted:
+            return
+        stored = find_verdict_residue_batch(
+            session,
+            chain_id=chain_id,
+            identities=((it.candidate.probe_target, it.candidate.selector or "", it.effect_class) for it in wanted),
+        )
+        for it in wanted:
+            row = stored.get((it.candidate.probe_target.lower(), it.candidate.selector or "", it.effect_class))
+            if row is None:
+                it.residue_probe = True
+                continue
+            destination, current_check = row
+            it.residue_probe = (
+                destination is None if it.effect_class == EFFECT_CLASS_VALUE_OUT else current_check is None
+            )
+
+    def _mark_empty_planning(
+        self,
+        session: Session,
+        job: Job | None,
+        planned_per_contract: dict[int, int],
+        unclean_contracts: set[int],
+        contracts_with_plans: set[int],
+        counters: _Counters,
+    ) -> None:
+        """Record contracts this pass planned in full and that yielded no plans.
+
+        Without this a swept contract with no job of its own leaves nothing
+        behind — no verdict, no ``stage_timing_effects`` artifact — and every
+        later job in the protocol sweeps it again.
+
+        Two conditions gate the write, both in the direction of re-planning:
+        a contract with ANY unplannable candidate is excluded (transient, must
+        retry), and nothing is recorded at all while the Tier-2 fork is disabled,
+        because that suppresses the pause plans and would make an artificially
+        empty result look like a real one."""
+        if job is None or not planned_per_contract or not _fork_enabled():
+            return
+        empty = {
+            cid: n
+            for cid, n in planned_per_contract.items()
+            if cid not in contracts_with_plans and cid not in unclean_contracts
+        }
+        if not empty:
+            return
+        counters.contracts_planned_empty = record_empty_planning(session, job_id=job.id, candidates_by_contract=empty)
 
     def _run_probes(self, items: list[_Item], durations_ms: dict[str, int], counters: _Counters, seams: _Seams) -> None:
         """Run recipes for cache misses + audit re-runs. Tier-2 (fork/projection)
@@ -597,11 +774,19 @@ class EffectsWorker(BaseWorker):
         a whole-stage infra failure escapes ``process()``."""
         tier1 = [it for it in items if it.scope == SCOPE_KERNEL and (it.cached is None or it.needs_audit)]
         tier2 = [it for it in items if it.scope != SCOPE_KERNEL and (it.cached is None or it.needs_audit)]
+        # State-plane residue re-observation. Kernel-scope only by construction —
+        # every class in ``_RESIDUE_KEY`` is Tier-0/Tier-1, so this can never
+        # spawn the Tier-2 fork — and timed under Tier 1 with the probes it
+        # resembles rather than as a phase of its own.
+        residue = [it for it in items if it.residue_probe and it.scope == SCOPE_KERNEL]
 
         with log_timed_phase(logger, "tier1_probes", durations_ms=durations_ms) as ph:
             for it in tier1:
                 self._probe_one(it, counters)
+            for it in residue:
+                self._probe_one(it, counters)
             ph["probed"] = len(tier1)
+            ph["residue_reobserved"] = len(residue)
 
         with log_timed_phase(logger, "tier2_fork", durations_ms=durations_ms) as ph:
             for it in tier2:
@@ -723,7 +908,17 @@ class EffectsWorker(BaseWorker):
                 return self._withhold_collision(session, cached, it, counters, reason="kernel_hash_collision")
             bump_hit(session, cached)
             self._count_hit(it, counters)
-            return cached.verdict, cached.tier, cached.transcript_ptr, cached.details, None, None
+            # The audit already re-simulated THIS deployment, so its state-plane
+            # residue is in hand at no extra cost — the verdict still comes from
+            # the cache (the audit only confirmed they agree).
+            return (
+                cached.verdict,
+                cached.tier,
+                cached.transcript_ptr,
+                cached.details,
+                _residue_only(fresh.concrete, it.effect_class),
+                None,
+            )
 
         if cached.audit_status == AUDIT_FAILED:
             # A previously-caught collision poisoned this key → never reuse it.
@@ -731,7 +926,17 @@ class EffectsWorker(BaseWorker):
 
         bump_hit(session, cached)
         self._count_hit(it, counters)
-        return cached.verdict, cached.tier, cached.transcript_ptr, cached.details, None, None
+        # A plain hit carries no residue of its own (inv. 3). When this
+        # deployment's stored row has none either, ``_mark_residue_gaps`` asked
+        # for one observation; take its ``concrete`` and NOTHING else — the
+        # verdict, tier, details and transcript stay the cache's, and nothing
+        # observed here is written back to ``effect_behavior_cache``.
+        concrete = None
+        if it.residue_probe and it.probed is not None:
+            concrete = _residue_only(it.probed.concrete, it.effect_class)
+            if concrete is not None:
+                counters.residue_observations += 1
+        return cached.verdict, cached.tier, cached.transcript_ptr, cached.details, concrete, None
 
     def _cache_miss_write(self, session: Session, it: _Item, eff: ObservedEffect, *, audit_status: str | None) -> None:
         upsert_cached_verdict(
@@ -805,6 +1010,8 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("new_idiom_candidates", counters.new_idiom_candidates)
         record_stage_metric("upstream_requests", counters.upstream_requests)
         record_stage_metric("peak_anvil_rss_mb", counters.peak_anvil_rss_mb)
+        record_stage_metric("residue_observations", counters.residue_observations)
+        record_stage_metric("contracts_planned_empty", counters.contracts_planned_empty)
 
     def _finalize_terminal_failure(
         self,

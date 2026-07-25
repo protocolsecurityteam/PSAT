@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -22,6 +23,7 @@ from db.models import (
     ContractBalance,
     ControlGraphEdge,
     EffectiveFunction,
+    EffectsPlanMarker,
     EffectVerdict,
     FunctionPrincipal,
     Job,
@@ -726,3 +728,181 @@ def test_no_scope_keeps_protocol_wide_behavior(db_session):
     proto, _addrs, fns, _ = _scoped_fixture(db_session)
     got = {c.function_id for c in select_candidates(db_session, proto.id)}
     assert got == set(fns.values())
+
+
+# ---------------------------------------------------------------------------
+# Ownership rule 4 — the empty-planning marker.
+#
+# Rules 1-3 all leave a trace only when SOMETHING happened: a job exists, a
+# stage artifact was written, a verdict landed. A contract that is swept and
+# whose candidates yield no plans at all leaves none of those, so it stays
+# unowned and every later job re-sweeps it. These cover both directions: the
+# marker must stop the re-sweep, and it must never make a contract look covered.
+# ---------------------------------------------------------------------------
+
+
+def _mark_planned_empty(session: Session, contract_id: int, job: Job | None, *, at: datetime) -> None:
+    session.add(
+        EffectsPlanMarker(
+            contract_id=contract_id,
+            job_id=job.id if job is not None else None,
+            candidates_planned=1,
+            planned_at=at,
+        )
+    )
+    session.flush()
+
+
+def _scoped_since(session, proto_id, addr, since) -> set[int]:
+    return {c.function_id for c in select_candidates(session, proto_id, scope=JobScope(addr, 1, planned_since=since))}
+
+
+def _swept_only(session: Session, proto: Protocol) -> tuple[str, int, Contract]:
+    """An owner contract with a live job, plus a contract nothing will ever own —
+    the shape that gets re-swept forever when its planning yields nothing."""
+    owner_addr, orphan_addr = ADDR(0x8601), ADDR(0x8602)
+    owner = _contract(session, proto.id, owner_addr, chain="ethereum")
+    _fn(session, owner.id, name="own", selector="0x00008601", effect_targets=["s"])
+    orphan = _contract(session, proto.id, orphan_addr, chain="ethereum")
+    orphan_fn = _fn(session, orphan.id, name="orph", selector="0x00008602", effect_targets=["s"])
+    _job(session, proto.id, owner_addr)
+    session.commit()
+    return owner_addr, orphan_fn.id, orphan
+
+
+def test_shape1_empty_planning_marker_stops_the_re_sweep(db_session):
+    """Gap 2: a swept contract whose candidates produce NO plans writes no
+    verdict, so rule 3 never fires and every later job re-sweeps it."""
+    proto = _protocol(db_session, "scope-marker-full")
+    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
+    reading_job_created = datetime.now(timezone.utc)
+
+    assert orphan_fn in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
+
+    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created + timedelta(seconds=1))
+    db_session.commit()
+    assert orphan_fn not in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
+
+
+def test_marker_older_than_the_reading_job_does_not_own(db_session):
+    """The expiry that keeps the marker safe: planning inputs are not immutable
+    (an upgrade_events row lands, a re-analysis rewrites the functions), so a
+    marker from a previous run must NOT suppress this run's sweep."""
+    proto = _protocol(db_session, "scope-marker-stale")
+    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
+    reading_job_created = datetime.now(timezone.utc)
+
+    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created - timedelta(hours=6))
+    db_session.commit()
+    assert orphan_fn in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
+
+
+def test_marker_is_ignored_without_a_planned_since(db_session):
+    """No timestamp ⇒ rule 4 off. Costs a sweep, never coverage."""
+    proto = _protocol(db_session, "scope-marker-nosince")
+    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
+    _mark_planned_empty(db_session, orphan.id, None, at=datetime.now(timezone.utc) + timedelta(hours=1))
+    db_session.commit()
+    assert orphan_fn in _scoped(db_session, proto.id, owner_addr)
+
+
+def test_marker_does_not_shadow_a_contract_that_yields_plans(db_session):
+    """Coverage guard. The marker is per-contract, so it must not be readable as
+    ownership for any contract other than the one recorded."""
+    proto = _protocol(db_session, "scope-marker-scope")
+    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
+    other_addr = ADDR(0x8603)
+    other = _contract(db_session, proto.id, other_addr, chain="ethereum")
+    other_fn = _fn(db_session, other.id, name="oth", selector="0x00008603", effect_targets=["s"])
+    now = datetime.now(timezone.utc)
+    _mark_planned_empty(db_session, orphan.id, None, at=now + timedelta(seconds=1))
+    db_session.commit()
+
+    got = _scoped_since(db_session, proto.id, owner_addr, now)
+    assert orphan_fn not in got
+    assert other_fn.id in got
+
+
+def test_shape2_incremental_run_re_sweeps_a_marker_from_the_old_run(db_session):
+    """Incremental shape: the new contract's job was created AFTER the previous
+    run's marker, so the empty contract is planned once more against whatever
+    facts have landed since — then marked again."""
+    proto = _protocol(db_session, "scope-marker-incremental")
+    old_addr, new_addr, empty_addr = ADDR(0x8701), ADDR(0x8702), ADDR(0x8703)
+    old = _contract(db_session, proto.id, old_addr, chain="ethereum")
+    old_fn = _fn(db_session, old.id, name="old", selector="0x00008701", effect_targets=["s"])
+    new = _contract(db_session, proto.id, new_addr, chain="ethereum")
+    new_fn = _fn(db_session, new.id, name="new", selector="0x00008702", effect_targets=["s"])
+    empty = _contract(db_session, proto.id, empty_addr, chain="ethereum")
+    empty_fn = _fn(db_session, empty.id, name="empty", selector="0x00008703", effect_targets=["s"])
+    old_job = _job(db_session, proto.id, old_addr)
+    _ran_effects(db_session, old_job)
+    _verdict_for(db_session, old_fn.id, old_addr)
+    last_run = datetime.now(timezone.utc) - timedelta(days=1)
+    _mark_planned_empty(db_session, empty.id, old_job, at=last_run)
+    db_session.commit()
+
+    this_run = datetime.now(timezone.utc)
+    got = _scoped_since(db_session, proto.id, new_addr, this_run)
+    assert got == {new_fn.id, empty_fn.id}, "the incremental run must re-plan the empty contract exactly once"
+
+    # ...and the re-plan refreshes it, so the rest of this run skips it again.
+    db_session.query(EffectsPlanMarker).filter(EffectsPlanMarker.contract_id == empty.id).update(
+        {"planned_at": this_run + timedelta(seconds=1)}
+    )
+    db_session.commit()
+    assert _scoped_since(db_session, proto.id, new_addr, this_run) == {new_fn.id}
+
+
+def test_shape3_prod_first_run_still_sweeps_everything(db_session):
+    """First-ever effects run on production's shape — all jobs completed, zero
+    verdicts, zero markers. Nothing may look owned."""
+    proto, addrs, fns = _prod_shape(db_session, 3)
+    now = datetime.now(timezone.utc)
+    assert _scoped_since(db_session, proto.id, addrs[0], now) == set(fns.values())
+
+
+def test_shape3_marker_bounds_the_prod_sweep_to_once_per_run(db_session):
+    """On the prod shape every contract is unowned, so the FIRST job sweeps them
+    all. Contracts that yield nothing get a marker; the next job must skip those
+    and still plan its own."""
+    proto, addrs, fns = _prod_shape(db_session, 3)
+    now = datetime.now(timezone.utc)
+    contracts = {
+        addr: db_session.query(Contract).filter(Contract.address == addr, Contract.protocol_id == proto.id).one()
+        for addr in addrs
+    }
+    for addr in addrs[1:]:
+        _mark_planned_empty(db_session, contracts[addr].id, None, at=now + timedelta(seconds=1))
+    db_session.commit()
+
+    got = _scoped_since(db_session, proto.id, addrs[0], now)
+    assert got == {fns[addrs[0]]}
+
+
+def test_marker_union_still_covers_the_protocol(db_session):
+    """The coverage proof under rule 4: markers only ever land on contracts a job
+    actually planned, so the union over the run is still the protocol-wide set."""
+    proto, addrs, fns = _prod_shape(db_session, 3)
+    now = datetime.now(timezone.utc)
+    contracts = {
+        addr: db_session.query(Contract).filter(Contract.address == addr, Contract.protocol_id == proto.id).one()
+        for addr in addrs
+    }
+    union: set[int] = set()
+    for addr in addrs:
+        planned = _scoped_since(db_session, proto.id, addr, now)
+        union |= planned
+        # Everything this job planned and that yielded nothing is now marked —
+        # the worst case for coverage, since it maximises what later jobs skip.
+        for planned_addr in addrs:
+            if fns[planned_addr] in planned and planned_addr != addr:
+                db_session.merge(
+                    EffectsPlanMarker(
+                        contract_id=contracts[planned_addr].id,
+                        candidates_planned=1,
+                        planned_at=now + timedelta(seconds=1),
+                    )
+                )
+        db_session.commit()
+    assert union == set(fns.values())

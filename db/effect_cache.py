@@ -151,6 +151,48 @@ def find_cached_verdicts_batch(
     return {(r.behavior_hash, r.effect_class, r.scope, r.contract_surface_hash, r.gate_ref): r for r in rows}
 
 
+def find_verdict_residue_batch(
+    session: Session,
+    *,
+    chain_id: int,
+    identities: "Any",
+) -> dict[tuple[str, str, str], tuple[str | None, bool | None]]:
+    """State-plane residue already persisted for a set of deployment identities.
+
+    ``identities`` is any iterable of ``(contract_address, selector,
+    effect_class)``. Returns ``{identity: (concrete_destination,
+    current_check_passed)}`` for the rows that exist — a key absent from the
+    result has no verdict row at all, which is also "no residue".
+
+    Read-only and batched (one composite ``IN``) because the caller asks it once
+    per job about every cache HIT: a hit carries no state-plane observation of
+    its own (inv. 3), so this is how the worker learns whether THIS deployment
+    ever got one, without a round-trip per plan.
+    """
+    keys: set[tuple[str, str, str]] = set()
+    for address, selector, effect_class in identities:
+        keys.add((address.lower(), selector or "", effect_class))
+    if not keys:
+        return {}
+    rows = session.execute(
+        select(
+            EffectVerdict.contract_address,
+            EffectVerdict.selector,
+            EffectVerdict.effect_class,
+            EffectVerdict.concrete_destination,
+            EffectVerdict.current_check_passed,
+        ).where(
+            EffectVerdict.chain_id == chain_id,
+            tuple_(
+                EffectVerdict.contract_address,
+                EffectVerdict.selector,
+                EffectVerdict.effect_class,
+            ).in_(list(keys)),
+        )
+    ).all()
+    return {(r[0], r[1], r[2]): (r[3], r[4]) for r in rows}
+
+
 def upsert_cached_verdict(
     session: Session,
     *,
