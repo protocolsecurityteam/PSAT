@@ -128,6 +128,13 @@ class ValueFlow(TypedDict):
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
     #   fixed_constant, indeterminate}
     amount_kind: NotRequired[KindTier]
+    # Positional index of the ENTRY function's parameter the destination
+    # resolves to. Present ONLY when ``target_kind`` is ``param`` and every
+    # contributing site agrees on that one parameter slot; a struct member or
+    # array element of a parameter never emits one (the value is not the whole
+    # argument). Consumers plant a probe address in that ABI slot, so a guessed
+    # index would probe the wrong argument — absent means "do not guess".
+    target_param_index: NotRequired[int]
 
 
 class EffectInfo(TypedDict):
@@ -877,7 +884,14 @@ class _UnitCtx:
       state variable. ``None`` on the entry itself (its own parameters ARE the
       caller-directed origin). Threaded down ``walk`` per call site; a helper
       reached from two sites with divergent bindings is re-walked so the
-      cross-site fold collapses the disagreement to ``indeterminate``."""
+      cross-site fold collapses the disagreement to ``indeterminate``.
+    * ``param_index_bindings`` — the positional half of ``param_bindings``: for a
+      nested unit, the ENTRY parameter INDEX each formal binds to, present only
+      for the formals whose argument resolved to one unambiguous entry parameter
+      (never for a struct member / array element of one). The origin alone says
+      *a* parameter; addressing an ABI argument slot needs *which*. Threaded and
+      re-walked exactly like ``param_bindings``, so two call sites forwarding
+      different parameter positions disagree at the fold instead of one winning."""
 
     def __init__(
         self,
@@ -888,12 +902,14 @@ class _UnitCtx:
         setter_scan_complete: bool,
         nested: bool,
         param_bindings: dict[str, tuple[str, ...]] | None = None,
+        param_index_bindings: dict[str, int] | None = None,
     ) -> None:
         # Context-independent, shared across every entry that reaches this unit.
         self.engine = bundle.engine
         self.param_names = bundle.param_names
         self.merged = bundle.merged
         self.def_by_id = bundle.def_by_id
+        self.param_indexes = bundle.param_indexes
         # Contract-level (constant within a contract) + the per-context nested flag.
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
@@ -901,6 +917,7 @@ class _UnitCtx:
         self.setter_scan_complete = setter_scan_complete
         self.nested = nested
         self.param_bindings = param_bindings
+        self.param_index_bindings = param_index_bindings
 
 
 class _EngineBundle:
@@ -911,21 +928,47 @@ class _EngineBundle:
     bundle is memoized per function across the whole build pass. Only the
     per-context ``nested`` interpretation lives on ``_UnitCtx``."""
 
-    __slots__ = ("engine", "param_names", "merged", "def_by_id")
+    __slots__ = ("engine", "param_names", "merged", "def_by_id", "param_indexes")
 
     def __init__(
-        self, engine: ProvenanceEngine, param_names: set[str], merged: set[str], def_by_id: dict[int, Any]
+        self,
+        engine: ProvenanceEngine,
+        param_names: set[str],
+        merged: set[str],
+        def_by_id: dict[int, Any],
+        param_indexes: dict[str, int],
     ) -> None:
         self.engine = engine
         self.param_names = param_names
         self.merged = merged
         self.def_by_id = def_by_id
+        self.param_indexes = param_indexes
 
 
 # Per-function memo of the context-independent bundle, keyed by the Slither
 # function object (weak so it dies with the Slither instance). Collapses the
 # prior O(entries × helpers) engine rebuilds to one run per function per pass.
 _ENGINE_BUNDLE: WeakKeyDictionary[Any, _EngineBundle] = WeakKeyDictionary()
+
+
+def _param_indexes_of(unit: Any) -> dict[str, int]:
+    """``formal parameter base name -> positional index``. A name that repeats
+    (shadowing, an unnamed formal reusing the empty name) is DROPPED: the index
+    is used to address an ABI argument slot, so an ambiguous name must resolve to
+    nothing rather than to the first match."""
+    indexes: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for position, param in enumerate(getattr(unit, "parameters", []) or []):
+        base = _base_name(getattr(param, "name", None))
+        if not base:
+            continue
+        if base in indexes:
+            ambiguous.add(base)
+            continue
+        indexes[base] = position
+    for name in ambiguous:
+        indexes.pop(name, None)
+    return indexes
 
 
 def _engine_bundle_for(unit: Any) -> _EngineBundle:
@@ -941,6 +984,7 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
     param_names = {
         base for param in getattr(unit, "parameters", []) or [] if (base := _base_name(getattr(param, "name", None)))
     }
+    param_indexes = _param_indexes_of(unit)
     merged: set[str] = set()
     def_by_id: dict[int, Any] = {}
     for node in getattr(unit, "nodes", []) or []:
@@ -961,7 +1005,7 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
                     base = _base_name(getattr(lvalue, "name", None))
                     if base:
                         merged.add(base)
-    bundle = _EngineBundle(engine, param_names, merged, def_by_id)
+    bundle = _EngineBundle(engine, param_names, merged, def_by_id, param_indexes)
     try:
         _ENGINE_BUNDLE[unit] = bundle
     except TypeError:  # pragma: no cover — unit not weak-referenceable
@@ -977,6 +1021,7 @@ def _build_unit_ctx(
     alias_indeterminate: set[str],
     setter_scan_complete: bool,
     param_bindings: dict[str, tuple[str, ...]] | None = None,
+    param_index_bindings: dict[str, int] | None = None,
 ) -> _UnitCtx:
     return _UnitCtx(
         _engine_bundle_for(unit),
@@ -986,6 +1031,7 @@ def _build_unit_ctx(
         setter_scan_complete,
         not is_entry,
         param_bindings,
+        param_index_bindings,
     )
 
 
@@ -1168,6 +1214,73 @@ def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     if len(origins) == 1 and ("indeterminate",) not in origins:
         return next(iter(origins))
     return ("indeterminate",)
+
+
+def _source_param_index(source: Any, ctx: _UnitCtx) -> int | None:
+    """The ENTRY parameter index one provenance source resolves to — the
+    positional twin of ``_single_param_origin``. ``None`` for every source that
+    is not a parameter reaching one unambiguous entry parameter."""
+    if source.kind != "parameter":
+        return None
+    base = _base_name(source.parameter_name) if source.parameter_name else None
+    if not base:
+        return None
+    if not ctx.nested:
+        return ctx.param_indexes.get(base)
+    return ctx.param_index_bindings.get(base) if ctx.param_index_bindings else None
+
+
+def _reads_element(operand: Any, ctx: _UnitCtx) -> bool:
+    """True when the operand's value is read THROUGH an array/mapping/struct
+    access (``a[k]``, ``s.field``, ``map[k].field``).
+
+    Such a destination is not an ABI argument slot even when its root is a
+    parameter: planting a probe address would mean rewriting a field inside an
+    encoded struct/array. Index emission bails on this shape entirely — the
+    ``target_kind`` (``param`` for a calldata-struct root, the base var's
+    mutability for a storage root) is unaffected."""
+    seen: set[int] = set()
+    stack: list[Any] = [operand]
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn in ("Index", "Member"):
+            return True
+        if tn == "TypeConversion":
+            stack.append(getattr(ir, "variable", None))
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+    return False
+
+
+def _operand_param_index(operand: Any, ctx: _UnitCtx) -> int | None:
+    """The ENTRY parameter index an operand resolves to — the positional twin of
+    ``_arg_origin``, and the ONLY producer of ``target_param_index``.
+
+    Emits an index only when EVERY source the origin resolution considered is a
+    parameter binding onto the SAME entry parameter, so the operand is that whole
+    argument and nothing else. Element reads, merged locals, computed mixes,
+    missing bindings and non-parameter origins all yield ``None`` — the caller
+    must then plant no probe rather than address a guessed slot."""
+    if operand is None or _reads_element(operand, ctx) or _reaches_merged_local(operand, ctx):
+        return None
+    srcs = ctx.engine._sources_for_value(operand)
+    if not srcs or is_top(srcs):
+        return None
+    forwarded = _forwarded_param_sources(srcs, ctx)
+    considered = forwarded if forwarded is not None else [s for s in srcs if s.kind != "computed"]
+    if not considered:
+        return None
+    indexes = {_source_param_index(s, ctx) for s in considered}
+    if len(indexes) != 1:
+        return None
+    return next(iter(indexes))
 
 
 def _is_zero_literal(value: str) -> bool:
@@ -1462,18 +1575,25 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
 _VALUE_WALK_DEPTH_CAP = 128
 
 
-def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> dict[str, tuple[str, ...]]:
+def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> tuple[dict[str, tuple[str, ...]], dict[str, int]]:
     """The param→neutral-origin map forwarded at one internal/library call site,
-    resolved in the caller's ``ctx``. Each callee formal parameter binds to the
-    entry-rooted origin of its positional argument (``_arg_origin``), chaining
-    through the caller's own bindings so a multi-hop forward stays exact."""
+    resolved in the caller's ``ctx``, plus its param→entry-parameter-INDEX half.
+    Each callee formal parameter binds to the entry-rooted origin of its
+    positional argument (``_arg_origin``), chaining through the caller's own
+    bindings so a multi-hop forward stays exact. The index map carries only the
+    formals whose argument is one whole entry parameter."""
     bindings: dict[str, tuple[str, ...]] = {}
+    index_bindings: dict[str, int] = {}
     args = list(getattr(ir, "arguments", []) or [])
     for param, arg in zip(getattr(callee, "parameters", []) or [], args):
         base = _base_name(getattr(param, "name", None))
-        if base:
-            bindings[base] = _arg_origin(arg, ctx)
-    return bindings
+        if not base:
+            continue
+        bindings[base] = _arg_origin(arg, ctx)
+        index = _operand_param_index(arg, ctx)
+        if index is not None:
+            index_bindings[base] = index
+    return bindings, index_bindings
 
 
 def _value_flow_facts(function: Any) -> list[ValueFlow]:
@@ -1492,9 +1612,10 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     # Keyed by (unit id, forwarded-binding signature): a helper reached with the
     # SAME bindings is deduped, but one reached with DIVERGENT bindings across
     # call sites is re-walked so the cross-site fold collapses to indeterminate.
-    visited: set[tuple[int, Any]] = set()
+    visited: set[tuple[int, Any, Any]] = set()
     target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
+    target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
 
     contract = getattr(function, "contract", None)
     state_vars_by_name: dict[str, Any] = {
@@ -1504,27 +1625,49 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
     scan_complete = _setter_scan_complete(contract) if contract is not None else False
 
-    def unit_ctx(unit: Any, is_entry: bool, param_bindings: dict[str, tuple[str, ...]] | None) -> _UnitCtx:
+    def unit_ctx(
+        unit: Any,
+        is_entry: bool,
+        param_bindings: dict[str, tuple[str, ...]] | None,
+        param_index_bindings: dict[str, int] | None,
+    ) -> _UnitCtx:
         # Fresh per (unit, bindings); the expensive per-unit ProvenanceEngine is
         # memoized inside ``_engine_bundle_for``, so this wrapper is cheap.
         return _build_unit_ctx(
-            unit, is_entry, state_vars_by_name, setters, alias_indeterminate, scan_complete, param_bindings
+            unit,
+            is_entry,
+            state_vars_by_name,
+            setters,
+            alias_indeterminate,
+            scan_complete,
+            param_bindings,
+            param_index_bindings,
         )
 
     def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx) -> None:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
         amount_sites.setdefault(key, []).append(_classify_site(amount, ctx, amount=True))
+        target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
         if key in seen:
             return
         seen.add(key)
         flows.append(flow)
 
     def walk(
-        unit: Any, origin: str, is_entry: bool, param_bindings: dict[str, tuple[str, ...]] | None, depth: int
+        unit: Any,
+        origin: str,
+        is_entry: bool,
+        param_bindings: dict[str, tuple[str, ...]] | None,
+        param_index_bindings: dict[str, int] | None,
+        depth: int,
     ) -> None:
         sig = None if param_bindings is None else frozenset(param_bindings.items())
-        key = (id(unit), sig)
+        # The index half is part of the identity: two sites can forward the same
+        # origins from DIFFERENT parameter positions, and deduping those would
+        # let the first-walked site's index stand for both.
+        index_sig = None if param_index_bindings is None else frozenset(param_index_bindings.items())
+        key = (id(unit), sig, index_sig)
         if key in visited or depth > _VALUE_WALK_DEPTH_CAP:
             return
         visited.add(key)
@@ -1550,7 +1693,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 op = type(ir).__name__
                 if op in ("Transfer", "Send"):
                     if ctx is None:
-                        ctx = unit_ctx(unit, is_entry, param_bindings)
+                        ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                     add(
                         {
                             "kind": "native_transfer_send",
@@ -1570,7 +1713,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         from_arg = arguments[0] if arguments else None
                         from_self = _arg_is_address_this(from_arg, this_ids, this_names)
                         if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings)
+                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -1585,7 +1728,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings)
+                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
@@ -1600,7 +1743,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
                     if ctx is None:
-                        ctx = unit_ctx(unit, is_entry, param_bindings)
+                        ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                     call_value = getattr(ir, "call_value", None)
                     # A provably-zero value call (OZ SafeERC20's
                     # ``functionCallWithValue(token, data, 0)``) moves no ETH — not
@@ -1624,20 +1767,38 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
                         if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings)
-                        child_bindings = _bindings_for_call(ir, callee, ctx)
-                        walk(callee, child_origin, False, child_bindings, depth + 1)
+                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
+                        child_bindings, child_index_bindings = _bindings_for_call(ir, callee, ctx)
+                        walk(callee, child_origin, False, child_bindings, child_index_bindings, depth + 1)
 
-    walk(function, "body", True, None, 0)
+    walk(function, "body", True, None, None, 0)
     for flow in flows:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target = _fold_sites(target_sites.get(key, []))
         amount = _fold_sites(amount_sites.get(key, []))
         if target is not None:
             flow["target_kind"] = target
+            index = _fold_param_index(target, target_indexes.get(key, []))
+            if index is not None:
+                flow["target_param_index"] = index
         if amount is not None:
             flow["amount_kind"] = amount
     return flows
+
+
+def _fold_param_index(target: KindTier, indexes: list[int | None]) -> int | None:
+    """The one entry-parameter slot every contributing site sent funds to.
+
+    Requires the folded kind to BE ``param`` (so the destination is an entry
+    parameter at all) and every site to have resolved the same index. A site that
+    resolved none, or two sites resolving different positions, yields ``None``:
+    the flow is still a ``param`` destination, we just cannot say which slot."""
+    if target["kind"] != "param" or not indexes:
+        return None
+    distinct = set(indexes)
+    if len(distinct) != 1:
+        return None
+    return next(iter(distinct))
 
 
 # ---------------------------------------------------------------------------

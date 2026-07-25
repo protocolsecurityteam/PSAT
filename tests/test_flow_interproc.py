@@ -24,6 +24,11 @@ Held at the witness bar (stay ``indeterminate``):
   * an element whose BASE is merged across branches;
   * a balance-DELTA amount, which must not claim ``whole_balance``.
 
+The last two sections cover WHICH parameter a ``param`` destination is —
+``target_param_index``, the ABI slot the fork prober plants its sentinel in —
+and the legacy ``contract_analysis`` eth_out flow that used to deny every native
+send had a caller-chosen recipient at all.
+
 Precedent: ``tests/test_flow_lattice.py`` (same compile-with-Slither harness).
 """
 
@@ -42,6 +47,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
 
 
 def _compile(tmp_path: Path, source: str, name: str):
@@ -794,3 +800,163 @@ def test_calldata_struct_member_destination_is_param(tmp_path):
     # Entry-vs-nested parity for the struct-member operand shape.
     assert nested["target_kind"] == entry["target_kind"]
     assert nested["amount_kind"] == entry["amount_kind"]
+
+
+# ---------------------------------------------------------------------------
+# ``target_param_index`` — WHICH entry parameter the destination is.
+#
+# The kind says a caller-chosen destination exists; the fork prober additionally
+# needs the ABI slot to plant a sentinel address in. An index is emitted only for
+# a destination that IS one whole entry parameter, agreed by every contributing
+# site; everything else must emit nothing rather than address a guessed slot.
+# ---------------------------------------------------------------------------
+
+
+def _index(info) -> Any:
+    return _out_flow(info).get("target_param_index")
+
+
+def test_param_index_for_directly_forwarded_recipient(tmp_path):
+    contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
+    fns = build_effects(contract)["functions"]
+    # withdraw(address to, uint256 amt) -> library send site: slot 0.
+    assert _index(fns["withdraw(address,uint256)"]) == 0
+    # forward(address to, bytes data, uint256 value): still slot 0.
+    assert _index(fns["forward(address,bytes,uint256)"]) == 0
+
+
+def test_param_index_survives_a_three_hop_forward(tmp_path):
+    contract = _compile(tmp_path, _MULTIHOP_SRC, "Redemption")
+    fns = build_effects(contract)["functions"]
+    # redeemEEth(uint256 amount, address receiver): the recipient is slot 1, and
+    # the helper chain reorders it (``_processETHRedemption(receiver, amount)``)
+    # — the index follows the binding, not the callee's own position.
+    assert _index(fns["redeemEEth(uint256,address)"]) == 1
+
+
+def test_param_index_absent_for_non_param_destinations(tmp_path):
+    """immutable / msg_sender / tx.origin / storage destinations have no slot."""
+    fns = build_effects(_compile(tmp_path, _OZ_ADDRESS_SRC, "Vault"))["functions"]
+    assert _index(fns["payTreasury(uint256)"]) is None
+    caller = build_effects(_compile(tmp_path, _CALLER_FORWARD_SRC, "Caller"))["functions"]
+    assert _index(caller["withdraw(uint256)"]) is None
+    assert _index(caller["withdrawToOrigin(uint256)"]) is None
+    routed = build_effects(_compile(tmp_path, _STATEVAR_FORWARD_SRC, "Routed"))["functions"]
+    assert _index(routed["drainToSink()"]) is None
+    assert _index(routed["drainToTreasury(uint256)"]) is None
+
+
+def test_param_index_absent_when_bindings_diverge(tmp_path):
+    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    fns = build_effects(contract)["functions"]
+    assert _index(fns["router(address,uint256)"]) is None
+    # The unambiguous sibling entries still carry theirs.
+    assert _index(fns["entryParam(address,uint256)"]) == 0
+    assert _index(fns["entryImmutable(uint256)"]) is None
+
+
+_TWO_SLOT_SRC = """
+pragma solidity ^0.8.20;
+contract TwoSlots {
+    // One entry reaches the SAME helper from two sites forwarding two DIFFERENT
+    // parameters. Both are caller-chosen, so the kind is honestly ``param`` —
+    // but there is no single slot, and picking one would plant a probe in the
+    // wrong argument.
+    function payBoth(address a, address b, uint256 amt) external {
+        _send(a, amt);
+        _send(b, amt);
+    }
+    function paySecond(address a, address b, uint256 amt) external { _send(b, amt); }
+    function _send(address to, uint256 x) internal {
+        (bool ok, ) = to.call{value: x}(""); require(ok);
+    }
+}
+"""
+
+
+def test_param_index_absent_when_two_slots_reach_one_helper(tmp_path):
+    contract = _compile(tmp_path, _TWO_SLOT_SRC, "TwoSlots")
+    fns = build_effects(contract)["functions"]
+    both = _out_flow(fns["payBoth(address,address,uint256)"])
+    assert both["target_kind"]["kind"] == "param"
+    assert both.get("target_param_index") is None
+    # The helper is also reached with a DIFFERENT slot from another entry: the
+    # per-site re-walk must not let the first-seen index stand for it.
+    assert _index(fns["paySecond(address,address,uint256)"]) == 1
+
+
+def test_param_index_absent_for_element_and_struct_member_destinations(tmp_path):
+    """A member/element of a parameter is not an ABI argument slot: planting a
+    sentinel would mean rewriting a field inside an encoded struct/array, which
+    the flat positional encoder cannot do. Kind stays ``param``, index absent."""
+    batch = build_effects(_compile(tmp_path, _ELEMENT_SRC, "Batch"))["functions"]
+    array_elem = _out_flow(batch["executeBatch(address[],uint256[])"])
+    assert array_elem["target_kind"]["kind"] == "param"
+    assert array_elem.get("target_param_index") is None
+
+    struct = build_effects(_compile(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry"))["functions"]
+    for name in ("payEntry(StructMemberEntry.Payout)", "payNested(StructMemberEntry.Payout)"):
+        member = _out_flow(struct[name])
+        assert member["target_kind"]["kind"] == "param"
+        assert member.get("target_param_index") is None
+
+
+def test_param_index_for_guarded_onward_forward(tmp_path):
+    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    fns = build_effects(contract)["functions"]
+    # claimTo(uint256[] ids, uint256[] hints, address recipient): slot 2, two
+    # hops deep through a helper sibling entries also call with msg.sender.
+    assert _index(fns["claimTo(uint256[],uint256[],address)"]) == 2
+    assert _index(fns["claimSelf(uint256[],uint256[])"]) is None
+
+
+# ---------------------------------------------------------------------------
+# The legacy ``contract_analysis`` eth_out flow (``summaries._extract_value_flows``)
+#
+# It used to hardcode ``token_var=None, is_parameter=False`` on EVERY native
+# send — asserting "no caller-chosen address here" even when the recipient was
+# the entry's own parameter. It now names the recipient where the send site can
+# see it, and stays silent (not false) everywhere else.
+# ---------------------------------------------------------------------------
+
+
+def _eth_flows(contract, full_name: str) -> list[dict]:
+    fn = next(f for f in contract.functions if f.full_name == full_name)
+    return [flow for flow in _extract_value_flows(fn) if flow["direction"] == "eth_out"]
+
+
+_LEGACY_ETH_SRC = """
+pragma solidity ^0.8.20;
+contract Legacy {
+    address public treasury;
+    function payParam(address payable to, uint256 amt) external {
+        (bool ok, ) = to.call{value: amt}(""); require(ok);
+    }
+    function payTreasury(uint256 amt) external {
+        (bool ok, ) = treasury.call{value: amt}(""); require(ok);
+    }
+    function payViaHelper(address to, uint256 amt) external { _send(to, amt); }
+    function _send(address to, uint256 amt) internal {
+        (bool ok, ) = to.call{value: amt}(""); require(ok);
+    }
+}
+"""
+
+
+def test_legacy_eth_flow_names_a_direct_entry_param_recipient(tmp_path):
+    contract = _compile(tmp_path, _LEGACY_ETH_SRC, "Legacy")
+    flow = _eth_flows(contract, "payParam(address,uint256)")[0]
+    assert flow["token_var"] == "to"
+    assert flow["is_parameter"] is True
+    assert flow["token_type"] == "ETH" and flow["method"] == "call{value}"
+
+
+def test_legacy_eth_flow_stays_silent_for_storage_and_nested_recipients(tmp_path):
+    contract = _compile(tmp_path, _LEGACY_ETH_SRC, "Legacy")
+    storage = _eth_flows(contract, "payTreasury(uint256)")[0]
+    assert storage["token_var"] is None and storage["is_parameter"] is False
+    # One hop deep the destination is a CALLEE formal — not an ABI slot of the
+    # entry, so it is left unnamed here; the lattice's ``target_param_index``
+    # is what resolves it interprocedurally.
+    nested = _eth_flows(contract, "payViaHelper(address,uint256)")[0]
+    assert nested["token_var"] is None and nested["is_parameter"] is False

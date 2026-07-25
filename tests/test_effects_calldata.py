@@ -253,6 +253,109 @@ def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
     assert spec.taint_param_reaches_sink is False
 
 
+# --- the static lattice's recipient slot (``target_param_index``) ----------
+#
+# 76 of 78 live fund-out flows are native ETH sends, whose recipient the legacy
+# ``token_var``/``is_parameter`` shape never named and whose slot the gate-operand
+# name map cannot recover when no gate mentions the recipient. The flow lattice
+# resolves the destination interprocedurally and reports WHICH entry parameter it
+# is; that index is what makes a sentinel probe possible at all.
+
+REDEEM = "0x7bde82f2"  # redeem(uint256,address)
+REDEEM_SIG = "redeem(uint256,address)"
+
+
+def _redeem_facts(*, flows: list[dict[str, Any]], legacy: list[dict[str, Any]] | None = None) -> cd.ContractFacts:
+    """An ETH-redeem entry point whose recipient appears in NO gate — the shape
+    the name->slot map is blind to."""
+    effects = {REDEEM_SIG: _effect_info(REDEEM_SIG, REDEEM, value_flows=flows)}
+    return cd.ContractFacts(
+        address=CONTRACT,
+        job_id="job-1",
+        effects=effects,
+        trees={REDEEM_SIG: OWNER_GATE},
+        canonical_signatures={REDEEM_SIG: REDEEM_SIG},
+        legacy_value_flows={REDEEM_SIG: legacy} if legacy else {},
+        by_selector={REDEEM: REDEEM_SIG},
+    )
+
+
+def _eth_flow(**extra: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "low_level_value_call",
+        "direction": "out",
+        "origin": "body",
+        "target_kind": {"kind": "param", "tier": "static_trace"},
+    }
+    flow.update(extra)
+    return flow
+
+
+def _redeem_spec(facts: cd.ContractFacts) -> Any:
+    fn = cd.resolve_function(facts, REDEEM)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(REDEEM), fn)
+    assert spec is not None
+    return spec
+
+
+def test_lattice_param_index_plants_the_sentinel_without_a_gate_operand():
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=1)]))
+    assert spec.taint_param_reaches_sink is True
+    assert spec.sentinel_address == cd.SENTINEL_ADDRESS
+    assert spec.sentinel_calldata is not None
+    # Slot 1 (the recipient) carries the sentinel; slot 0 (the amount) is
+    # untouched, and the base probe keeps the principal in the recipient slot.
+    assert int(spec.sentinel_calldata[10:74], 16) == cd.ARG_AMOUNT
+    assert spec.sentinel_calldata[74:].endswith("ee" * 20)
+    assert spec.calldata[74:].endswith("22" * 20)
+
+
+def test_lattice_index_ignored_unless_the_kind_is_param():
+    """The index only ever accompanies ``param``; a stale/foreign index on any
+    other kind must not plant a probe."""
+    for kind in ("immutable", "msg_sender", "storage_setter", "indeterminate"):
+        flow = _eth_flow(target_param_index=1, target_kind={"kind": kind, "tier": "static_trace"})
+        spec = _redeem_spec(_redeem_facts(flows=[flow]))
+        assert spec.sentinel_calldata is None, kind
+        assert spec.taint_param_reaches_sink is False, kind
+
+
+def test_lattice_index_ignored_when_the_slot_is_not_an_address():
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=0)]))  # uint256 amount
+    assert spec.sentinel_calldata is None
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=7)]))  # out of range
+    assert spec.sentinel_calldata is None
+
+
+def test_lattice_indexes_that_disagree_plant_nothing():
+    flows = [_eth_flow(target_param_index=1), _eth_flow(kind="native_transfer_send", target_param_index=0)]
+    spec = _redeem_spec(_redeem_facts(flows=flows))
+    assert spec.sentinel_calldata is None
+
+
+def test_lattice_guard_origin_flow_is_not_a_recipient():
+    flow = _eth_flow(target_param_index=1, origin="guard")
+    spec = _redeem_spec(_redeem_facts(flows=[flow, _eth_flow()]))
+    assert spec.sentinel_calldata is None
+
+
+def test_legacy_name_path_still_serves_a_flow_without_an_index():
+    """The ERC-20 shape keeps resolving through the predicate-tree name map."""
+    facts = _token_facts(
+        legacy_value_flows={
+            "transfer(address,uint256)": [
+                {"direction": "out", "token_var": "token", "is_parameter": True, "method": "transfer"}
+            ]
+        }
+    )
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None and spec.sentinel_calldata is not None
+    assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
+
+
 # ---------------------------------------------------------------------------
 # §4.5 supply
 # ---------------------------------------------------------------------------

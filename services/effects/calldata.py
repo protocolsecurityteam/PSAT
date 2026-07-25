@@ -507,10 +507,39 @@ def _flow_directions(fn: FunctionFacts) -> set[str]:
     return dirs
 
 
+def _lattice_taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[str]) -> int | None:
+    """The recipient slot the static flow lattice resolved for a value-out flow.
+
+    The lattice emits ``target_param_index`` only for a destination that IS one
+    whole entry parameter (``target_kind == "param"``, agreed by every
+    contributing site) — which is what a sentinel needs, and what the name-based
+    path below cannot reach for a payout recipient that no gate mentions. Flows
+    disagreeing on the slot yield nothing rather than a picked winner."""
+    found: set[int] = set()
+    for flow in fn.effect_info.get("value_flows") or []:
+        if not isinstance(flow, dict) or flow.get("origin") == "guard":
+            continue
+        if str(flow.get("direction")) not in directions:
+            continue
+        index = flow.get("target_param_index")
+        kind = flow.get("target_kind")
+        kind_name = kind.get("kind") if isinstance(kind, dict) else None
+        if kind_name != "param" or not isinstance(index, int) or isinstance(index, bool):
+            continue
+        found.add(index)
+    if len(found) != 1:
+        return None
+    index = next(iter(found))
+    return index if 0 <= index < len(types) and _is_address_type(types[index]) else None
+
+
 def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[str]) -> int | None:
     """Positional index of the address param the value-flow taint says the caller
     controls. ``None`` (⇒ no sentinel probe) when the taint is absent, the param
     name cannot be mapped to a slot, or that slot is not address-typed."""
+    lattice_index = _lattice_taint_index(fn, types, directions)
+    if lattice_index is not None:
+        return lattice_index
     names = [
         str(f.get("token_var"))
         for f in fn.legacy_value_flows

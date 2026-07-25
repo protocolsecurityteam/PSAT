@@ -466,8 +466,14 @@ def _extract_value_flows(function) -> list[dict]:
          "token_var": "rewardsToken"|None,
          "token_type": "IERC20"|"address"|None,
          "method": "transfer"|"call{value}"|etc,
-         "is_parameter": True if the token is a function param (arbitrary token)}
-    """
+         "is_parameter": True if the caller chooses the address in ``token_var``}
+
+    ``token_var`` names the caller-selectable address of the flow: the token
+    contract for a high-level ERC-20 call, the RECIPIENT for a native send (an
+    ETH send has no token). ``is_parameter`` says that address is one of THIS
+    function's own parameters — a nested helper's formal is not an ABI slot and
+    so is never reported here (the effects lattice's ``target_param_index``
+    resolves those interprocedurally)."""
     flows: list[dict] = []
     param_names = {p.name.lower() for p in function.parameters}
 
@@ -502,7 +508,7 @@ def _extract_value_flows(function) -> list[dict]:
     # Low-level calls with value: ETH transfer
     visited: set[int] = set()
 
-    def _check_low_level(fn) -> None:
+    def _check_low_level(fn, is_entry: bool) -> None:
         fn_id = id(fn)
         if fn_id in visited:
             return
@@ -511,22 +517,29 @@ def _extract_value_flows(function) -> list[dict]:
             for ir in node.irs:
                 ir_str = str(ir)
                 if "LOW_LEVEL_CALL" in ir_str and "value:" in ir_str:
+                    # Only a send sited in the entry's OWN body can name its
+                    # recipient in the entry's ABI; one hop inside a helper the
+                    # destination is a callee formal, meaningless to a caller, so
+                    # it stays unnamed here rather than being asserted fixed.
+                    dest = getattr(ir, "destination", None) if is_entry else None
+                    dest_name = getattr(dest, "name", None)
+                    recipient = dest_name if isinstance(dest_name, str) and dest_name.lower() in param_names else None
                     flows.append(
                         {
                             "direction": "eth_out",
-                            "token_var": None,
+                            "token_var": recipient,
                             "token_type": "ETH",
                             "method": "call{value}",
-                            "is_parameter": False,
+                            "is_parameter": recipient is not None,
                         }
                     )
                     return
         for call in _call_or_value(fn, "all_internal_calls"):
             callee = getattr(call, "function", call) if not callable(call) else call
             if hasattr(callee, "nodes"):
-                _check_low_level(callee)
+                _check_low_level(callee, False)
 
-    _check_low_level(function)
+    _check_low_level(function, True)
 
     return flows
 
