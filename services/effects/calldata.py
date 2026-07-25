@@ -815,10 +815,16 @@ def _principals_by_selector(session: Session, contract_id: int) -> dict[str, str
     pf = get_prefetch(session)
     if pf is not None and contract_id in pf.contract_ids:
         return dict(pf.principals_by_selector_by_contract.get(contract_id, {}))
+    # ORDER BY is load-bearing, not cosmetic: a selector with two principals
+    # resolves to whichever row arrives first under ``setdefault``, so an
+    # unordered read makes the ``from_addr`` we simulate with depend on the plan
+    # path (and on Postgres' row order). Matches ``prefetch.install_prefetch``
+    # exactly so batched and unbatched planning simulate the same call.
     rows = session.execute(
         select(EffectiveFunction.selector, FunctionPrincipal.address)
         .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(EffectiveFunction.contract_id == contract_id)
+        .order_by(EffectiveFunction.id, FunctionPrincipal.address)
     ).all()
     out: dict[str, str] = {}
     for selector, address in rows:

@@ -284,6 +284,59 @@ def test_principals_by_selector_prefetch_matches_query(clean):
 
 
 @requires_postgres
+def test_principals_by_selector_is_deterministic_with_two_principals(clean):
+    """A selector with TWO principals is where the batched and unbatched reads
+    could disagree: both keep the first row via ``setdefault``, but only the
+    prefetch path ordered its query. The unbatched read then returned whichever
+    row Postgres handed back first — a different ``from_addr`` in the simulated
+    call depending on which plan path ran. Insertion order below is the reverse
+    of the ordered answer, so the pre-fix single-contract query returns the HIGH
+    address and the prefetch path the LOW one."""
+    session = clean
+    proto = Protocol(name=f"pbs2-{uuid.uuid4().hex[:8]}")
+    session.add(proto)
+    session.flush()
+    c = Contract(protocol_id=proto.id, address="0x" + "c3" * 20, chain="ethereum", is_proxy=False)
+    session.add(c)
+    session.flush()
+    fn = EffectiveFunction(
+        contract_id=c.id, function_name="f", selector="0xcccccccc", authority_public=False, effect_targets=["s"]
+    )
+    session.add(fn)
+    session.flush()
+    high, low = "0x" + "f0" * 20, "0x" + "10" * 20
+    session.add(FunctionPrincipal(function_id=fn.id, address=high))
+    session.flush()
+    session.add(FunctionPrincipal(function_id=fn.id, address=low))
+    session.commit()
+
+    unbatched = calldata_synth._principals_by_selector(session, c.id)
+    prefetch_mod.install_prefetch(
+        session,
+        1,
+        [
+            Candidate(
+                function_id=fn.id,
+                contract_id=c.id,
+                contract_address=c.address,
+                selector="0xcccccccc",
+                function_name="f",
+                authority_public=False,
+                effect_targets=("s",),
+                principal_addresses=(),
+            )
+        ],
+    )
+    try:
+        batched = calldata_synth._principals_by_selector(session, c.id)
+    finally:
+        prefetch_mod.clear_prefetch(session)
+
+    assert unbatched == batched
+    assert unbatched == {"0xcccccccc": low}
+
+
+@requires_postgres
 def test_claim_latch_pairs_prefetch_matches_query(clean):
     session = clean
     proto = Protocol(name=f"clp-{uuid.uuid4().hex[:8]}")

@@ -24,9 +24,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, exists, func, literal, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from db.models import (
     Artifact,
@@ -243,11 +243,220 @@ def _contract_chain_matches(chain_id: int):
 # Derived rather than hardcoded so it cannot drift from the writer.
 _EFFECTS_STAGE_ARTIFACT = f"stage_timing_{JobStage.effects.value}"
 
+# The ``status`` ``BaseWorker._record_stage_timing`` stamps on the success path.
+# The failure path writes the SAME artifact with ``"failed"``, and the effects
+# stage fail-forwards (``EffectsWorker._finalize_terminal_failure`` advances the
+# job to ``coverage`` rather than failing it), so a failed stage is never re-run:
+# counting it as ownership strands the contract with nobody planning it. Any
+# other or unreadable value reads as "did not succeed", which re-sweeps — the
+# direction that costs work rather than coverage.
+_STAGE_STATUS_SUCCESS = "success"
+
 # A job in either of these states will never run the effects stage again.
 _FINISHED_JOB_STATES = (JobStatus.completed, JobStatus.failed_terminal)
 
+# The stages from which a job can still ARRIVE at the effects stage. Source
+# order in :class:`~db.models.JobStage` is the progression, so the slice is the
+# prefix through ``effects``. A job past it never runs effects again — which is
+# exactly what a fail-forwarded job looks like (the finalizer advances it to
+# ``coverage``) and what a flag-off job looks like (policy skips straight to
+# ``coverage``) — so "in flight" alone is not a promise to plan anything.
+_JOB_STAGE_ORDER = list(JobStage)
+_EFFECTS_REACHABLE_STAGES = tuple(_JOB_STAGE_ORDER[: _JOB_STAGE_ORDER.index(JobStage.effects) + 1])
 
-def _scope_predicate(protocol_id: int, scope: JobScope):
+# storage_key -> recorded stage status, for artifacts belonging to jobs that can
+# no longer rewrite them. ``store_artifact`` upserts on a deterministic key, so a
+# LIVE job's artifact may still change (transient retry: failed → success) and is
+# deliberately never cached.
+_STAGE_STATUS_CACHE: dict[str, str] = {}
+_STAGE_STATUS_CACHE_MAX = 20_000
+
+
+def _job_owns_contract_address(protocol_id: int, scope: JobScope):
+    """Join predicate tying a ``jobs`` row to the ``contracts`` row it is for.
+
+    Protocol- AND chain-qualified: one address can host unrelated contracts on
+    different chains, and (schema-permitting) belong to different protocols,
+    neither of which may claim ownership of the other's.
+    """
+    return and_(
+        Job.protocol_id == protocol_id,
+        Job.chain_id == scope.chain_id,
+        Job.address.is_not(None),
+        func.lower(Job.address) == func.lower(Contract.address),
+    )
+
+
+def _protocol_contracts_on_chain(protocol_id: int, scope: JobScope):
+    return (Contract.protocol_id == protocol_id, _contract_chain_matches(scope.chain_id))
+
+
+def _contracts_with_an_effects_capable_job(session: Session, protocol_id: int, scope: JobScope) -> set[int]:
+    """Rule 1 — a job at this contract's address is in flight AND can still reach
+    the effects stage."""
+    rows = (
+        session.execute(
+            select(Contract.id)
+            .join(Job, _job_owns_contract_address(protocol_id, scope))
+            .where(
+                *_protocol_contracts_on_chain(protocol_id, scope),
+                Job.status.not_in(_FINISHED_JOB_STATES),
+                Job.stage.in_(_EFFECTS_REACHABLE_STAGES),
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return set(rows)
+
+
+def _contracts_with_verdicts(session: Session, protocol_id: int, scope: JobScope) -> set[int]:
+    """Rule 3 — the residue a sweep leaves behind."""
+    rows = (
+        session.execute(
+            select(Contract.id)
+            .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+            .join(EffectVerdict, EffectVerdict.function_id == EffectiveFunction.id)
+            .where(*_protocol_contracts_on_chain(protocol_id, scope))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return set(rows)
+
+
+def _contracts_with_a_fresh_marker(session: Session, protocol_id: int, scope: JobScope) -> set[int]:
+    """Rule 4 — a sweep planned it and it yielded no plans, within this job's own
+    lifetime."""
+    if scope.planned_since is None:
+        return set()
+    rows = (
+        session.execute(
+            select(Contract.id)
+            .join(EffectsPlanMarker, EffectsPlanMarker.contract_id == Contract.id)
+            .where(
+                *_protocol_contracts_on_chain(protocol_id, scope),
+                EffectsPlanMarker.planned_at >= scope.planned_since,
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return set(rows)
+
+
+def _recorded_stage_status(data: Any) -> str | None:
+    if isinstance(data, dict):
+        status = data.get("status")
+        if isinstance(status, str):
+            return status
+    return None
+
+
+def _resolve_stored_statuses(keys_to_types: dict[str, str | None]) -> dict[str, str | None]:
+    """Fetch stage-timing bodies that live in object storage, in ONE round trip.
+
+    With ``ARTIFACT_STORAGE_*`` configured (every deployed environment)
+    ``store_artifact`` writes ``artifacts.data`` as JSON ``null`` and puts the body
+    in the bucket, so the status is invisible to SQL — measured on the psat-pr-160
+    preview: 70/70 ``stage_timing_effects`` rows have a NULL ``data->>'status'``.
+    A read failure yields ``None``, which reads as "did not succeed" (re-sweep).
+    """
+    from db.storage import deserialize_artifact, get_storage_client
+
+    try:
+        client = get_storage_client()
+        if client is None:
+            return {}
+        bodies = client.get_many(list(keys_to_types))
+    except Exception:
+        logger.warning("effects selection: stage-timing bodies unreadable; re-sweeping instead", exc_info=True)
+        return {}
+    out: dict[str, str | None] = {}
+    for key, content_type in keys_to_types.items():
+        body = bodies.get(key)
+        if body is None:
+            continue
+        try:
+            out[key] = _recorded_stage_status(deserialize_artifact(body, content_type))
+        except Exception:
+            logger.warning("effects selection: undecodable stage-timing body %s", key, exc_info=True)
+    return out
+
+
+def _contracts_with_a_successful_effects_run(
+    session: Session, protocol_id: int, scope: JobScope, *, already_owned: set[int]
+) -> set[int]:
+    """Rule 2 — a job at this contract's address ran the effects stage AND it
+    succeeded.
+
+    Scoped to contracts nothing else already owns so the storage reads below stay
+    proportional to the contracts this rule alone can save (8 of 31 candidate
+    contracts on the preview shape), not to the protocol.
+    """
+    where = [
+        *_protocol_contracts_on_chain(protocol_id, scope),
+        func.lower(Contract.address) != scope.address.lower(),
+    ]
+    if already_owned:
+        where.append(Contract.id.not_in(already_owned))
+    rows = session.execute(
+        select(Contract.id, Artifact.data, Artifact.storage_key, Artifact.content_type, Job.status)
+        .select_from(Contract)
+        .join(Job, _job_owns_contract_address(protocol_id, scope))
+        .join(Artifact, and_(Artifact.job_id == Job.id, Artifact.name == _EFFECTS_STAGE_ARTIFACT))
+        .where(*where)
+    ).all()
+
+    owned: set[int] = set()
+    pending: dict[str, str | None] = {}
+    deferred: list[tuple[int, str, bool]] = []
+    for contract_id, data, storage_key, content_type, job_status in rows:
+        if contract_id in owned:
+            continue
+        status = _recorded_stage_status(data)
+        if status is not None:
+            if status == _STAGE_STATUS_SUCCESS:
+                owned.add(contract_id)
+            continue
+        if not storage_key:
+            continue
+        cached = _STAGE_STATUS_CACHE.get(storage_key)
+        if cached is not None:
+            if cached == _STAGE_STATUS_SUCCESS:
+                owned.add(contract_id)
+            continue
+        pending[storage_key] = content_type
+        deferred.append((contract_id, storage_key, job_status in _FINISHED_JOB_STATES))
+
+    if pending:
+        resolved = _resolve_stored_statuses(pending)
+        if len(_STAGE_STATUS_CACHE) > _STAGE_STATUS_CACHE_MAX:
+            _STAGE_STATUS_CACHE.clear()
+        for contract_id, storage_key, job_is_finished in deferred:
+            status = resolved.get(storage_key)
+            if status is None:
+                continue
+            if job_is_finished:
+                _STAGE_STATUS_CACHE[storage_key] = status
+            if status == _STAGE_STATUS_SUCCESS:
+                owned.add(contract_id)
+    return owned
+
+
+def _owned_contract_ids(session: Session, protocol_id: int, scope: JobScope) -> set[int]:
+    """The contracts some OTHER job demonstrably owns — see :func:`_scope_predicate`."""
+    owned = _contracts_with_an_effects_capable_job(session, protocol_id, scope)
+    owned |= _contracts_with_verdicts(session, protocol_id, scope)
+    owned |= _contracts_with_a_fresh_marker(session, protocol_id, scope)
+    owned |= _contracts_with_a_successful_effects_run(session, protocol_id, scope, already_owned=owned)
+    return owned
+
+
+def _scope_predicate(session: Session, protocol_id: int, scope: JobScope):
     """Which contracts THIS job plans: its own, plus every *unowned* one.
 
     Ownership must answer "will some job actually plan this contract?", NOT "does
@@ -257,11 +466,12 @@ def _scope_predicate(protocol_id: int, scope: JobScope):
     of them, so a row-existence rule would leave every contract unplanned while
     looking like a clean partition. A contract is owned when:
 
-    1. a job at its address is still in flight, so it will reach this stage; or
-    2. a job at its address ALREADY ran the effects stage — it was planned, even
-       if the plans yielded no verdict (measured: 5 of 29 contracts in the live
-       run planned candidates and wrote none, so verdict-existence alone would
-       re-sweep them forever); or
+    1. a job at its address is in flight AND can still reach the effects stage,
+       so it will plan the contract itself; or
+    2. a job at its address ALREADY ran the effects stage AND that stage
+       SUCCEEDED — it was planned, even if the plans yielded no verdict
+       (measured: 5 of 29 contracts in the live run planned candidates and wrote
+       none, so verdict-existence alone would re-sweep them forever); or
     3. its functions already carry verdicts — which is what a *sweep* leaves
        behind, and is what stops a sweep repeating across a run: the first job to
        sweep a contract marks it planned for every job after it; or
@@ -269,6 +479,17 @@ def _scope_predicate(protocol_id: int, scope: JobScope):
        ``effects_plan_markers`` row (rule 3's blind spot: an empty planning pass
        writes no verdict, so a contract with no job of its own left no trace at
        all and was re-swept by every later job forever).
+
+    Rules 1 and 2 each carry a qualifier that is the whole point of the rule.
+    Rule 2's is that ``BaseWorker`` writes the SAME ``stage_timing_effects``
+    artifact on the FAILURE path, and the effects stage fail-forwards instead of
+    failing the job, so a stage that blew up never runs again — counting it left
+    the contract planned by nobody, permanently and silently. Rule 1's is that
+    a job past the effects stage cannot run it again, and a fail-forwarded job is
+    exactly that: still in flight (at ``coverage``) with its effects stage already
+    lost. Bounding rule 1 to :data:`_EFFECTS_REACHABLE_STAGES` releases such a
+    contract back to its siblings the moment the stage fails rather than when the
+    whole job finishes.
 
     Rule 4 is the only one that expires, and deliberately: a marker counts only
     while it is at least as new as the reading job (``scope.planned_since``).
@@ -285,52 +506,24 @@ def _scope_predicate(protocol_id: int, scope: JobScope):
     whichever job reaches this stage next) — while keeping each job's work to its
     own contract in the steady state.
 
+    Rule 1 remains the one PREDICTION in the set, and it has an irreducible
+    residual: if the promising job dies before reaching the effects stage AND no
+    other job of the protocol reaches the stage afterwards, nothing re-reads the
+    now-broken promise. No selection predicate can close that — the falsifying
+    event happens strictly after the last reader — so the contract is recovered by
+    the next run (its new job owns it under rule 1, and rules 2-4 hold no stale
+    evidence for it). Every case where the promise is already broken at read time
+    IS closed here, by the stage bound above and by ``failed_terminal`` never
+    counting as in flight.
+
     All job matching is protocol- AND chain-qualified: one address can host
     unrelated contracts on different chains, and (schema-permitting) belong to
     different protocols, neither of which may claim ownership of the other's.
     """
-    address_match = (
-        Job.protocol_id == protocol_id,
-        Job.chain_id == scope.chain_id,
-        Job.address.is_not(None),
-        func.lower(Job.address) == func.lower(Contract.address),
-    )
-    in_flight = exists(
-        select(literal(1))
-        .select_from(Job)
-        .where(*address_match, Job.status.not_in(_FINISHED_JOB_STATES))
-        .correlate(Contract)
-    )
-    planned_by_own_job = exists(
-        select(literal(1))
-        .select_from(Job)
-        .join(Artifact, and_(Artifact.job_id == Job.id, Artifact.name == _EFFECTS_STAGE_ARTIFACT))
-        .where(*address_match)
-        .correlate(Contract)
-    )
-    swept_function = aliased(EffectiveFunction)
-    planned_by_a_sweep = exists(
-        select(literal(1))
-        .select_from(EffectVerdict)
-        .join(swept_function, swept_function.id == EffectVerdict.function_id)
-        .where(swept_function.contract_id == Contract.id)
-        .correlate(Contract)
-    )
-    clauses = [in_flight, planned_by_own_job, planned_by_a_sweep]
-    if scope.planned_since is not None:
-        clauses.append(
-            exists(
-                select(literal(1))
-                .select_from(EffectsPlanMarker)
-                .where(
-                    EffectsPlanMarker.contract_id == Contract.id,
-                    EffectsPlanMarker.planned_at >= scope.planned_since,
-                )
-                .correlate(Contract)
-            )
-        )
-    owned = or_(*clauses)
-    return or_(func.lower(Contract.address) == scope.address.lower(), ~owned)
+    owned = _owned_contract_ids(session, protocol_id, scope)
+    if not owned:
+        return literal(True)
+    return or_(func.lower(Contract.address) == scope.address.lower(), Contract.id.not_in(owned))
 
 
 def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = None):
@@ -364,7 +557,7 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
         # handed a chain-1 job the candidates of every other chain's contracts and
         # probed them through chain-1 seams.
         where.append(_contract_chain_matches(scope.chain_id))
-        where.append(_scope_predicate(protocol_id, scope))
+        where.append(_scope_predicate(session, protocol_id, scope))
     return session.execute(
         select(
             EffectiveFunction.id,
