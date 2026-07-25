@@ -13,44 +13,40 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from eth_utils.crypto import keccak
-
-from ..context import ClaimContext
+from ..context import ClaimContext, abi_selector
 
 # --- canonical 4-byte selectors (interface/enum params normalized) ----------
 # Auth-family entry points, keyed by the canonical ``name(types)`` selector so a
 # rename can't dodge detection and an interface-typed param (``setAuthority``'s
 # raw selector differs from its canonical ``setAuthority(address)`` one) resolves
 # correctly.
-TRANSFER_OWNERSHIP = "0xf2fde38b"  # transferOwnership(address)
-RENOUNCE_OWNERSHIP = "0x715018a6"  # renounceOwnership()
-ACCEPT_OWNERSHIP = "0x79ba5097"  # acceptOwnership()                 Ownable2Step
-REQUEST_HANDOVER = "0x25692962"  # requestOwnershipHandover()        Solady
-COMPLETE_HANDOVER = "0xf04e283e"  # completeOwnershipHandover(address) Solady
-BEGIN_DEFAULT_ADMIN = "0x634e93da"  # beginDefaultAdminTransfer(address) DAR
-ACCEPT_DEFAULT_ADMIN = "0xcefc1429"  # acceptDefaultAdminTransfer()      DAR
+TRANSFER_OWNERSHIP = abi_selector("transferOwnership(address)")  # 0xf2fde38b
+RENOUNCE_OWNERSHIP = abi_selector("renounceOwnership()")  # 0x715018a6
+ACCEPT_OWNERSHIP = abi_selector("acceptOwnership()")  # Ownable2Step
+REQUEST_HANDOVER = abi_selector("requestOwnershipHandover()")  # Solady
+COMPLETE_HANDOVER = abi_selector("completeOwnershipHandover(address)")  # Solady
+BEGIN_DEFAULT_ADMIN = abi_selector("beginDefaultAdminTransfer(address)")  # DAR
+ACCEPT_DEFAULT_ADMIN = abi_selector("acceptDefaultAdminTransfer()")  # DAR
+DEFAULT_ADMIN = abi_selector("defaultAdmin()")  # DAR
+OWNER = abi_selector("owner()")  # OZ Ownable / Solady / DSAuth
 
-GRANT_ROLE = "0x2f2ff15d"  # grantRole(bytes32,address)          OZ AccessControl
-REVOKE_ROLE = "0xd547741f"  # revokeRole(bytes32,address)         OZ AccessControl
-SET_USER_ROLE = "0x67aff484"  # setUserRole(address,uint8,bool)   Solmate
-SET_ROLE_CAPABILITY = "0x7d40583d"  # setRoleCapability(uint8,address,bytes4,bool)
-SET_PUBLIC_CAPABILITY = "0xc6b0263e"  # setPublicCapability(address,bytes4,bool)
-RELY = "0x65fae35e"  # rely(address)                              Maker wards
-DENY = "0x9c52a7f1"  # deny(address)                              Maker wards
-SET_AUTHORITY = "0x7a9e5e4b"  # setAuthority(address)             Solmate Auth/DSAuth
-
-
-def selector_of(signature: str | None) -> str | None:
-    """keccak256[:4] of a canonical ``name(types)`` signature, else ``None``."""
-    if not signature or "(" not in signature or not signature.endswith(")"):
-        return None
-    return "0x" + keccak(text=signature).hex()[:8]
+GRANT_ROLE = abi_selector("grantRole(bytes32,address)")  # OZ AccessControl
+REVOKE_ROLE = abi_selector("revokeRole(bytes32,address)")  # OZ AccessControl
+HAS_ROLE = abi_selector("hasRole(bytes32,address)")  # OZ AccessControl
+GET_ROLE_ADMIN = abi_selector("getRoleAdmin(bytes32)")  # OZ AccessControl
+SET_USER_ROLE = abi_selector("setUserRole(address,uint8,bool)")  # Solmate
+SET_ROLE_CAPABILITY = abi_selector("setRoleCapability(uint8,address,bytes4,bool)")
+SET_PUBLIC_CAPABILITY = abi_selector("setPublicCapability(address,bytes4,bool)")
+CAN_CALL = abi_selector("canCall(address,address,bytes4)")  # Solmate Authority
+RELY = abi_selector("rely(address)")  # Maker wards
+DENY = abi_selector("deny(address)")  # Maker wards
+SET_AUTHORITY = abi_selector("setAuthority(address)")  # Solmate Auth/DSAuth
 
 
 def canonical_selector(ctx: ClaimContext, function: str) -> str | None:
     """The function's selector computed from its canonical signature (enum/struct
-    params normalized), falling back to the full-name signature."""
-    return selector_of(ctx.canonical_signature(function) or function)
+    params normalized)."""
+    return ctx.canonical_selector(function)
 
 
 # --- predicate-tree leaf reading --------------------------------------------
@@ -191,30 +187,38 @@ def writes_owner_scalar(ctx: ClaimContext, function: str) -> bool:
 
 
 def is_ownable(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("owner")
+    """The contract publishes ``owner()`` — the getter every recognized ownership
+    standard mandates. A ``public`` owner variable publishes it too."""
+    return ctx.has_selectors(OWNER)
 
 
 def solady_handover_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("requestOwnershipHandover", "completeOwnershipHandover", "owner")
+    return ctx.has_selectors(REQUEST_HANDOVER, COMPLETE_HANDOVER, OWNER)
 
 
 def default_admin_rules_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("defaultAdmin", "beginDefaultAdminTransfer", "acceptDefaultAdminTransfer")
+    return ctx.has_selectors(DEFAULT_ADMIN, BEGIN_DEFAULT_ADMIN, ACCEPT_DEFAULT_ADMIN)
 
 
 def oz_access_control_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("hasRole", "getRoleAdmin")
+    return ctx.has_selectors(HAS_ROLE, GET_ROLE_ADMIN)
 
 
 def solmate_roles_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("setUserRole", "setRoleCapability", "setPublicCapability", "canCall")
+    return ctx.has_selectors(SET_USER_ROLE, SET_ROLE_CAPABILITY, SET_PUBLIC_CAPABILITY, CAN_CALL)
 
 
 def maker_wards_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_functions("rely", "deny") and "wards" in _clean_scalar_write_types_or_mappings(ctx)
+    """Maker ``wards``. The ``rely``/``deny`` halves are canonical selectors, but
+    the ACL itself has no published standard: nothing about the *shape* of a
+    caller-keyed ``uint256`` map distinguishes an authorization list from a
+    balance ledger, so the discriminator can only be the variable's name.
+    Consumers must therefore treat a wards-derived claim as an idiom, never as a
+    standard proof (see the tier in ``roles.py``)."""
+    return ctx.has_selectors(RELY, DENY) and "wards" in _written_var_names(ctx)
 
 
-def _clean_scalar_write_types_or_mappings(ctx: ClaimContext) -> set[str]:
+def _written_var_names(ctx: ClaimContext) -> set[str]:
     """Every state-var name written (any granularity/hygiene) — the wards ACL is a
     ``mapping`` write, so the scalar-only view would miss it."""
     out: set[str] = set()
@@ -223,3 +227,32 @@ def _clean_scalar_write_types_or_mappings(ctx: ClaimContext) -> set[str]:
             if isinstance(write, dict) and isinstance(write.get("var"), str):
                 out.add(write["var"])
     return out
+
+
+def delegated_authority_vars(ctx: ClaimContext) -> set[str]:
+    """State variables the contract's guards hold their *external authority* in.
+
+    Read straight off the predicate trees: a ``delegated_authority`` leaf records
+    the address source of the contract it consults (``authority.canCall(...)`` →
+    ``authority``). That makes "this function replaces the authority pointer" an
+    IR fact about the variable the gate actually reads, with no reliance on what
+    the variable is called."""
+    cache = _cache(ctx)
+    if "delegated_authority_vars" in cache:
+        return cache["delegated_authority_vars"]
+
+    found: set[str] = set()
+    for signature in ctx.function_signatures():
+        for leaf in _iter_leaves(ctx.predicate_tree(signature)):
+            if leaf.get("authority_role") != "delegated_authority":
+                continue
+            descriptor = leaf.get("set_descriptor")
+            if not isinstance(descriptor, dict):
+                continue
+            contract = descriptor.get("authority_contract")
+            source = contract.get("address_source") if isinstance(contract, dict) else None
+            name = source.get("state_variable_name") if isinstance(source, dict) else None
+            if isinstance(name, str) and name:
+                found.add(name)
+    cache["delegated_authority_vars"] = found
+    return found

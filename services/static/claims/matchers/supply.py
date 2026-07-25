@@ -6,40 +6,47 @@ Evidence, most-exact first:
 * own canonical ``mint``/``burn`` selector inside an ERC-20 / FiatToken gate
   (``standard_exact``);
 * a callee ``mint``/``burn`` selector on a body external call (``standard_exact``);
-* the supply-write-sign idiom — ERC-20 and a ``totalSupply`` write whose Binary
-  IR operation is an increase/decrease (``idiom_structural``);
+* the supply-write-sign idiom — ERC-20 and a Binary-IR increase/decrease of the
+  variable the contract publishes as ``totalSupply()`` (``idiom_structural``);
 * the mint/burn Transfer idiom — ERC-20 and a zero-address-endpoint
   ``Transfer(address,address,uint256)`` corroborated by a matching-direction
-  monotone state-var write, so a rebasing token whose supply var is not named
-  ``totalSupply`` is still recognized (``idiom_structural``);
+  monotone state-var write, so a rebasing token that publishes no supply variable
+  is still recognized (``idiom_structural``);
 * the WETH wrap/unwrap idiom — inside the WETH gate, ``deposit`` mints and
-  ``withdraw`` burns the wrapped supply (``idiom_structural``).
+  ``withdraw`` burns, corroborated by an observed one-directional balance write
+  (WETH9 keeps no supply variable and emits no ``Transfer`` on wrap, so this is
+  the only path that sees it) (``idiom_structural``).
 """
 
 from __future__ import annotations
 
-from ..context import ClaimContext
+from ..context import ClaimContext, abi_selector, selectors_of
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
 _OWN_SELECTORS = {
-    "mint": frozenset({"0x40c10f19"}),  # mint(address,uint256)
-    "burn": frozenset({"0x42966c68", "0x9dc29fac", "0x79cc6790"}),  # burn(uint256)/burn(address,uint256)/burnFrom
+    "mint": selectors_of("mint(address,uint256)"),
+    "burn": selectors_of("burn(uint256)", "burn(address,uint256)", "burnFrom(address,uint256)"),
 }
 _CALLEE_SELECTORS = _OWN_SELECTORS
 
+# Circle FiatToken's published minter ABI — the non-ERC-20 half of the token gate.
+_FIAT_TOKEN_SELECTORS = selectors_of("configureMinter(address,uint256)", "isMinter(address)")
+_DEPOSIT = abi_selector("deposit()")
+_WITHDRAW = abi_selector("withdraw(uint256)")
+
 
 def _token_gate(ctx: ClaimContext) -> bool:
-    return _facts.is_erc20(ctx) or ctx.has_functions("configureMinter", "isMinter")
+    return _facts.is_erc20(ctx) or ctx.has_selectors(*_FIAT_TOKEN_SELECTORS)
 
 
 def _weth_gate(ctx: ClaimContext) -> bool:
-    return _facts.is_erc20(ctx) and ctx.has_signature("deposit()") and ctx.has_signature("withdraw(uint256)")
+    return _facts.is_erc20(ctx) and ctx.has_selectors(_DEPOSIT, _WITHDRAW)
 
 
 def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEvidence | None:
-    selector = ctx.selector(function)
+    selector = ctx.canonical_selector(function)
     if _token_gate(ctx) and selector in _OWN_SELECTORS[kind]:
         return ClaimEvidence(
             tier="standard_exact",
@@ -57,24 +64,26 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
             witness={"kind": "callee_selector", "sink_ids": sorted(set(callee_sink_ids)), "supply": kind},
         )
 
-    if _facts.is_erc20(ctx):
-        fn = _facts.contract_function(ctx, function)
-        if fn is not None and _facts.total_supply_sign(fn) == kind:
+    fn = _facts.contract_function(ctx, function) if _facts.is_erc20(ctx) else None
+    if fn is not None:
+        if _facts.total_supply_sign(fn, _facts.total_supply_vars(ctx)) == kind:
             return ClaimEvidence(
                 tier="idiom_structural",
                 witness={"kind": "total_supply_sign", "supply": kind},
             )
-        if fn is not None and _facts.mint_burn_transfer_sign(fn) == kind:
+        if _facts.mint_burn_transfer_sign(fn) == kind:
             return ClaimEvidence(
                 tier="idiom_structural",
                 witness={"kind": "mint_burn_transfer", "supply": kind},
             )
-
-    if _weth_gate(ctx):
-        if kind == "mint" and function == "deposit()":
-            return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_wrap", "supply": "mint"})
-        if kind == "burn" and function == "withdraw(uint256)":
-            return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_unwrap", "supply": "burn"})
+        # The wrap/unwrap arm asserts a supply move, so it must observe one: the
+        # gate alone says the contract is wrapped native, not that this call
+        # created or destroyed anything.
+        if _weth_gate(ctx) and _facts.monotone_balance_delta(fn) == kind:
+            if kind == "mint" and selector == _DEPOSIT:
+                return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_wrap", "supply": "mint"})
+            if kind == "burn" and selector == _WITHDRAW:
+                return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_unwrap", "supply": "burn"})
     return None
 
 

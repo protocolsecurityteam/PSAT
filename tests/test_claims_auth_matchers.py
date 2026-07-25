@@ -22,7 +22,7 @@ from services.static.claims import (
     legacy_projections,
     registry,
 )
-from services.static.claims.matchers import _authcommon as ac
+from services.static.claims.context import selector_of
 
 AUTH_FAMILY = frozenset(
     {
@@ -82,6 +82,34 @@ def _ca_membership_leaf():
     }
 
 
+def _delegated_authority_leaf(var):
+    """The ``authority.canCall(msg.sender, ...)`` half of Solmate's
+    ``requiresAuth``: an external_bool leaf whose set descriptor records the state
+    variable holding the authority contract. This is the IR fact
+    ``authority.replace`` reads — the pointer the guard consults, not a variable
+    called ``authority``."""
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "external_bool",
+            "authority_role": "delegated_authority",
+            "references_msg_sender": True,
+            "operands": [{"source": "msg_sender"}, {"source": "self_address"}],
+            "callee_signature": "canCall(address,address,bytes4)",
+            "set_descriptor": {
+                "kind": "external_set",
+                "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": var}},
+                "callee_signature": "canCall(address,address,bytes4)",
+            },
+        },
+    }
+
+
+def _requires_auth_tree(owner_var, authority_var):
+    """Solmate ``msg.sender == owner || authority.canCall(...)``."""
+    return {"op": "OR", "children": [_ca_equality_leaf(owner_var), _delegated_authority_leaf(authority_var)]}
+
+
 def _business_leaf(var):
     return {
         "op": "LEAF",
@@ -97,7 +125,7 @@ def _business_leaf(var):
 def _fn(signature, *, state_writes=None, view=False):
     return {
         "function": signature,
-        "selector": ac.selector_of(signature) or "",
+        "selector": selector_of(signature) or "",
         "sinks": [],
         "state_writes": list(state_writes or []),
         "effect_labels": [],
@@ -207,7 +235,7 @@ def test_dsauth_owner_var_write_identity_no_getter():
             ),
             "setAuthority(address)": (
                 _fn("setAuthority(address)", state_writes=[_sw("authority", "Authority")]),
-                _ca_equality_leaf("owner"),
+                _requires_auth_tree("owner", "authority"),
             ),
             "setUserRole(address,uint8,bool)": (
                 _fn(
@@ -257,18 +285,57 @@ def test_dsauth_renounce_via_owner_var_write_identity():
 
 
 def test_set_authority_without_authority_write_is_not_claimed():
-    # setAuthority selector but it writes no `authority` var -> no authority.replace.
+    # setAuthority selector, and the contract really does consult an external
+    # authority — but this function writes a different var, so the replacement is
+    # unproven and no claim is minted.
     functions = _run(
         "NotAuth",
         {
             "setAuthority(address)": (
                 _fn("setAuthority(address)", state_writes=[_sw("somethingElse", "address")]),
-                None,
+                _requires_auth_tree("owner", "authority"),
             ),
             "owner()": (_fn("owner()", view=True), None),
         },
     )
     assert _auth(functions, "setAuthority(address)") == set()
+
+
+def test_set_authority_without_a_consulted_authority_is_not_claimed():
+    """The selector plus a scalar write is not enough: with no gate anywhere that
+    delegates to an external authority, nothing proves the written pointer IS the
+    permission authority. Name-matching the variable used to supply that proof."""
+    functions = _run(
+        "NoDelegatedGate",
+        {
+            "setAuthority(address)": (
+                _fn("setAuthority(address)", state_writes=[_sw("authority", "Authority")]),
+                _ca_equality_leaf("owner"),
+            ),
+            "owner()": (_fn("owner()", view=True), None),
+        },
+    )
+    assert _auth(functions, "setAuthority(address)") == set()
+
+
+def test_authority_replace_ignores_the_variable_name():
+    """The authority pointer is whatever the delegated-authority gate leaf names.
+    Here it is called ``permissionOracle`` — off every conventional vocabulary —
+    and the claim still lands, because the evidence is the IR, not the identifier."""
+    functions = _run(
+        "OffVocabularyAuth",
+        {
+            "setAuthority(address)": (
+                _fn("setAuthority(address)", state_writes=[_sw("permissionOracle", "IPermissions")]),
+                _requires_auth_tree("owner", "permissionOracle"),
+            ),
+            "owner()": (_fn("owner()", view=True), None),
+        },
+    )
+    assert _auth(functions, "setAuthority(address)") == {"authority.replace"}
+    claim = next(c for c in functions["setAuthority(address)"] if c["claim_id"] == "authority.replace")
+    assert claim["tier"] == "standard_exact"
+    assert claim["witness"]["write_target"] == "permissionOracle"
 
 
 # ---------------------------------------------------------------------------

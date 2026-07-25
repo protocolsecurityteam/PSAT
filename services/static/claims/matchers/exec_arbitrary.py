@@ -19,11 +19,13 @@ from __future__ import annotations
 from ..context import ClaimContext
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
-from ._gates import function_name, is_oz_timelock_gate, is_safe_gate
+from ._gates import (
+    SAFE_EXEC_SELECTORS,
+    TIMELOCK_EXECUTE_SELECTORS,
+    is_oz_timelock_gate,
+    is_safe_gate,
+)
 from ._taint import arbitrary_exec_taint
-
-_SAFE_EXEC = frozenset({"execTransaction", "execTransactionFromModule", "execTransactionFromModuleReturnData"})
-_TIMELOCK_EXEC = frozenset({"execute", "executeBatch"})
 
 
 def _body_external_call_sink_ids(ctx: ClaimContext, function: str) -> list[str]:
@@ -41,18 +43,18 @@ def _body_external_call_sink_ids(ctx: ClaimContext, function: str) -> list[str]:
     consumer_family="exec",
 )
 def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    name = function_name(function)
+    selector = ctx.canonical_selector(function)
     sink_ids = _body_external_call_sink_ids(ctx, function)
 
-    if is_safe_gate(ctx) and name in _SAFE_EXEC:
+    if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
         return ClaimEvidence(
             tier="standard_exact",
-            witness={"kind": "selector+gate", "standard": "safe", "function": name, "sink_ids": sink_ids},
+            witness={"kind": "selector+gate", "standard": "safe", "selector": selector, "sink_ids": sink_ids},
         )
-    if is_oz_timelock_gate(ctx) and name in _TIMELOCK_EXEC:
+    if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
         return ClaimEvidence(
             tier="standard_exact",
-            witness={"kind": "selector+gate", "standard": "oz_timelock", "function": name, "sink_ids": sink_ids},
+            witness={"kind": "selector+gate", "standard": "oz_timelock", "selector": selector, "sink_ids": sink_ids},
         )
 
     # Idiom tier: prove arbitrariness by taint, anchored to a real body call sink.

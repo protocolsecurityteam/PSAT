@@ -15,6 +15,11 @@ Standards covered:
     write) — today mislabeled ``hook_update``;
   * Solmate RolesAuthority ``setUserRole`` / ``setRoleCapability`` /
     ``setPublicCapability`` (gate: those setters + ``canCall``).
+
+Maker wards is the one arm that mints at ``idiom_structural`` rather than
+``standard_exact``: there is no published wards standard, and the ACL half of its
+gate can only be recognized by the variable's name (see ``maker_wards_gate``), so
+the claim is honest as an idiom and overclaimed as a standard proof.
 """
 
 from __future__ import annotations
@@ -36,6 +41,13 @@ def _evidence(standard: str, selector: str) -> ClaimEvidence:
     )
 
 
+def _wards_evidence(selector: str) -> ClaimEvidence:
+    return ClaimEvidence(
+        tier="idiom_structural",
+        witness={"kind": "selector+wards_idiom", "selector": selector, "standard": "maker_wards"},
+    )
+
+
 @claim_matcher(
     claim_id="roles.grant",
     sentence="grants membership in a role-based access-control scheme (per a recognized standard)",
@@ -45,10 +57,12 @@ def _evidence(standard: str, selector: str) -> ClaimEvidence:
 )
 def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector == ac.GRANT_ROLE and ac.oz_access_control_gate(ctx):
         return _evidence("oz_access_control", selector)
     if selector == ac.RELY and ac.maker_wards_gate(ctx):
-        return _evidence("maker_wards", selector)
+        return _wards_evidence(selector)
     return None
 
 
@@ -61,10 +75,12 @@ def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
 )
 def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector == ac.REVOKE_ROLE and ac.oz_access_control_gate(ctx):
         return _evidence("oz_access_control", selector)
     if selector == ac.DENY and ac.maker_wards_gate(ctx):
-        return _evidence("maker_wards", selector)
+        return _wards_evidence(selector)
     return None
 
 
@@ -77,6 +93,8 @@ def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
 )
 def roles_configure(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector in (ac.SET_USER_ROLE, ac.SET_ROLE_CAPABILITY, ac.SET_PUBLIC_CAPABILITY):
         return _evidence("solmate_roles", selector)
     return None

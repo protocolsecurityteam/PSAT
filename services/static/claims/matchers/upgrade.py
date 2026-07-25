@@ -24,7 +24,8 @@ from ._gates import UPGRADE_SELECTORS, is_upgrade_gate, is_uups_gate
     gate=is_upgrade_gate,
 )
 def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if ctx.selector(function) not in UPGRADE_SELECTORS:
+    selector = ctx.canonical_selector(function)
+    if selector not in UPGRADE_SELECTORS:
         return None
     # Record the delegatecall sink(s) this claim explains so the projection
     # layer can suppress the standalone delegatecall_execution emphasis on the
@@ -34,7 +35,7 @@ def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | 
         tier="standard_exact",
         witness={
             "kind": "selector+gate",
-            "selector": ctx.selector(function),
+            "selector": selector,
             "gate": "uups" if is_uups_gate(ctx) else "proxy_1967",
             "explained_delegatecall_sink_ids": explained,
         },

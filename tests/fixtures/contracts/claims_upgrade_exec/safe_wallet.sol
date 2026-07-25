@@ -7,6 +7,13 @@ pragma solidity ^0.8.19;
 // execute entries to exec.arbitrary (forward caller-supplied target + calldata).
 
 contract SafeWallet {
+    // Safe's `Enum.Operation`. Kept as a real enum so the fixture exercises the
+    // canonical-signature lowering (enum -> uint8) the exec selectors need.
+    enum Operation {
+        Call,
+        DelegateCall
+    }
+
     address internal constant SENTINEL = address(0x1);
 
     mapping(address => address) internal owners;
@@ -73,21 +80,28 @@ contract SafeWallet {
     }
 
     // -- execution ---------------------------------------------------------
-    // Slimmed param list (Safe's real execTransaction takes 10) so the fixture
-    // compiles without the optimizer; the Safe gate matches by name, not by the
-    // 10-arg selector, and the exec.arbitrary taint only needs to+data.
-    function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, bytes calldata signatures)
-        external
-        payable
-        returns (bool success)
-    {
+    // The full published Safe parameter lists: the gate and the exec claims key
+    // on the 4-byte selector, so a slimmed signature is a DIFFERENT function and
+    // must not be recognized as Safe's.
+    function execTransaction(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        Operation operation,
+        uint256 safeTxGas,
+        uint256 baseGas,
+        uint256 gasPrice,
+        address gasToken,
+        address payable refundReceiver,
+        bytes memory signatures
+    ) external payable returns (bool success) {
         nonce++;
         require(signatures.length > 0, "sig");
         (success,) = to.call{value: value}(data);
         require(success, "exec failed");
     }
 
-    function execTransactionFromModule(address to, uint256 value, bytes calldata data, uint8 operation)
+    function execTransactionFromModule(address to, uint256 value, bytes calldata data, Operation operation)
         external
         returns (bool success)
     {
@@ -95,7 +109,7 @@ contract SafeWallet {
         (success,) = to.call{value: value}(data);
     }
 
-    function execTransactionFromModuleReturnData(address to, uint256 value, bytes calldata data, uint8 operation)
+    function execTransactionFromModuleReturnData(address to, uint256 value, bytes calldata data, Operation operation)
         external
         returns (bool success, bytes memory returnData)
     {
