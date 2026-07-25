@@ -43,6 +43,7 @@ from db.models import (
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +373,11 @@ def _resolve_stored_statuses(keys_to_types: dict[str, str | None]) -> dict[str, 
         if client is None:
             return {}
         bodies = client.get_many(list(keys_to_types))
-    except Exception:
+    except Exception as exc:
+        # Safe direction (every contract re-sweeps), but it silently multiplies the
+        # stage's planning work, so it has to surface as a degraded record and not
+        # only as a log line someone would have to go looking for.
+        record_degraded(phase="effects_selection_stage_status", exc=exc, context={"keys": len(keys_to_types)})
         logger.warning("effects selection: stage-timing bodies unreadable; re-sweeping instead", exc_info=True)
         return {}
     out: dict[str, str | None] = {}

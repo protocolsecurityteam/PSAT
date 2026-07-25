@@ -130,12 +130,15 @@ class SeedBudget:
             max_probe_retries=_int_env("PSAT_EFFECTS_SEED_MAX_RETRIES", _DEFAULT_MAX_PROBE_RETRIES),
         )
 
-    def _deny(self, kind: str, name: str, used: int, cap: int) -> None:
+    def _deny(self, kind: str, name: str, used: int, cap: int, skipped: int) -> None:
         if len(self.skipped_names) < _SKIP_SAMPLE:
             self.skipped_names.append(f"{kind}:{name}")
-        # WARNING exactly once per kind (the first denial), so the truncation is
-        # never silent but a large protocol does not flood the log.
-        level = logging.WARNING if used == cap else logging.DEBUG
+        # WARNING on the FIRST denial of this kind only. ``used`` cannot express
+        # that — it stops incrementing once the cap is reached, so it equals
+        # ``cap`` for every subsequent denial. The skip counter is what
+        # distinguishes them, and a large protocol would otherwise flood the very
+        # log this truncation notice exists to make readable.
+        level = logging.WARNING if skipped == 1 else logging.DEBUG
         logger.log(
             level,
             "effects seeding: %s budget exhausted (%d/%d) — skipping %s; probe degrades to unseeded",
@@ -148,7 +151,9 @@ class SeedBudget:
     def take_identity(self, spender: str) -> bool:
         if self.identity_probes >= self.max_identity_probes:
             self.skipped_identity_probes += 1
-            self._deny("identity", spender, self.identity_probes, self.max_identity_probes)
+            self._deny(
+                "identity", spender, self.identity_probes, self.max_identity_probes, self.skipped_identity_probes
+            )
             return False
         self.identity_probes += 1
         return True
@@ -156,7 +161,9 @@ class SeedBudget:
     def take_layout(self, token: str) -> bool:
         if self.layout_discoveries >= self.max_layout_discoveries:
             self.skipped_layout_discoveries += 1
-            self._deny("layout", token, self.layout_discoveries, self.max_layout_discoveries)
+            self._deny(
+                "layout", token, self.layout_discoveries, self.max_layout_discoveries, self.skipped_layout_discoveries
+            )
             return False
         self.layout_discoveries += 1
         return True
@@ -164,7 +171,7 @@ class SeedBudget:
     def take_retry(self, target: str) -> bool:
         if self.probe_retries >= self.max_probe_retries:
             self.skipped_probe_retries += 1
-            self._deny("retry", target, self.probe_retries, self.max_probe_retries)
+            self._deny("retry", target, self.probe_retries, self.max_probe_retries, self.skipped_probe_retries)
             return False
         self.probe_retries += 1
         return True
