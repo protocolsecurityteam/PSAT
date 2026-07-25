@@ -508,6 +508,7 @@ const TARGET_KIND_WORD = {
   msg_sender: "msg.sender (the caller)",
   caller_controlled: "caller (tx.origin)",
   self: "the contract itself",
+  token_owner: "the token's current owner",
   indeterminate: "indeterminate",
 };
 
@@ -517,6 +518,7 @@ const AMOUNT_KIND_WORD = {
   whole_balance: "the whole balance",
   bounded_by_storage: "bounded by a storage value",
   fixed_constant: "a fixed constant",
+  balance_delta: "a balance delta",
   indeterminate: "indeterminate",
 };
 

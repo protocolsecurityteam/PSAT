@@ -311,6 +311,29 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     expect(qualifierForClaims({ claims: [flowOut(null)] })).toBeNull();
   });
 
+  it("reads token_owner as neither caller-chosen nor fixed", () => {
+    // The caller names the token id, not the payee, so it is not theft-shaped —
+    // but an NFT transfer repoints it, so it is not a proven-fixed destination
+    // either. It must also block a sibling fixed flow from claiming "fixed".
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "token_owner", tier: "static_trace" })] })).toBeNull();
+    const mixed = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "token_owner", tier: "static_trace" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(mixed)).toBeNull();
+  });
+
   it("shows the worst path in a multi-flow function (caller-chosen dominates fixed)", () => {
     const fn = {
       claims: [{
@@ -504,6 +527,19 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
   it("labels a caller_controlled destination honestly as caller (tx.origin)", () => {
     const fn = { claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] };
     expect(claimWitnessFacts(fn)).toContainEqual({ label: "Destination", value: "caller (tx.origin) · dispositive AST" });
+  });
+
+  it("words a token_owner destination and a balance_delta amount", () => {
+    const fn = {
+      claims: [flowOut(
+        { kind: "token_owner", tier: "static_trace" },
+        { amountKind: { kind: "balance_delta", tier: "static_trace" } },
+      )],
+    };
+    const facts = claimWitnessFacts(fn);
+    // Both must render as prose, not leak the raw enum through the fallback.
+    expect(facts).toContainEqual({ label: "Destination", value: "the token's current owner · static trace" });
+    expect(facts).toContainEqual({ label: "Amount", value: "a balance delta · static trace" });
   });
 
   it("emits freeze scope + auto-expiry rows for a fork-observed pause", () => {
