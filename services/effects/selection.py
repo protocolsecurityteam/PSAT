@@ -120,11 +120,22 @@ class AuthorityGraph:
     """Address-keyed authority closure inputs for value-at-stake.
 
     ``controls[A]`` is the set of addresses A has authority over (A → B means
-    "A controls B"). ``balance[addr]`` is the summed USD held at that address.
+    "A controls B"). ``balance[addr]`` is the summed USD held at that address,
+    keyed on the CODE-bearing ``contracts.address`` — the same plane the control
+    edges are keyed on, which is what makes the closure sum meaningful.
+
+    ``deployment_balance`` is the same money keyed on the address that actually
+    HOLDS it. The two differ for every proxy-fronted contract, and only the
+    second can be compared against a chain observation: the balances were fetched
+    for the proxy (``resolution_worker`` reads ``proxy_address or address``) but
+    stored on the implementation's contract row, and a ``Transfer`` log names the
+    proxy. Keying §5b value-reach on ``balance`` therefore matched no holder and
+    floored every acting balance to zero.
     """
 
     controls: dict[str, set[str]] = field(default_factory=dict)
     balance: dict[str, float] = field(default_factory=dict)
+    deployment_balance: dict[str, float] = field(default_factory=dict)
 
     def _add_control(self, controller: str | None, controlled: str | None) -> None:
         c, t = _addr(controller), _addr(controlled)
@@ -162,15 +173,22 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
 
     # Balances: sum USD per contract, keyed by the contract's on-chain address.
     bal_rows = session.execute(
-        select(Contract.address, func.coalesce(func.sum(ContractBalance.usd_value), 0))
+        select(Contract.id, Contract.address, func.coalesce(func.sum(ContractBalance.usd_value), 0))
         .join(ContractBalance, ContractBalance.contract_id == Contract.id)
         .where(Contract.protocol_id == protocol_id)
-        .group_by(Contract.address)
+        .group_by(Contract.id, Contract.address)
     ).all()
-    for address, usd in bal_rows:
+    holders = _deployment_by_contract(session, protocol_id)
+    for contract_id, address, usd in bal_rows:
         a = _addr(address)
-        if a is not None:
-            graph.balance[a] = graph.balance.get(a, 0.0) + float(usd or 0.0)
+        if a is None:
+            continue
+        graph.balance[a] = graph.balance.get(a, 0.0) + float(usd or 0.0)
+        holder = holders.get(contract_id) or a
+        # MAX, not sum: two implementation rows fronted by one proxy each carry a
+        # copy of that ONE deployment's holdings, and adding them would report the
+        # money twice.
+        graph.deployment_balance[holder] = max(graph.deployment_balance.get(holder, 0.0), float(usd or 0.0))
 
     # control_graph_edges: reverse to controller → contract.
     edge_rows = session.execute(
@@ -199,6 +217,26 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
         graph._add_control(principal, address)
 
     return graph
+
+
+def _deployment_by_contract(session: Session, protocol_id: int) -> dict[int, str]:
+    """``contract id -> the address that holds its state``.
+
+    ``effective_functions.deployment_address`` is the proxy a contract's code runs
+    behind; it is uniform per contract (a code row is planned for one deployment)
+    and absent for a contract that fronts nothing."""
+    rows = session.execute(
+        select(EffectiveFunction.contract_id, EffectiveFunction.deployment_address)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .where(Contract.protocol_id == protocol_id, EffectiveFunction.deployment_address.isnot(None))
+        .distinct()
+    ).all()
+    out: dict[int, str] = {}
+    for contract_id, deployment in rows:
+        addr = _addr(deployment)
+        if addr is not None:
+            out.setdefault(contract_id, addr)
+    return out
 
 
 @dataclass(frozen=True)
@@ -653,8 +691,9 @@ def select_candidates(
 
     # §5b: the protocol's witnessed value-holder set (on-chain balances), built once
     # and shared by reference across every candidate. Only positive balances — a
-    # zero-balance holder can't be a value-reach target and only adds noise.
-    value_holders = tuple(sorted((a, u) for a, u in graph.balance.items() if u > 0.0))
+    # zero-balance holder can't be a value-reach target and only adds noise. Keyed
+    # on the HOLDING address, which is the one a ``Transfer`` log can name.
+    value_holders = tuple(sorted((a, u) for a, u in graph.deployment_balance.items() if u > 0.0))
 
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, targets, deployment, claims in rows:
@@ -681,7 +720,7 @@ def select_candidates(
                 deployment_address=deployment_addr,
                 restrict_families=families,
                 value_holders=value_holders,
-                acting_balance_usd=graph.balance.get(acting, 0.0),
+                acting_balance_usd=graph.deployment_balance.get(acting, 0.0),
             )
         )
 

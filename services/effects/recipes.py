@@ -454,7 +454,10 @@ def value_out(
         )
     # §5b downstream value-reach rides the proven flow.out verdict only, and is
     # STATE-plane (holder addresses + this protocol's USD) — hence ``concrete``.
-    _add_reach(concrete, base_res.calls[0], value_holders, acting_balance_usd)
+    # Measured on ``observed``, the execution the VERDICT came from: on a seeded
+    # retry the unseeded call reverted and carries no logs at all, so reading
+    # reach off it made every seeded verdict indeterminate by construction.
+    _add_reach(concrete, observed, value_holders, acting_balance_usd)
     if budget is not None and used is not None:
         budget.record_proven()
     eff = proven(
