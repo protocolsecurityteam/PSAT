@@ -8,6 +8,10 @@ Evidence, most-exact first:
 * a callee ``mint``/``burn`` selector on a body external call (``standard_exact``);
 * the supply-write-sign idiom — ERC-20 and a ``totalSupply`` write whose Binary
   IR operation is an increase/decrease (``idiom_structural``);
+* the mint/burn Transfer idiom — ERC-20 and a zero-address-endpoint
+  ``Transfer(address,address,uint256)`` corroborated by a matching-direction
+  monotone state-var write, so a rebasing token whose supply var is not named
+  ``totalSupply`` is still recognized (``idiom_structural``);
 * the WETH wrap/unwrap idiom — inside the WETH gate, ``deposit`` mints and
   ``withdraw`` burns the wrapped supply (``idiom_structural``).
 """
@@ -59,6 +63,11 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
             return ClaimEvidence(
                 tier="idiom_structural",
                 witness={"kind": "total_supply_sign", "supply": kind},
+            )
+        if fn is not None and _facts.mint_burn_transfer_sign(fn) == kind:
+            return ClaimEvidence(
+                tier="idiom_structural",
+                witness={"kind": "mint_burn_transfer", "supply": kind},
             )
 
     if _weth_gate(ctx):

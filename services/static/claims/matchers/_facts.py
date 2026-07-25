@@ -446,6 +446,123 @@ def total_supply_sign(function: Any) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Mint/burn via the ERC-20 standard Transfer event (name-independent supply)
+# ---------------------------------------------------------------------------
+
+# The ERC-20 published signature ``Transfer(address,address,uint256)``. A
+# rebasing token (EETH) tracks supply in a differently-named var and computes
+# ``totalSupply()`` externally, so ``total_supply_sign`` cannot see the write;
+# the standard zero-address ``Transfer`` is the general, name-independent mint /
+# burn signal.
+_ERC20_TRANSFER_ARG_TYPES = ("address", "address", "uint256")
+
+
+def _is_erc20_transfer_event(ir: Any) -> bool:
+    if getattr(ir, "name", None) != "Transfer":
+        return False
+    args = list(getattr(ir, "arguments", []) or [])
+    if len(args) != 3:
+        return False
+    return tuple(str(getattr(arg, "type", None)) for arg in args) == _ERC20_TRANSFER_ARG_TYPES
+
+
+def _arg_is_zero(arg: Any, origins: dict[int, tuple[str, str | None]]) -> bool:
+    from slither.slithir.variables import Constant
+
+    if isinstance(arg, Constant):
+        return getattr(arg, "value", None) in (0, "0", "0x0", False)
+    return origins.get(id(arg)) == ("zero", None)
+
+
+def _transfer_zero_direction(ir: Any, origins: dict[int, tuple[str, str | None]]) -> str | None:
+    """``"mint"`` for an ERC-20 ``Transfer`` whose FROM is the zero address,
+    ``"burn"`` when the TO is, ``None`` otherwise (neither endpoint zero, both
+    zero, or not the canonical ``Transfer(address,address,uint256)`` shape)."""
+    if not _is_erc20_transfer_event(ir):
+        return None
+    args = list(getattr(ir, "arguments", []) or [])
+    from_zero = _arg_is_zero(args[0], origins)
+    to_zero = _arg_is_zero(args[1], origins)
+    if from_zero and not to_zero:
+        return "mint"
+    if to_zero and not from_zero:
+        return "burn"
+    return None
+
+
+def mint_burn_transfer_sign(function: Any) -> str | None:
+    """``"mint"`` / ``"burn"`` when the function both emits a zero-endpoint
+    ERC-20 ``Transfer`` and makes a matching-direction monotone Binary write to
+    a state variable, else ``None``.
+
+    Both halves are required. The zero-address ``Transfer`` alone would fire on a
+    proxy/forwarder that re-emits it without changing its own supply, so a
+    monotone ``+`` (mint) or ``-`` (burn) to some ``StateVariable`` in the same
+    body must corroborate it. Walks internal/library callees like
+    :func:`total_supply_sign` so a mint/burn routed through a helper is
+    attributed to the entry point. Fails to ``None`` on any doubt — a mixed body
+    that emits both a from-zero and a to-zero ``Transfer`` is ambiguous."""
+    from slither.core.variables.state_variable import StateVariable
+
+    transfer_dirs: set[str] = set()
+    write_signs: set[str] = set()
+    visited: set[int] = set()
+
+    def walk(unit: Any) -> None:
+        if id(unit) in visited:
+            return
+        visited.add(id(unit))
+        origins = _operand_origins(unit)
+        for node in getattr(unit, "nodes", []) or []:
+            irs = list(getattr(node, "irs", []) or [])
+            for ir in irs:
+                if type(ir).__name__ == "EventCall":
+                    direction = _transfer_zero_direction(ir, origins)
+                    if direction:
+                        transfer_dirs.add(direction)
+            binary_sign: dict[int, str] = {}
+            for ir in irs:
+                if type(ir).__name__ != "Binary":
+                    continue
+                op_type = getattr(getattr(ir, "type", None), "name", "") or ""
+                left = getattr(ir, "variable_left", None)
+                right = getattr(ir, "variable_right", None)
+                lvalue = getattr(ir, "lvalue", None)
+                sign = None
+                if op_type == "ADDITION" and (isinstance(left, StateVariable) or isinstance(right, StateVariable)):
+                    sign = "mint"
+                elif op_type == "SUBTRACTION" and isinstance(left, StateVariable):
+                    sign = "burn"
+                if sign is None:
+                    continue
+                # In-place (`S += x`): the Binary lvalue is the state var itself.
+                # Two-step: a TMP the next Assignment stores back into a state var.
+                if isinstance(lvalue, StateVariable):
+                    write_signs.add(sign)
+                elif lvalue is not None:
+                    binary_sign[id(lvalue)] = sign
+            for ir in irs:
+                if type(ir).__name__ != "Assignment":
+                    continue
+                target = getattr(ir, "lvalue", None)
+                rvalue = getattr(ir, "rvalue", None)
+                if isinstance(target, StateVariable) and rvalue is not None and id(rvalue) in binary_sign:
+                    write_signs.add(binary_sign[id(rvalue)])
+            for ir in irs:
+                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and getattr(callee, "nodes", None):
+                        walk(callee)
+
+    walk(function)
+    if transfer_dirs == {"mint"} and "mint" in write_signs:
+        return "mint"
+    if transfer_dirs == {"burn"} and "burn" in write_signs:
+        return "burn"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Callee-pointer use-link (destination identity, not name strings)
 # ---------------------------------------------------------------------------
 
