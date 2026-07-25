@@ -57,6 +57,12 @@ _NODE_PREFIX = "address:"
 _FLOW_CLAIM_PREFIX = "flow."
 _SUPPLY_CLAIM_PREFIX = "supply."
 
+# How many of a deployment's own holdings may stand in for a caller-supplied token
+# parameter. Each one the seeder resolves costs a storage-layout discovery block,
+# and ``SeedBudget`` allows 8 per job across ALL tokens — so this stays small
+# enough to leave room for the getter-named assets, which are stronger evidence.
+_MAX_TOKEN_ARG_CANDIDATES = 2
+
 
 def _addr(value: str | None) -> str | None:
     """Normalize a node id / address to a bare lowercase 0x address."""
@@ -104,6 +110,10 @@ class Candidate:
     # per-candidate is cheap.
     value_holders: tuple[tuple[str, float], ...] = ()
     acting_balance_usd: float = 0.0
+    # Assets the acting deployment PROVABLY holds, richest first — the only honest
+    # identity for a caller-supplied token PARAMETER, which has no getter behind it
+    # to resolve. Priced entries only (see :func:`_token_holdings_by_contract`).
+    input_token_addresses: tuple[str, ...] = ()
 
     @property
     def probe_target(self) -> str:
@@ -237,6 +247,33 @@ def _deployment_by_contract(session: Session, protocol_id: int) -> dict[int, str
         if addr is not None:
             out.setdefault(contract_id, addr)
     return out
+
+
+def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
+    """``contract id -> its richest PRICED ERC-20 holdings``, most valuable first.
+
+    Priced only, and that filter is load-bearing rather than cosmetic: an unpriced
+    holding is typically an airdropped spam token, and a mint witnessed against
+    one would carry a ``backing.inflow_observed: true`` indistinguishable from a
+    real deposit. Native balance (``token_address IS NULL``) is excluded — it is
+    not an argument any token parameter can take."""
+    rows = session.execute(
+        select(Contract.id, ContractBalance.token_address, ContractBalance.usd_value)
+        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        .where(
+            Contract.protocol_id == protocol_id,
+            ContractBalance.token_address.isnot(None),
+            ContractBalance.usd_value > 0,
+        )
+        .order_by(ContractBalance.usd_value.desc())
+    ).all()
+    out: dict[int, list[str]] = {}
+    for contract_id, token, _usd in rows:
+        addr = _addr(token)
+        holdings = out.setdefault(contract_id, [])
+        if addr is not None and addr not in holdings and len(holdings) < limit:
+            holdings.append(addr)
+    return {cid: tuple(v) for cid, v in out.items()}
 
 
 @dataclass(frozen=True)
@@ -694,6 +731,7 @@ def select_candidates(
     # zero-balance holder can't be a value-reach target and only adds noise. Keyed
     # on the HOLDING address, which is the one a ``Transfer`` log can name.
     value_holders = tuple(sorted((a, u) for a, u in graph.deployment_balance.items() if u > 0.0))
+    holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
 
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, targets, deployment, claims in rows:
@@ -721,6 +759,7 @@ def select_candidates(
                 restrict_families=families,
                 value_holders=value_holders,
                 acting_balance_usd=graph.deployment_balance.get(acting, 0.0),
+                input_token_addresses=holdings.get(contract_id, ()),
             )
         )
 

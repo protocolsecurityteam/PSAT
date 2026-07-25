@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from services.effects.calldata import substitute_address_arg
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
@@ -123,6 +124,10 @@ _SKIP_NO_CALLDATA = "skipped_no_seeded_calldata"
 _SKIP_BUDGET = "skipped_budget_exhausted"
 _SKIP_NO_TOKEN = "skipped_no_token_resolved"
 _SKIP_NO_ATTEMPT_PATH = "skipped_no_viable_attempt"
+# A token PARAMETER was left at the encoder's default because nothing honest
+# could be named for it. The call reverts on its own argument — a non-observation
+# with a recorded reason, never a guessed address.
+_SKIP_NO_TOKEN_ARG = "skipped_no_token_for_param"
 
 
 @dataclass(frozen=True)
@@ -136,6 +141,10 @@ class _SeedAttempt:
     sentinel_calldata: str | None
     seeding: Seeding | None
     contract_balance_seeded: bool = False
+    # ``param index -> token address`` written into this attempt's calldata. Only
+    # a read-back-proved token appears here, so it is what the backing witness is
+    # gated on (see :func:`_backing_admissible`).
+    token_args: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def readback(self) -> tuple[SimCall, ...]:
@@ -182,6 +191,7 @@ def _seed_attempts(
     block_tag: str,
     target_payable: bool | None = None,
     native_payout: bool = False,
+    token_param_indexes: Sequence[int] = (),
 ) -> list[_SeedAttempt]:
     """The ordered retries for a probe whose UNSEEDED call already reverted.
 
@@ -243,9 +253,20 @@ def _seed_attempts(
     sentinel = seeded_sentinel_calldata.get(decimals) or seeded_sentinel_calldata.get(18)
     if seeding is not None:
         transcript["seeding"] = dict(seeding.detail)
+    placed: dict[str, str] = {}
+    if token_param_indexes:
+        calldata, sentinel, placed = _place_token_args(
+            calldata, sentinel, token_param_indexes, seeding, contract_address
+        )
+        if not placed:
+            _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_TOKEN_ARG)
+        elif seeding is not None:
+            transcript.setdefault("seeding", {})["token_args"] = placed
     attempts: list[_SeedAttempt] = []
     if seeding is not None:
-        attempts.append(_SeedAttempt(_ATTEMPT_SEEDED, seeding.overrides, 0, calldata, sentinel, seeding))
+        attempts.append(
+            _SeedAttempt(_ATTEMPT_SEEDED, seeding.overrides, 0, calldata, sentinel, seeding, token_args=placed)
+        )
     if target_payable is not False:
         attempts.append(
             _SeedAttempt(
@@ -255,6 +276,7 @@ def _seed_attempts(
                 calldata,
                 sentinel,
                 seeding,
+                token_args=placed,
             )
         )
     else:
@@ -269,11 +291,66 @@ def _seed_attempts(
                 sentinel,
                 seeding,
                 contract_balance_seeded=True,
+                token_args=placed,
             )
         )
     if not attempts:
         _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_ATTEMPT_PATH)
     return attempts
+
+
+def _place_token_args(
+    calldata: str,
+    sentinel: str | None,
+    indexes: Sequence[int],
+    seeding: Seeding | None,
+    contract_address: str,
+) -> tuple[str, str | None, dict[str, str]]:
+    """Write a SEEDED token address into each proved token parameter.
+
+    Only a token the seeder actually seeded may be written: the principal now
+    holds it, so the pull the function performs can succeed and emit the Transfer
+    the backing witness is read from. The probe target itself is excluded even
+    when it was the only token seeded — feeding a vault its own share token as
+    the deposit asset produces a mint whose inflow is the minted asset, which the
+    backing rule discards, and the resulting ``inflow_observed: false`` would
+    describe the prober's argument rather than the function.
+
+    Returns the (possibly unchanged) calldata pair and a map of what was placed;
+    an empty map means the slots kept the encoder's default."""
+    tokens = [t for t in (seeding.tokens if seeding else ()) if t != contract_address.lower()]
+    if not tokens:
+        return calldata, sentinel, {}
+    placed: dict[str, str] = {}
+    for n, index in enumerate(indexes):
+        token = tokens[min(n, len(tokens) - 1)]
+        rewritten = substitute_address_arg(calldata, index, token)
+        if rewritten is None:
+            continue
+        calldata = rewritten
+        if sentinel is not None:
+            sentinel = substitute_address_arg(sentinel, index, token) or sentinel
+        placed[str(index)] = token
+    return calldata, sentinel, placed
+
+
+def _backing_admissible(token_param_indexes: Sequence[int], used: _SeedAttempt | None) -> bool:
+    """May the §5a backing witness be published for this execution?
+
+    Only if the call the witness comes from was made with a real token in every
+    slot that takes one. ``inflow_observed: false`` means "supply rose and nothing
+    came in", which is a statement about the FUNCTION — and it is not one this
+    stage may make when the prober itself supplied a non-token for the asset: a
+    codeless address is a no-op success inside every ``safeTransfer`` wrapper, so
+    the pull silently does nothing and a deposit-backed conversion reads as pure
+    dilution. With no token parameter there is nothing to get wrong and the
+    witness is admissible exactly as before.
+
+    Withholding is not a negative: the key is simply ABSENT, which the claims
+    bridge and the scorer read as unmeasured (never as "no backing")."""
+    if not token_param_indexes:
+        return True
+    return used is not None and set(used.token_args) >= {str(i) for i in token_param_indexes}
 
 
 def _readback_ok(attempt: _SeedAttempt, results: Sequence[SimCallResult]) -> bool:
@@ -320,6 +397,7 @@ def value_out(
     gate_ref: str = "",
     seeder: Seeder | None = None,
     input_token_hints: Sequence[str] = (),
+    token_param_indexes: Sequence[int] = (),
     seeded_calldata: Mapping[int, str] | None = None,
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
     target_payable: bool | None = None,
@@ -380,6 +458,7 @@ def value_out(
                 contract_address=contract_address,
                 principal=principal,
                 token_hints=input_token_hints,
+                token_param_indexes=token_param_indexes,
                 seeded_calldata=seeded_calldata or {},
                 seeded_sentinel_calldata=seeded_sentinel_calldata or {},
                 block_tag=hex(tr["block_number"]),
@@ -687,6 +766,7 @@ def supply(
     gate_ref: str = "",
     seeder: Seeder | None = None,
     input_token_hints: Sequence[str] = (),
+    token_param_indexes: Sequence[int] = (),
     seeded_calldata: Mapping[int, str] | None = None,
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
     target_payable: bool | None = None,
@@ -732,6 +812,7 @@ def supply(
                 contract_address=token_address,
                 principal=principal,
                 token_hints=input_token_hints,
+                token_param_indexes=token_param_indexes,
                 seeded_calldata=seeded_calldata or {},
                 seeded_sentinel_calldata=seeded_sentinel_calldata or {},
                 block_tag=hex(tr["block_number"]),
@@ -798,7 +879,7 @@ def supply(
     )
     details: dict[str, Any] = {"supply_delta_sign": sign}
     concrete: dict[str, Any] = {}
-    if sign == "mint":
+    if sign == "mint" and _backing_admissible(token_param_indexes, used):
         # §5a backing: an asset Transfer INTO the vault during the SAME simulated
         # mint call is the co-occurring inflow that separates a deposit-backed
         # conversion (WeETH.wrap / BoringVault.enter) from an unbacked, dilutive
@@ -842,6 +923,8 @@ def supply(
             # balance was overridden is a capability claim, not a live one.
             "contract_balance_seeded": used is not None and used.contract_balance_seeded,
         }
+    elif sign == "mint":
+        tr["backing_withheld"] = "token_param_unresolved"
     if used is not None:
         seed_budget = budget_of(seeder)
         if seed_budget is not None:

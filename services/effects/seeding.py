@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -50,6 +51,8 @@ from services.effects.simulate import SimCall, Simulate, StateOverride
 logger = logging.getLogger(__name__)
 
 _TRUTHY = {"1", "true", "yes", "on"}
+
+_RESOLVED_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def input_seeding_enabled() -> bool:
@@ -361,8 +364,9 @@ class TokenLayout:
 @dataclass(frozen=True)
 class SeedRequest:
     """What a probe needs seeded. ``token_hints`` are zero-arg getter signatures
-    on ``spender`` naming the input asset (``"__self__"`` means the probe target
-    itself — a withdrawal burning the caller's own share token)."""
+    on ``spender`` naming the input asset, or already-resolved token addresses
+    (``"__self__"`` means the probe target itself — a withdrawal burning the
+    caller's own share token)."""
 
     spender: str
     principal: str
@@ -562,12 +566,16 @@ class SimulateSeeder:
         readback_expected: list[str] = []
         seeded: list[str] = []
         decimals = _DEFAULT_DECIMALS
+        # A hint that is already an address is a HOLDING of the acting deployment,
+        # not an asset the code was seen to pull. It is therefore too weak to stand
+        # in for the self-seed below.
+        literals = {h.lower() for h in request.token_hints if _RESOLVED_ADDRESS.match(h)}
         for token in tokens:
-            if token == request.spender.lower() and seeded:
+            if token == request.spender.lower() and any(t not in literals for t in seeded):
                 # ``__self__`` is the always-appended fallback candidate (the
                 # withdrawal-burns-your-own-shares shape) and it resolves without
                 # a wire call, so EVERY reverting probe would otherwise pay a
-                # layout discovery for the probe target itself. A specific hint
+                # layout discovery for the probe target itself. A GETTER-named hint
                 # that already yielded anchors is the asset static actually saw
                 # flow in, so the fallback adds a discovery block for a seed the
                 # call has no evidence of needing. Ordered last by
@@ -615,7 +623,12 @@ class SimulateSeeder:
         cached = self._tokens.get(key)
         if cached is not None:
             return cached
-        getters = [h for h in request.token_hints if h != "__self__"]
+        # A hint that is already an address needs no getter call: it came from the
+        # acting deployment's own measured holdings, not from a name.
+        literals = [h.lower() for h in request.token_hints if _RESOLVED_ADDRESS.match(h)]
+        getters = [
+            h for h in request.token_hints if h != "__self__" and h not in literals and not _RESOLVED_ADDRESS.match(h)
+        ]
         resolved: list[str] = []
         if getters and self.budget.take_identity(request.spender.lower()):
             calls = [SimCall(to=request.spender, data=selector_of(sig)) for sig in getters]
@@ -631,16 +644,24 @@ class SimulateSeeder:
                 address = _to_address(call_result.return_data)
                 if address and address not in resolved:
                     resolved.append(address)
+        # After the getters: a getter names the asset the CODE pulls, which is
+        # stronger evidence than "the deployment happens to hold it".
+        for literal in literals:
+            if literal not in resolved:
+                resolved.append(literal)
         # ``__self__`` LAST, not first: it costs no wire call to resolve, but it
         # sets the seeded probe's decimals when it is seeded first — and the
         # amount is meant to be one whole unit of the INPUT asset static named,
         # not of the probe target. Ordering it last also lets ``__call__`` drop
-        # its discovery once a specific hint has produced anchors.
+        # its discovery once a specific hint has produced anchors. It is appended
+        # AFTER the cap so a long candidate list cannot crowd out the one seed a
+        # share-burning withdrawal needs.
+        resolved = resolved[: self._max_tokens]
         if "__self__" in request.token_hints:
             self_token = request.spender.lower()
             if self_token not in resolved:
                 resolved.append(self_token)
-        tokens = tuple(resolved[: self._max_tokens])
+        tokens = tuple(resolved)
         self._tokens[key] = tokens
         return tokens
 

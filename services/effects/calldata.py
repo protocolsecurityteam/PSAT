@@ -92,6 +92,15 @@ ARG_IDENTIFIER = 1
 ROLE_AMOUNT = "amount"
 ROLE_IDENTIFIER = "identifier"
 
+# Roles for an ADDRESS parameter. ``ROLE_RECIPIENT`` is where the principal
+# belongs (it is what makes a payout observable); ``ROLE_TOKEN`` is a slot the
+# principal must NEVER occupy — a token/asset argument is dereferenced as a
+# contract, so an EOA there reverts the call before any effect (measured:
+# ``BoringVault.enter``'s ``asset`` slot, ``TRANSFER_FROM_FAILED``, 8/8 supply
+# probes, 2026-07-25 run).
+ROLE_RECIPIENT = "recipient"
+ROLE_TOKEN = "token"
+
 # Balance handed to every impersonated entry-point caller on the fork so gas can
 # never masquerade as a pause revert.
 FIXTURE_BALANCE_WEI = 10**19
@@ -134,6 +143,10 @@ class ValueOutPlanInputs:
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
     input_token_hints: tuple[str, ...] = ()
+    # Address slots proved to carry a TOKEN. They hold no principal; the seeded
+    # retry writes a resolved token address into each, or leaves them at the
+    # encoder's default and records why.
+    token_param_indexes: tuple[int, ...] = ()
     seeded_calldata: Mapping[int, str] = field(default_factory=dict)
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
     # ABI payability of F, or ``None`` on an artifact that predates the fact.
@@ -159,6 +172,7 @@ class SupplyPlanInputs:
     sentinel_calldata: str | None = None
     # Input-asset seeding — see :class:`ValueOutPlanInputs`.
     input_token_hints: tuple[str, ...] = ()
+    token_param_indexes: tuple[int, ...] = ()
     seeded_calldata: Mapping[int, str] = field(default_factory=dict)
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
     target_payable: bool | None = None
@@ -516,6 +530,118 @@ def integer_param_roles(
     return roles
 
 
+# Word vocabulary for the ROLE of an ADDRESS parameter, same mechanism-first
+# shape as the integer one: split the declared name into words and classify by
+# what the word MEANS in ABI usage. ``asset``/``depositAsset``/``tokenIn`` name a
+# contract the function dereferences; ``to``/``receiver``/``beneficiary`` name
+# somewhere value lands.
+_TOKEN_WORDS = frozenset({"token", "tokens", "asset", "collateral", "underlying", "currency", "erc20", "erc721", "nft"})
+_RECIPIENT_WORDS = frozenset({"to", "recipient", "receiver", "beneficiary", "destination", "dst", "payee", "refund"})
+
+# Method names, from the ERC-20/721 ABI and the two ubiquitous wrapper libraries
+# over it, that only ever appear on a TOKEN. A body sink calling one of these on
+# a parameter proves that parameter is a token, whatever it is named — the
+# selector-keyed :data:`_PULL_SELECTORS` cannot see it, because a library wrapper
+# (``SafeTransferLib.safeTransferFrom(ERC20,...)``) has a selector of its own.
+_TOKEN_METHOD_WORDS = frozenset(
+    {
+        "transfer",
+        "transferfrom",
+        "safetransfer",
+        "safetransferfrom",
+        "approve",
+        "safeapprove",
+        "increaseallowance",
+        "decreaseallowance",
+        "balanceof",
+        "allowance",
+        "burn",
+        "burnfrom",
+        "mint",
+        "permit",
+    }
+)
+
+
+def _token_method_targets(fn: "FunctionFacts") -> set[str]:
+    """Dotted-target HEADS of body sinks calling a token-only method
+    (``asset.safeTransferFrom`` ⇒ ``asset``). The head is either a declared
+    parameter or a state variable; the caller decides which it is looking at."""
+    heads: set[str] = set()
+    for sink in fn.effect_info.get("sinks") or []:
+        if not isinstance(sink, dict) or sink.get("kind") != "external_call" or sink.get("origin") != "body":
+            continue
+        target = str(sink.get("target") or "")
+        head, _, method = target.rpartition(".")
+        if head and method.lower() in _TOKEN_METHOD_WORDS:
+            heads.add(head)
+    return heads
+
+
+def address_param_roles(
+    fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None = None
+) -> dict[int, str]:
+    """``index -> ROLE_RECIPIENT | ROLE_TOKEN`` for the address params whose role
+    the static plane can name. An index ABSENT from the result keeps the probe's
+    default (the acting principal).
+
+    The ROLE_TOKEN half is what this exists for. The encoder used to write the
+    principal into every address arg, so a deposit-shaped function received an
+    EOA where it expected an ERC-20 and reverted on its own first line — the
+    whole gated-deposit population landed ``unknown`` with no backing witness. A
+    token slot therefore takes no principal; the seeded retry writes a REAL token
+    there (:func:`substitute_address_arg`) or the slot stays at the encoder's
+    default and the resulting revert is the contract's, not the prober's.
+
+    ROLE_RECIPIENT is a veto, not a substitution change: it already gets the
+    principal. It exists so a name carrying BOTH vocabularies, or a slot the
+    value-flow lattice resolved as the payout destination, can never be demoted
+    to a token slot and lose the identity that makes the payout observable."""
+    names = _declared_param_names(fn, len(types))
+    lattice_target = _lattice_taint_index(fn, types, directions) if directions is not None else None
+    called_on = _token_method_targets(fn)
+    roles: dict[int, str] = {}
+    for idx, type_str in enumerate(types):
+        if not _is_address_type(type_str.strip()):
+            continue
+        name = names[idx]
+        words = _name_words(name)
+        is_recipient = bool(words & _RECIPIENT_WORDS) or idx == lattice_target
+        is_token = bool(words & _TOKEN_WORDS) or (bool(name) and name in called_on)
+        # Both vocabularies on one name is no evidence at all: demoting a payout
+        # destination to a token slot costs the observation the probe exists for.
+        if is_recipient:
+            roles[idx] = ROLE_RECIPIENT
+        elif is_token:
+            roles[idx] = ROLE_TOKEN
+    return roles
+
+
+def substitute_address_arg(calldata: str, index: int, address: str) -> str | None:
+    """Rewrite top-level argument ``index`` of an encoded call to ``address``.
+
+    An ``address`` is a static ABI type, so its head word IS its value and lives
+    at a fixed offset whatever follows it — the rewrite is exact, and it is done
+    here rather than by re-encoding because the identity of the token is only
+    known on the wire (the seeder resolves it), while the calldata is built
+    offline. Returns ``None`` when the calldata is too short for that slot or the
+    address is malformed, so the caller fails closed."""
+    if not isinstance(calldata, str) or not calldata.startswith("0x") or index < 0:
+        return None
+    body = calldata[2:]
+    start = 8 + index * 64
+    if len(body) < start + 64:
+        return None
+    raw = address[2:] if address.startswith("0x") else address
+    if len(raw) != 40:
+        return None
+    try:
+        int(raw, 16)
+    except ValueError:
+        return None
+    return "0x" + body[:start] + raw.rjust(64, "0").lower() + body[start + 64 :]
+
+
 def _arg_values(
     types: Sequence[str],
     *,
@@ -527,7 +653,19 @@ def _arg_values(
     caller identity (so a mint/transfer has a real recipient); an integer param
     takes ``amount`` only where :func:`integer_param_roles` proved it is a
     quantity, the small id filler where it proved an identifier, and the encoder's
-    default where the role is unproven."""
+    default where the role is unproven.
+
+    A token slot gets the identity here too, and it is deliberate that it stays
+    that way until a REAL token is known. Measured on the three etherfi
+    BoringVaults (2026-07-25, mainnet fork): ``enter`` with the encoder's default
+    ``address(0)`` in its ``asset`` slot SUCCEEDS — a call to a codeless address
+    is a no-op success inside ``SafeTransferLib`` — and mints shares against a
+    pull that never happened. That is a fabricated ``supply.mint`` with a
+    fabricated "no inflow", i.e. exactly the witness this stage must never
+    produce. The identity keeps the slot occupied by something the probe never
+    claims is a token; the seeded retry then writes a proven one
+    (:func:`substitute_address_arg`), and the recipe withholds the backing
+    witness entirely when it could not."""
     roles = integer_roles or {}
     subs: dict[int, Any] = {}
     for idx, type_str in enumerate(types):
@@ -746,12 +884,14 @@ def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[
 
 def _value_probe_inputs(
     fn: FunctionFacts, principal: str, directions: frozenset[str]
-) -> tuple[str, bool, str | None] | None:
-    """``(calldata, taint_flag, sentinel_calldata)`` shared by §4.2 and §4.5."""
+) -> tuple[str, bool, str | None, tuple[int, ...]] | None:
+    """``(calldata, taint_flag, sentinel_calldata, token_param_indexes)`` shared by
+    §4.2 and §4.5."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
     roles = integer_param_roles(fn, types, directions)
+    addr_roles = address_param_roles(fn, types, directions)
     base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles)
     calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=base_subs)
     if calldata is None:
@@ -762,7 +902,8 @@ def _value_probe_inputs(
         sentinel_subs = dict(base_subs)
         sentinel_subs[taint_idx] = SENTINEL_ADDRESS
         sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
-    return calldata, taint_idx is not None, sentinel_calldata
+    tokens = tuple(sorted(idx for idx, role in addr_roles.items() if role == ROLE_TOKEN))
+    return calldata, taint_idx is not None, sentinel_calldata, tokens
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
@@ -777,7 +918,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
     built = _value_probe_inputs(fn, principal, frozenset(_OUT_DIRECTIONS))
     if built is None:
         return None
-    calldata, tainted, sentinel_calldata = built
+    calldata, tainted, sentinel_calldata, token_params = built
     seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_OUT_DIRECTIONS))
     return ValueOutPlanInputs(
         contract_address=candidate.probe_target,
@@ -789,7 +930,8 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
         acting_balance_usd=candidate.acting_balance_usd,
-        input_token_hints=input_token_hints(fn),
+        input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
+        token_param_indexes=token_params,
         seeded_calldata=seeded,
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
@@ -808,7 +950,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
     built = _value_probe_inputs(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
     if built is None:
         return None
-    calldata, tainted, sentinel_calldata = built
+    calldata, tainted, sentinel_calldata, token_params = built
     seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
     return SupplyPlanInputs(
         # The candidate's own probe target. A candidate that is not an ERC-20
@@ -821,12 +963,30 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         taint_param_reaches_sink=tainted,
         sentinel_address=SENTINEL_ADDRESS if sentinel_calldata else None,
         sentinel_calldata=sentinel_calldata,
-        input_token_hints=input_token_hints(fn),
+        input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
+        token_param_indexes=token_params,
         seeded_calldata=seeded,
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
     )
+
+
+def _token_arg_candidates(candidate: Candidate, token_params: Sequence[int]) -> tuple[str, ...]:
+    """Assets the acting deployment PROVABLY holds, offered only to a function
+    that actually has a token parameter.
+
+    They exist because a caller-supplied token slot has no getter behind it: the
+    identity has to come from somewhere, and the only honest "somewhere" is real
+    on-chain state. ``contract_balances`` is a measurement of this deployment at
+    this block, ordered by USD, and :func:`selection.select_candidates` keeps only
+    the PRICED entries — an unpriced holding is usually an airdropped spam token,
+    and a mint witnessed against one would read as backed while being worthless.
+
+    A candidate that the function does not accept can only make the call revert.
+    It can never invent a witness: backing is counted from Transfers the
+    execution EMITTED, and writing an address into calldata emits nothing."""
+    return tuple(candidate.input_token_addresses) if token_params else ()
 
 
 def _seeded_probe_calldata(
@@ -1322,6 +1482,8 @@ _PULL_SELECTORS = frozenset(
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A token hint that is already an address needs no getter call to resolve.
+_RESOLVED_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 # Zero-arg getter every ERC-4626 vault must expose for its input asset. A
 # standard, not a name guess — and a wrong candidate can only fail to unblock the
@@ -1333,26 +1495,33 @@ _ERC4626_ASSET_GETTER = "asset()"
 SELF_TOKEN_HINT = "__self__"
 
 
-def input_token_hints(fn: FunctionFacts) -> tuple[str, ...]:
-    """Zero-arg getter signatures on the probe target that name the asset F pulls
-    from its caller, most specific first, plus :data:`SELF_TOKEN_HINT`.
+def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ()) -> tuple[str, ...]:
+    """Candidate input assets for the seeded retry, most specific first, plus
+    :data:`SELF_TOKEN_HINT` last. An entry is either a zero-arg getter signature
+    to call on the probe target or an already-resolved token ADDRESS.
 
-    Two artifact sources, no name invention: the dotted target of a body sink
-    carrying an ERC-20 PULL selector (``eETH.transferFrom`` ⇒ ``eETH()``), and the
-    ``token_var`` of a ``contract_analysis`` value flow whose direction is a pull
-    or burn and whose token is NOT a caller-supplied parameter. A caller-supplied
-    token param is deliberately excluded: the probe encoder substitutes the
-    principal for every address arg, so there is no token there to seed.
+    Getter sources, no name invention: the dotted target of a body sink carrying
+    an ERC-20 PULL selector (``eETH.transferFrom`` ⇒ ``eETH()``); the dotted
+    target of a body sink calling a token-only METHOD, which is how a
+    library-wrapped pull surfaces (``nativeWrapper.safeApprove`` ⇒
+    ``nativeWrapper()``, whose selector belongs to the library, not to ERC-20);
+    and the ``token_var`` of a ``contract_analysis`` value flow whose direction is
+    a pull or burn. A head that is a declared PARAMETER names no getter — there is
+    no state variable behind it — which is what ``token_addresses`` is for: the
+    caller supplies the assets the acting deployment provably holds, and
+    :func:`substitute_address_arg` writes one of them into that parameter.
 
     These are CANDIDATES, not claims. Identity is settled on the wire (the getter
     must return an address whose storage read-back confirms a balance mapping),
     and the verdict is settled by an observed transfer — a wrong candidate simply
     leaves the call reverting exactly as it does today."""
     names: list[str] = []
+    params = set(_declared_param_names(fn, len(_parse_arg_types(fn.canonical_signature) or ())))
 
     def _add(raw: Any) -> None:
         name = str(raw or "").strip()
-        if name and _IDENTIFIER.match(name) and name not in names:
+        # A parameter is not a getter: the value lives in calldata, not storage.
+        if name and name not in params and _IDENTIFIER.match(name) and name not in names:
             names.append(name)
 
     for sink in fn.effect_info.get("sinks") or []:
@@ -1361,6 +1530,8 @@ def input_token_hints(fn: FunctionFacts) -> tuple[str, ...]:
         if str(sink.get("selector") or "").lower() not in _PULL_SELECTORS:
             continue
         _add(str(sink.get("target") or "").split(".")[0])
+    for head in sorted(_token_method_targets(fn)):
+        _add(head)
     for flow in fn.legacy_value_flows:
         if str(flow.get("direction")) not in _INPUT_DIRECTIONS or flow.get("is_parameter"):
             continue
@@ -1368,6 +1539,7 @@ def input_token_hints(fn: FunctionFacts) -> tuple[str, ...]:
 
     hints = [f"{name}()" for name in names]
     hints.append(_ERC4626_ASSET_GETTER)
+    hints.extend(addr.lower() for addr in token_addresses if _RESOLVED_ADDRESS.match(addr or ""))
     hints.append(SELF_TOKEN_HINT)
     return tuple(dict.fromkeys(hints))
 
@@ -1510,6 +1682,8 @@ __all__ = [
     "ARG_IDENTIFIER",
     "ROLE_AMOUNT",
     "ROLE_IDENTIFIER",
+    "ROLE_RECIPIENT",
+    "ROLE_TOKEN",
     "NEUTRAL_CALLER",
     "SENTINEL_ADDRESS",
     "FIXTURE_BALANCE_WEI",
@@ -1521,6 +1695,7 @@ __all__ = [
     "PausePlanInputs",
     "SupplyPlanInputs",
     "ValueOutPlanInputs",
+    "address_param_roles",
     "encode_calldata",
     "facts_for_name",
     "function_payable",
@@ -1530,6 +1705,7 @@ __all__ = [
     "load_contract_facts",
     "read_max_pause_duration",
     "resolve_function",
+    "substitute_address_arg",
     "synthesize",
     "synthesize_authority",
     "synthesize_pause",
