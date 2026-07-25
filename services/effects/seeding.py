@@ -121,6 +121,11 @@ class SeedBudget:
     skipped_layout_discoveries: int = 0
     skipped_probe_retries: int = 0
     skipped_names: list[str] = field(default_factory=list)
+    # Why individual seeded attempts (and whole retry paths) came to nothing,
+    # counted by reason. Without this a run reporting ``executed=0`` says only
+    # that seeding failed, never which precondition failed — which is the whole
+    # difference between a bug and an honest non-observation.
+    attempt_outcomes: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "SeedBudget":
@@ -182,6 +187,10 @@ class SeedBudget:
     def record_proven(self) -> None:
         self.verdicts_proven_seeded += 1
 
+    def record_outcome(self, outcome: str) -> None:
+        """Count one attempt/skip outcome by reason (see ``recipes._OUTCOME_*``)."""
+        self.attempt_outcomes[outcome] = self.attempt_outcomes.get(outcome, 0) + 1
+
     def metrics(self) -> dict[str, int]:
         return {
             "seed_identity_probes": self.identity_probes,
@@ -192,6 +201,7 @@ class SeedBudget:
             "seed_budget_skips": (
                 self.skipped_identity_probes + self.skipped_layout_discoveries + self.skipped_probe_retries
             ),
+            **{f"seed_outcome_{reason}": count for reason, count in sorted(self.attempt_outcomes.items())},
         }
 
     @property
@@ -206,6 +216,7 @@ class SeedBudget:
             f"executed={self.probes_executed} proven={self.verdicts_proven_seeded} "
             f"skipped(identity/layout/retry)="
             f"{self.skipped_identity_probes}/{self.skipped_layout_discoveries}/{self.skipped_probe_retries} "
+            f"outcomes={dict(sorted(self.attempt_outcomes.items()))} "
             f"sample={self.skipped_names}"
         )
 
@@ -231,6 +242,13 @@ SEED_AMOUNT = 2**128
 # deposit cap.
 SEED_ETH_VALUE = 10**18
 SEED_ETH_BALANCE = 10**19
+
+# ETH handed to the TARGET CONTRACT (never the caller) on the last, most
+# synthetic retry. A redemption/sweep pays out of the contract's own balance and
+# reverts before its send when that balance is short — the revert is about this
+# block's treasury, not about what the function can do. 100 ETH clears a realistic
+# single redemption while staying far below any overflow concern.
+SEED_CONTRACT_ETH_BALANCE = 10**20
 
 # Solidity base slots scanned for a mapping. 256 is not arbitrary: OZ-upgradeable
 # inheritance chains push the balance mapping deep behind ``__gap`` arrays —
@@ -656,4 +674,23 @@ def eth_value_override(principal: str, overrides: StateOverride | None = None) -
     merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (overrides or {}).items()}
     account = merged.setdefault(principal.lower(), {})
     account["balance"] = _word(SEED_ETH_BALANCE)
+    return merged
+
+
+def contract_balance_override(contract: str, overrides: StateOverride | None = None) -> StateOverride:
+    """Add the TARGET CONTRACT's own ETH balance to ``overrides``.
+
+    Semantically distinct from every other seed here, and the distinction has to
+    travel with the verdict: seeding the caller answers "could a caller reach this
+    function", seeding the contract answers "could this function pay out IF the
+    contract held funds". A verdict proven under this override is a CAPABILITY
+    claim about the code, not a statement that the money is there today — which is
+    why the recipes stamp ``contract_balance_seeded`` on the witness and run this
+    attempt LAST, after every less synthetic one has failed.
+
+    Only the balance field is set, so the contract's code and storage are
+    untouched (and any token seeding on the same account survives)."""
+    merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (overrides or {}).items()}
+    account = merged.setdefault(contract.lower(), {})
+    account["balance"] = _word(SEED_CONTRACT_ETH_BALANCE)
     return merged

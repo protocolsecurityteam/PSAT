@@ -176,7 +176,13 @@ class FakeChain:
         return SimCallResult(False, "0x", "0x", ())
 
 
-def _facts(sig: str, *, pull_sink: str | None = None, flows: Sequence[dict] = ()) -> FunctionFacts:
+def _facts(
+    sig: str,
+    *,
+    pull_sink: str | None = None,
+    flows: Sequence[dict] = (),
+    param_names: Sequence[str] = ("amount",),
+) -> FunctionFacts:
     sinks = []
     if pull_sink:
         sinks.append({"kind": "external_call", "origin": "body", "selector": "0x23b872dd", "target": pull_sink})
@@ -184,7 +190,14 @@ def _facts(sig: str, *, pull_sink: str | None = None, flows: Sequence[dict] = ()
         full_name=sig,
         selector=sel(sig),
         canonical_signature=sig,
-        effect_info={"sinks": sinks, "value_flows": [], "effect_labels": []},
+        effect_info={
+            "sinks": sinks,
+            "value_flows": [],
+            "effect_labels": [],
+            # wrap/unwrap take one quantity; the seeded retry may only scale a
+            # parameter the static plane names as one.
+            "parameter_names": list(param_names),
+        },
         tree=None,
         legacy_value_flows=tuple(flows),
     )
@@ -354,10 +367,12 @@ def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
     assert eff.details["backing"] == {
         "inflow_observed": False,
         "minted": True,
-        "inflow_transfers": 0,
-        "mint_transfers": 1,
         "input_seeded": False,
+        "contract_balance_seeded": False,
     }
+    # The per-execution counts are state-plane residue, not cacheable details.
+    assert eff.concrete["backing_inflow_transfers"] == 0
+    assert eff.concrete["backing_mint_transfers"] == 1
     assert len(chain.blocks) == 1
     assert "seeding" not in store.stored[-1]
 
@@ -372,7 +387,7 @@ def test_seeded_conversion_proves_the_mint_and_witnesses_the_inflow():
     eff = _supply(chain, store, **_wrap_inputs(chain))
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["backing"]["inflow_observed"] is True
-    assert eff.details["backing"]["inflow_transfers"] == 1
+    assert eff.concrete["backing_inflow_transfers"] == 1
     assert eff.details["backing"]["input_seeded"] is True
     assert store.stored[-1]["seeding"]["tokens"] == [ASSET.lower()]
 

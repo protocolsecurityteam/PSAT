@@ -207,8 +207,23 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     # ``{inflow_observed, minted, ...}`` recorded on EFFECT_CLASS_SUPPLY verdicts —
     # present only on ``supply.mint``. ``inflow_observed is False`` is a witnessed
     # dilution signal (supply rose with no asset inflow in the same call); the
-    # scorer must NOT read absence of this key as "backed".
+    # scorer must NOT read absence of this key as "backed". The per-execution
+    # Transfer COUNTS are state-plane and live on ``observed_residue``
+    # (``backing_inflow_transfers`` / ``backing_mint_transfers``), absent on a
+    # deployment whose verdict came from a cache hit.
     #
+    # ``input_seeded`` / ``contract_balance_seeded`` are the SYNTHESIS QUALIFIERS of
+    # a proven verdict and both weaken it — they must reach the consumer or the
+    # claim reads stronger than the observation:
+    #   * ``input_seeded`` — the acting principal was given the input asset the
+    #     function pulls. The effect itself is still fully observed; what is NOT
+    #     claimed is that this principal holds that asset today.
+    #   * ``contract_balance_seeded`` — the TARGET CONTRACT's own ETH balance was
+    #     overridden before the payout executed. The verdict then means "would move
+    #     value if the contract were funded" (a capability of the code), NOT "moves
+    #     value in current state". A scorer must not treat it as a live outflow of
+    #     present treasury, and must not read its ABSENCE as "the contract is
+    #     funded" — absence only means no balance override was needed.
     keep = (
         "supply_delta_sign",
         "gate_mutation",
@@ -219,6 +234,8 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "auto_expiry",
         "duration_bound_seconds",
         "backing",
+        "input_seeded",
+        "contract_balance_seeded",
     )
     summary = {k: raw[k] for k in keep if k in raw}
     summary.update(_reach_summary(verdict))

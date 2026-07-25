@@ -45,6 +45,7 @@ from services.effects.seeding import (
     Seeding,
     SeedRequest,
     budget_of,
+    contract_balance_override,
     eth_value_override,
 )
 from services.effects.simulate import (
@@ -104,6 +105,26 @@ def uups_sentinel_override(sentinel_address: str, impl_slot: str = EIP1967_IMPL_
 # ---------------------------------------------------------------------------
 
 
+# Attempt labels. ``contract_balance`` is the most synthetic and always runs last.
+_ATTEMPT_SEEDED = "seeded_probe"
+_ATTEMPT_PAYABLE = "seeded_probe_payable"
+_ATTEMPT_CONTRACT_BALANCE = "seeded_probe_contract_balance"
+
+# Why a seeded attempt (or the whole retry path) produced no observation. Recorded
+# per attempt on the transcript AND counted on the seed budget's metrics, so a live
+# run reporting ``executed=0`` names the failing precondition instead of going
+# silent.
+_OUTCOME_EXECUTED = "executed"
+_OUTCOME_TARGET_REVERTED = "target_reverted"
+_OUTCOME_READBACK_FAILED = "readback_failed"
+_OUTCOME_MALFORMED = "malformed_response"
+_SKIP_NO_SEEDER = "skipped_no_seeder"
+_SKIP_NO_CALLDATA = "skipped_no_seeded_calldata"
+_SKIP_BUDGET = "skipped_budget_exhausted"
+_SKIP_NO_TOKEN = "skipped_no_token_resolved"
+_SKIP_NO_ATTEMPT_PATH = "skipped_no_viable_attempt"
+
+
 @dataclass(frozen=True)
 class _SeedAttempt:
     """One seeded retry of a probe call."""
@@ -114,6 +135,7 @@ class _SeedAttempt:
     calldata: str
     sentinel_calldata: str | None
     seeding: Seeding | None
+    contract_balance_seeded: bool = False
 
     @property
     def readback(self) -> tuple[SimCall, ...]:
@@ -122,6 +144,30 @@ class _SeedAttempt:
     @property
     def expected(self) -> tuple[str, ...]:
         return self.seeding.readback_expected if self.seeding else ()
+
+
+def _record_seed_outcome(
+    transcript: dict[str, Any],
+    seeder: Seeder | None,
+    label: str,
+    outcome: str,
+    *,
+    detail: str | None = None,
+) -> None:
+    """Append one attempt/skip outcome to the transcript and count it on the
+    budget. The transcript already carries the raw calls; this says which
+    PRECONDITION each attempt died on, which the call list alone cannot."""
+    entry: dict[str, Any] = {"label": label, "outcome": outcome}
+    if detail:
+        entry["detail"] = detail
+    transcript.setdefault("seed_attempts", []).append(entry)
+    budget = budget_of(seeder)
+    if budget is not None:
+        budget.record_outcome(outcome)
+    if outcome != _OUTCOME_EXECUTED:
+        logger.debug(
+            "effects recipes: seeded attempt %s discarded (%s%s)", label, outcome, f": {detail}" if detail else ""
+        )
 
 
 def _seed_attempts(
@@ -134,6 +180,8 @@ def _seed_attempts(
     seeded_calldata: Mapping[int, str],
     seeded_sentinel_calldata: Mapping[int, str],
     block_tag: str,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
 ) -> list[_SeedAttempt]:
     """The ordered retries for a probe whose UNSEEDED call already reverted.
 
@@ -145,18 +193,31 @@ def _seed_attempts(
       zero-value call provably failed. Attaching ETH up front would let a payable
       admin mint bank our own ``msg.value`` as an "inflow" when a real caller
       could mint with nothing attached. This ordering makes an ETH deposit's
-      inflow a witnessed REQUIREMENT.
+      inflow a witnessed REQUIREMENT;
+    * the TARGET CONTRACT's own balance is seeded LAST and only for a function
+      static says pays native ETH out. It is the most synthetic override the
+      stage makes — a verdict it produces means "would move value if the contract
+      were funded", not "moves value in current state" — so it may only ever run
+      after every attempt that carries the stronger meaning has failed.
 
-    An unresolvable token yields the payable attempt alone; nothing resolvable at
-    all yields no attempt, and the probe keeps exactly today's verdict.
+    Attempts a target cannot execute are not issued at all: a NON-payable function
+    rejects an attached ``msg.value`` with an empty revert before its body runs,
+    which witnesses nothing and cost 9 of the 13 seeded calls on the 2026-07-22
+    run. With no token seeding, no payable path and no native payout there is
+    nothing left to try, and the probe keeps exactly today's unseeded verdict.
 
     The whole path is charged to the job's :class:`~services.effects.seeding.SeedBudget`
     FIRST — an exhausted budget returns no attempt at all, which is the exact
     pre-seeding probe, never a less careful one."""
-    if seeder is None or not principal or not seeded_calldata:
+    if seeder is None or not principal:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_SEEDER)
+        return []
+    if not seeded_calldata:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_CALLDATA)
         return []
     budget = budget_of(seeder)
     if budget is not None and not budget.take_retry(contract_address.lower()):
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_BUDGET)
         return []
     seeding: Seeding | None = None
     if token_hints:
@@ -172,28 +233,46 @@ def _seed_attempts(
         except Exception:  # noqa: BLE001 - a failed seeder only means "do not seed"
             logger.debug("effects recipes: seeder failed for %s", contract_address, exc_info=True)
             seeding = None
+    if seeding is None:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_TOKEN)
     decimals = seeding.decimals if seeding else 18
     calldata = seeded_calldata.get(decimals) or seeded_calldata.get(18)
     if calldata is None:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_CALLDATA)
         return []
     sentinel = seeded_sentinel_calldata.get(decimals) or seeded_sentinel_calldata.get(18)
     if seeding is not None:
         transcript["seeding"] = dict(seeding.detail)
     attempts: list[_SeedAttempt] = []
     if seeding is not None:
+        attempts.append(_SeedAttempt(_ATTEMPT_SEEDED, seeding.overrides, 0, calldata, sentinel, seeding))
+    if target_payable is not False:
         attempts.append(
-            _SeedAttempt("seeded_probe", seeding.overrides, 0, calldata, sentinel, seeding),
+            _SeedAttempt(
+                _ATTEMPT_PAYABLE,
+                eth_value_override(principal, seeding.overrides if seeding else None),
+                SEED_ETH_VALUE,
+                calldata,
+                sentinel,
+                seeding,
+            )
         )
-    attempts.append(
-        _SeedAttempt(
-            "seeded_probe_payable",
-            eth_value_override(principal, seeding.overrides if seeding else None),
-            SEED_ETH_VALUE,
-            calldata,
-            sentinel,
-            seeding,
+    else:
+        _record_seed_outcome(transcript, seeder, _ATTEMPT_PAYABLE, _SKIP_NO_ATTEMPT_PATH, detail="non_payable_target")
+    if native_payout:
+        attempts.append(
+            _SeedAttempt(
+                _ATTEMPT_CONTRACT_BALANCE,
+                contract_balance_override(contract_address, seeding.overrides if seeding else None),
+                0,
+                calldata,
+                sentinel,
+                seeding,
+                contract_balance_seeded=True,
+            )
         )
-    )
+    if not attempts:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_ATTEMPT_PATH)
     return attempts
 
 
@@ -243,6 +322,8 @@ def value_out(
     input_token_hints: Sequence[str] = (),
     seeded_calldata: Mapping[int, str] | None = None,
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
 
@@ -252,7 +333,21 @@ def value_out(
     are static UNIVERSALS; only ``caller_arbitrary`` is proven by simulation via
     a sentinel that lands — a sentinel that moves nothing proves nothing
     (rule 8.1) and, when taint said the param reaches the sink, is a §9
-    discrepancy (recorded, not routed)."""
+    discrepancy (recorded, not routed).
+
+    VERDICT SEMANTICS under seeding. A proven verdict normally reads "calling F
+    moves value out, in the state at this block". Two flags on ``details`` weaken
+    that, and both travel with the verdict through the cache and the claims
+    bridge because a consumer that misses them over-reads the witness:
+
+    * ``input_seeded`` — the caller was given the asset F pulls. The effect is
+      still fully observed; what is not claimed is that this principal holds the
+      asset today.
+    * ``contract_balance_seeded`` — the TARGET CONTRACT's own ETH balance was
+      overridden before the payout executed. The verdict then means "would move
+      value IF THE CONTRACT WERE FUNDED" — a capability of the code — not "moves
+      value in current state". Its absence means no override was needed, never
+      that the treasury is funded."""
     tr = new_transcript(ctx, feature="value_out", tier=TIER_CALL, effect_class=EFFECT_CLASS_VALUE_OUT)
     if not simulate_supported:
         tr["fallback"] = "tier2"
@@ -288,9 +383,12 @@ def value_out(
                 seeded_calldata=seeded_calldata or {},
                 seeded_sentinel_calldata=seeded_sentinel_calldata or {},
                 block_tag=hex(tr["block_number"]),
+                target_payable=target_payable,
+                native_payout=native_payout,
             ),
             to=contract_address,
             principal=principal,
+            seeder=seeder,
         )
         if seeded_result is not None:
             observed = seeded_result
@@ -299,6 +397,7 @@ def value_out(
     budget = budget_of(seeder)
     if used is not None:
         tr["input_seeded"] = True
+        tr["contract_balance_seeded"] = used.contract_balance_seeded
         if budget is not None:
             budget.record_executed()
 
@@ -330,6 +429,14 @@ def value_out(
         # the input asset it pulls. Which token / how much is state-plane residue
         # and stays in the transcript.
         details["input_seeded"] = True
+        if used.contract_balance_seeded:
+            # WEAKER CLAIM, and it has to travel with the verdict everywhere the
+            # verdict does (cache included): the payout was only reachable after
+            # the TARGET CONTRACT's own ETH balance was overridden, so this proves
+            # "would move value if the contract were funded" — a capability of the
+            # code — not "moves value in current state". A consumer that ignores
+            # this key reads a treasury-empty contract as a live outflow.
+            details["contract_balance_seeded"] = True
     concrete: dict[str, Any] = {}
     if concrete_dest is not None:
         concrete["destination"] = concrete_dest
@@ -579,6 +686,8 @@ def supply(
     input_token_hints: Sequence[str] = (),
     seeded_calldata: Mapping[int, str] | None = None,
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``? (§4.5)
 
@@ -623,13 +732,17 @@ def supply(
                 seeded_calldata=seeded_calldata or {},
                 seeded_sentinel_calldata=seeded_sentinel_calldata or {},
                 block_tag=hex(tr["block_number"]),
+                target_payable=target_payable,
+                native_payout=native_payout,
             ),
             token_address=token_address,
             principal=principal,
+            seeder=seeder,
         )
         if seeded is not None:
             before_c, mint_c, after_c = seeded
             tr["input_seeded"] = True
+            tr["contract_balance_seeded"] = used.contract_balance_seeded if used is not None else False
             budget = budget_of(seeder)
             if budget is not None:
                 budget.record_executed()
@@ -681,6 +794,7 @@ def supply(
         static_destination=static_destination,
     )
     details: dict[str, Any] = {"supply_delta_sign": sign}
+    concrete: dict[str, Any] = {}
     if sign == "mint":
         # §5a backing: an asset Transfer INTO the vault during the SAME simulated
         # mint call is the co-occurring inflow that separates a deposit-backed
@@ -702,11 +816,17 @@ def supply(
         # ``backing.inflow_observed: true`` byte-identical to a real deposit-backed
         # conversion on the purest case of unbacked issuance.
         inflow = transfers_in(mint_c, token_address, exclude_asset=token_address)
+        # HOW MANY transfers this execution emitted is an observation of THIS
+        # deployment at this block, not a property of the bytecode: the same code
+        # on a vault with two fee recipients emits a different count. The
+        # code-plane witness is the BOOLEAN pair (an inflow co-occurred / units
+        # were minted), which is what a twin deployment may inherit; the counts go
+        # to the per-deployment residue (inv. 3).
+        concrete["backing_inflow_transfers"] = len(inflow)
+        concrete["backing_mint_transfers"] = len(minted)
         details["backing"] = {
             "inflow_observed": bool(inflow),
             "minted": bool(minted),
-            "inflow_transfers": len(inflow),
-            "mint_transfers": len(minted),
             # Whether the acting principal had to be given the input asset before
             # the mint would execute at all. It records HOW the call was reached,
             # never what the call did: ``inflow_observed`` above still comes
@@ -715,6 +835,9 @@ def supply(
             # ``inflow_observed: false`` (witnessed dilution); an unseeded mint is
             # unaffected by any of this.
             "input_seeded": used is not None,
+            # See ``value_out``: a mint only reachable once the CONTRACT's own ETH
+            # balance was overridden is a capability claim, not a live one.
+            "contract_balance_seeded": used is not None and used.contract_balance_seeded,
         }
     if used is not None:
         seed_budget = budget_of(seeder)
@@ -725,6 +848,7 @@ def supply(
         gate_ref=gate_ref,
         reason=f"supply_{sign}",
         details=details,
+        concrete=concrete,
         transcript=tr,
     )
     eff.discrepancy = disc
@@ -762,24 +886,43 @@ def _seeded_call(
     attempts: Sequence[_SeedAttempt],
     to: str,
     principal: str | None,
+    seeder: Seeder | None = None,
 ) -> tuple[_SeedAttempt | None, SimCallResult | None]:
     """Run the seeded retries of a single-call probe until one EXECUTES.
 
     Returns the attempt and its result only when the read-back held AND the call
     succeeded; otherwise ``(None, None)`` and the caller keeps its unseeded
-    verdict verbatim."""
+    verdict verbatim. Every discarded attempt records WHY."""
     for attempt in attempts:
         calls = [
             *attempt.readback,
             SimCall(to=to, data=attempt.calldata, from_addr=principal, value=attempt.value),
         ]
         res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
-        if res is None or not _readback_ok(attempt, res.calls):
+        if res is None:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_MALFORMED)
+            continue
+        if not _readback_ok(attempt, res.calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_READBACK_FAILED)
             continue
         target = res.calls[len(attempt.readback)]
         if target.success:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_EXECUTED)
             return attempt, target
+        _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_TARGET_REVERTED, detail=_revert_detail(target))
     return None, None
+
+
+def _revert_detail(result: SimCallResult) -> str:
+    """A short, replayable reason for one reverted attempt: the decoded error when
+    the revert data decodes, else the raw selector, else ``empty_revert``."""
+    from services.resolution.differential_probe import decode_error
+
+    raw = result.revert_data
+    if not raw or raw == "0x":
+        return "empty_revert"
+    decoded = decode_error(raw)
+    return str(decoded) if decoded else raw[:10]
 
 
 def _seeded_supply_call(
@@ -789,6 +932,7 @@ def _seeded_supply_call(
     attempts: Sequence[_SeedAttempt],
     token_address: str,
     principal: str | None,
+    seeder: Seeder | None = None,
 ) -> tuple[_SeedAttempt | None, tuple[SimCallResult, SimCallResult, SimCallResult] | None]:
     """Seeded-retry form of the read → mint → read block. The two ``totalSupply``
     reads must bracket the seeded call in the SAME block, so the whole triple is
@@ -798,12 +942,18 @@ def _seeded_supply_call(
         mint = SimCall(to=token_address, data=attempt.calldata, from_addr=principal, value=attempt.value)
         calls = [*attempt.readback, read, mint, read]
         res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
-        if res is None or len(res.calls) != len(calls) or not _readback_ok(attempt, res.calls):
+        if res is None or len(res.calls) != len(calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_MALFORMED)
+            continue
+        if not _readback_ok(attempt, res.calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_READBACK_FAILED)
             continue
         head = len(attempt.readback)
         before_c, mint_c, after_c = res.calls[head], res.calls[head + 1], res.calls[head + 2]
         if mint_c.success:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_EXECUTED)
             return attempt, (before_c, mint_c, after_c)
+        _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_TARGET_REVERTED, detail=_revert_detail(mint_c))
     return None, None
 
 
