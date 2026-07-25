@@ -582,3 +582,140 @@ def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     b = _out_flow(effects["functions"]["entryB(uint256)"])
     assert a["target_kind"] == b["target_kind"] == {"kind": "immutable", "tier": "static_trace"}
     assert a["amount_kind"] == b["amount_kind"]
+
+
+# ---------------------------------------------------------------------------
+# Per-site breakdown: the fold collapses every contributing IR site to one
+# scalar and returns ``indeterminate`` on any MIX — right for a single answer,
+# but it hides destinations we actually resolved. ``target_kinds`` /
+# ``amount_kinds`` publish the contributing sites beside the unchanged fold.
+# ---------------------------------------------------------------------------
+
+_SITES_SRC = """
+pragma solidity ^0.8.20;
+
+contract Sites {
+    address public immutable sink;
+    address public treasury;
+
+    constructor(address s) { sink = s; }
+
+    function setTreasury(address t) external { treasury = t; }
+
+    // Two sends sharing one flow key, each with its OWN resolved destination:
+    // a fixed address and a caller-supplied one. The fold must stay
+    // indeterminate; the breakdown must name both.
+    function twoResolved(address dest, uint256 a) external payable {
+        (bool ok1,) = payable(sink).call{value: a}("");
+        (bool ok2,) = payable(dest).call{value: msg.value}("");
+        require(ok1 && ok2);
+    }
+
+    // One resolved site + one genuinely-unknown site (a cross-branch merged
+    // local). The unknown site must appear AS unknown, never be dropped to make
+    // the list read resolved.
+    function oneIndeterminate(bool flag, address dest, uint256 a) external {
+        address m = flag ? dest : treasury;
+        (bool ok1,) = payable(sink).call{value: a}("");
+        (bool ok2,) = payable(m).call{value: a}("");
+        require(ok1 && ok2);
+    }
+
+    // A single site: the fold already IS the whole answer.
+    function single(uint256 a) external {
+        (bool ok,) = payable(sink).call{value: a}("");
+        require(ok);
+    }
+
+    // Two sites that agree: the breakdown would be a redundant copy of the fold.
+    function twoAgreeing(uint256 a, uint256 b) external {
+        (bool ok1,) = payable(sink).call{value: a}("");
+        (bool ok2,) = payable(sink).call{value: b}("");
+        require(ok1 && ok2);
+    }
+
+    // Many sites drawing from a small set of kinds: dedup by meaning bounds the
+    // list by the LATTICE, never by the site count.
+    function manySites(address dest, uint256 a) external {
+        (bool o1,) = payable(sink).call{value: a}("");
+        (bool o2,) = payable(dest).call{value: a}("");
+        (bool o3,) = payable(sink).call{value: a}("");
+        (bool o4,) = payable(dest).call{value: a}("");
+        (bool o5,) = payable(msg.sender).call{value: a}("");
+        (bool o6,) = payable(sink).call{value: a}("");
+        (bool o7,) = payable(dest).call{value: a}("");
+        require(o1 && o2 && o3 && o4 && o5 && o6 && o7);
+    }
+}
+"""
+
+
+def test_two_resolved_sites_publish_both_destinations(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["twoResolved(address,uint256)"])
+    # The fold keeps today's exact semantics — a MIX is still indeterminate.
+    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert {e["kind"] for e in flow["target_kinds"]} == {"immutable", "param"}
+    assert all(e["tier"] in ("dispositive_ast", "static_trace") for e in flow["target_kinds"])
+    # The amount lattice gets the same treatment, independently.
+    assert flow["amount_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert {e["kind"] for e in flow["amount_kinds"]} == {"param", "msg_value"}
+
+
+def test_indeterminate_site_stays_visible_in_the_breakdown(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["oneIndeterminate(bool,address,uint256)"])
+    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    kinds = [e["kind"] for e in flow["target_kinds"]]
+    # The resolved site is named AND the unknown one is still reported unknown.
+    assert "immutable" in kinds
+    assert "indeterminate" in kinds
+
+
+def test_single_site_carries_no_breakdown(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["single(uint256)"])
+    assert flow["target_kind"]["kind"] == "immutable"
+    assert "target_kinds" not in flow
+    assert "amount_kinds" not in flow
+
+
+def test_agreeing_sites_carry_no_breakdown(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["twoAgreeing(uint256,uint256)"])
+    assert flow["target_kind"]["kind"] == "immutable"
+    # Two sites, one meaning: the breakdown would repeat the fold verbatim.
+    assert "target_kinds" not in flow
+
+
+def test_breakdown_is_bounded_by_the_lattice_not_the_site_count(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["manySites(address,uint256)"])
+    assert flow["target_kind"]["kind"] == "indeterminate"
+    entries = flow["target_kinds"]
+    # Seven sends, three meanings — deduplication by (kind, tier) is the cap.
+    assert {e["kind"] for e in entries} == {"immutable", "param", "msg_sender"}
+    assert len(entries) == len({(e["kind"], e["tier"]) for e in entries})
+    # One amount origin across all seven sites still publishes nothing.
+    assert flow["amount_kind"]["kind"] == "param"
+    assert "amount_kinds" not in flow
+
+
+def test_breakdown_reaches_the_claim_witness(tmp_path):
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    claims = build_claims(contract, effects, {})["functions"]
+    rows = [c for c in claims["twoResolved(address,uint256)"] if c["claim_id"] == "flow.out"]
+    assert rows, "no flow.out claim"
+    entry = rows[0]["witness"]["flows"][0]
+    assert entry["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert {e["kind"] for e in entry["target_kinds"]} == {"immutable", "param"}
+    assert {e["kind"] for e in entry["amount_kinds"]} == {"param", "msg_value"}
+
+    single = [c for c in claims["single(uint256)"] if c["claim_id"] == "flow.out"][0]
+    assert "target_kinds" not in single["witness"]["flows"][0]

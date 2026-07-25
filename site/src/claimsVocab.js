@@ -371,6 +371,12 @@ const OUT_TARGET_CALLER = new Set(["param", "msg_sender", "caller_controlled"]);
 
 // Scan every out-flow entry across all flow.out claims (the static claim carries
 // witness.flows[]; the behavioral one has no direction/flows and is skipped).
+//
+// Reads the FOLDED target_kind only, deliberately — never the per-site
+// target_kinds. The chip and the tone are one word for the whole function, and a
+// function whose sites disagree has no single honest word; promoting one site's
+// kind would turn "we cannot say" into a verdict the fold never reached. The
+// per-site breakdown belongs to the inspector, which has room to name both.
 function flowOutTargetSummary(claims) {
   let sawCaller = false;
   let sawSetter = false;
@@ -531,6 +537,31 @@ function kindTierText(kt, wordMap) {
   return tier ? `${word} · ${tier}` : word;
 }
 
+// A flow whose contributing IR sites disagreed folds to "indeterminate", which
+// reads as "we don't know" even when every site WAS resolved (a payout to the
+// token's owner plus a sweep to a fixed address, say). The fact layer publishes
+// those sites as target_kinds/amount_kinds exactly when the fold lost that
+// information, so prefer them here and say how many there are — the count is
+// what makes "two destinations" legible rather than one hedged word.
+//
+// Rendering cap: at most 4 sites are spelled out, the rest counted. The backend
+// list is already deduplicated by meaning (bounded by the lattice, not the site
+// count), so the cap only ever drops distinct-but-rarer classifications from a
+// pathological function — and the leading count still states the true total.
+const SITE_RENDER_CAP = 4;
+
+function kindTierRowText(folded, sites, wordMap) {
+  if (Array.isArray(sites) && sites.length > 1) {
+    const texts = sites.map((s) => kindTierText(s, wordMap)).filter(Boolean);
+    if (texts.length > 1) {
+      const shown = texts.slice(0, SITE_RENDER_CAP).join(" / ");
+      const more = texts.length > SITE_RENDER_CAP ? ` +${texts.length - SITE_RENDER_CAP} more` : "";
+      return `${texts.length} sites: ${shown}${more}`;
+    }
+  }
+  return kindTierText(folded, wordMap);
+}
+
 // Conservative UPPER-BOUND USD phrasing — never render as exact (inv. 5/7).
 function formatUsdUpperBound(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
@@ -562,9 +593,9 @@ export function claimWitnessFacts(fn) {
     if (!w) continue;
     if (w.direction === "out" && Array.isArray(w.flows)) {
       for (const f of w.flows) {
-        const dt = kindTierText(f && f.target_kind, TARGET_KIND_WORD);
+        const dt = kindTierRowText(f && f.target_kind, f && f.target_kinds, TARGET_KIND_WORD);
         if (dt && !destKinds.includes(dt)) destKinds.push(dt);
-        const at = kindTierText(f && f.amount_kind, AMOUNT_KIND_WORD);
+        const at = kindTierRowText(f && f.amount_kind, f && f.amount_kinds, AMOUNT_KIND_WORD);
         if (at && !amtKinds.includes(at)) amtKinds.push(at);
       }
     }

@@ -44,7 +44,13 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
     """Project a value-flow fact into the witness. ``target_kind`` (where funds
     go) and ``amount_kind`` (how much can leave) — each ``{kind, tier}`` — carry
     the theft-vs-routing discriminators when the fact layer classified them;
-    omitted when absent so a consumer never reads a guessed value."""
+    omitted when absent so a consumer never reads a guessed value.
+
+    ``target_kinds``/``amount_kinds`` accompany them only where the contributing
+    IR sites disagreed and the fold therefore reads ``indeterminate``: the list
+    names each site's own classification so a reader sees "two destinations, both
+    resolved" instead of just "unknown". The scalar keeps its exact meaning — a
+    consumer reading only it is unaffected."""
     entry: dict[str, Any] = {
         "kind": f.get("kind"),
         "selector": f.get("selector"),
@@ -52,8 +58,12 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
     }
     if f.get("target_kind"):
         entry["target_kind"] = f["target_kind"]
+        if f.get("target_kinds"):
+            entry["target_kinds"] = f["target_kinds"]
     if f.get("amount_kind"):
         entry["amount_kind"] = f["amount_kind"]
+        if f.get("amount_kinds"):
+            entry["amount_kinds"] = f["amount_kinds"]
     return entry
 
 

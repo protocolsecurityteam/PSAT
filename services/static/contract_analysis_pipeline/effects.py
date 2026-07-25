@@ -128,6 +128,20 @@ class ValueFlow(TypedDict):
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
     #   fixed_constant, balance_delta, indeterminate}
     amount_kind: NotRequired[KindTier]
+    # The DISTINCT per-IR-site classifications behind the folded kind above,
+    # first-seen order, deduplicated by meaning (the ``(kind, tier)`` pair).
+    # Present ONLY when the fold lost information — i.e. the sites disagreed —
+    # so a consumer reading the fold alone is never contradicted, and a
+    # single-site flow carries no redundant copy. A function sending to two
+    # separately-resolved destinations therefore publishes both instead of
+    # only the ``indeterminate`` their union folds to.
+    #
+    # Honesty: a site that is itself ``indeterminate`` appears in the list as
+    # such — the list explains the fold, it never launders it. Consequently the
+    # fold is still ``indeterminate`` whenever this key is present.
+    target_kinds: NotRequired[list[KindTier]]
+    # ``target_kinds`` for the amount lattice, same discipline.
+    amount_kinds: NotRequired[list[KindTier]]
     # Positional index of the ENTRY function's parameter the destination
     # resolves to. Present ONLY when ``target_kind`` is ``param`` and every
     # contributing site agrees on that one parameter slot; a struct member or
@@ -1677,6 +1691,36 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
     return {"kind": next(iter(kinds)), "tier": tier}
 
 
+def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
+    """The distinct site classifications behind a fold, or ``None`` when the
+    fold is already the whole answer.
+
+    ``_fold_sites`` must keep returning one scalar (a scorer reads it), but a
+    function with two separately-resolved destinations then publishes only
+    ``indeterminate`` — we would be hiding an answer we hold. This publishes the
+    contributing sites alongside it, deduplicated by MEANING (the ``(kind,
+    tier)`` pair, so provenance is not flattened either) in first-seen order.
+
+    Emitted only when more than one distinct classification survives dedup, which
+    is exactly when the fold lost information; an agreeing set is byte-for-byte
+    the fold. An ``indeterminate`` site stays in the list — the breakdown says
+    why the fold is what it is, it never makes it look more resolved.
+
+    Size needs no cap: both lattices are finite closed vocabularies and dedup is
+    by lattice member × tier, so the list is bounded by that product (≤20 target,
+    ≤14 amount entries) no matter how many IR sites a function has."""
+    if len(sites) < 2:
+        return None
+    ordered: list[KindTier] = []
+    seen: set[tuple[str, str]] = set()
+    for kind, tier in sites:
+        if (kind, tier) in seen:
+            continue
+        seen.add((kind, tier))
+        ordered.append({"kind": kind, "tier": tier})
+    return ordered if len(ordered) > 1 else None
+
+
 # Re-walk insurance: bounds interprocedural recursion when a helper is reached
 # with many distinct forwarded-binding signatures (a wide call DAG). Real helper
 # chains are a handful of hops deep; a cutoff only drops sends past a depth no
@@ -1717,7 +1761,8 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     ``ProvenanceEngine`` per unit. Every IR site contributing to a flow is
     classified and the results are folded per flow key, so distinct
     destinations across branches/sites collapse to ``indeterminate`` instead of
-    the first-seen winner."""
+    the first-seen winner — with the contributing sites published alongside as
+    ``target_kinds``/``amount_kinds`` when they disagreed."""
     flows: list[ValueFlow] = []
     seen: set[tuple[str, str | None, str, bool, str]] = set()
     # Keyed by (unit id, forwarded-binding signature): a helper reached with the
@@ -1891,11 +1936,17 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         amount = _fold_sites(amount_sites.get(key, []))
         if target is not None:
             flow["target_kind"] = target
+            breakdown = _site_breakdown(target_sites.get(key, []))
+            if breakdown is not None:
+                flow["target_kinds"] = breakdown
             index = _fold_param_index(target, target_indexes.get(key, []))
             if index is not None:
                 flow["target_param_index"] = index
         if amount is not None:
             flow["amount_kind"] = amount
+            breakdown = _site_breakdown(amount_sites.get(key, []))
+            if breakdown is not None:
+                flow["amount_kinds"] = breakdown
             index = _fold_param_index(amount, amount_indexes.get(key, []))
             if index is not None:
                 flow["amount_param_index"] = index

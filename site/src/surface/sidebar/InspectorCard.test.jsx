@@ -105,6 +105,29 @@ describe("InspectorCard witnessed-facts block", () => {
     expect(text).toContain("the whole balance · static trace");
   });
 
+  it("names every resolved destination when the folded kind is a site disagreement", () => {
+    const claims = [{
+      claim_id: "flow.out",
+      tier: "standard_exact",
+      witness: {
+        kind: "value_flow",
+        direction: "out",
+        flows: [{
+          kind: "low_level_value_call",
+          target_kind: { kind: "indeterminate", tier: "static_trace" },
+          target_kinds: [
+            { kind: "token_owner", tier: "static_trace" },
+            { kind: "immutable", tier: "static_trace" },
+          ],
+        }],
+        sink_ids: [],
+      },
+    }];
+    const { container } = render(<InspectorCard selected={selectedWithClaims(claims)} />);
+    const text = container.textContent;
+    expect(text).toContain("2 sites: the token's current owner · static trace / immutable address · static trace");
+  });
+
   it("renders nothing extra when a function carries no witnessed facts", () => {
     const claims = [{ claim_id: "flow.out", tier: "standard_exact", witness: {} }];
     const { container } = render(<InspectorCard selected={selectedWithClaims(claims)} />);

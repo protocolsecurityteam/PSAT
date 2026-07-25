@@ -241,10 +241,12 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
 // ── SCORING plan §7: witness qualifiers (the honesty rule) ───────────────────
 
 // A static flow.out claim carrying a target_kind / amount_kind on one flow entry.
-function flowOut(targetKind, { amountKind = null, tier = "standard_exact" } = {}) {
+function flowOut(targetKind, { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null } = {}) {
   const flow = { kind: "low_level_value_call", selector: null, from_is_self: true };
   if (targetKind) flow.target_kind = targetKind;
   if (amountKind) flow.amount_kind = amountKind;
+  if (targetKinds) flow.target_kinds = targetKinds;
+  if (amountKinds) flow.amount_kinds = amountKinds;
   return {
     claim_id: "flow.out",
     tier,
@@ -595,6 +597,69 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(claimWitnessFacts({ claims: [claim("flow.out")] })).toEqual([]);
     expect(claimWitnessFacts({ claims: [claim("ownership.transfer")] })).toEqual([]);
     expect(claimWitnessFacts({})).toEqual([]);
+  });
+
+  // The per-site breakdown: a fold that reads "indeterminate" only because its
+  // sites disagreed must show what those sites actually were.
+  it("names both destinations instead of the fold when the sites disagreed", () => {
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, {
+        targetKinds: [
+          { kind: "token_owner", tier: "static_trace" },
+          { kind: "immutable", tier: "dispositive_ast" },
+        ],
+        amountKind: { kind: "indeterminate", tier: "static_trace" },
+        amountKinds: [
+          { kind: "indeterminate", tier: "static_trace" },
+          { kind: "balance_delta", tier: "static_trace" },
+        ],
+      })],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Destination",
+      value: "2 sites: the token's current owner · static trace / immutable address · dispositive AST",
+    });
+    // An unresolved site stays visible as unresolved — the row explains the
+    // fold, it never launders it into something more settled.
+    expect(facts).toContainEqual({
+      label: "Amount",
+      value: "2 sites: indeterminate · static trace / a balance delta · static trace",
+    });
+  });
+
+  it("keeps the folded row when there is no breakdown", () => {
+    const fn = { claims: [flowOut({ kind: "indeterminate", tier: "static_trace" })] };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Destination", value: "indeterminate · static trace" });
+  });
+
+  it("caps a pathological site list and still states the true total", () => {
+    const sites = ["immutable", "param", "msg_sender", "storage_setter", "self", "token_owner"].map((kind) => ({
+      kind,
+      tier: "static_trace",
+    }));
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, { targetKinds: sites })],
+    };
+    const value = claimWitnessFacts(fn).find((f) => f.label === "Destination").value;
+    expect(value).toMatch(/^6 sites: /);
+    expect(value).toContain("+2 more");
+    expect(value).not.toContain("the token's current owner");
+  });
+
+  it("leaves the chip and the tone on the FOLD, never a single site", () => {
+    // A caller-supplied site inside a disagreeing fold must not promote the chip
+    // to "(caller-chosen destination)" — the fold never reached that verdict.
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, {
+        targetKinds: [
+          { kind: "param", tier: "dispositive_ast" },
+          { kind: "immutable", tier: "static_trace" },
+        ],
+      })],
+    };
+    expect(qualifierForClaims(fn)).toBeNull();
+    expect(toneForClaims(fn)).toBe(toneForClaims({ claims: [claim("flow.out")] }));
   });
 });
 
