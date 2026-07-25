@@ -155,14 +155,20 @@ def _token_facts(**overrides: Any) -> cd.ContractFacts:
     return cd.ContractFacts(**kwargs)
 
 
-def _candidate(selector: str, *, principals: tuple[str, ...] = (PRINCIPAL,), function_id: int = 1) -> Candidate:
+def _candidate(
+    selector: str,
+    *,
+    principals: tuple[str, ...] = (PRINCIPAL,),
+    function_id: int = 1,
+    authority_public: bool = False,
+) -> Candidate:
     return Candidate(
         function_id=function_id,
         contract_id=1,
         contract_address=CONTRACT,
         selector=selector,
         function_name="f",
-        authority_public=False,
+        authority_public=authority_public,
         effect_targets=("slot0",),
         principal_addresses=principals,
     )
@@ -242,6 +248,24 @@ def test_value_out_none_without_a_resolved_principal():
     fn = cd.resolve_function(facts, TRANSFER)
     assert fn is not None
     assert cd.synthesize_value_out(_candidate(TRANSFER, principals=()), fn) is None
+
+
+def test_value_out_public_falls_back_to_neutral_caller():
+    # A public value-mover has no FunctionPrincipal rows; it is still probed, from
+    # the neutral identity, instead of being skipped.
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=True), fn)
+    assert spec is not None
+    assert spec.principal == cd.NEUTRAL_CALLER
+
+
+def test_value_out_gated_without_principal_stays_none():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    assert cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=False), fn) is None
 
 
 def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
@@ -385,6 +409,22 @@ def test_supply_none_for_a_non_supply_function():
     fn = cd.resolve_function(facts, TRANSFER)
     assert fn is not None
     assert cd.synthesize_supply(_candidate(TRANSFER), fn) is None
+
+
+def test_supply_public_falls_back_to_neutral_caller():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, MINT)
+    assert fn is not None
+    spec = cd.synthesize_supply(_candidate(MINT, principals=(), authority_public=True), fn)
+    assert spec is not None
+    assert spec.principal == cd.NEUTRAL_CALLER
+
+
+def test_supply_gated_without_principal_stays_none():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, MINT)
+    assert fn is not None
+    assert cd.synthesize_supply(_candidate(MINT, principals=(), authority_public=False), fn) is None
 
 
 # ---------------------------------------------------------------------------

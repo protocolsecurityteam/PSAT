@@ -907,14 +907,18 @@ def _value_probe_inputs(
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
-    """§4.2. Applicable when static says the function moves value OUT. Requires a
-    resolved principal — a probe from the zero address only ever proves that the
-    gate rejected it."""
+    """§4.2. Applicable when static says the function moves value OUT. A gated
+    function needs a resolved principal — a probe from the zero address only ever
+    proves that the gate rejected it — but a PUBLIC function has no principal to
+    resolve, so it is probed from :data:`NEUTRAL_CALLER`, an arbitrary non-zero
+    identity that is a valid, productive probe of a permissionless mover."""
     if not _flow_directions(fn) & _OUT_DIRECTIONS:
         return None
     principal = candidate.principal_addresses[0] if candidate.principal_addresses else None
     if not principal:
-        return None
+        if not candidate.authority_public:
+            return None
+        principal = NEUTRAL_CALLER
     built = _value_probe_inputs(fn, principal, frozenset(_OUT_DIRECTIONS))
     if built is None:
         return None
@@ -946,7 +950,9 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         return None
     principal = candidate.principal_addresses[0] if candidate.principal_addresses else None
     if not principal:
-        return None
+        if not candidate.authority_public:
+            return None
+        principal = NEUTRAL_CALLER
     built = _value_probe_inputs(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
     if built is None:
         return None
