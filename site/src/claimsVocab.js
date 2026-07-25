@@ -525,6 +525,13 @@ const AMOUNT_KIND_WORD = {
   bounded_by_storage: "bounded by a storage value",
   fixed_constant: "a fixed constant",
   balance_delta: "a balance delta",
+  // A real ceiling, so it reads as one: the amount is the minimum of the
+  // contract's own balance and some other value.
+  capped_by_balance: "capped at the contract's own balance",
+  // Deliberately phrased as provenance, never as a ceiling: the external
+  // contract's rate is unseen state, so this is not a bound and not proof the
+  // caller sets the magnitude.
+  param_derived: "an external conversion of a caller-supplied argument",
   indeterminate: "indeterminate",
 };
 

@@ -131,9 +131,13 @@ class ValueFlow(TypedDict):
     #   param, msg_sender, caller_controlled, self, token_owner, indeterminate}
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
-    #   fixed_constant, balance_delta, capped_by_balance, indeterminate}
+    #   fixed_constant, balance_delta, capped_by_balance, param_derived,
+    #   indeterminate}
     # capped_by_balance: provably ≤ this contract's own balance — the minimum of
     #   address(this).balance and some other value (a real upper bound / mitigation).
+    # param_derived: see :func:`_call_amount_origin` — the amount IS an external
+    #   call's return value and a caller-supplied entry parameter is among that
+    #   call's arguments. NOT a bound, NOT proof of caller control.
     amount_kind: NotRequired[KindTier]
     # The DISTINCT per-IR-site classifications behind the folded kind above,
     # first-seen order, deduplicated by meaning (the ``(kind, tier)`` pair).
@@ -158,7 +162,10 @@ class ValueFlow(TypedDict):
     target_param_index: NotRequired[int]
     # Positional index of the ENTRY function's parameter carrying the AMOUNT,
     # under exactly the ``target_param_index`` discipline: present only when
-    # ``amount_kind`` is ``param`` and every contributing site agreed on the slot.
+    # ``amount_kind`` is ``param`` — or ``param_derived``, where it is the slot
+    # of the caller input that FED the conversion, not of the amount itself
+    # (which is a call result and occupies no ABI slot) — and every contributing
+    # site agreed on the slot.
     # This is the dispositive answer to "which argument is the quantity", which a
     # prober needs before it substitutes a nonzero value — a quantity written into
     # an id/index/deadline argument is how a probe reverts on its own input.
@@ -1383,6 +1390,8 @@ def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
         return "fixed_constant"
     if tag == "state_variable":
         return "bounded_by_storage"
+    if tag == "param_derived":
+        return "param_derived"
     # An address origin (msg.sender / tx.origin / self) forwarded as an amount is
     # not a meaningful value bound — stay indeterminate rather than invent one.
     return "indeterminate"
@@ -1529,10 +1538,98 @@ def _call_standard_origin(ir: Any) -> tuple[str, ...]:
     return ("indeterminate",)
 
 
-def _call_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
+def _call_param_argument_indexes(ir: Any, ctx: _UnitCtx) -> set[int]:
+    """The distinct ENTRY parameter slots this call's ARGUMENTS resolve to.
+
+    Each argument goes through :func:`_operand_param_index`, so an argument
+    counts only when it IS one whole unambiguous entry parameter — an element
+    read, a merged local, a computed mix and a non-parameter origin all
+    contribute nothing."""
+    out: set[int] = set()
+    for arg in getattr(ir, "arguments", None) or []:
+        index = _operand_param_index(arg, ctx)
+        if index is not None:
+            out.add(index)
+    return out
+
+
+def _call_amount_origin(ir: Any, ctx: _UnitCtx) -> tuple[str, ...]:
+    """The neutral origin of an AMOUNT read back from a call, which can name one
+    shape the destination lattice has no use for: ``param_derived``.
+
+    ``param_derived`` claims EXACTLY this and nothing more, and every consumer
+    must read it that way:
+
+    - It is NOT a bound. The callee's rate is state we cannot see and it can
+      move arbitrarily, so this kind must never be treated as an upper bound
+      nor credited as a mitigation.
+    - It is NOT proof of caller control. We cannot see inside the callee, so we
+      cannot prove it honors its argument; it must not be read as "the caller
+      determines the magnitude".
+    - It IS: the amount is an external call's return value, and a caller-supplied
+      entry parameter was among that call's arguments — the caller supplied an
+      input, an external contract scaled it.
+
+    The shape is ubiquitous (``transfer(receiver, convertToAssets(shares))`` in
+    every ERC-4626-style redemption, ``unwrap`` on a rebasing wrapper), and
+    collapsing it to ``indeterminate`` made it indistinguishable from "we traced
+    nothing". A recognized standard callee still wins: naming what the callee
+    returns is strictly more informative than naming what fed it."""
+    standard = _call_standard_origin(ir)
+    if standard[0] != "indeterminate":
+        return standard
+    return ("param_derived",) if _call_param_argument_indexes(ir, ctx) else ("indeterminate",)
+
+
+def _call_irs(operand: Any, ctx: _UnitCtx) -> list[Any]:
+    """Every call IR ``operand`` IS the return value of, walking casts/copies
+    only — the def-chain edges that preserve that identity."""
+    seen: set[int] = set()
+    stack: list[Any] = [operand]
+    irs: list[Any] = []
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn == "TypeConversion":
+            stack.append(getattr(ir, "variable", None))
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+        elif tn in _CALL_IR_OPS:
+            irs.append(ir)
+        # An unknown def (a Phi, a binary op) ends this branch.
+    return irs
+
+
+def _param_derived_index(operand: Any, ctx: _UnitCtx) -> int | None:
+    """The ENTRY parameter slot of the caller INPUT that fed a ``param_derived``
+    amount's conversion — NOT the slot of the amount itself (the amount is a call
+    return value and occupies no ABI slot).
+
+    Emitted only when exactly ONE call produced the operand and its arguments
+    identify exactly ONE unambiguous entry parameter. Two distinct entry params
+    feeding the call keep the KIND (it is still param-derived) but emit no index:
+    a prober plants a value in the slot, so a guessed one is worse than none."""
+    irs = _call_irs(operand, ctx)
+    if len(irs) != 1:
+        return None
+    indexes = _call_param_argument_indexes(irs[0], ctx)
+    return next(iter(indexes)) if len(indexes) == 1 else None
+
+
+def _call_origin(operand: Any, ctx: _UnitCtx, *, amount: bool = False) -> tuple[str, ...] | None:
     """The neutral origin of an operand that IS a call's return value. ``None``
     only when the operand does not resolve — through casts/copies alone — to
     exactly one call, in which case the caller falls through to the source set.
+
+    ``amount`` opts into the amount-only vocabulary (:func:`_call_amount_origin`);
+    destination resolution is unaffected, so ``param_derived`` can never reach
+    :func:`_origin_to_target_kind`.
 
     A POSITIVE test on the def-use chain, not on the source set, for two reasons.
     A set-membership test would fire on a value merely TAINTED by the call
@@ -1548,24 +1645,9 @@ def _call_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
     is the mapping KEY, not the value. Falling through to the source set there
     lets the drop-the-rest shortcut pick ``param`` out of a real union and report
     a token-owner payout as a caller-chosen destination."""
-    seen: set[int] = set()
-    stack: list[Any] = [operand]
-    origins: set[tuple[str, ...] | None] = set()
-    while stack:
-        v = stack.pop()
-        if v is None or id(v) in seen:
-            continue
-        seen.add(id(v))
-        ir = ctx.def_by_id.get(id(v))
-        if ir is None:
-            continue
-        tn = type(ir).__name__
-        if tn == "TypeConversion":
-            stack.append(getattr(ir, "variable", None))
-        elif tn == "Assignment":
-            stack.append(getattr(ir, "rvalue", None))
-        elif tn in _CALL_IR_OPS:
-            origins.add(_call_standard_origin(ir))
+    origins: set[tuple[str, ...] | None] = {
+        _call_amount_origin(ir, ctx) if amount else _call_standard_origin(ir) for ir in _call_irs(operand, ctx)
+    }
     # Two calls reaching one operand require a Phi between them, so >1 origin is
     # a merge and must not resolve to either member.
     if len(origins) != 1:
@@ -1925,7 +2007,7 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
         return ("indeterminate", "static_trace")
     # A recognized call's return value classifies from the callee's STANDARD
     # identity — a trace through the call, never a dispositive AST read.
-    call = _call_origin(operand, ctx)
+    call = _call_origin(operand, ctx, amount=amount)
     if call is not None:
         kind = _origin_to_amount_kind(call) if amount else _origin_to_target_kind(call, ctx)
         return (kind, "static_trace")
@@ -2142,9 +2224,16 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx, crossed: bool) -> None:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
-        amount_sites.setdefault(key, []).append(_classify_site(amount, ctx, amount=True))
+        amount_site = _classify_site(amount, ctx, amount=True)
+        amount_sites.setdefault(key, []).append(amount_site)
         target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
-        amount_indexes.setdefault(key, []).append(_operand_param_index(amount, ctx))
+        # A ``param_derived`` amount is a call RESULT, so the slot to publish is
+        # the one feeding the call, resolved from its arguments instead.
+        amount_indexes.setdefault(key, []).append(
+            _param_derived_index(amount, ctx)
+            if amount_site[0] == "param_derived"
+            else _operand_param_index(amount, ctx)
+        )
         if key in seen:
             return
         seen.add(key)
@@ -2388,8 +2477,12 @@ def _fold_param_index(kind: KindTier, indexes: list[int | None]) -> int | None:
     Requires the folded kind to BE ``param`` (so the value is an entry parameter
     at all) and every site to have resolved the same index. A site that resolved
     none, or two sites resolving different positions, yields ``None``: the flow
-    still has a ``param`` origin, we just cannot say which slot."""
-    if kind["kind"] != "param" or not indexes:
+    still has a ``param`` origin, we just cannot say which slot.
+
+    ``param_derived`` (amounts only) qualifies under the same discipline, with
+    the index meaning the slot of the caller INPUT that fed the conversion rather
+    than the slot of the value itself — see :func:`_param_derived_index`."""
+    if kind["kind"] not in ("param", "param_derived") or not indexes:
         return None
     distinct = set(indexes)
     if len(distinct) != 1:

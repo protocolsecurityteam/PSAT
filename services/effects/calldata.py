@@ -481,7 +481,13 @@ def _declared_param_names(fn: "FunctionFacts", count: int) -> list[str]:
 def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None) -> set[int]:
     """Parameter slots the static flow lattice resolved as the AMOUNT of a value
     flow — the dispositive "this argument is the quantity" fact (§4.2 mirror of
-    :func:`_lattice_taint_index`). Absent on artifacts predating the field."""
+    :func:`_lattice_taint_index`). Absent on artifacts predating the field.
+
+    ``param_derived`` counts alongside ``param``: its index is the slot of the
+    caller input the contract converted into the amount (``transfer(receiver,
+    convertToAssets(shares))`` — the ``shares`` slot), which is exactly the slot a
+    probe must fill for the redemption to move anything. It says nothing about
+    how much leaves, and nothing here reads it that way."""
     out: set[int] = set()
     for flow in fn.effect_info.get("value_flows") or []:
         if not isinstance(flow, dict) or flow.get("origin") == "guard":
@@ -491,7 +497,7 @@ def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], direction
         kind = flow.get("amount_kind")
         kind_name = kind.get("kind") if isinstance(kind, dict) else None
         index = flow.get("amount_param_index")
-        if kind_name != "param" or not isinstance(index, int) or isinstance(index, bool):
+        if kind_name not in ("param", "param_derived") or not isinstance(index, int) or isinstance(index, bool):
             continue
         if 0 <= index < len(types) and _INTEGER_TYPE.fullmatch(types[index].strip()):
             out.add(index)

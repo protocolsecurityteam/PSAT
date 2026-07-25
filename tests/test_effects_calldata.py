@@ -387,6 +387,56 @@ def test_legacy_name_path_still_serves_a_flow_without_an_index():
     assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
 
 
+# --- the static lattice's QUANTITY slot (``amount_param_index``) ------------
+#
+# Which integer argument is the quantity was previously answered by a parameter
+# NAME vocabulary (``_AMOUNT_WORDS``). For the whole ERC-4626 redemption class the
+# amount is not an argument at all — it is a conversion of one — so the lattice
+# publishes ``param_derived`` plus the slot of the input that fed the conversion,
+# and the prober fills THAT slot. Every case below names the slot ``n``, a word in
+# no vocabulary, so only a lattice fact can produce a role.
+
+UNWRAP_SIG = "unwrap(uint256,address)"
+UNWRAP = "0x11112222"
+
+
+def _unwrap_fn(**flow_extra: Any) -> cd.FunctionFacts:
+    flow: dict[str, Any] = {"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}
+    flow.update(flow_extra)
+    return cd.FunctionFacts(
+        full_name=UNWRAP_SIG,
+        selector=UNWRAP,
+        canonical_signature=UNWRAP_SIG,
+        effect_info=_effect_info(UNWRAP_SIG, UNWRAP, value_flows=[flow], parameter_names=["n", "to"]),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def test_param_derived_lattice_names_the_quantity_slot_without_a_name_hint():
+    """The point of the change: ``n`` is in no word vocabulary, so a role here can
+    only have come from the proven lattice fact."""
+    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=0)
+    roles = cd.integer_param_roles(fn, ["uint256", "address"])
+    assert roles == {0: cd.ROLE_AMOUNT}, roles
+
+
+def test_unnamed_quantity_without_a_lattice_fact_gets_no_role():
+    """The control: identical facts minus the lattice's answer leave the slot with
+    no evidence, and the prober substitutes nothing."""
+    fn = _unwrap_fn()
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
+    fn = _unwrap_fn(amount_kind={"kind": "indeterminate", "tier": "static_trace"})
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
+
+
+def test_param_derived_index_still_needs_an_integer_slot():
+    """The type check is unchanged: a slot the lattice names but that is not an
+    integer takes no quantity."""
+    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=1)
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
+
+
 # ---------------------------------------------------------------------------
 # §4.5 supply
 # ---------------------------------------------------------------------------
