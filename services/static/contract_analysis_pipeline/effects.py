@@ -126,7 +126,9 @@ class ValueFlow(TypedDict):
     #   param, msg_sender, caller_controlled, self, token_owner, indeterminate}
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
-    #   fixed_constant, balance_delta, indeterminate}
+    #   fixed_constant, balance_delta, capped_by_balance, indeterminate}
+    # capped_by_balance: provably ≤ this contract's own balance — the minimum of
+    #   address(this).balance and some other value (a real upper bound / mitigation).
     amount_kind: NotRequired[KindTier]
     # The DISTINCT per-IR-site classifications behind the folded kind above,
     # first-seen order, deduplicated by meaning (the ``(kind, tier)`` pair).
@@ -1392,6 +1394,25 @@ _ELEMENT_ROOT_TAGS = ("param", "state_variable", "constant")
 _ELEMENT_WALK_DEFS = ("TypeConversion", "Assignment", "Index", "Member")
 
 
+def _single_phi_input(var: Any, ctx: _UnitCtx) -> Any:
+    """The one distinct predecessor of ``var`` when its SSA def is a SINGLE-input
+    body Phi — pure renaming, not a merge (a storage-pointer local given a fresh
+    version because the body wrote through it). ``None`` for a non-Phi def, a
+    genuine multi-input merge (must NOT be followed to either arm), or an
+    ENTRYPOINT parameter-binding Phi (Slither's interprocedural SSA link — following
+    it would cross into the caller's SSA and strip a forwarded parameter of the
+    binding the nested classifiers resolve it through)."""
+    from slither.core.cfg.node import NodeType  # type: ignore[import]
+
+    ir = ctx.def_by_id.get(id(var))
+    if ir is None or type(ir).__name__ != "Phi":
+        return None
+    if getattr(getattr(ir, "node", None), "type", None) == NodeType.ENTRYPOINT:
+        return None
+    rvals = {id(rv): rv for rv in (getattr(ir, "rvalues", None) or []) if rv is not None and id(rv) != id(var)}
+    return next(iter(rvals.values())) if len(rvals) == 1 else None
+
+
 def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] | None:
     """If ``operand`` reads an array/mapping/struct element (``a[k]`` /
     ``s.field`` / ``map[k].field``, possibly via a storage-pointer local
@@ -1428,6 +1449,18 @@ def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] |
             stack.append(getattr(ir, "variable", None))
         elif tn == "Assignment":
             stack.append(getattr(ir, "rvalue", None))
+        elif tn == "Phi":
+            # A single-input Phi is pure SSA renaming — a storage-pointer local
+            # (``Bid storage bid = bids[id]``) given a fresh version because the
+            # body wrote through it (``bid.isActive = false``). Follow it so the
+            # aliased element resolves to the same root a direct read would. A
+            # multi-input Phi is a genuine merge and ends this branch; the caller
+            # then falls through to the merged-local guard rather than picking one
+            # arm. (Reached only for a Phi in the def chain, not a Phi BASE — that
+            # case is routed at the Index/Member handler below.)
+            nxt = _single_phi_input(v, ctx)
+            if nxt is not None:
+                stack.append(nxt)
         elif tn in ("Index", "Member"):
             found_access = True
             base = getattr(ir, "variable_left", None)
@@ -1438,10 +1471,13 @@ def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] |
             if base_var is not None:
                 if base_var.name:
                     origins.add(("state_variable", base_var.name))
-            elif type(ctx.def_by_id.get(id(base))).__name__ in _ELEMENT_WALK_DEFS:
-                # A nested access (map[k].field) or an aliasing local — keep
-                # walking to the root rather than reading the intermediate
-                # reference's base∪key source union.
+            elif type(ctx.def_by_id.get(id(base))).__name__ in _ELEMENT_WALK_DEFS or _single_phi_input(base, ctx):
+                # A nested access (map[k].field), an aliasing local, or a
+                # single-input-Phi storage pointer (``bid.amount`` where ``bid``
+                # was SSA-renamed by a write through it) — keep walking to the root
+                # rather than reading the intermediate reference's base∪key source
+                # union. A multi-input Phi base is NOT walked here; it falls to the
+                # ``_arg_origin`` resolution below, exactly as before.
                 stack.append(base)
             else:
                 # A parameter / merged / unresolvable root: resolve it exactly as
@@ -1636,6 +1672,224 @@ def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     return "indeterminate"
 
 
+# Inequalities under which a ``cond ? A : B`` returns the SMALLER operand — the
+# shape a hand-written or library ``min`` compiles to. ``<``/``<=`` return the
+# then-value when it is the left (smaller) operand; ``>``/``>=`` return it when it
+# is the right one.
+_MIN_LT_OPS = ("BinaryType.LESS", "BinaryType.LESS_EQUAL")
+_MIN_GT_OPS = ("BinaryType.GREATER", "BinaryType.GREATER_EQUAL")
+
+
+def _resolve_copies(value: Any, def_by_id: dict[int, Any]) -> tuple[Any, Any]:
+    """Follow copy edges (``TypeConversion`` cast, ``Assignment``) from ``value``
+    to the value that actually defines it. Returns ``(value, defining_ir)`` where
+    ``defining_ir`` is ``None`` for a leaf (param / constant / state var / call
+    argument with no def in this map). A pure identity walk — it never crosses a
+    Phi merge or a computation, so the returned value IS the input, just renamed."""
+    seen: set[int] = set()
+    v = value
+    while v is not None and id(v) not in seen:
+        seen.add(id(v))
+        ir = def_by_id.get(id(v))
+        if ir is None:
+            return v, None
+        tn = type(ir).__name__
+        if tn == "TypeConversion":
+            v = getattr(ir, "variable", None)
+        elif tn == "Assignment":
+            v = getattr(ir, "rvalue", None)
+        else:
+            return v, ir
+    return v, None
+
+
+def _is_self_balance_read(value: Any, ctx: _UnitCtx) -> bool:
+    """``value`` (through casts/copies) IS ``address(this).balance`` — the
+    ``SOLIDITY_CALL balance(address)`` built-in whose sole argument resolves to the
+    ``this`` Solidity variable. An arbitrary ``other.balance`` reads a foreign
+    balance and must NOT qualify, so the argument identity is checked."""
+    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+
+    _, ir = _resolve_copies(value, ctx.def_by_id)
+    if ir is None or type(ir).__name__ != "SolidityCall":
+        return False
+    name = getattr(getattr(ir, "function", None), "name", "") or ""
+    if "balance" not in name:
+        return False
+    args = getattr(ir, "arguments", None) or []
+    if len(args) != 1:
+        return False
+    base, _ = _resolve_copies(args[0], ctx.def_by_id)
+    return isinstance(base, SolidityVariable) and getattr(base, "name", None) == "this"
+
+
+def _fn_def_by_id(fn: Any) -> dict[int, Any]:
+    """A ``def_by_id`` map for an ARBITRARY function's SSA — needed to inspect a
+    call's callee body, which lives outside the entry unit's own map."""
+    out: dict[int, Any] = {}
+    for node in getattr(fn, "nodes", ()) or ():
+        for ir in getattr(node, "irs_ssa", ()) or ():
+            lv = getattr(ir, "lvalue", None)
+            if lv is not None:
+                out[id(lv)] = ir
+    return out
+
+
+def _branch_return_value(node: Any) -> Any:
+    """The single value a straight-line branch returns, or ``None`` when the arm is
+    not a simple ``return <expr>`` (it splits/merges or returns a tuple)."""
+    seen: set[int] = set()
+    cur = node
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        for ir in getattr(cur, "irs_ssa", ()) or ():
+            if type(ir).__name__ == "Return":
+                vals = getattr(ir, "values", None) or []
+                return vals[0] if len(vals) == 1 else None
+        sons = getattr(cur, "sons", None) or []
+        cur = sons[0] if len(sons) == 1 else None
+    return None
+
+
+def _callee_is_two_arg_min(fn: Any) -> bool:
+    """PROVE ``fn`` computes the minimum of its two arguments — returns ``arg_i``
+    when ``arg_i < arg_j`` else ``arg_j`` (the smaller). Keyed on the body's SHAPE,
+    never its name: exactly one comparison IF over the two parameters, each arm
+    returning one parameter, the smaller taken on the corresponding branch. Any
+    other shape (a max, three args, a computed result) fails to ``False``."""
+    from slither.core.cfg.node import NodeType  # type: ignore[import]
+
+    params = getattr(fn, "parameters", None) or []
+    if len(params) != 2:
+        return False
+    d = _fn_def_by_id(fn)
+    candidates: list[tuple[Any, Any]] = []
+    for node in getattr(fn, "nodes", ()) or ():
+        if getattr(node, "type", None) != NodeType.IF:
+            continue
+        for ir in getattr(node, "irs_ssa", ()) or ():
+            if type(ir).__name__ == "Binary" and str(getattr(ir, "type", "")) in (_MIN_LT_OPS + _MIN_GT_OPS):
+                candidates.append((node, ir))
+    if len(candidates) != 1:
+        return False
+    cif, cmp = candidates[0]
+    tv = _branch_return_value(getattr(cif, "son_true", None))
+    fv = _branch_return_value(getattr(cif, "son_false", None))
+    if tv is None or fv is None:
+        return False
+
+    def pidx(v: Any) -> int | None:
+        rv, _ = _resolve_copies(v, d)
+        nsv = getattr(rv, "non_ssa_version", None) or rv
+        for i, p in enumerate(params):
+            if p is nsv:
+                return i
+        return None
+
+    li, ri = pidx(cmp.variable_left), pidx(cmp.variable_right)
+    ti, fi = pidx(tv), pidx(fv)
+    if None in (li, ri, ti, fi) or {li, ri} != {0, 1}:
+        return False
+    op = str(getattr(cmp, "type", ""))
+    if op in _MIN_LT_OPS:  # A < B -> take A (left) when smaller
+        return ti == li and fi == ri
+    return ti == ri and fi == li  # A > B -> take B (right) when smaller
+
+
+def _capped_ternary(operand: Any, ctx: _UnitCtx) -> bool:
+    """Form 1: a hand-written ``contractBalance < X ? contractBalance : X`` lowered
+    to a 2-input Phi over branch assignments, controlled by an inequality IF, where
+    the construct returns the SMALLER value and one compared operand is the
+    self-balance read. ``min(self_balance, X) <= self_balance``."""
+    from slither.core.cfg.node import NodeType  # type: ignore[import]
+
+    phi = ctx.def_by_id.get(id(operand))
+    if phi is None or type(phi).__name__ != "Phi":
+        return False
+    inputs = list({id(rv): rv for rv in (getattr(phi, "rvalues", None) or []) if rv is not None}.values())
+    if len(inputs) != 2:
+        return False
+    branch: dict[int, tuple[Any, Any]] = {}
+    for p in inputs:
+        d = ctx.def_by_id.get(id(p))
+        if d is None or type(d).__name__ != "Assignment":
+            return False
+        branch[id(p)] = (getattr(d, "node", None), getattr(d, "rvalue", None))
+    branch_nodes = {id(n) for n, _ in branch.values() if n is not None}
+    if len(branch_nodes) != 2:
+        return False
+    endif = getattr(phi, "node", None)
+    fn = getattr(endif, "node_function", None) or getattr(endif, "function", None)
+    if fn is None:
+        return False
+    cif = None
+    for node in getattr(fn, "nodes", ()) or ():
+        if getattr(node, "type", None) != NodeType.IF:
+            continue
+        st, sf = getattr(node, "son_true", None), getattr(node, "son_false", None)
+        if st is not None and sf is not None and {id(st), id(sf)} == branch_nodes:
+            cif = node
+            break
+    if cif is None:
+        return False
+    cmp = next(
+        (
+            ir
+            for ir in getattr(cif, "irs_ssa", ()) or ()
+            if type(ir).__name__ == "Binary" and str(getattr(ir, "type", "")) in (_MIN_LT_OPS + _MIN_GT_OPS)
+        ),
+        None,
+    )
+    if cmp is None:
+        return False
+    st = getattr(cif, "son_true", None)
+    # Map each branch's assigned value to the true/false side of the condition.
+    tv = fv = None
+    for _, (node, val) in branch.items():
+        if st is not None and id(node) == id(st):
+            tv = val
+        else:
+            fv = val
+    if tv is None or fv is None:
+        return False
+
+    def canon(v: Any) -> int:
+        rv, _ = _resolve_copies(v, ctx.def_by_id)
+        return id(rv)
+
+    lc, rc, tc, fc = canon(cmp.variable_left), canon(cmp.variable_right), canon(tv), canon(fv)
+    op = str(getattr(cmp, "type", ""))
+    is_min = (op in _MIN_LT_OPS and tc == lc and fc == rc) or (op in _MIN_GT_OPS and tc == rc and fc == lc)
+    if not is_min:
+        return False
+    return _is_self_balance_read(cmp.variable_left, ctx) or _is_self_balance_read(cmp.variable_right, ctx)
+
+
+def _capped_min_call(operand: Any, ctx: _UnitCtx) -> bool:
+    """Form 2: ``operand`` is the result of a 2-argument ``min`` call (a library or
+    internal function PROVEN to return the smaller argument) one of whose arguments
+    is the self-balance read. ``min(self_balance, X) <= self_balance``."""
+    _, ir = _resolve_copies(operand, ctx.def_by_id)
+    if ir is None or type(ir).__name__ not in ("LibraryCall", "InternalCall"):
+        return False
+    fn = getattr(ir, "function", None)
+    if fn is None or not _callee_is_two_arg_min(fn):
+        return False
+    args = getattr(ir, "arguments", None) or []
+    if len(args) != 2:
+        return False
+    return any(_is_self_balance_read(a, ctx) for a in args)
+
+
+def _is_capped_by_balance(operand: Any, ctx: _UnitCtx) -> bool:
+    """An amount provably ``<= address(this).balance``: the minimum of the
+    contract's own balance and some other value. Recognized in the two forms a min
+    compiles to (a hand-written ternary, a min-call). Fails to ``False`` on any
+    doubt — a MAX, a foreign balance, more than two inputs — so the caller stays
+    ``indeterminate`` rather than over-claiming a bound."""
+    return _capped_ternary(operand, ctx) or _capped_min_call(operand, ctx)
+
+
 def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, str]:
     """Classify one destination/amount operand at one IR site -> (kind, tier).
 
@@ -1655,6 +1909,13 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     elem = _element_kind(operand, ctx, amount=amount)
     if elem is not None:
         return (elem, "static_trace")
+    # An amount that is provably ``min(address(this).balance, X)`` is bounded by
+    # the contract's own balance. This runs BEFORE the merged-local guard because
+    # the ternary form (Form 1) IS a cross-branch Phi merge the guard would fold to
+    # indeterminate, and before the source path because the min-call form (Form 2)
+    # otherwise declines there. Amount-only: a destination has no such bound.
+    if amount and _is_capped_by_balance(operand, ctx):
+        return ("capped_by_balance", "static_trace")
     if _reaches_merged_local(operand, ctx):
         return ("indeterminate", "static_trace")
     # A recognized call's return value classifies from the callee's STANDARD

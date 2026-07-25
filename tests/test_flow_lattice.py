@@ -65,8 +65,8 @@ contract Lattice {
     function setTreasury(address t) external { treasury = t; }
 
     // Cast-through-immutable (the withdrawEther shape): dest is a TMP from
-    // address(liquidityPool) -> immutable, static_trace. Amount is a Math.min
-    // mix of balance and a view call -> indeterminate.
+    // address(liquidityPool) -> immutable, static_trace. Amount is a Math.min of
+    // the self-balance and a view call -> capped_by_balance (<= own balance).
     function withdrawEther() external {
         uint256 amt = Math.min(address(this).balance, liquidityPool.totalValueOutOfLp());
         (bool ok,) = payable(address(liquidityPool)).call{value: amt}("");
@@ -139,8 +139,9 @@ def test_cast_through_immutable_destination(tmp_path):
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["withdrawEther()"])
     assert flow["target_kind"] == {"kind": "immutable", "tier": "static_trace"}
-    # Math.min(balance, view_call) is not a single unambiguous origin.
-    assert flow["amount_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    # Math.min(address(this).balance, view_call) is provably <= the contract's own
+    # balance — the minimum of the self-balance and some other value.
+    assert flow["amount_kind"] == {"kind": "capped_by_balance", "tier": "static_trace"}
 
 
 def test_caller_param_destination_is_extraction(tmp_path):
