@@ -819,7 +819,23 @@ def _authority_roles(tree: Any) -> set[str]:
 
 
 def _gate_ref(tree: Any) -> str:
-    """A gate STRUCTURE descriptor (inv. 12) — authority roles, never an address."""
+    """A gate STRUCTURE descriptor (inv. 12) — authority roles, never an address.
+
+    ``gate:none`` is emitted for a tree-less function, which covers BOTH a
+    proven-ungated one and one whose real gate the static plane could not lower
+    (``guard_extraction_uncertain`` and the rest of the tree-less residue) — so
+    it is not on its own a claim that no gate exists. It never has to be: the
+    other half of the cache identity is the kernel ``behavior_hash``, which is
+    the whole metadata-stripped runtime bytecode (§7 item 2, immutables masked).
+    The gate lives inside that bytecode, so two rows can share a ``gate:none``
+    only when their code — and therefore their gate — is identical, and masking
+    an immutable authority erases the ADDRESS a gate compares against, never the
+    comparison. ``tests/test_effects_hashing.py`` pins that.
+
+    The consumers of an absent role (the §4.4 gate-moving pick, the §4.1 pauser
+    probe) each fail closed to a probe that is not synthesized, so a gate that
+    did not lower costs recall, never a widened verdict.
+    """
     roles = sorted(_authority_roles(tree))
     return "gate:" + ("+".join(roles) if roles else "none")
 

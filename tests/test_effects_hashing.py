@@ -166,6 +166,43 @@ def test_immutable_masking_recovers_a_hit():
     )
 
 
+def test_masking_never_merges_a_gated_deployment_with_an_ungated_one():
+    """The invariant ``calldata._gate_ref`` relies on to emit ``gate:none``.
+
+    ``gate:none`` is what a function gets when it has no predicate tree — a
+    proven-ungated one AND one whose real gate the static plane could not lower.
+    Those two may only ever share a cache identity when the OTHER component,
+    the kernel ``behavior_hash``, also matches; here that hash is the whole
+    runtime bytecode, which contains the gate. Immutable masking is the one
+    thing that deliberately merges distinct deployments, so it is the thing that
+    must not reach the gate: it erases the ADDRESS the gate compares against
+    (two owners, one hash) and leaves the CALLER/EQ/JUMPI comparison standing
+    (gated and ungated stay apart).
+    """
+    body = bytes.fromhex("6001600155")  # the guarded action: sstore(1, 1)
+
+    # CALLER, PUSH20 <owner>, EQ, PUSH1 dest, JUMPI, REVERT, JUMPDEST
+    def _gated(owner: bytes) -> bytes:
+        return bytes.fromhex("33") + bytes.fromhex("73") + owner + bytes.fromhex("14601a575ffd5b") + body
+
+    owner_offset = 2  # after CALLER + the PUSH20 opcode
+    refs = {"1": [{"start": owner_offset, "length": 20}]}
+    gated_a = _gated(b"\xaa" * 20)
+    gated_b = _gated(b"\xbb" * 20)
+    selector = "0xdeadbeef"
+
+    # The mask does its job: a per-deployment immutable authority is not an identity.
+    assert bytecode_fallback_hash(gated_a, selector, immutable_references=refs) == bytecode_fallback_hash(
+        gated_b, selector, immutable_references=refs
+    )
+    # ...and cannot reach past it: the gate itself still splits the identity, so a
+    # `gate:none` row can never transfer a verdict onto a deployment that has one.
+    assert bytecode_fallback_hash(gated_a, selector, immutable_references=refs) != bytecode_fallback_hash(
+        body, selector, immutable_references=refs
+    )
+    assert bytecode_fallback_hash(gated_a, selector) != bytecode_fallback_hash(body, selector)
+
+
 def test_contract_surface_hash_is_selectorless_and_masks():
     prefix = b"\x60\x80"
     refs = {"1": [{"start": 2, "length": 4}]}
