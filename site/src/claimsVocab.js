@@ -26,162 +26,352 @@
 const CLAIM_VOCAB = {
   // ── upgrade / proxy admin (top lane) ──────────────────────────────────────
   "upgrade.implementation": {
-    family: "control_plane", lane: "top", tone: "#9b8a9e", sentence: "changes logic",
-    priority: 0, legacy: "implementation_update", score: { kind: "upgrade", severity: 1 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#9b8a9e",
+    sentence: "changes logic",
+    priority: 0,
+    legacy: "implementation_update",
+    score: { kind: "upgrade", severity: 1 },
   },
   "proxy.admin_change": {
-    family: "control_plane", lane: "top", tone: "#9b8a9e", sentence: "changes proxy admin",
-    priority: 0, legacy: null, score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#9b8a9e",
+    sentence: "changes proxy admin",
+    priority: 0,
+    legacy: null,
+    score: { kind: "admin", severity: 0.88 },
   },
 
   // ── arbitrary execution / deployment (exec family, top lane) ──────────────
   "exec.arbitrary": {
-    family: "exec", lane: "top", tone: "#7a8098", sentence: "arbitrary external call",
-    priority: 1, legacy: "arbitrary_external_call", score: { kind: "execution", severity: 0.95 },
+    family: "exec",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "arbitrary external call",
+    priority: 1,
+    legacy: "arbitrary_external_call",
+    score: { kind: "execution", severity: 0.95 },
   },
   contract_deployment: {
-    family: "exec", lane: "top", tone: "#7a8098", sentence: "deploys a contract",
-    priority: 1, legacy: "contract_deployment", score: null,
+    family: "exec",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "deploys a contract",
+    priority: 1,
+    legacy: "contract_deployment",
+    score: null,
   },
 
   // ── ownership (top lane) ──────────────────────────────────────────────────
   "ownership.transfer": {
-    family: "control_plane", lane: "top", tone: "#9e8a8d", sentence: "changes owner",
-    priority: 2, legacy: "ownership_transfer", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#9e8a8d",
+    sentence: "changes owner",
+    priority: 2,
+    legacy: "ownership_transfer",
+    score: { kind: "admin", severity: 0.88 },
   },
   "ownership.renounce": {
-    family: "control_plane", lane: "top", tone: "#9e8a8d", sentence: "renounces ownership",
-    priority: 2, legacy: "ownership_transfer", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#9e8a8d",
+    sentence: "renounces ownership",
+    priority: 2,
+    legacy: "ownership_transfer",
+    score: { kind: "admin", severity: 0.88 },
   },
   "ownership.accept": {
-    family: "control_plane", lane: "top", tone: "#9e8a8d", sentence: "accepts ownership",
-    priority: 2, legacy: "ownership_transfer", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#9e8a8d",
+    sentence: "accepts ownership",
+    priority: 2,
+    legacy: "ownership_transfer",
+    score: { kind: "admin", severity: 0.88 },
   },
 
   // ── role / authority / pointer admin (top lane) ───────────────────────────
   "roles.grant": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "grants role",
-    priority: 3, legacy: "role_management", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "grants role",
+    priority: 3,
+    legacy: "role_management",
+    score: { kind: "admin", severity: 0.88 },
   },
   "roles.revoke": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "revokes role",
-    priority: 3, legacy: "role_management", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "revokes role",
+    priority: 3,
+    legacy: "role_management",
+    score: { kind: "admin", severity: 0.88 },
   },
   "roles.configure": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "configures roles",
-    priority: 3, legacy: "role_management", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "configures roles",
+    priority: 3,
+    legacy: "role_management",
+    score: { kind: "admin", severity: 0.88 },
   },
   "authority.replace": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "changes authority",
-    priority: 3, legacy: "authority_update", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "changes authority",
+    priority: 3,
+    legacy: "authority_update",
+    score: { kind: "admin", severity: 0.88 },
   },
   "authorized_caller.rotate": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "rotates caller authority",
-    priority: 3, legacy: null, score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "rotates caller authority",
+    priority: 3,
+    legacy: null,
+    score: { kind: "admin", severity: 0.88 },
   },
   // Minted only by the effects claims bridge (behavioral_observed): a simulated
   // call opened a permission gate to previously-rejected callers. Scoreable like
   // the other control-plane authority claims, but the observed tier is
   // neutralised in protocolScore.js until SCORING_INVARIANTS.md designs consumption.
   "authority.grant": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "opens a gate",
-    priority: 3, legacy: "authority_update", score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "opens a gate",
+    priority: 3,
+    legacy: "authority_update",
+    score: { kind: "admin", severity: 0.88 },
   },
   "callee_pointer.rotate": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "changes hook",
-    priority: 3, legacy: "hook_update", score: { kind: "config", severity: 0.78 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "changes hook",
+    priority: 3,
+    legacy: "hook_update",
+    score: { kind: "config", severity: 0.78 },
   },
   "safe.signer_mgmt": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "changes signers",
-    priority: 3, legacy: null, score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "changes signers",
+    priority: 3,
+    legacy: null,
+    score: { kind: "admin", severity: 0.88 },
   },
   "safe.module_mgmt": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "changes modules",
-    priority: 3, legacy: null, score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "changes modules",
+    priority: 3,
+    legacy: null,
+    score: { kind: "admin", severity: 0.88 },
   },
   "safe.set_guard": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "sets guard",
-    priority: 3, legacy: null, score: { kind: "admin", severity: 0.88 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "sets guard",
+    priority: 3,
+    legacy: null,
+    score: { kind: "admin", severity: 0.88 },
   },
   "lz_oapp.set_peer": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "sets peer",
-    priority: 3, legacy: null, score: { kind: "config", severity: 0.78 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "sets peer",
+    priority: 3,
+    legacy: null,
+    score: { kind: "config", severity: 0.78 },
   },
   "lz_oapp.set_delegate": {
-    family: "control_plane", lane: "top", tone: "#7a8098", sentence: "sets delegate",
-    priority: 3, legacy: null, score: { kind: "config", severity: 0.78 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "sets delegate",
+    priority: 3,
+    legacy: null,
+    score: { kind: "config", severity: 0.78 },
   },
 
   // ── pause (top lane, split set/unset) ─────────────────────────────────────
   "pause.set": {
-    family: "control_plane", lane: "top", tone: "#998a6a", sentence: "pauses",
-    priority: 4, legacy: "pause_toggle", score: { kind: "pause", severity: 0.25 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#998a6a",
+    sentence: "pauses",
+    priority: 4,
+    legacy: "pause_toggle",
+    score: { kind: "pause", severity: 0.25 },
   },
   "pause.unset": {
-    family: "control_plane", lane: "top", tone: "#998a6a", sentence: "unpauses",
-    priority: 4, legacy: "pause_toggle", score: { kind: "unpause", severity: 0.68 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#998a6a",
+    sentence: "unpauses",
+    priority: 4,
+    legacy: "pause_toggle",
+    score: { kind: "unpause", severity: 0.68 },
   },
 
   // ── timelock ops (top lane) ───────────────────────────────────────────────
   "timelock.schedule": {
-    family: "control_plane", lane: "top", tone: "#8a7e6a", sentence: "schedules op",
-    priority: 5, legacy: "timelock_operation", score: { kind: "timelock", severity: 0.62 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#8a7e6a",
+    sentence: "schedules op",
+    priority: 5,
+    legacy: "timelock_operation",
+    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.execute": {
-    family: "control_plane", lane: "top", tone: "#8a7e6a", sentence: "executes op",
-    priority: 5, legacy: "timelock_operation", score: { kind: "timelock", severity: 0.62 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#8a7e6a",
+    sentence: "executes op",
+    priority: 5,
+    legacy: "timelock_operation",
+    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.cancel": {
-    family: "control_plane", lane: "top", tone: "#8a7e6a", sentence: "cancels op",
-    priority: 5, legacy: "timelock_operation", score: { kind: "timelock", severity: 0.62 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#8a7e6a",
+    sentence: "cancels op",
+    priority: 5,
+    legacy: "timelock_operation",
+    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.set_delay": {
-    family: "control_plane", lane: "top", tone: "#8a7e6a", sentence: "changes delay",
-    priority: 5, legacy: "timelock_operation", score: { kind: "timelock", severity: 0.62 },
+    family: "control_plane",
+    lane: "top",
+    tone: "#8a7e6a",
+    sentence: "changes delay",
+    priority: 5,
+    legacy: "timelock_operation",
+    score: { kind: "timelock", severity: 0.62 },
   },
 
   // ── flow / supply (inflow / outflow lanes) ────────────────────────────────
   "flow.in": {
-    family: "flow", lane: "left", tone: "#6a9e94", sentence: "moves value in",
-    priority: 6, legacy: "asset_pull", score: { kind: "asset_in", severity: 0.5 },
+    family: "flow",
+    lane: "left",
+    tone: "#6a9e94",
+    sentence: "moves value in",
+    priority: 6,
+    legacy: "asset_pull",
+    score: { kind: "asset_in", severity: 0.5 },
   },
   "supply.mint": {
-    family: "flow", lane: "left", tone: "#6a9e94", sentence: "mints supply",
-    priority: 6, legacy: "mint", score: { kind: "asset_in", severity: 0.5 },
+    family: "flow",
+    lane: "left",
+    tone: "#6a9e94",
+    sentence: "mints supply",
+    priority: 6,
+    legacy: "mint",
+    score: { kind: "asset_in", severity: 0.5 },
   },
   "flow.out": {
-    family: "flow", lane: "right", tone: "#9a8a6e", sentence: "moves value out",
-    priority: 7, legacy: "asset_send", score: { kind: "asset_out", severity: 0.78 },
+    family: "flow",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "moves value out",
+    priority: 7,
+    legacy: "asset_send",
+    score: { kind: "asset_out", severity: 0.78 },
+  },
+  // The entry neither holds nor sends the value — it calls a contract that does.
+  // Same risk class as a direct out-flow when the routed value LEAVES that
+  // contract (the caller can still name where it lands), so it shares
+  // flow.out's severity. ``lane`` here is the outbound default; laneForClaims
+  // overrides it per-witness, because a router that forwards value INTO a vault
+  // is an inflow and must not read as an outflow.
+  value_router: {
+    family: "flow",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "routes value through a contract it calls",
+    priority: 7,
+    legacy: null,
+    score: { kind: "asset_out", severity: 0.78 },
   },
   "supply.burn": {
-    family: "flow", lane: "right", tone: "#9a8a6e", sentence: "burns supply",
-    priority: 7, legacy: "burn", score: { kind: "asset_out", severity: 0.78 },
+    family: "flow",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "burns supply",
+    priority: 7,
+    legacy: "burn",
+    score: { kind: "asset_out", severity: 0.78 },
   },
 
   // ── user-plane operations (never the control lane) ────────────────────────
   "weth.deposit": {
-    family: "user_plane", lane: "left", tone: "#6a9e94", sentence: "wraps ETH",
-    priority: 8, legacy: null, score: null,
+    family: "user_plane",
+    lane: "left",
+    tone: "#6a9e94",
+    sentence: "wraps ETH",
+    priority: 8,
+    legacy: null,
+    score: null,
   },
   "weth.withdraw": {
-    family: "user_plane", lane: "right", tone: "#9a8a6e", sentence: "unwraps ETH",
-    priority: 9, legacy: null, score: null,
+    family: "user_plane",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "unwraps ETH",
+    priority: 9,
+    legacy: null,
+    score: null,
   },
   "erc20.transfer": {
-    family: "user_plane", lane: "right", tone: "#9a8a6e", sentence: "transfers tokens",
-    priority: 9, legacy: null, score: null,
+    family: "user_plane",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "transfers tokens",
+    priority: 9,
+    legacy: null,
+    score: null,
   },
   "erc20.transfer_from": {
-    family: "user_plane", lane: "right", tone: "#9a8a6e", sentence: "transfers tokens",
-    priority: 9, legacy: null, score: null,
+    family: "user_plane",
+    lane: "right",
+    tone: "#9a8a6e",
+    sentence: "transfers tokens",
+    priority: 9,
+    legacy: null,
+    score: null,
   },
   "erc20.approve": {
-    family: "user_plane", lane: "ops", tone: null, sentence: "approves allowance",
-    priority: 10, legacy: null, score: null,
+    family: "user_plane",
+    lane: "ops",
+    tone: null,
+    sentence: "approves allowance",
+    priority: 10,
+    legacy: null,
+    score: null,
   },
   "gov.delegate": {
-    family: "user_plane", lane: "ops", tone: null, sentence: "delegates votes",
-    priority: 10, legacy: null, score: null,
+    family: "user_plane",
+    lane: "ops",
+    tone: null,
+    sentence: "delegates votes",
+    priority: 10,
+    legacy: null,
+    score: null,
   },
 };
 
@@ -195,14 +385,21 @@ const TIER_LABEL = {
 // behavioral_observed (effects plane) outranks every static tier: a witnessed
 // state transition on real forked state is the strongest provenance a claim can
 // carry (EFFECTS_RESOLUTION_SPEC §5.2). Mirrors services/static/claims/types.py.
-const TIER_RANK = { behavioral_observed: 4, standard_exact: 3, idiom_structural: 2, policy_derived: 1 };
+const TIER_RANK = {
+  behavioral_observed: 4,
+  standard_exact: 3,
+  idiom_structural: 2,
+  policy_derived: 1,
+};
 
 // Registered claims carried on a function payload, in registry-entry order.
 // Unknown ids are dropped (fail-closed): a claim the vocab can't render is
 // treated as absent rather than crashing a consumer.
 export function claimsOf(fn) {
   const raw = Array.isArray(fn?.claims) ? fn.claims : [];
-  return raw.filter((c) => c && typeof c.claim_id === "string" && CLAIM_VOCAB[c.claim_id]);
+  return raw.filter(
+    (c) => c && typeof c.claim_id === "string" && CLAIM_VOCAB[c.claim_id],
+  );
 }
 
 export function hasClaims(fn) {
@@ -223,13 +420,19 @@ export function scoreClaimsView(fn) {
   const observed = claims.filter((c) => c && c.tier === OBSERVED_TIER);
   if (!observed.length) return fn;
   const scoreable = claims.filter((c) => !(c && c.tier === OBSERVED_TIER));
-  const scoreableLabels = new Set(scoreable.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter(Boolean));
+  const scoreableLabels = new Set(
+    scoreable.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter(Boolean),
+  );
   // Only labels contributed SOLELY by an observed claim are removed; a label a
   // scoreable claim also projects stays (and is ignored anyway when claims exist).
   const observedOnly = new Set(
-    observed.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter((l) => l && !scoreableLabels.has(l)),
+    observed
+      .map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy)
+      .filter((l) => l && !scoreableLabels.has(l)),
   );
-  const labels = (Array.isArray(fn?.effect_labels) ? fn.effect_labels : []).filter((l) => !observedOnly.has(l));
+  const labels = (
+    Array.isArray(fn?.effect_labels) ? fn.effect_labels : []
+  ).filter((l) => !observedOnly.has(l));
   return { ...fn, claims: scoreable, effect_labels: labels };
 }
 
@@ -246,10 +449,26 @@ export function primaryClaim(fn) {
   });
 }
 
+// A routed move takes its lane from the direction of the value, not from the
+// claim id: the same ``value_router`` claim covers a router forwarding funds
+// INTO a vault (an inflow) and one sending that vault's funds onward (an
+// outflow). ``from_is_self`` is the fact layer's own discriminator for which.
+function routedOutFlows(witness) {
+  if (!witness || !Array.isArray(witness.flows)) return [];
+  return witness.flows.filter((f) => f && f.from_is_self === true);
+}
+
+function laneOfClaim(c) {
+  if (c.claim_id === "value_router") {
+    return routedOutFlows(c.witness).length ? "right" : "left";
+  }
+  return CLAIM_VOCAB[c.claim_id].lane;
+}
+
 // Lane from claim families, reproducing laneForFunction's original ordering:
 // any control/exec claim → top; otherwise an outflow beats an inflow; then ops.
 export function laneForClaims(fn) {
-  const lanes = claimsOf(fn).map((c) => CLAIM_VOCAB[c.claim_id].lane);
+  const lanes = claimsOf(fn).map((c) => laneOfClaim(c));
   if (!lanes.length) return null;
   if (lanes.includes("top")) return "top";
   const hasLeft = lanes.includes("left");
@@ -276,7 +495,7 @@ export function toneForClaims(fn) {
   if (!primary) return null;
   const base = CLAIM_VOCAB[primary.claim_id].tone;
   const claims = claimsOf(fn);
-  if (primary.claim_id === "flow.out") {
+  if (primary.claim_id === "flow.out" || primary.claim_id === "value_router") {
     const s = flowOutTargetSummary(claims);
     if (s.sawCaller) return TONE_FLOW_OUT_CALLER;
     // Calm-tint only a purely-fixed out-flow (mirrors flowOutQualifier's "fixed"
@@ -311,7 +530,8 @@ export function claimSummaryLine(fn) {
   const claims = claimsOf(fn);
   if (!claims.length) return null;
   const ordered = [...claims].sort(
-    (a, b) => CLAIM_VOCAB[a.claim_id].priority - CLAIM_VOCAB[b.claim_id].priority,
+    (a, b) =>
+      CLAIM_VOCAB[a.claim_id].priority - CLAIM_VOCAB[b.claim_id].priority,
   );
   const seen = new Set();
   const phrases = [];
@@ -322,7 +542,10 @@ export function claimSummaryLine(fn) {
       seen.add(phrase);
       phrases.push(phrase);
     }
-    if (bestTier === null || (TIER_RANK[c.tier] || 0) > (TIER_RANK[bestTier] || 0)) {
+    if (
+      bestTier === null ||
+      (TIER_RANK[c.tier] || 0) > (TIER_RANK[bestTier] || 0)
+    ) {
       bestTier = c.tier;
     }
   }
@@ -335,13 +558,19 @@ export function claimSummaryLine(fn) {
   const qualifier = qualifierForClaims(fn);
   if (qualifier && phrases.length) {
     const primary = primaryClaim(fn);
-    const primaryPhrase = primary ? CLAIM_VOCAB[primary.claim_id].sentence : phrases[0];
+    const primaryPhrase = primary
+      ? CLAIM_VOCAB[primary.claim_id].sentence
+      : phrases[0];
     const at = Math.max(0, phrases.indexOf(primaryPhrase));
     phrases[at] = `${phrases[at]} ${qualifier}`;
   }
   const tierLabel = TIER_LABEL[bestTier];
   const text = phrases.join(" · ");
-  return { text, tier: bestTier, label: tierLabel ? `${text} · ${tierLabel}` : text };
+  return {
+    text,
+    tier: bestTier,
+    label: tierLabel ? `${text} · ${tierLabel}` : text,
+  };
 }
 
 // ── Witness qualifiers (SCORING plan §7) ─────────────────────────────────────
@@ -362,7 +591,11 @@ export function claimSummaryLine(fn) {
 // admin can repoint it, so it earns its own honest phrasing rather than a
 // reassurance. self / indeterminate / absent are neither proven-fixed nor
 // caller-chosen → they block a "fixed" claim and render nothing.
-const OUT_TARGET_FIXED = new Set(["immutable", "constant", "storage_no_setter"]);
+const OUT_TARGET_FIXED = new Set([
+  "immutable",
+  "constant",
+  "storage_no_setter",
+]);
 // param / msg_sender / caller_controlled (tx.origin) are all caller-directed
 // destinations — the same theft-shaped class. caller_controlled is a distinct
 // address fact (the origin EOA, not msg.sender) but must never read as fixed and
@@ -384,12 +617,25 @@ function flowOutTargetSummary(claims) {
   let sawOther = false; // indeterminate / self / unclassified → blocks a "fixed" claim
   let total = 0;
   for (const c of claims) {
-    if (c.claim_id !== "flow.out") continue;
     const w = c.witness;
-    if (!w || w.direction !== "out" || !Array.isArray(w.flows)) continue;
-    for (const f of w.flows) {
+    // A routed outflow counts here too: the funds leave a contract this entry
+    // calls, and the destination question ("can the caller name it") is the same
+    // one. Inbound routes are excluded by ``routedOutFlows``.
+    let entries = null;
+    if (c.claim_id === "flow.out") {
+      entries =
+        w && w.direction === "out" && Array.isArray(w.flows) ? w.flows : null;
+    } else if (c.claim_id === "value_router") {
+      entries = routedOutFlows(w);
+      if (!entries.length) entries = null;
+    }
+    if (!entries) continue;
+    for (const f of entries) {
       total += 1;
-      const kind = f && f.target_kind && typeof f.target_kind.kind === "string" ? f.target_kind.kind : null;
+      const kind =
+        f && f.target_kind && typeof f.target_kind.kind === "string"
+          ? f.target_kind.kind
+          : null;
       if (OUT_TARGET_CALLER.has(kind)) sawCaller = true;
       else if (kind === "storage_setter") sawSetter = true;
       else if (OUT_TARGET_FIXED.has(kind)) sawFixed = true;
@@ -414,7 +660,12 @@ function flowOutQualifier(claims) {
 // The fork-observed pause summary (only the behavioral tier carries it).
 function pauseObserved(claims) {
   for (const c of claims) {
-    if (c.claim_id === "pause.set" && c.tier === OBSERVED_TIER && c.witness && c.witness.observed) {
+    if (
+      c.claim_id === "pause.set" &&
+      c.tier === OBSERVED_TIER &&
+      c.witness &&
+      c.witness.observed
+    ) {
       return c.witness.observed;
     }
   }
@@ -435,7 +686,11 @@ function pauseQualifier(claims) {
   // A bounded auto-expiry is a severity REDUCER only when the fork affirmed it
   // (auto_expiry === true) AND a positive duration bound was read. auto_expiry
   // false means the fork contradicted the static bound → not a mitigation → plain.
-  if (o.auto_expiry === true && typeof o.duration_bound_seconds === "number" && o.duration_bound_seconds > 0) {
+  if (
+    o.auto_expiry === true &&
+    typeof o.duration_bound_seconds === "number" &&
+    o.duration_bound_seconds > 0
+  ) {
     return `(auto-expires ~${formatDuration(o.duration_bound_seconds)})`;
   }
   // Indefinite latch = most severe: both fields present AND null. Absent keys
@@ -450,11 +705,11 @@ function pauseQualifier(claims) {
 function mintBacking(claims) {
   for (const c of claims) {
     if (
-      c.claim_id === "supply.mint"
-      && c.tier === OBSERVED_TIER
-      && c.witness
-      && c.witness.observed
-      && c.witness.observed.backing
+      c.claim_id === "supply.mint" &&
+      c.tier === OBSERVED_TIER &&
+      c.witness &&
+      c.witness.observed &&
+      c.witness.observed.backing
     ) {
       return c.witness.observed.backing;
     }
@@ -489,6 +744,9 @@ export function qualifierForClaims(fn) {
   const claims = claimsOf(fn);
   switch (primary.claim_id) {
     case "flow.out":
+    // A routed outflow answers the same destination question, so it takes the
+    // same qualifier; flowOutTargetSummary already admits only outbound routes.
+    case "value_router":
       return flowOutQualifier(claims);
     case "pause.set":
       return pauseQualifier(claims);
@@ -535,7 +793,10 @@ const AMOUNT_KIND_WORD = {
   indeterminate: "indeterminate",
 };
 
-const TIER_WORD = { dispositive_ast: "dispositive AST", static_trace: "static trace" };
+const TIER_WORD = {
+  dispositive_ast: "dispositive AST",
+  static_trace: "static trace",
+};
 
 function kindTierText(kt, wordMap) {
   if (!kt || typeof kt.kind !== "string") return null;
@@ -562,7 +823,10 @@ function kindTierRowText(folded, sites, wordMap) {
     const texts = sites.map((s) => kindTierText(s, wordMap)).filter(Boolean);
     if (texts.length > 1) {
       const shown = texts.slice(0, SITE_RENDER_CAP).join(" / ");
-      const more = texts.length > SITE_RENDER_CAP ? ` +${texts.length - SITE_RENDER_CAP} more` : "";
+      const more =
+        texts.length > SITE_RENDER_CAP
+          ? ` +${texts.length - SITE_RENDER_CAP} more`
+          : "";
       return `${texts.length} sites: ${shown}${more}`;
     }
   }
@@ -571,7 +835,8 @@ function kindTierRowText(folded, sites, wordMap) {
 
 // Conservative UPPER-BOUND USD phrasing — never render as exact (inv. 5/7).
 function formatUsdUpperBound(value) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+    return null;
   const abs = Math.abs(value);
   let text;
   if (abs >= 1e9) text = `$${(value / 1e9).toFixed(1)}B`;
@@ -595,27 +860,47 @@ export function claimWitnessFacts(fn) {
   let reachValue = null;
   let reachIndeterminate = false;
   for (const c of claims) {
-    if (c.claim_id !== "flow.out") continue;
+    if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
     const w = c.witness;
     if (!w) continue;
-    if (w.direction === "out" && Array.isArray(w.flows)) {
-      for (const f of w.flows) {
-        const dt = kindTierRowText(f && f.target_kind, f && f.target_kinds, TARGET_KIND_WORD);
+    const rows =
+      c.claim_id === "value_router"
+        ? routedOutFlows(w)
+        : w.direction === "out" && Array.isArray(w.flows)
+          ? w.flows
+          : [];
+    if (rows.length) {
+      for (const f of rows) {
+        const dt = kindTierRowText(
+          f && f.target_kind,
+          f && f.target_kinds,
+          TARGET_KIND_WORD,
+        );
         if (dt && !destKinds.includes(dt)) destKinds.push(dt);
-        const at = kindTierRowText(f && f.amount_kind, f && f.amount_kinds, AMOUNT_KIND_WORD);
+        const at = kindTierRowText(
+          f && f.amount_kind,
+          f && f.amount_kinds,
+          AMOUNT_KIND_WORD,
+        );
         if (at && !amtKinds.includes(at)) amtKinds.push(at);
       }
     }
     const observed = w.observed;
     if (observed) {
-      if (typeof observed.observed_reach_value_usd === "number") reachValue = observed.observed_reach_value_usd;
+      if (typeof observed.observed_reach_value_usd === "number")
+        reachValue = observed.observed_reach_value_usd;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
     }
   }
-  if (destKinds.length) facts.push({ label: "Destination", value: destKinds.join(", ") });
-  if (amtKinds.length) facts.push({ label: "Amount", value: amtKinds.join(", ") });
+  if (destKinds.length)
+    facts.push({ label: "Destination", value: destKinds.join(", ") });
+  if (amtKinds.length)
+    facts.push({ label: "Amount", value: amtKinds.join(", ") });
   if (reachIndeterminate) {
-    facts.push({ label: "Reach", value: "floored to own balance (reach indeterminate)" });
+    facts.push({
+      label: "Reach",
+      value: "floored to own balance (reach indeterminate)",
+    });
   } else {
     const reach = formatUsdUpperBound(reachValue);
     if (reach) facts.push({ label: "Reach (upper bound)", value: reach });
@@ -628,14 +913,29 @@ export function claimWitnessFacts(fn) {
     if (Array.isArray(radius) && radius.length) {
       const shown = radius.slice(0, 4).join(", ");
       const more = radius.length > 4 ? ` +${radius.length - 4} more` : "";
-      facts.push({ label: "Freeze scope", value: `${radius.length} entry point(s): ${shown}${more}` });
+      facts.push({
+        label: "Freeze scope",
+        value: `${radius.length} entry point(s): ${shown}${more}`,
+      });
     }
-    if (observed.auto_expiry === true && typeof observed.duration_bound_seconds === "number") {
-      facts.push({ label: "Auto-expiry", value: `self-recovers after ~${formatDuration(observed.duration_bound_seconds)}` });
+    if (
+      observed.auto_expiry === true &&
+      typeof observed.duration_bound_seconds === "number"
+    ) {
+      facts.push({
+        label: "Auto-expiry",
+        value: `self-recovers after ~${formatDuration(observed.duration_bound_seconds)}`,
+      });
     } else if (observed.auto_expiry === false) {
       facts.push({ label: "Auto-expiry", value: "does not self-recover" });
-    } else if (observed.auto_expiry === null && observed.duration_bound_seconds === null) {
-      facts.push({ label: "Auto-expiry", value: "indefinite latch (no self-recovery bound)" });
+    } else if (
+      observed.auto_expiry === null &&
+      observed.duration_bound_seconds === null
+    ) {
+      facts.push({
+        label: "Auto-expiry",
+        value: "indefinite latch (no self-recovery bound)",
+      });
     }
   }
 
@@ -643,9 +943,15 @@ export function claimWitnessFacts(fn) {
   const backing = mintBacking(claims);
   if (backing) {
     if (backing.inflow_observed === true) {
-      facts.push({ label: "Backing", value: "matching asset inflow observed (backed)" });
+      facts.push({
+        label: "Backing",
+        value: "matching asset inflow observed (backed)",
+      });
     } else if (backing.inflow_observed === false) {
-      facts.push({ label: "Backing", value: "no matching inflow — supply rose alone (dilution)" });
+      facts.push({
+        label: "Backing",
+        value: "no matching inflow — supply rose alone (dilution)",
+      });
     }
   }
 
@@ -659,26 +965,41 @@ export function claimWitnessFacts(fn) {
 // is nothing to say. Shape: {kind: "terminated"|"ambiguous"|"unresolved", ...}.
 export function terminalControllerNote(principal) {
   const details = (principal && principal.details) || {};
-  const resolvedType = (principal && (principal.resolvedType || principal.resolved_type)) || "unknown";
+  const resolvedType =
+    (principal && (principal.resolvedType || principal.resolved_type)) ||
+    "unknown";
   // A settled key (terminal === true) needs no way-point note.
   if (details.terminal === true) return null;
 
   const tp = details.terminal_principal;
   if (tp && typeof tp === "object") {
     if (tp.terminal === true && tp.address) {
-      return { kind: "terminated", address: tp.address, resolvedType: String(tp.resolved_type || "unknown") };
+      return {
+        kind: "terminated",
+        address: tp.address,
+        resolvedType: String(tp.resolved_type || "unknown"),
+      };
     }
     // Multiple parallel control planes (Solmate/Solady Auth owner + authority).
     // `multi_plane` at the top level carries `tp.planes` — each plane walked to
     // its OWN terminal — so the verbose inspector can show every plane's controller
     // and outcome (a reviewer needs to see the weakest plane). The header still says
     // "no single settled key"; we never collapse to one key.
-    if (tp.status === "multi_plane" && Array.isArray(tp.planes) && tp.planes.length) {
+    if (
+      tp.status === "multi_plane" &&
+      Array.isArray(tp.planes) &&
+      tp.planes.length
+    ) {
       const planes = tp.planes.map((p) => {
         const rec = (p && p.terminal_record) || {};
-        const outcome = rec.terminal === true && rec.address
-          ? { resolved: true, address: rec.address, resolvedType: String(rec.resolved_type || "unknown") }
-          : { resolved: false, status: String(rec.status || "unknown") };
+        const outcome =
+          rec.terminal === true && rec.address
+            ? {
+                resolved: true,
+                address: rec.address,
+                resolvedType: String(rec.resolved_type || "unknown"),
+              }
+            : { resolved: false, status: String(rec.status || "unknown") };
         return { controller: (p && p.controller) || null, outcome };
       });
       return { kind: "multi_plane", planes };
@@ -709,9 +1030,14 @@ export function terminalControllerNote(principal) {
 export function signerOverlapNote(principal) {
   const so = principal && principal.details && principal.details.signer_overlap;
   if (!so || !Array.isArray(so.overlaps) || !so.overlaps.length) return null;
-  const withShared = so.overlaps.filter((o) => o && typeof o.shared_count === "number" && o.shared_count > 0);
-  if (!withShared.length) return { selfOwnerCount: so.self_owner_count, strongest: null };
-  const strongest = withShared.reduce((best, o) => (o.jaccard > best.jaccard ? o : best));
+  const withShared = so.overlaps.filter(
+    (o) => o && typeof o.shared_count === "number" && o.shared_count > 0,
+  );
+  if (!withShared.length)
+    return { selfOwnerCount: so.self_owner_count, strongest: null };
+  const strongest = withShared.reduce((best, o) =>
+    o.jaccard > best.jaccard ? o : best,
+  );
   return {
     selfOwnerCount: so.self_owner_count,
     strongest: {
@@ -734,7 +1060,8 @@ export function signerOverlapNote(principal) {
 // hedge whenever `heuristic` is true — never phrased as org identity or control.
 // Returns {deployer, otherCount, heuristic} or null (absent fact → nothing).
 export function sharedDeployerNote(principal) {
-  const sd = principal && principal.details && principal.details.shared_deployer;
+  const sd =
+    principal && principal.details && principal.details.shared_deployer;
   if (!sd || typeof sd.deployer !== "string") return null;
   const addresses = Array.isArray(sd.addresses) ? sd.addresses : [];
   const self = String((principal && principal.address) || "").toLowerCase();
@@ -743,7 +1070,11 @@ export function sharedDeployerNote(principal) {
   const others = addresses.filter((a) => String(a).toLowerCase() !== self);
   const otherCount = others.length || Math.max(0, addresses.length - 1);
   if (otherCount <= 0) return null;
-  return { deployer: sd.deployer, otherCount, heuristic: sd.heuristic !== false };
+  return {
+    deployer: sd.deployer,
+    otherCount,
+    heuristic: sd.heuristic !== false,
+  };
 }
 
 // {kind, severity} for protocolScore — the strongest-severity scoreable claim.

@@ -74,6 +74,7 @@ const EXPECTED_CLAIM_IDS = [
   "timelock.schedule",
   "timelock.set_delay",
   "upgrade.implementation",
+  "value_router",
   "weth.deposit",
   "weth.withdraw",
 ];
