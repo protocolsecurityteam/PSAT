@@ -67,6 +67,14 @@ KERNEL_SURFACE_SENTINEL = ""
 AUDIT_PASSED = "passed"
 AUDIT_FAILED = "failed"
 
+# ``observed_residue`` keys that are BOOKKEEPING about probing, not observations
+# of the contract. Everything else in the bag describes what a verdict saw, so a
+# verdict flip correctly drops it; these describe how many times this deployment
+# has already been re-probed, which is just as true after the flip. Losing them
+# resets a cap that exists to stop an unreproducible behavior from re-probing on
+# every job forever, so they survive the flip that clears the observations.
+RESIDUE_BOOKKEEPING_KEYS = ("destination_probe_attempts",)
+
 
 def _lock_key(behavior_hash: str, effect_class: str, scope: str, surface: str, gate_ref: str) -> str:
     return f"effect:{behavior_hash}:{effect_class}:{scope}:{surface}:{gate_ref}"
@@ -420,14 +428,30 @@ def record_effect_verdict(
             ``_object`` is not defensive padding: a JSONB column renders a Python
             ``None`` as the jsonb scalar ``null`` rather than SQL NULL, and
             ``jsonb_object || jsonb_null`` concatenates into a two-element ARRAY
-            instead of merging. Both sides are normalized to an object first."""
+            instead of merging. Both sides are normalized to an object first.
+
+            The flip branch is NOT a plain overwrite: the observation keys must go
+            (they described the old verdict) but :data:`RESIDUE_BOOKKEEPING_KEYS`
+            must not, or a verdict that flips hands the re-probe bound a fresh
+            budget and an unreproducible deployment re-probes forever."""
             empty = text("'{}'::jsonb")
 
             def _object(col):
                 return func.coalesce(func.nullif(col, text("'null'::jsonb")), empty)
 
-            merged = func.nullif(_object(stored).op("||")(_object(incoming)), empty)
-            return case((residue_still_stands, merged), else_=incoming)
+            def _bookkeeping(col):
+                """Only the bookkeeping keys of ``col``, as an object."""
+                picked = func.jsonb_build_object()
+                for key in RESIDUE_BOOKKEEPING_KEYS:
+                    value = col.op("->")(key)
+                    picked = picked.op("||")(
+                        case((value.is_not(None), func.jsonb_build_object(key, value)), else_=empty)
+                    )
+                return picked
+
+            merged = _object(stored).op("||")(_object(incoming))
+            flipped = _bookkeeping(_object(stored)).op("||")(_object(incoming))
+            return func.nullif(case((residue_still_stands, merged), else_=flipped), empty)
 
         return stmt.on_conflict_do_update(
             constraint="uq_effect_verdicts_identity",

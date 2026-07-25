@@ -385,6 +385,55 @@ def test_observed_residue_merges_key_wise_across_observation_less_rewrites(clean
 
 
 @requires_postgres
+def test_probe_bookkeeping_survives_a_verdict_flip(clean_effects):
+    """A verdict flip must clear the OBSERVATIONS (they described the old answer)
+    without refunding the re-probe budget.
+
+    ``destination_probe_attempts`` is not an observation of the contract — it is
+    how many times this deployment has already been re-probed, which stays true
+    across a flip. Dropping the whole bag reset the ≤2 cap, so a behavior that is
+    proven in the cache but unreproducible HERE flips its way to an unbounded
+    number of Tier-1 probes: two per flip, on every job, forever."""
+    session = clean_effects
+    _write(
+        session,
+        observed_residue={"destination_probe_attempts": 2, "observed_reach_value_usd": 42.0},
+        concrete_destination=DEST,
+    )
+
+    row = _write(session, verdict="unknown", observed_residue=None, concrete_destination=None)
+
+    assert row.verdict == "unknown"
+    # The observation is gone (it justified the old verdict) ...
+    assert "observed_reach_value_usd" not in (row.observed_residue or {})
+    assert row.concrete_destination is None
+    # ... and the bound the observation was probed under is not refunded.
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+    # A flip back does not resurrect the observation either.
+    row = _write(session, verdict="proven", observed_residue=None)
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
+def test_a_flip_with_a_fresh_attempt_count_takes_the_new_one(clean_effects):
+    session = clean_effects
+    _write(session, observed_residue={"destination_probe_attempts": 1, "observed_reach_holders": ["0xaa"]})
+    row = _write(session, verdict="unknown", observed_residue={"destination_probe_attempts": 2})
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
+def test_a_code_change_also_keeps_the_probe_bookkeeping(clean_effects):
+    """A new behavior hash drops the residue for the same reason a flip does; the
+    attempt count is still about this DEPLOYMENT's probe spend, not the code."""
+    session = clean_effects
+    _write(session, observed_residue={"destination_probe_attempts": 2, "observed_reach_value_usd": 1.0})
+    row = _write(session, behavior_hash="other-hash", observed_residue=None)
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
 def test_fresh_observation_overwrites_stale_residue(clean_effects):
     """Preservation is only for the absent case — a real new observation wins."""
     session = clean_effects
