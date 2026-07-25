@@ -119,7 +119,12 @@ class ValueFlow(TypedDict):
 
     kind: str  # callee_erc20_selector | native_transfer_send | low_level_value_call
     selector: str | None
-    direction: str  # in | out
+    # ``in`` / ``out`` are the entry contract's OWN value moves. ``value_router``
+    # is a move the entry caused a DIFFERENT, in-unit contract to make by calling
+    # it (a router forwarding into a vault) — the entry is neither source nor
+    # sink, so it is kept distinct from in/out and never drives an asset-direction
+    # label on the router.
+    direction: str  # in | out | value_router
     from_is_self: bool
     origin: str  # body | guard
     # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
@@ -1993,6 +1998,50 @@ def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
 _VALUE_WALK_DEPTH_CAP = 128
 
 
+# The token-first safe-transfer library idiom (Solmate / Solady ``SafeTransferLib``,
+# OZ ``SafeERC20``): the token is the FIRST argument, so the ``(to, amount)`` /
+# ``(from, to, amount)`` slots are shifted one right of the bare ERC-20 selectors.
+# Their canonical signatures — ``safeTransfer(ERC20,address,uint256)`` /
+# ``safeTransferFrom(ERC20,address,address,uint256)`` — hash to selectors NOT in
+# the bare ERC-20 sets, and Slither lowers them to ``LibraryCall`` (or, when the
+# helper is a plain internal, ``InternalCall``) whose body is pure inline
+# assembly, so the value move is invisible to both the selector scan and the
+# body walk. We recognize the shape by the callee's name + trailing argument
+# types (not a selector, so it holds whichever token type the library was
+# instantiated with) to surface a value move that a router forwards into an
+# in-unit callee. This runs ONLY across a crossed contract boundary
+# (``value_router`` flows); the same-contract classification is left byte-for-byte
+# unchanged, so a contract using ``SafeTransferLib`` in its OWN body keeps its
+# current (empty) flow set.
+_TOKEN_FIRST_SEND_NAMES = frozenset({"safeTransfer", "transfer"})
+_TOKEN_FIRST_PULL_NAMES = frozenset({"safeTransferFrom", "transferFrom"})
+
+
+def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
+    """Classify a token-first library/internal transfer call, or ``None``.
+
+    Returns ``("send", to, amount)`` for ``safeTransfer(<Token>, to, amount)`` and
+    ``("pull", from, to, amount)`` for ``safeTransferFrom(<Token>, from, to,
+    amount)`` — the operands being the call-site arguments in the SHIFTED
+    positions. The trailing types must match exactly, which discriminates the
+    token-first form from the bare ``transfer(address,uint256)`` /
+    ``transferFrom(address,address,uint256)`` (2 / 3 args) the selector scan
+    already handles, and from ERC-721 ``safeTransferFrom(...,bytes)`` (a ``bytes``
+    tail)."""
+    signature = _callee_signature(ir)
+    if not signature or "(" not in signature or not signature.endswith(")"):
+        return None
+    name = signature[: signature.index("(")]
+    inner = signature[signature.index("(") + 1 : -1]
+    types = [t.strip() for t in inner.split(",")] if inner else []
+    args = list(getattr(ir, "arguments", []) or [])
+    if name in _TOKEN_FIRST_SEND_NAMES and types[1:] == ["address", "uint256"] and len(args) >= 3:
+        return ("send", args[1], args[2])
+    if name in _TOKEN_FIRST_PULL_NAMES and types[1:] == ["address", "address", "uint256"] and len(args) >= 4:
+        return ("pull", args[1], args[2], args[3])
+    return None
+
+
 def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> tuple[dict[str, tuple[str, ...]], dict[str, int]]:
     """The param→neutral-origin map forwarded at one internal/library call site,
     resolved in the caller's ``ctx``, plus its param→entry-parameter-INDEX half.
@@ -2027,32 +2076,58 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
     the first-seen winner — with the contributing sites published alongside as
     ``target_kinds``/``amount_kinds`` when they disagreed."""
     flows: list[ValueFlow] = []
+    # Value moves found while CROSSED into a callee contract (``value_router``
+    # direction). Collected apart and appended after the primary walk so the
+    # same-contract flow list stays in its exact prior order — the parity
+    # guarantee — with routed flows strictly after it.
+    router_flows: list[ValueFlow] = []
     seen: set[tuple[str, str | None, str, bool, str]] = set()
-    # Keyed by (unit id, forwarded-binding signature): a helper reached with the
-    # SAME bindings is deduped, but one reached with DIVERGENT bindings across
-    # call sites is re-walked so the cross-site fold collapses to indeterminate.
-    visited: set[tuple[int, Any, Any]] = set()
+    # Keyed by (unit id, forwarded-binding signature, crossed): a helper reached
+    # with the SAME bindings is deduped, but one reached with DIVERGENT bindings
+    # across call sites is re-walked so the cross-site fold collapses to
+    # indeterminate. ``crossed`` is part of the identity so a routed walk of a
+    # unit can never suppress (or be suppressed by) a same-contract walk of it —
+    # the two classify against different contract contexts.
+    visited: set[tuple[int, Any, Any, bool]] = set()
     target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
     amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
 
-    contract = getattr(function, "contract", None)
-    state_vars_by_name: dict[str, Any] = {
-        getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
-    }
-    setters = _setter_state_vars(contract) if contract is not None else set()
-    alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
-    scan_complete = _setter_scan_complete(contract) if contract is not None else False
+    entry_contract = getattr(function, "contract", None)
+    # Per-contract classification context (state vars + the setter/alias/scan
+    # soundness guards), memoized by contract identity for this build pass. The
+    # ENTRY's contract classifies every same-contract unit exactly as before;
+    # crossing a HighLevelCall rebuilds it for the CALLEE's contract so
+    # ``address(this)``, state-var mutability, and self-detection are read against
+    # the contract whose body is actually running, not the router's.
+    ctx_tuple_cache: dict[int, tuple[dict[str, Any], set[str], set[str], bool]] = {}
+
+    def contract_ctx_tuple(contract: Any) -> tuple[dict[str, Any], set[str], set[str], bool]:
+        cache_key = id(contract)
+        cached = ctx_tuple_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        state_vars_by_name: dict[str, Any] = {
+            getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
+        }
+        setters = _setter_state_vars(contract) if contract is not None else set()
+        alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
+        scan_complete = _setter_scan_complete(contract) if contract is not None else False
+        result = (state_vars_by_name, setters, alias_indeterminate, scan_complete)
+        ctx_tuple_cache[cache_key] = result
+        return result
 
     def unit_ctx(
         unit: Any,
         is_entry: bool,
         param_bindings: dict[str, tuple[str, ...]] | None,
         param_index_bindings: dict[str, int] | None,
+        class_contract: Any,
     ) -> _UnitCtx:
         # Fresh per (unit, bindings); the expensive per-unit ProvenanceEngine is
         # memoized inside ``_engine_bundle_for``, so this wrapper is cheap.
+        state_vars_by_name, setters, alias_indeterminate, scan_complete = contract_ctx_tuple(class_contract)
         return _build_unit_ctx(
             unit,
             is_entry,
@@ -2064,7 +2139,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
             param_index_bindings,
         )
 
-    def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx) -> None:
+    def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx, crossed: bool) -> None:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
         amount_sites.setdefault(key, []).append(_classify_site(amount, ctx, amount=True))
@@ -2073,7 +2148,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         if key in seen:
             return
         seen.add(key)
-        flows.append(flow)
+        (router_flows if crossed else flows).append(flow)
 
     def walk(
         unit: Any,
@@ -2082,17 +2157,31 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         param_bindings: dict[str, tuple[str, ...]] | None,
         param_index_bindings: dict[str, int] | None,
         depth: int,
+        crossed: bool,
+        class_contract: Any,
     ) -> None:
         sig = None if param_bindings is None else frozenset(param_bindings.items())
         # The index half is part of the identity: two sites can forward the same
         # origins from DIFFERENT parameter positions, and deduping those would
         # let the first-walked site's index stand for both.
         index_sig = None if param_index_bindings is None else frozenset(param_index_bindings.items())
-        key = (id(unit), sig, index_sig)
+        key = (id(unit), sig, index_sig, crossed)
         if key in visited or depth > _VALUE_WALK_DEPTH_CAP:
             return
         visited.add(key)
         ctx: _UnitCtx | None = None  # built lazily only if the unit moves value or forwards args
+
+        def context() -> _UnitCtx:
+            nonlocal ctx
+            if ctx is None:
+                ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings, class_contract)
+            return ctx
+
+        # A move found across a contract boundary is the ROUTER's effect on a
+        # DIFFERENT contract, not the entry's own in/out — it is tagged
+        # ``value_router`` regardless of the site's native direction.
+        def direction_of(native: str) -> str:
+            return "value_router" if crossed else native
 
         this_ids: set[int] = set()
         this_names: set[str] = set()
@@ -2113,19 +2202,18 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
             for ir in getattr(node, "irs_ssa", ()) or ():
                 op = type(ir).__name__
                 if op in ("Transfer", "Send"):
-                    if ctx is None:
-                        ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                     add(
                         {
                             "kind": "native_transfer_send",
                             "selector": None,
-                            "direction": "out",
+                            "direction": direction_of("out"),
                             "from_is_self": True,
                             "origin": origin,
                         },
                         getattr(ir, "destination", None),
                         getattr(ir, "call_value", None),
-                        ctx,
+                        context(),
+                        crossed,
                     )
                 elif op == "HighLevelCall":
                     selector = _selector_for(_callee_signature(ir))
@@ -2133,66 +2221,144 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                     if selector in _ERC20_PULL_SELECTORS:
                         from_arg = arguments[0] if arguments else None
                         from_self = _arg_is_address_this(from_arg, this_ids, this_names)
-                        if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
                                 "selector": selector,
-                                "direction": "out" if from_self else "in",
+                                "direction": direction_of("out" if from_self else "in"),
                                 "from_is_self": from_self,
                                 "origin": origin,
                             },
                             arguments[1] if len(arguments) > 1 else None,  # to
                             arguments[2] if len(arguments) > 2 else None,  # amount
-                            ctx,
+                            context(),
+                            crossed,
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
-                        if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                         add(
                             {
                                 "kind": "callee_erc20_selector",
                                 "selector": selector,
-                                "direction": "out",
+                                "direction": direction_of("out"),
                                 "from_is_self": True,
                                 "origin": origin,
                             },
                             arguments[0] if arguments else None,  # to
                             arguments[1] if len(arguments) > 1 else None,  # amount
-                            ctx,
+                            context(),
+                            crossed,
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
-                    if ctx is None:
-                        ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
                     call_value = getattr(ir, "call_value", None)
                     # A provably-zero value call (OZ SafeERC20's
                     # ``functionCallWithValue(token, data, 0)``) moves no ETH — not
                     # a value-out flow, and must not fold with a real send on the
                     # same function's flow key.
-                    if not _amount_is_provably_zero(call_value, ctx):
+                    if not _amount_is_provably_zero(call_value, context()):
                         add(
                             {
                                 "kind": "low_level_value_call",
                                 "selector": None,
-                                "direction": "out",
+                                "direction": direction_of("out"),
                                 "from_is_self": True,
                                 "origin": origin,
                             },
                             getattr(ir, "destination", None),
                             call_value,
-                            ctx,
+                            context(),
+                            crossed,
                         )
-                if op in ("InternalCall", "LibraryCall"):
+                # A token-first library/internal transfer (SafeTransferLib /
+                # SafeERC20) whose value move is invisible to the selector scan and
+                # to the assembly-only callee body. Recognized ONLY when routing
+                # across a boundary, so same-contract classification is unchanged.
+                token_first = _token_first_transfer(ir) if crossed and op in ("HighLevelCall", "LibraryCall") else None
+                if token_first is not None:
+                    selector = _selector_for(_callee_signature(ir))
+                    if token_first[0] == "send":
+                        _kind, to_arg, amount_arg = token_first
+                        add(
+                            {
+                                "kind": "callee_erc20_selector",
+                                "selector": selector,
+                                "direction": "value_router",
+                                "from_is_self": True,
+                                "origin": origin,
+                            },
+                            to_arg,
+                            amount_arg,
+                            context(),
+                            crossed,
+                        )
+                    else:  # pull
+                        _kind, from_arg, to_arg, amount_arg = token_first
+                        from_self = _arg_is_address_this(from_arg, this_ids, this_names)
+                        add(
+                            {
+                                "kind": "callee_erc20_selector",
+                                "selector": selector,
+                                "direction": "value_router",
+                                "from_is_self": from_self,
+                                "origin": origin,
+                            },
+                            to_arg,
+                            amount_arg,
+                            context(),
+                            crossed,
+                        )
+                if op in ("InternalCall", "LibraryCall") and token_first is None:
+                    # ``token_first is None`` skips a library call already counted
+                    # as a direct routed move, so its (assembly, or bare-selector)
+                    # body is not walked into a second, duplicate ``value_router``
+                    # flow. Only crossed frames set ``token_first``; the
+                    # same-contract recursion is therefore byte-for-byte unchanged.
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-                        if ctx is None:
-                            ctx = unit_ctx(unit, is_entry, param_bindings, param_index_bindings)
-                        child_bindings, child_index_bindings = _bindings_for_call(ir, callee, ctx)
-                        walk(callee, child_origin, False, child_bindings, child_index_bindings, depth + 1)
+                        child_bindings, child_index_bindings = _bindings_for_call(ir, callee, context())
+                        # Internal/library calls stay within the SAME contract
+                        # context (and same ``crossed`` state) as their caller.
+                        walk(
+                            callee,
+                            child_origin,
+                            False,
+                            child_bindings,
+                            child_index_bindings,
+                            depth + 1,
+                            crossed,
+                            class_contract,
+                        )
+                elif op == "HighLevelCall":
+                    # Route into a RESOLVED in-unit callee that is not itself one
+                    # of the already-handled direct value ops — a function whose
+                    # BODY moves value (``BoringVault.enter``/``exit``). Crossing
+                    # sets ``crossed`` and rebases the classification context onto
+                    # the callee's own contract.
+                    selector = _selector_for(_callee_signature(ir))
+                    is_direct_value = (
+                        selector in _ERC20_PULL_SELECTORS
+                        or selector in _ERC20_SEND_SELECTORS
+                        or (crossed and _token_first_transfer(ir) is not None)
+                    )
+                    callee = getattr(ir, "function", None)
+                    if not is_direct_value and callee is not None and getattr(callee, "nodes", None):
+                        child_origin = "guard" if origin == "guard" else "body"
+                        child_bindings, child_index_bindings = _bindings_for_call(ir, callee, context())
+                        walk(
+                            callee,
+                            child_origin,
+                            False,
+                            child_bindings,
+                            child_index_bindings,
+                            depth + 1,
+                            True,
+                            getattr(callee, "contract", None),
+                        )
 
-    walk(function, "body", True, None, None, 0)
+    walk(function, "body", True, None, None, 0, False, entry_contract)
+    # Routed flows come strictly after the same-contract flows, preserving the
+    # exact prior ordering of the latter.
+    flows.extend(router_flows)
     for flow in flows:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target = _fold_sites(target_sites.get(key, []))
@@ -2276,8 +2442,10 @@ def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]
     """Correct asset-direction labels from the value-flow facts. Native
     transfer/send is an outbound value sink Slither's low-level scan misses;
     a ``transferFrom`` whose ``from`` is ``address(this)`` was mis-read as a
-    pull. Only body-origin flows count."""
-    body_flows = [vf for vf in value_flows if vf["origin"] != "guard"]
+    pull. Only body-origin flows count. ``value_router`` flows are excluded: they
+    are a callee's move, not the entry's own asset direction, so they must not add
+    ``asset_send``/``asset_pull`` to the router."""
+    body_flows = [vf for vf in value_flows if vf["origin"] != "guard" and vf["direction"] != "value_router"]
     if not body_flows:
         return labels
 

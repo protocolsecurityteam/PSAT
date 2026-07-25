@@ -93,3 +93,18 @@ def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
 )
 def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _flow_evidence(ctx, function, "in")
+
+
+@claim_matcher(
+    claim_id="value_router",
+    sentence="routes value through a contract it calls",
+    legacy_projection=None,
+    consumer_family="flow",
+)
+def value_router(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+    """A function that itself neither holds nor sends value but CALLS an in-unit
+    contract whose body moves it (a Teller forwarding into a BoringVault). The
+    fact layer tags such moves ``direction: "value_router"`` and carries the
+    destination/amount witness resolved back through the call to the entry's own
+    parameters — so a caller-chosen router destination is provable when it is one."""
+    return _flow_evidence(ctx, function, "value_router")
