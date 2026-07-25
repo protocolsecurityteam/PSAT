@@ -1701,15 +1701,17 @@ def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
     contributing sites alongside it, deduplicated by MEANING (the ``(kind,
     tier)`` pair, so provenance is not flattened either) in first-seen order.
 
-    Emitted only when more than one distinct classification survives dedup, which
-    is exactly when the fold lost information; an agreeing set is byte-for-byte
-    the fold. An ``indeterminate`` site stays in the list — the breakdown says
-    why the fold is what it is, it never makes it look more resolved.
+    Emitted only when the sites disagree on the KIND, which is exactly when
+    ``_fold_sites`` gives up its answer; sites agreeing on a kind are already
+    fully described by the fold (which carries their weaker tier), so publishing
+    "msg_sender, msg_sender" there would be noise on a flow nothing was hidden
+    from. An ``indeterminate`` site stays in the list — the breakdown says why
+    the fold is what it is, it never makes it look more resolved.
 
     Size needs no cap: both lattices are finite closed vocabularies and dedup is
     by lattice member × tier, so the list is bounded by that product (≤20 target,
     ≤14 amount entries) no matter how many IR sites a function has."""
-    if len(sites) < 2:
+    if len({kind for kind, _ in sites}) < 2:
         return None
     ordered: list[KindTier] = []
     seen: set[tuple[str, str]] = set()
@@ -1718,7 +1720,7 @@ def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
             continue
         seen.add((kind, tier))
         ordered.append({"kind": kind, "tier": tier})
-    return ordered if len(ordered) > 1 else None
+    return ordered
 
 
 # Re-walk insurance: bounds interprocedural recursion when a helper is reached

@@ -692,6 +692,17 @@ def test_agreeing_sites_carry_no_breakdown(tmp_path):
     assert "target_kinds" not in flow
 
 
+def test_sites_agreeing_on_a_kind_carry_no_breakdown_even_at_mixed_tiers():
+    from services.static.contract_analysis_pipeline.effects import _fold_sites, _site_breakdown
+
+    sites = [("msg_sender", "dispositive_ast"), ("msg_sender", "static_trace")]
+    # The fold keeps the kind and takes the weaker tier, so it already says
+    # everything the sites do. A breakdown here would read "msg.sender,
+    # msg.sender" on a flow whose destination was never in doubt.
+    assert _fold_sites(sites) == {"kind": "msg_sender", "tier": "static_trace"}
+    assert _site_breakdown(sites) is None
+
+
 def test_breakdown_is_bounded_by_the_lattice_not_the_site_count(tmp_path):
     contract = _compile(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
