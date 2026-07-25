@@ -474,7 +474,12 @@ def test_value_out_seeded_retry_proves_a_precondition_blocked_withdrawal():
         simulate_supported=True,
         gate_ref="gate:none",
     )
-    assert plain.verdict == VERDICT_UNKNOWN and plain.reason == "no_value_observed"
+    # The UNSEEDED probe reverted on the precondition, and that is a different
+    # non-observation from "the call ran and moved nothing" — same empty log set,
+    # different fact. The reason must say so, or the code-plane cache transfers a
+    # precondition revert to every bytecode twin.
+    assert plain.verdict == VERDICT_UNKNOWN and plain.reason == "value_probe_reverted"
+    assert plain.details["observation"] == "reverted"
 
     eff = recipes.value_out(
         simulate=chain,

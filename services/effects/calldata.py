@@ -29,8 +29,8 @@ loop can adjust them without re-deriving the module:
 * :func:`_arg_values` — the address/uint/other substitution policy.
 * :data:`NEUTRAL_CALLER` — the identity a blast-radius probe uses when the entry
   point has no resolved principal.
-* :func:`read_max_pause_duration` — inv. 10: the bound is READ (trees, then
-  source), never hardcoded, and scoped to the LATCH the function writes.
+* :func:`read_max_pause_duration` — inv. 10: the bound is READ off the latch's
+  own guard leaf, never hardcoded and never scraped from source text.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import EffectiveFunction, FunctionPrincipal
-from db.queue import get_artifact, get_source_files
+from db.queue import get_artifact
 from services.effects.anvil import EntryPoint, ForkFixture
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
@@ -1211,63 +1211,6 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> int 
     return best
 
 
-_TIME_UNITS = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400, "weeks": 604800}
-_CONST_DECL = re.compile(r"constant\s+([A-Za-z0-9_]*(?:PAUSE|Pause|FREEZE|Freeze)[A-Za-z0-9_]*)\s*=\s*([^;]+);")
-
-
-def _duration_from_source(session: Session, job_id: Any, latch_vars: set[str]) -> int | None:
-    """Read the declared bound out of the Solidity source (inv. 10 — the VALUE
-    always comes from the contract).
-
-    Scoped to the files that DECLARE this latch, which is what keeps a contract's
-    indefinite latch from inheriting the timed latch's constant: the two live in
-    different units, and only the timed one declares a duration. The MAX of the
-    duration constants in that unit is taken because the live window is whatever
-    state or a MIN fallback says, always ≤ the declared MAX — so warping by it is
-    a sound upper bound for the auto-expiry probe. A flattened source that puts
-    both latches in one file would over-read; that degrades to a longer warp, not
-    a wrong latch."""
-    if not latch_vars:
-        return None
-    try:
-        sources = get_source_files(session, job_id)
-    except Exception:
-        logger.debug("effects calldata: source read failed for job %s", job_id, exc_info=True)
-        return None
-    best: int | None = None
-    for content in sources.values():
-        text = content or ""
-        if not any(var in text for var in latch_vars):
-            continue
-        for _name, expr in _CONST_DECL.findall(text):
-            value = _eval_time_expr(expr)
-            if value is not None and 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
-                best = value if best is None else max(best, value)
-    return best
-
-
-def _eval_time_expr(expr: str) -> int | None:
-    """Evaluate a Solidity duration literal: ``30 days``, ``7 * 24 hours``, ``3600``.
-    Anything richer returns ``None`` (⇒ no auto-expiry probe)."""
-    text = expr.strip().replace("_", "")
-    unit = 1
-    for name, mult in _TIME_UNITS.items():
-        if re.search(rf"\b{name}\b", text):
-            unit = mult
-            text = re.sub(rf"\b{name}\b", "", text)
-            break
-    factors = [p.strip() for p in text.split("*") if p.strip()]
-    if not factors:
-        return None
-    total = 1
-    for factor in factors:
-        value = _parse_int(factor)
-        if value is None:
-            return None
-        total *= value
-    return total * unit
-
-
 def _parse_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -1282,14 +1225,27 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
-def read_max_pause_duration(session: Session, facts: ContractFacts, latch_vars: set[str]) -> int | None:
+def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int | None:
     """Inv. 10: the pause bound is READ, never hardcoded — and it is per-LATCH.
 
     A contract can hold an indefinite latch and a timed one at once; the writer
     function pins which. An indefinite latch legitimately yields ``None`` (the
     recipe then skips the auto-expiry probe and records no duration bound), and
-    emitting the timed latch's constant for it would be a false witness."""
-    return _duration_from_trees(facts.trees, latch_vars) or _duration_from_source(session, facts.job_id, latch_vars)
+    emitting the timed latch's constant for it would be a false witness.
+
+    ONE source, and it is the IR: a constant that the latch's own guard leaf
+    compares ``block.timestamp`` against IS that latch's window
+    (:func:`_duration_from_trees`). There used to be a source-text fallback that
+    scraped ``constant`` declarations whose NAME contained PAUSE/FREEZE out of
+    every file mentioning the latch. That is identifier matching, and the value it
+    produced did not stay in the transcript: it reaches the claim witness as
+    ``duration_bound_seconds``, where the documented scorer contract
+    (``claims_bridge._observed_summary``) reads a bound as a severity REDUCER. A
+    cooldown, a minimum, or an unrelated timer picked up by the name pattern would
+    therefore have discounted an indefinite freeze. No bound is the correct and
+    conservative output: ``duration_bound_seconds is None`` + ``auto_expiry is
+    None`` already means "indefinite latch, most severe"."""
+    return _duration_from_trees(facts.trees, latch_vars)
 
 
 def _state_changing_functions(facts: ContractFacts) -> list[str]:
@@ -1649,7 +1605,7 @@ def synthesize_pause(
         pause_calldata=pause_calldata,
         entry_points=tuple(entry_points),
         predicted_guard_set=tuple(predicted),
-        max_pause_duration=read_max_pause_duration(session, facts, latch_vars),
+        max_pause_duration=read_max_pause_duration(facts, latch_vars),
         gate_ref=_gate_ref(fn.tree),
         fixtures=fixtures,
     )

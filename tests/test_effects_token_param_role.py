@@ -373,11 +373,18 @@ def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
 
 
 def test_a_function_with_no_token_slot_keeps_its_backing_witness():
-    """The gate must not silence the admin-mint case the witness exists for."""
+    """The gate must not silence the admin-mint case the witness exists for.
+
+    ``mint(address,uint256)`` names no token, so the prober's identity sits in an
+    address slot; the differential proves the mint did not depend on it (a stub
+    that reverts on every call changes nothing) and the negative is published."""
     eff = _supply(
         "mint(address,uint256)",
         ["to", "amount"],
-        [_supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)])],
+        [
+            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
+            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
+        ],
         seeding=None,
     )
     assert eff.details["backing"]["inflow_observed"] is False
@@ -392,7 +399,9 @@ def test_seeding_a_token_cannot_by_itself_produce_an_inflow():
     eff = _supply(
         "deposit(address,uint256,address)",
         ["depositAsset", "amount", "receiver"],
-        [reverted, seeded],
+        # The third block is the inertness differential: the recipient slot still
+        # holds the prober's identity, so the negative has to be earned.
+        [reverted, seeded, seeded],
         seeding=_seeding(TOKEN_A),
     )
     assert eff.details["backing"]["inflow_observed"] is False

@@ -92,6 +92,15 @@ _PHASES_AFTER_SELECTION = ("preflight", "cache_lookup", "tier1_probes", "tier2_f
 # result). Every OTHER unknown (capability fallback, precondition/mint revert,
 # malformed response) is chain-/state-/transient-dependent and must NEVER enter
 # the code-plane cache (§7) — those re-probe instead of transferring.
+#
+# Membership turns on ONE question: did the probe call EXECUTE? Every reason
+# below is recorded only on a row whose ``details["observation"] == "executed"``
+# (``services.effects.recipes``) — the call ran and the transition simply was not
+# there, which a bytecode twin genuinely inherits. The reverted counterparts
+# (``value_probe_reverted``, ``upgrade_probe_reverted``, ``mint_call_reverted``,
+# ``mutation_call_reverted``) are deliberately ABSENT: a revert on a precondition
+# or on an argument the prober guessed says nothing structural, and caching one
+# published a guessed-argument failure as a fact about every twin.
 _CACHEABLE_UNKNOWN_REASONS = frozenset(
     {
         "no_value_observed",
@@ -931,6 +940,15 @@ class EffectsWorker(BaseWorker):
                 concrete_destination=concrete.get("destination") if concrete else None,
                 current_check_passed=concrete.get("current_check_passed") if concrete else None,
                 observed_residue=_observed_residue(it, concrete),
+                # CONTRACT for anything reading ``effect_verdicts.witness``: this
+                # row is written for UNKNOWN verdicts too, so the payload alone is
+                # not a claim. ``witness["observation"]`` is the discriminator —
+                # ``executed`` means the probe call ran and the other keys describe
+                # F; ``reverted``/``not_run`` mean nothing was measured and a
+                # ``false`` in the payload (``value_moved``, ``upgradeable``) is
+                # "unmeasured", never "F does not do this". A consumer that reads
+                # ``witness`` without joining on ``verdict`` must at minimum join on
+                # this key. See ``services.effects.recipes.OBSERVATION_*``.
                 witness=details or None,
                 transcript_ptr=transcript_ptr,
             )

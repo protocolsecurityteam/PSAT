@@ -9,6 +9,7 @@ exercised against a stubbed spawn).
 
 from __future__ import annotations
 
+import inspect
 import sys
 import uuid
 from pathlib import Path
@@ -572,7 +573,7 @@ def test_max_pause_duration_read_from_a_timestamp_guard_constant():
             )
         }
     )
-    assert cd.read_max_pause_duration(MagicMock(), facts, {"TIMED_SLOT"}) == 2592000
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == 2592000
 
 
 def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
@@ -588,22 +589,21 @@ def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
             )
         }
     )
-    session = MagicMock()
-    session.execute.side_effect = RuntimeError("no db")
-    assert cd.read_max_pause_duration(session, facts, {"INDEFINITE_SLOT"}) is None
+    assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) is None
 
 
-@pytest.mark.parametrize(
-    ("expr", "expected"),
-    [
-        ("30 days", 2592000),
-        ("7 * 24 hours", 604800),
-        ("3600", 3600),
-        ("someIdentifier", None),
-    ],
-)
-def test_time_expression_evaluation(expr, expected):
-    assert cd._eval_time_expr(expr) == expected
+def test_max_pause_duration_is_never_scraped_from_a_constant_name():
+    """A bound reaches the claim witness as a severity REDUCER, so it may only come
+    from a constant the latch's own guard leaf compares ``block.timestamp``
+    against. Source text naming a PAUSE/FREEZE constant is identifier matching: the
+    same pattern catches a cooldown or a minimum, and publishing one of those would
+    discount an indefinite freeze."""
+    facts = _token_facts(trees={"unpause()": _and(_leaf(_state("TIMED_SLOT", "pausedUntil")))})
+    # The guard reads the latch but compares it against nothing time-shaped, so no
+    # constant in the unit is provably this latch's window.
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) is None
+    # And the reader takes no session at all: there is no source plane to consult.
+    assert "session" not in inspect.signature(cd.read_max_pause_duration).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -1008,9 +1008,11 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
 
 
 @requires_postgres
-def test_acceptance_timed_latch_reads_its_own_bound_from_source(db_session, monkeypatch):
-    """The same contract's ``*_UNTIL_*`` latch DOES carry MAX_PAUSE_DURATION, read
-    out of the source unit that declares that latch."""
+def test_acceptance_timed_latch_publishes_no_bound_it_cannot_prove(db_session):
+    """The same contract's ``*_UNTIL_*`` latch DECLARES a MAX_PAUSE_DURATION in
+    source, and that is still not enough: nothing here proves the latch's guard
+    reads it. No bound is the conservative output — an indefinite-looking latch is
+    scored as the most severe freeze, never discounted by a scraped constant."""
     pausable_until_source = """
         library PausableUntilStorage {
             bytes32 internal constant PAUSABLE_UNTIL_STORAGE_SLOT = keccak256("pausableUntil.storage");
@@ -1019,21 +1021,13 @@ def test_acceptance_timed_latch_reads_its_own_bound_from_source(db_session, monk
             uint256 public constant PAUSER_UNTIL_COOLDOWN = 7 days;
         }
     """
-    pausable_source = """
-        library PausableStorage {
-            bytes32 internal constant PAUSABLE_STORAGE_SLOT = keccak256("pausable.storage");
-        }
-    """
-    monkeypatch.setattr(
-        cd,
-        "get_source_files",
-        lambda _s, _j: {"Pausable.sol": pausable_source, "PausableUntil.sol": pausable_until_source},
-    )
+    # Declared in source, and deliberately unreachable from here.
+    assert "MAX_PAUSE_DURATION" in pausable_until_source
     facts = _eeth_facts(PAUSABLE_UNTIL_SLOT)
-    assert cd.read_max_pause_duration(db_session, facts, {PAUSABLE_UNTIL_SLOT}) == 30 * 86400
+    assert cd.read_max_pause_duration(facts, {PAUSABLE_UNTIL_SLOT}) is None
     # ...and the indefinite latch, whose declaring unit has no duration constant,
     # still gets nothing.
-    assert cd.read_max_pause_duration(db_session, facts, {PAUSABLE_SLOT}) is None
+    assert cd.read_max_pause_duration(facts, {PAUSABLE_SLOT}) is None
 
 
 def test_acceptance_liquidity_pool_withdraw_value_out():
