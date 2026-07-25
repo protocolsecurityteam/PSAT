@@ -64,6 +64,10 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
         entry["amount_kind"] = f["amount_kind"]
         if f.get("amount_kinds"):
             entry["amount_kinds"] = f["amount_kinds"]
+    if f.get("target_param_index") is not None:
+        entry["target_param_index"] = f["target_param_index"]
+    if f.get("amount_param_index") is not None:
+        entry["amount_param_index"] = f["amount_param_index"]
     return entry
 
 

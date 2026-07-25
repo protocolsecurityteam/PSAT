@@ -363,3 +363,15 @@ def test_balance_delta_reaches_the_claims_witness(tmp_path):
     assert out, claims["sweepStranded()"]
     kinds = [f.get("amount_kind") for f in out[0]["witness"]["flows"]]
     assert {"kind": "balance_delta", "tier": "static_trace"} in kinds, kinds
+
+
+def test_param_index_reaches_the_claims_witness(tmp_path):
+    # A caller-supplied destination address resolves to calldata slot 0; that index
+    # is now projected into the flow.out witness alongside its ``target_kind``.
+    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    effects = build_effects(contract)
+    claims = build_claims(contract, effects, {})["functions"]
+    out = [c for c in claims["half(address)"] if c["claim_id"] == "flow.out"]
+    assert out, claims["half(address)"]
+    indexes = [f.get("target_param_index") for f in out[0]["witness"]["flows"]]
+    assert 0 in indexes, out[0]["witness"]["flows"]
