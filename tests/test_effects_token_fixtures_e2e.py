@@ -54,10 +54,12 @@ from services.effects.calldata import (  # noqa: E402
     FIXTURE_BALANCE_WEI,
     NEUTRAL_CALLER,
     SEED_AMOUNT,
+    FunctionFacts,
     _arg_values,
     _mapping_entry_slot,
     _token_seed_fixtures,
     encode_calldata,
+    integer_param_roles,
 )
 from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN  # noqa: E402
 from services.effects.harness import SimContext  # noqa: E402
@@ -133,16 +135,30 @@ def _corrupt_slot(entry: dict[str, Any]) -> dict[str, Any]:
     return corrupted
 
 
-def _transfer_from_entry_point(fixture: dict[str, Any], caller: str) -> EntryPoint:
+def _transfer_from_entry_point(
+    fixture: dict[str, Any], caller: str, param_names: tuple[str, str, str] = ("from", "to", "amount")
+) -> EntryPoint:
     """A ``transferFrom`` blast-radius probe built the same way the synthesizer
-    builds it: every address arg substituted to ``caller`` and every uint to
-    ``ARG_AMOUNT`` (so the seeded keys line up with the call), plus gas for the
+    builds it: every address arg substituted to ``caller``, and the integer arg
+    filled through the production role classifier off the token's own declared
+    parameter names (so the seeded keys line up with the call), plus gas for the
     caller so an out-of-gas revert can never masquerade as the pause."""
     sig = _TRANSFER_FROM
     selector = fixture["selectors"][sig]
     types = _parse_arg_types(sig)
     assert types is not None
-    calldata = encode_calldata(selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT))
+    fn = FunctionFacts(
+        full_name=sig,
+        selector=selector,
+        canonical_signature=sig,
+        effect_info={"parameter_names": list(param_names)},
+        tree=None,
+        legacy_value_flows=(),
+    )
+    roles = integer_param_roles(fn, types)
+    calldata = encode_calldata(
+        selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles)
+    )
     assert calldata is not None
     return EntryPoint(
         key="transferFrom",
@@ -161,7 +177,10 @@ def _control_entry_point(fixture: dict[str, Any], caller: str) -> EntryPoint:
 
 
 def _run_pause(
-    anvil: SubprocessAnvil, fixture: dict[str, Any], entries: list[dict[str, Any]]
+    anvil: SubprocessAnvil,
+    fixture: dict[str, Any],
+    entries: list[dict[str, Any]],
+    param_names: tuple[str, str, str] = ("from", "to", "amount"),
 ) -> tuple[Any, RecordingStore, str]:
     """Deploy the fixture, seed the derived (or corrupted) entries for a neutral
     caller, and run the real pause recipe with a ``transferFrom`` probe + an
@@ -180,7 +199,10 @@ def _run_pause(
         contract_address=addr,
         principal=owner,
         pause_calldata=pause_calldata,
-        entry_points=[_transfer_from_entry_point(fixture, caller), _control_entry_point(fixture, caller)],
+        entry_points=[
+            _transfer_from_entry_point(fixture, caller, param_names),
+            _control_entry_point(fixture, caller),
+        ],
         predicted_guard_set=["transferFrom"],
         max_pause_duration=None,
         fixtures=tuple(seeds),
@@ -339,7 +361,9 @@ def test_erc721_owner_seeded_e2e(tmp_path: Path) -> None:
     assert by_role["owner"]["base_slot"] == "0x" + "0" * 63 + "1"
 
     with SubprocessAnvil(port=8555, hardfork_name="prague") as anvil:
-        eff, store, _addr = _run_pause(anvil, fixture, entries)
+        # The NFT's third argument is a token ID, not a quantity — the probe must
+        # fill it with the id filler the ownership seed is keyed at.
+        eff, store, _addr = _run_pause(anvil, fixture, entries, ("from", "to", "tokenId"))
 
     # The seeded owner word IS the prober: a read-back of "ok" means the derived
     # uint256-keyed slot was live and ownerOf(ARG_AMOUNT) echoed the caller.

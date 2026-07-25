@@ -80,6 +80,18 @@ NEUTRAL_CALLER = "0x" + "11" * 20
 # is the one that got through on the 2026-07-21 live run.
 ARG_AMOUNT = 1
 
+# Filler for an integer param whose role is an ID / index, not a quantity.
+# Deliberately equal to :data:`ARG_AMOUNT` and NEVER scaled by token decimals:
+# the seeded retry raises the AMOUNT to one whole unit, and one whole unit
+# substituted into a token id is what made every claim/redeem probe revert on its
+# own argument (``ERC721: invalid token ID``, measured 2026-07-22). It also has to
+# equal the key :func:`_seed_fixture_for_role` writes an ownership seed at, or the
+# seeded owner would sit at a token id no probe ever asks about.
+ARG_IDENTIFIER = 1
+
+ROLE_AMOUNT = "amount"
+ROLE_IDENTIFIER = "identifier"
+
 # Balance handed to every impersonated entry-point caller on the fork so gas can
 # never masquerade as a pause revert.
 FIXTURE_BALANCE_WEI = 10**19
@@ -124,6 +136,13 @@ class ValueOutPlanInputs:
     input_token_hints: tuple[str, ...] = ()
     seeded_calldata: Mapping[int, str] = field(default_factory=dict)
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
+    # ABI payability of F, or ``None`` on an artifact that predates the fact.
+    # ``False`` suppresses the ``msg.value`` retry, which such a target rejects
+    # with an empty revert before its body runs.
+    target_payable: bool | None = None
+    # Static says F sends native ETH out of the CONTRACT's own balance, so a
+    # contract-balance seed could unblock it (see ``has_native_payout``).
+    native_payout: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,6 +161,8 @@ class SupplyPlanInputs:
     input_token_hints: tuple[str, ...] = ()
     seeded_calldata: Mapping[int, str] = field(default_factory=dict)
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
+    target_payable: bool | None = None
+    native_payout: bool = False
 
 
 @dataclass(frozen=True)
@@ -323,6 +344,25 @@ def _legacy_value_flow_map(analysis: Any) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
+def facts_for_name(facts: ContractFacts, full_name: str) -> FunctionFacts | None:
+    """The static facts of one function by its artifact ``full_name`` — the
+    selector-free form :func:`resolve_function` needs for a candidate. ``None``
+    when the artifact has no record (fail closed)."""
+    info = facts.effects.get(full_name)
+    if not isinstance(info, dict):
+        return None
+    sig = facts.canonical_signature(full_name)
+    selector = _selector_of(sig)
+    return FunctionFacts(
+        full_name=full_name,
+        selector=selector or "",
+        canonical_signature=sig,
+        effect_info=info,
+        tree=facts.trees.get(full_name),
+        legacy_value_flows=tuple(facts.legacy_value_flows.get(full_name, ())),
+    )
+
+
 def resolve_function(facts: ContractFacts, selector: str | None) -> FunctionFacts | None:
     """Resolve a candidate's selector to its static facts. ``None`` when the
     selector is absent or unknown to the artifact (fail closed)."""
@@ -378,20 +418,159 @@ def encode_calldata(
     return selector + encoded
 
 
-def _arg_values(types: Sequence[str], *, identity: str | None, amount: int) -> dict[int, Any]:
+_INTEGER_TYPE = re.compile(r"u?int\d*")
+
+# Word vocabulary for the ROLE of an integer parameter. Both sets are semantic,
+# not protocol-specific: a name is split into words and classified by what the
+# word MEANS in ABI usage, so ``assetAmount``/``_amount``/``wad`` are quantities
+# and ``tokenId``/``requestId``/``index``/``deadline`` are not, on any contract.
+_AMOUNT_WORDS = frozenset(
+    {"amount", "amounts", "value", "values", "qty", "quantity", "shares", "wad", "fee", "fees", "assets"}
+)
+# Names that denote a HANDLE to something the contract stores — a token id, a
+# queue position. These take the small id filler, which is also the key the
+# ownership seed writes at (:func:`_seed_fixture_for_role`), so a probe and its
+# seed agree on which entry they mean.
+_IDENTIFIER_WORDS = frozenset({"id", "ids", "index", "indexes", "indices", "idx", "key", "position", "slot"})
+# Names that are demonstrably NOT quantities but are no kind of handle either: a
+# clock value, a replay counter, a version. There is no honest filler for these —
+# a made-up deadline is a guess about the chain's time — so they take the
+# encoder's zero and the contract's own check decides.
+_NON_QUANTITY_WORDS = frozenset(
+    {"deadline", "timestamp", "expiry", "expiration", "nonce", "epoch", "round", "version", "salt"}
+)
+# Split on separators AND camelCase humps: ``assetAmount`` → asset, amount.
+_NAME_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _name_words(name: str) -> set[str]:
+    return {word.lower() for word in _NAME_SPLIT.split(name or "") if word}
+
+
+def _declared_param_names(fn: "FunctionFacts", count: int) -> list[str]:
+    """Declared parameter names by position, best-effort.
+
+    Two sources, both from the static plane: the effects artifact's own
+    ``parameter_names`` (complete, but absent on artifacts written before it
+    existed), and the predicate trees, which record ``parameter_name`` beside
+    ``parameter_index`` for every parameter some gate reads. The tree fills gaps
+    on an older artifact; an unnamed slot stays the empty string, which classifies
+    as no evidence rather than as a guess."""
+    raw = fn.effect_info.get("parameter_names")
+    names = [str(n) for n in raw] if isinstance(raw, list) and len(raw) == count else [""] * count
+    for name, idx in _param_index_by_name(fn.tree).items():
+        if 0 <= idx < count and not names[idx]:
+            names[idx] = name
+    return names
+
+
+def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None) -> set[int]:
+    """Parameter slots the static flow lattice resolved as the AMOUNT of a value
+    flow — the dispositive "this argument is the quantity" fact (§4.2 mirror of
+    :func:`_lattice_taint_index`). Absent on artifacts predating the field."""
+    out: set[int] = set()
+    for flow in fn.effect_info.get("value_flows") or []:
+        if not isinstance(flow, dict) or flow.get("origin") == "guard":
+            continue
+        if directions is not None and str(flow.get("direction")) not in directions:
+            continue
+        kind = flow.get("amount_kind")
+        kind_name = kind.get("kind") if isinstance(kind, dict) else None
+        index = flow.get("amount_param_index")
+        if kind_name != "param" or not isinstance(index, int) or isinstance(index, bool):
+            continue
+        if 0 <= index < len(types) and _INTEGER_TYPE.fullmatch(types[index].strip()):
+            out.add(index)
+    return out
+
+
+def integer_param_roles(
+    fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None = None
+) -> dict[int, str]:
+    """``index -> ROLE_AMOUNT | ROLE_IDENTIFIER`` for the integer params whose role
+    the static plane can actually name. An index ABSENT from the result has no
+    evidence either way and takes NO substitution.
+
+    That absence is the point. The previous policy pushed the probe amount into
+    every integer slot, so a redemption's ``requestId`` and a swap's ``deadline``
+    received a quantity — the seeded retry escalated that to one whole token unit
+    and the call reverted on its own input before reaching any effect. A probe
+    argument nobody can justify is better left at the encoder's zero: the call
+    still runs, and a revert that follows is the contract's, not the prober's."""
+    lattice = _lattice_amount_indexes(fn, types, directions)
+    names = _declared_param_names(fn, len(types))
+    roles: dict[int, str] = {}
+    for idx, type_str in enumerate(types):
+        if not _INTEGER_TYPE.fullmatch(type_str.strip()):
+            continue
+        words = _name_words(names[idx])
+        # The two negative vocabularies are checked FIRST and beat every other
+        # signal: writing a quantity into a slot that is not one is the failure
+        # being fixed, so an ambiguous name fails away from the amount.
+        if words & _IDENTIFIER_WORDS:
+            roles[idx] = ROLE_IDENTIFIER
+        elif words & _NON_QUANTITY_WORDS:
+            continue
+        elif idx in lattice or words & _AMOUNT_WORDS:
+            roles[idx] = ROLE_AMOUNT
+    return roles
+
+
+def _arg_values(
+    types: Sequence[str],
+    *,
+    identity: str | None,
+    amount: int,
+    integer_roles: Mapping[int, str] | None = None,
+) -> dict[int, Any]:
     """The substitution policy for a value-moving probe: address params get the
-    caller identity (so a mint/transfer has a real recipient), integer params get
-    ``amount`` (nonzero, so a delta is observable), everything else keeps the
-    encoder's default. Deliberately blunt — a live-validation adjustment point."""
+    caller identity (so a mint/transfer has a real recipient); an integer param
+    takes ``amount`` only where :func:`integer_param_roles` proved it is a
+    quantity, the small id filler where it proved an identifier, and the encoder's
+    default where the role is unproven."""
+    roles = integer_roles or {}
     subs: dict[int, Any] = {}
     for idx, type_str in enumerate(types):
         t = type_str.strip()
         if _is_address_type(t):
             if identity:
                 subs[idx] = identity.lower()
-        elif re.fullmatch(r"u?int\d*", t):
-            subs[idx] = amount
+        elif _INTEGER_TYPE.fullmatch(t):
+            role = roles.get(idx)
+            if role == ROLE_AMOUNT:
+                subs[idx] = amount
+            elif role == ROLE_IDENTIFIER:
+                subs[idx] = ARG_IDENTIFIER
     return subs
+
+
+# Flow kinds that move NATIVE ETH out of the contract's OWN balance (as opposed
+# to an ERC-20 selector call, which moves a token the contract holds). A function
+# with one of these is the only shape a contract-balance seed could unblock.
+_NATIVE_OUT_KINDS = frozenset({"native_transfer_send", "low_level_value_call"})
+
+
+def has_native_payout(fn: "FunctionFacts") -> bool:
+    """Does static say F sends native ETH out of the contract's own balance?
+
+    Gates the contract-balance seeding attempt, which is the most synthetic
+    override the stage makes: without this the attempt would fire on every
+    reverting probe and buy nothing on the ones whose revert has no funding
+    cause."""
+    for flow in fn.effect_info.get("value_flows") or []:
+        if not isinstance(flow, dict) or flow.get("origin") == "guard":
+            continue
+        if str(flow.get("direction")) in _OUT_DIRECTIONS and str(flow.get("kind")) in _NATIVE_OUT_KINDS:
+            return True
+    return False
+
+
+def function_payable(fn: "FunctionFacts") -> bool | None:
+    """ABI payability of F, or ``None`` when the artifact predates the fact.
+    Tri-state on purpose: only a recorded ``False`` may suppress a probe attempt —
+    an absent fact leaves the attempt exactly as it is today."""
+    value = fn.effect_info.get("payable")
+    return value if isinstance(value, bool) else None
 
 
 def _selector_of(signature: str) -> str | None:
@@ -572,7 +751,8 @@ def _value_probe_inputs(
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
-    base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT)
+    roles = integer_param_roles(fn, types, directions)
+    base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles)
     calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=base_subs)
     if calldata is None:
         return None
@@ -612,6 +792,8 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         input_token_hints=input_token_hints(fn),
         seeded_calldata=seeded,
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
+        target_payable=function_payable(fn),
+        native_payout=has_native_payout(fn),
     )
 
 
@@ -642,6 +824,8 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         input_token_hints=input_token_hints(fn),
         seeded_calldata=seeded,
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
+        target_payable=function_payable(fn),
+        native_payout=has_native_payout(fn),
     )
 
 
@@ -654,9 +838,11 @@ def _seeded_probe_calldata(
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return {}, {}
-    base = seeded_calldata(fn, principal)
+    base = seeded_calldata(fn, principal, directions=directions)
     taint_idx = _taint_index(fn, types, directions)
-    sentinel = seeded_calldata(fn, principal, sentinel_index=taint_idx) if taint_idx is not None else {}
+    sentinel = (
+        seeded_calldata(fn, principal, sentinel_index=taint_idx, directions=directions) if taint_idx is not None else {}
+    )
     return base, sentinel
 
 
@@ -957,7 +1143,13 @@ def _entry_point_for(
     if not selector or types is None:
         return None
     caller = caller_override or principals.get(selector, NEUTRAL_CALLER)
-    calldata = encode_calldata(selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT))
+    # Any direction: a blast-radius probe is not scoped to one value flow, it just
+    # needs each argument to carry a value the role evidence justifies.
+    probe_fn = facts_for_name(facts, name)
+    roles = integer_param_roles(probe_fn, types) if probe_fn is not None else {}
+    calldata = encode_calldata(
+        selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles)
+    )
     if calldata is None:
         return None
     # Gas only: the caller must be able to pay, or an out-of-gas revert pre-pause
@@ -1054,17 +1246,17 @@ def _seed_fixture_for_role(entry: Mapping[str, Any], caller: str, target: str) -
         logger.debug("effects calldata: token_slots caller not an address: %r", caller)
         return None
 
-    # The synthesizer substitutes identity=caller for every address arg and
-    # ARG_AMOUNT for every uint arg (see ``_arg_values``), so in a probe an
-    # allowance is m[owner=caller][spender=caller] and a uint-keyed owner mapping
-    # is read at tokenId == ARG_AMOUNT — the seeds MUST match those exact keys.
+    # The synthesizer substitutes identity=caller for every address arg (see
+    # ``_arg_values``), so in a probe an allowance is m[owner=caller][spender=caller];
+    # an id-shaped uint arg carries ARG_IDENTIFIER, so a uint-keyed owner mapping is
+    # read at exactly that token id — the seeds MUST match those keys.
     if role in ("balance", "shares") and key_kind == "address":
         keys, subs, value = [caller_key], {0: caller}, _word_hex(SEED_AMOUNT)
     elif role == "allowance" and key_kind == "address_address":
         keys, subs, value = [caller_key, caller_key], {0: caller, 1: caller}, _word_hex(SEED_AMOUNT)
     elif role == "owner" and key_kind == "uint256":
         # The stored word IS the caller: ownerOf(tokenId) must return the prober.
-        keys, subs, value = [ARG_AMOUNT], {0: ARG_AMOUNT}, _word_hex(caller_key)
+        keys, subs, value = [ARG_IDENTIFIER], {0: ARG_IDENTIFIER}, _word_hex(caller_key)
     else:
         logger.debug("effects calldata: token_slots role/kind unsupported: role=%r kind=%r", role, key_kind)
         return None
@@ -1180,7 +1372,13 @@ def input_token_hints(fn: FunctionFacts) -> tuple[str, ...]:
     return tuple(dict.fromkeys(hints))
 
 
-def seeded_calldata(fn: FunctionFacts, principal: str, *, sentinel_index: int | None = None) -> dict[int, str]:
+def seeded_calldata(
+    fn: FunctionFacts,
+    principal: str,
+    *,
+    sentinel_index: int | None = None,
+    directions: frozenset[str] | None = None,
+) -> dict[int, str]:
     """``token decimals -> calldata`` for the SEEDED retry of a value/supply probe.
 
     The unseeded probe sends :data:`ARG_AMOUNT` (1 unit) — the amount that slips
@@ -1197,9 +1395,10 @@ def seeded_calldata(fn: FunctionFacts, principal: str, *, sentinel_index: int | 
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return {}
+    roles = integer_param_roles(fn, types, directions)
     out: dict[int, str] = {}
     for decimals in SEED_UNIT_DECIMALS:
-        subs = _arg_values(types, identity=principal, amount=10**decimals)
+        subs = _arg_values(types, identity=principal, amount=10**decimals, integer_roles=roles)
         if sentinel_index is not None:
             if not (0 <= sentinel_index < len(types)):
                 return {}
@@ -1308,6 +1507,9 @@ def synthesize(session: Session, candidate: Candidate) -> CandidatePlanInputs:
 
 __all__ = [
     "ARG_AMOUNT",
+    "ARG_IDENTIFIER",
+    "ROLE_AMOUNT",
+    "ROLE_IDENTIFIER",
     "NEUTRAL_CALLER",
     "SENTINEL_ADDRESS",
     "FIXTURE_BALANCE_WEI",
@@ -1320,7 +1522,11 @@ __all__ = [
     "SupplyPlanInputs",
     "ValueOutPlanInputs",
     "encode_calldata",
+    "facts_for_name",
+    "function_payable",
     "guarded_functions",
+    "has_native_payout",
+    "integer_param_roles",
     "load_contract_facts",
     "read_max_pause_duration",
     "resolve_function",

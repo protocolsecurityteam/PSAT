@@ -83,6 +83,7 @@ def _effect_info(
     state_writes: list[dict[str, Any]] | None = None,
     effect_labels: list[str] | None = None,
     value_flows: list[dict[str, Any]] | None = None,
+    parameter_names: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "function": full_name,
@@ -94,6 +95,9 @@ def _effect_info(
         "effect_labels": effect_labels or [],
         "effect_targets": [],
         "state_changing": True,
+        # Real artifacts always carry these; the prober needs a NAMED quantity
+        # before it may substitute one (``integer_param_roles``).
+        "parameter_names": parameter_names or [],
     }
 
 
@@ -120,8 +124,11 @@ def _token_facts(**overrides: Any) -> cd.ContractFacts:
             "transfer(address,uint256)",
             TRANSFER,
             value_flows=[{"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}],
+            parameter_names=["to", "amount"],
         ),
-        "mint(address,uint256)": _effect_info("mint(address,uint256)", MINT, effect_labels=["mint"]),
+        "mint(address,uint256)": _effect_info(
+            "mint(address,uint256)", MINT, effect_labels=["mint"], parameter_names=["to", "amount"]
+        ),
         "pause()": _effect_info("pause()", PAUSE_SEL, state_writes=[_write("paused", "bool")]),
         "deposit()": _effect_info("deposit()", DEPOSIT),
         "adminOnly()": _effect_info("adminOnly()", ADMIN_ONLY),
@@ -268,7 +275,7 @@ REDEEM_SIG = "redeem(uint256,address)"
 def _redeem_facts(*, flows: list[dict[str, Any]], legacy: list[dict[str, Any]] | None = None) -> cd.ContractFacts:
     """An ETH-redeem entry point whose recipient appears in NO gate — the shape
     the name->slot map is blind to."""
-    effects = {REDEEM_SIG: _effect_info(REDEEM_SIG, REDEEM, value_flows=flows)}
+    effects = {REDEEM_SIG: _effect_info(REDEEM_SIG, REDEEM, value_flows=flows, parameter_names=["amount", "recipient"])}
     return cd.ContractFacts(
         address=CONTRACT,
         job_id="job-1",
@@ -788,6 +795,10 @@ def _eeth_facts(latch_var: str) -> cd.ContractFacts:
                     "origin": "guard",
                 }
             ],
+            # eETH's real ABI names: the trailing quantity is ``_amount`` on each.
+            parameter_names=["_sender", "_recipient", "_amount"]
+            if name.startswith("transferFrom")
+            else ["_recipient", "_amount"],
         )
         trees[name] = guarded_tree
     return cd.ContractFacts(
@@ -949,6 +960,7 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
                 full_name,
                 selector,
                 value_flows=[{"kind": "native_transfer_send", "direction": "out", "origin": "body"}],
+                parameter_names=["_recipient", "_amount"],
             )
         },
         trees={full_name: _and(_leaf(_param("_recipient", 0)))},
