@@ -52,7 +52,11 @@ logger = logging.getLogger(__name__)
 # slots, read-back verified). A v1 ``unknown`` row for a surface whose entry
 # points were precondition-blind would otherwise cache-hit forever and mask the
 # widened observed radius.
-EFFECT_CACHE_SCHEMA_VERSION = 2
+# v3: Tier-1 value_out/supply probes retry with the caller's INPUT ASSET seeded
+# (read-back verified). Every deposit-backed conversion previously cached an
+# ``unknown`` from a precondition revert; those rows would otherwise hit forever
+# and keep the whole ``supply.mint`` backing witness empty.
+EFFECT_CACHE_SCHEMA_VERSION = 3
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

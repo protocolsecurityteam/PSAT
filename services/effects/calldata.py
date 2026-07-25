@@ -55,6 +55,7 @@ from services.effects.config import (
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
 )
+from services.effects.seeding import SEED_UNIT_DECIMALS
 from services.effects.selection import Candidate
 from services.policy.effective_permissions import _abi_signature
 from services.resolution.differential_probe import (
@@ -118,6 +119,11 @@ class ValueOutPlanInputs:
     # measures against, and the acting deployment's own balance floor.
     value_holders: tuple[tuple[str, float], ...] = ()
     acting_balance_usd: float = 0.0
+    # Input-asset seeding: candidate getters naming the asset F pulls, and the
+    # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
+    input_token_hints: tuple[str, ...] = ()
+    seeded_calldata: Mapping[int, str] = field(default_factory=dict)
+    seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -132,6 +138,10 @@ class SupplyPlanInputs:
     taint_param_reaches_sink: bool = False
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
+    # Input-asset seeding — see :class:`ValueOutPlanInputs`.
+    input_token_hints: tuple[str, ...] = ()
+    seeded_calldata: Mapping[int, str] = field(default_factory=dict)
+    seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -588,6 +598,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
     if built is None:
         return None
     calldata, tainted, sentinel_calldata = built
+    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_OUT_DIRECTIONS))
     return ValueOutPlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
@@ -598,6 +609,9 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
         acting_balance_usd=candidate.acting_balance_usd,
+        input_token_hints=input_token_hints(fn),
+        seeded_calldata=seeded,
+        seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
     )
 
 
@@ -613,6 +627,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
     if built is None:
         return None
     calldata, tainted, sentinel_calldata = built
+    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
     return SupplyPlanInputs(
         # The candidate's own probe target. A candidate that is not an ERC-20
         # simply fails the pre-read and lands ``unknown`` — that is the honest
@@ -624,7 +639,25 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         taint_param_reaches_sink=tainted,
         sentinel_address=SENTINEL_ADDRESS if sentinel_calldata else None,
         sentinel_calldata=sentinel_calldata,
+        input_token_hints=input_token_hints(fn),
+        seeded_calldata=seeded,
+        seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
     )
+
+
+def _seeded_probe_calldata(
+    fn: FunctionFacts, principal: str, directions: frozenset[str]
+) -> tuple[dict[int, str], dict[int, str]]:
+    """``(base, sentinel)`` whole-unit calldata for the seeded retry, keyed by
+    token decimals. Empty dicts when the signature will not encode — the probe
+    then simply never retries."""
+    types = _parse_arg_types(fn.canonical_signature)
+    if types is None:
+        return {}, {}
+    base = seeded_calldata(fn, principal)
+    taint_idx = _taint_index(fn, types, directions)
+    sentinel = seeded_calldata(fn, principal, sentinel_index=taint_idx) if taint_idx is not None else {}
+    return base, sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1100,109 @@ def _token_seed_fixtures(
             if fx is not None:
                 fixtures.append(fx)
     return tuple(fixtures)
+
+
+# ---------------------------------------------------------------------------
+# Input-asset seeding (§4.2 / §4.5 preconditions) — Tier 1
+# ---------------------------------------------------------------------------
+
+# Directions whose asset the ACTING PRINCIPAL must already hold for the call to
+# get past its first line: a pull (``in``) and a burn of the caller's own
+# holding. An ``out`` flow is what the function produces, never its precondition.
+_INPUT_DIRECTIONS = frozenset({"in", "burn"})
+
+# ERC-20/721 selectors that PULL from the caller. A body sink bearing one of
+# these names the input asset in its dotted target (``eETH.transferFrom``).
+_PULL_SELECTORS = frozenset(
+    {
+        "0x23b872dd",  # transferFrom(address,address,uint256)
+        "0x42842e0e",  # safeTransferFrom(address,address,uint256)
+        "0xb88d4fde",  # safeTransferFrom(address,address,uint256,bytes)
+        "0x9dc29fac",  # burn(address,uint256)
+        "0x79cc6790",  # burnFrom(address,uint256)
+    }
+)
+
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Zero-arg getter every ERC-4626 vault must expose for its input asset. A
+# standard, not a name guess — and a wrong candidate can only fail to unblock the
+# call, never fabricate an inflow.
+_ERC4626_ASSET_GETTER = "asset()"
+
+# The probe target itself, as a token-hint sentinel: a withdrawal/unwrap burns
+# the caller's holding of the very contract under probe.
+SELF_TOKEN_HINT = "__self__"
+
+
+def input_token_hints(fn: FunctionFacts) -> tuple[str, ...]:
+    """Zero-arg getter signatures on the probe target that name the asset F pulls
+    from its caller, most specific first, plus :data:`SELF_TOKEN_HINT`.
+
+    Two artifact sources, no name invention: the dotted target of a body sink
+    carrying an ERC-20 PULL selector (``eETH.transferFrom`` ⇒ ``eETH()``), and the
+    ``token_var`` of a ``contract_analysis`` value flow whose direction is a pull
+    or burn and whose token is NOT a caller-supplied parameter. A caller-supplied
+    token param is deliberately excluded: the probe encoder substitutes the
+    principal for every address arg, so there is no token there to seed.
+
+    These are CANDIDATES, not claims. Identity is settled on the wire (the getter
+    must return an address whose storage read-back confirms a balance mapping),
+    and the verdict is settled by an observed transfer — a wrong candidate simply
+    leaves the call reverting exactly as it does today."""
+    names: list[str] = []
+
+    def _add(raw: Any) -> None:
+        name = str(raw or "").strip()
+        if name and _IDENTIFIER.match(name) and name not in names:
+            names.append(name)
+
+    for sink in fn.effect_info.get("sinks") or []:
+        if not isinstance(sink, dict) or sink.get("kind") != "external_call" or sink.get("origin") != "body":
+            continue
+        if str(sink.get("selector") or "").lower() not in _PULL_SELECTORS:
+            continue
+        _add(str(sink.get("target") or "").split(".")[0])
+    for flow in fn.legacy_value_flows:
+        if str(flow.get("direction")) not in _INPUT_DIRECTIONS or flow.get("is_parameter"):
+            continue
+        _add(flow.get("token_var"))
+
+    hints = [f"{name}()" for name in names]
+    hints.append(_ERC4626_ASSET_GETTER)
+    hints.append(SELF_TOKEN_HINT)
+    return tuple(dict.fromkeys(hints))
+
+
+def seeded_calldata(fn: FunctionFacts, principal: str, *, sentinel_index: int | None = None) -> dict[int, str]:
+    """``token decimals -> calldata`` for the SEEDED retry of a value/supply probe.
+
+    The unseeded probe sends :data:`ARG_AMOUNT` (1 unit) — the amount that slips
+    under rate limiters when the caller already holds the asset. Once the input is
+    seeded that amount becomes the new failure mode: a conversion rounds 1 unit to
+    a zero-sized mint (measured: ``WeETH.wrap(1)`` reverts on
+    ``require(weEthAmount > 0)``), which is a non-observation, not a witness. So
+    the seeded retry sends ONE WHOLE UNIT of the input token, pre-encoded per
+    common token scale because the encoder runs offline and the decimals are only
+    known once the discovery block has read them back.
+
+    ``sentinel_index`` re-points the taint-identified address param at the
+    attacker sentinel, so a seeded sentinel probe keeps its meaning."""
+    types = _parse_arg_types(fn.canonical_signature)
+    if types is None:
+        return {}
+    out: dict[int, str] = {}
+    for decimals in SEED_UNIT_DECIMALS:
+        subs = _arg_values(types, identity=principal, amount=10**decimals)
+        if sentinel_index is not None:
+            if not (0 <= sentinel_index < len(types)):
+                return {}
+            subs[sentinel_index] = SENTINEL_ADDRESS
+        encoded = encode_calldata(fn.selector, fn.canonical_signature, substitutions=subs)
+        if encoded is None:
+            return {}
+        out[decimals] = encoded
+    return out
 
 
 def synthesize_pause(

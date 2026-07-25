@@ -13,7 +13,9 @@ not persist to the DB and do not route discrepancies anywhere (Phase 3).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from services.effects.config import (
@@ -37,8 +39,24 @@ from services.effects.harness import (
     record_calls,
     unknown,
 )
-from services.effects.simulate import SimCall, SimCallResult, Simulate, transfers_in, transfers_out
+from services.effects.seeding import (
+    SEED_ETH_VALUE,
+    Seeder,
+    Seeding,
+    SeedRequest,
+    eth_value_override,
+)
+from services.effects.simulate import (
+    SimCall,
+    SimCallResult,
+    Simulate,
+    StateOverride,
+    transfers_in,
+    transfers_out,
+)
 from utils.rpc import EthCallResult
+
+logger = logging.getLogger(__name__)
 
 # EIP-1967 implementation slot. keccak("eip1967.proxy.implementation") - 1.
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
@@ -81,6 +99,117 @@ def uups_sentinel_override(sentinel_address: str, impl_slot: str = EIP1967_IMPL_
 
 
 # ---------------------------------------------------------------------------
+# Input-asset seeding (shared by §4.2 and §4.5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _SeedAttempt:
+    """One seeded retry of a probe call."""
+
+    label: str
+    overrides: StateOverride | None
+    value: int
+    calldata: str
+    sentinel_calldata: str | None
+    seeding: Seeding | None
+
+    @property
+    def readback(self) -> tuple[SimCall, ...]:
+        return self.seeding.readback_calls if self.seeding else ()
+
+    @property
+    def expected(self) -> tuple[str, ...]:
+        return self.seeding.readback_expected if self.seeding else ()
+
+
+def _seed_attempts(
+    *,
+    seeder: Seeder | None,
+    transcript: dict[str, Any],
+    contract_address: str,
+    principal: str | None,
+    token_hints: Sequence[str],
+    seeded_calldata: Mapping[int, str],
+    seeded_sentinel_calldata: Mapping[int, str],
+    block_tag: str,
+) -> list[_SeedAttempt]:
+    """The ordered retries for a probe whose UNSEEDED call already reverted.
+
+    Ordering is the soundness argument, not an optimization:
+
+    * the ERC-20 attempt runs first, at ``value == 0``, so an asset the call then
+      consumes is one it genuinely pulls;
+    * ``msg.value`` is attached only on the SECOND attempt — i.e. only after a
+      zero-value call provably failed. Attaching ETH up front would let a payable
+      admin mint bank our own ``msg.value`` as an "inflow" when a real caller
+      could mint with nothing attached. This ordering makes an ETH deposit's
+      inflow a witnessed REQUIREMENT.
+
+    An unresolvable token yields the payable attempt alone; nothing resolvable at
+    all yields no attempt, and the probe keeps exactly today's verdict."""
+    if seeder is None or not principal or not seeded_calldata:
+        return []
+    seeding: Seeding | None = None
+    if token_hints:
+        try:
+            seeding = seeder(
+                SeedRequest(
+                    spender=contract_address,
+                    principal=principal,
+                    token_hints=tuple(token_hints),
+                    block_tag=block_tag,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a failed seeder only means "do not seed"
+            logger.debug("effects recipes: seeder failed for %s", contract_address, exc_info=True)
+            seeding = None
+    decimals = seeding.decimals if seeding else 18
+    calldata = seeded_calldata.get(decimals) or seeded_calldata.get(18)
+    if calldata is None:
+        return []
+    sentinel = seeded_sentinel_calldata.get(decimals) or seeded_sentinel_calldata.get(18)
+    if seeding is not None:
+        transcript["seeding"] = dict(seeding.detail)
+    attempts: list[_SeedAttempt] = []
+    if seeding is not None:
+        attempts.append(
+            _SeedAttempt("seeded_probe", seeding.overrides, 0, calldata, sentinel, seeding),
+        )
+    attempts.append(
+        _SeedAttempt(
+            "seeded_probe_payable",
+            eth_value_override(principal, seeding.overrides if seeding else None),
+            SEED_ETH_VALUE,
+            calldata,
+            sentinel,
+            seeding,
+        )
+    )
+    return attempts
+
+
+def _readback_ok(attempt: _SeedAttempt, results: Sequence[SimCallResult]) -> bool:
+    """Did every seeded slot echo its written word inside THIS probe's block?
+
+    The strict gate on every seeded verdict. The discovery block proved the
+    getter reads the slot; this proves the seed landed in the block the witness
+    comes from. Any revert or any mismatch ⇒ the whole attempt is discarded and
+    the probe falls back to its unseeded verdict — an unseeded ``unknown`` is
+    honest, a wrongly-seeded positive is not."""
+    expected = attempt.expected
+    if len(results) < len(expected):
+        return False
+    for want, got in zip(expected, results, strict=False):
+        if not got.success:
+            return False
+        value = _to_int(got.return_data)
+        if value is None or value != _to_int(want):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # §4.2 — value-out (+ three-valued destination shape)
 # ---------------------------------------------------------------------------
 
@@ -102,6 +231,10 @@ def value_out(
     value_holders: Sequence[tuple[str, float]] = (),
     acting_balance_usd: float = 0.0,
     gate_ref: str = "",
+    seeder: Seeder | None = None,
+    input_token_hints: Sequence[str] = (),
+    seeded_calldata: Mapping[int, str] | None = None,
+    seeded_sentinel_calldata: Mapping[int, str] | None = None,
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
 
@@ -130,10 +263,43 @@ def value_out(
     base_res = _run(simulate, tr, [base_call], label="value_probe")
     if base_res is None:
         return emit(store, _sim_precondition_unknown(EFFECT_CLASS_VALUE_OUT, gate_ref, tr))
-    moved = transfers_out(base_res.calls[0], contract_address)
+    observed = base_res.calls[0]
+    used: _SeedAttempt | None = None
+    if not observed.success:
+        # A precondition revert, not an absence of value movement: a payable or
+        # asset-pulling withdrawal never reaches its send with an empty caller.
+        used, seeded_result = _seeded_call(
+            simulate,
+            tr,
+            attempts=_seed_attempts(
+                seeder=seeder,
+                transcript=tr,
+                contract_address=contract_address,
+                principal=principal,
+                token_hints=input_token_hints,
+                seeded_calldata=seeded_calldata or {},
+                seeded_sentinel_calldata=seeded_sentinel_calldata or {},
+                block_tag=hex(tr["block_number"]),
+            ),
+            to=contract_address,
+            principal=principal,
+        )
+        if seeded_result is not None:
+            observed = seeded_result
+    moved = transfers_out(observed, contract_address)
     value_moved = bool(moved)
+    if used is not None:
+        tr["input_seeded"] = True
 
-    sentinel_transfers = _run_sentinel(simulate, tr, contract_address, principal, sentinel_calldata, sentinel_address)
+    sentinel_transfers = _run_sentinel(
+        simulate,
+        tr,
+        contract_address,
+        principal,
+        used.sentinel_calldata if used is not None else sentinel_calldata,
+        sentinel_address,
+        attempt=used,
+    )
     shape, proved_by, concrete_dest, disc = _resolve_destination_shape(
         effect_class=EFFECT_CLASS_VALUE_OUT,
         base_transfers=moved,
@@ -148,6 +314,11 @@ def value_out(
         "destination_shape": shape,
         "shape_proved_by": proved_by,
     }
+    if used is not None:
+        # Code-plane: the function could only be exercised once the caller held
+        # the input asset it pulls. Which token / how much is state-plane residue
+        # and stays in the transcript.
+        details["input_seeded"] = True
     concrete: dict[str, Any] = {}
     if concrete_dest is not None:
         concrete["destination"] = concrete_dest
@@ -390,6 +561,10 @@ def supply(
     static_shape: str | None = None,
     static_destination: str | None = None,
     gate_ref: str = "",
+    seeder: Seeder | None = None,
+    input_token_hints: Sequence[str] = (),
+    seeded_calldata: Mapping[int, str] | None = None,
+    seeded_sentinel_calldata: Mapping[int, str] | None = None,
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``? (§4.5)
 
@@ -416,6 +591,31 @@ def supply(
     if res is None or len(res.calls) != 3:
         return emit(store, _sim_precondition_unknown(EFFECT_CLASS_SUPPLY, gate_ref, tr))
     before_c, mint_c, after_c = res.calls
+    used: _SeedAttempt | None = None
+    if not mint_c.success:
+        # A deposit-backed conversion (wrap / enter / deposit) reverts here on the
+        # asset it pulls, never reaching the mint — so it drops out of the mint
+        # population and takes its backing witness with it. Retry with the input
+        # asset seeded.
+        used, seeded = _seeded_supply_call(
+            simulate,
+            tr,
+            attempts=_seed_attempts(
+                seeder=seeder,
+                transcript=tr,
+                contract_address=token_address,
+                principal=principal,
+                token_hints=input_token_hints,
+                seeded_calldata=seeded_calldata or {},
+                seeded_sentinel_calldata=seeded_sentinel_calldata or {},
+                block_tag=hex(tr["block_number"]),
+            ),
+            token_address=token_address,
+            principal=principal,
+        )
+        if seeded is not None:
+            before_c, mint_c, after_c = seeded
+            tr["input_seeded"] = True
     if not (before_c.success and after_c.success):
         return emit(
             store,
@@ -446,7 +646,14 @@ def supply(
         base_transfers=minted,
         sentinel_address=sentinel_address,
         sentinel_transfers=_run_sentinel(
-            simulate, tr, token_address, principal, sentinel_calldata, sentinel_address, mint_from_zero=True
+            simulate,
+            tr,
+            token_address,
+            principal,
+            used.sentinel_calldata if used is not None else sentinel_calldata,
+            sentinel_address,
+            mint_from_zero=True,
+            attempt=used,
         ),
         taint_param_reaches_sink=taint_param_reaches_sink,
         static_shape=static_shape,
@@ -472,6 +679,14 @@ def supply(
             "minted": bool(minted),
             "inflow_transfers": len(inflow),
             "mint_transfers": len(minted),
+            # Whether the acting principal had to be given the input asset before
+            # the mint would execute at all. It records HOW the call was reached,
+            # never what the call did: ``inflow_observed`` above still comes
+            # solely from Transfers this execution emitted, and storage seeding
+            # emits none. A seeded mint that pulls nothing is still an honest
+            # ``inflow_observed: false`` (witnessed dilution); an unseeded mint is
+            # unaffected by any of this.
+            "input_seeded": used is not None,
         }
     eff = proven(
         EFFECT_CLASS_SUPPLY,
@@ -508,6 +723,58 @@ def _run(
     return result
 
 
+def _seeded_call(
+    simulate: Simulate,
+    transcript: dict[str, Any],
+    *,
+    attempts: Sequence[_SeedAttempt],
+    to: str,
+    principal: str | None,
+) -> tuple[_SeedAttempt | None, SimCallResult | None]:
+    """Run the seeded retries of a single-call probe until one EXECUTES.
+
+    Returns the attempt and its result only when the read-back held AND the call
+    succeeded; otherwise ``(None, None)`` and the caller keeps its unseeded
+    verdict verbatim."""
+    for attempt in attempts:
+        calls = [
+            *attempt.readback,
+            SimCall(to=to, data=attempt.calldata, from_addr=principal, value=attempt.value),
+        ]
+        res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
+        if res is None or not _readback_ok(attempt, res.calls):
+            continue
+        target = res.calls[len(attempt.readback)]
+        if target.success:
+            return attempt, target
+    return None, None
+
+
+def _seeded_supply_call(
+    simulate: Simulate,
+    transcript: dict[str, Any],
+    *,
+    attempts: Sequence[_SeedAttempt],
+    token_address: str,
+    principal: str | None,
+) -> tuple[_SeedAttempt | None, tuple[SimCallResult, SimCallResult, SimCallResult] | None]:
+    """Seeded-retry form of the read → mint → read block. The two ``totalSupply``
+    reads must bracket the seeded call in the SAME block, so the whole triple is
+    re-run rather than splicing a seeded mint into the unseeded reads."""
+    read = SimCall(to=token_address, data=TOTAL_SUPPLY_SELECTOR)
+    for attempt in attempts:
+        mint = SimCall(to=token_address, data=attempt.calldata, from_addr=principal, value=attempt.value)
+        calls = [*attempt.readback, read, mint, read]
+        res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
+        if res is None or len(res.calls) != len(calls) or not _readback_ok(attempt, res.calls):
+            continue
+        head = len(attempt.readback)
+        before_c, mint_c, after_c = res.calls[head], res.calls[head + 1], res.calls[head + 2]
+        if mint_c.success:
+            return attempt, (before_c, mint_c, after_c)
+    return None, None
+
+
 def _run_sentinel(
     simulate: Simulate,
     transcript: dict[str, Any],
@@ -517,19 +784,30 @@ def _run_sentinel(
     sentinel_address: str | None,
     *,
     mint_from_zero: bool = False,
+    attempt: _SeedAttempt | None = None,
 ) -> list[tuple[str, str, str]] | None:
     """Run the attacker-sentinel probe if one was supplied, returning its
     transfers of interest (or ``None`` when no sentinel probe ran). A sentinel
     that moves nothing returns ``[]`` — a non-observation the shape resolver
-    treats as rule-8.1 ``unknown``, never "fixed"."""
+    treats as rule-8.1 ``unknown``, never "fixed".
+
+    When the base probe only executed under a seed, the sentinel runs under the
+    SAME seed: an unseeded sentinel would revert on the same precondition and its
+    empty result would read as "the caller cannot redirect this", which is a
+    conclusion the probe never actually tested."""
     if not sentinel_calldata or not sentinel_address:
         return None
-    call = SimCall(to=source_address, data=sentinel_calldata, from_addr=principal)
-    res = _run(simulate, transcript, [call], label="sentinel_probe")
+    overrides = attempt.overrides if attempt is not None else None
+    value = attempt.value if attempt is not None else 0
+    readback = attempt.readback if attempt is not None else ()
+    call = SimCall(to=source_address, data=sentinel_calldata, from_addr=principal, value=value)
+    res = _run(simulate, transcript, [*readback, call], overrides=overrides, label="sentinel_probe")
     if res is None:
         return None
+    if attempt is not None and not _readback_ok(attempt, res.calls):
+        return None
     src = "0x" + "00" * 20 if mint_from_zero else source_address
-    return transfers_out(res.calls[0], src)
+    return transfers_out(res.calls[len(readback)], src)
 
 
 def _resolve_destination_shape(

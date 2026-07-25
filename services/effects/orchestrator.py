@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -54,6 +55,7 @@ from services.effects.harness import (
     TranscriptStore,
     select_identities,
 )
+from services.effects.seeding import Seeder, SimulateSeeder, input_seeding_enabled
 from services.effects.selection import Candidate
 from services.effects.simulate import Simulate
 
@@ -76,9 +78,28 @@ class ProbeContext:
     # Called with the number of upstream requests a probe issued, for the
     # §3-preflight sizing metric (best-effort; recipes that don't report leave 0).
     on_requests: Callable[[int], None] | None = None
+    # Input-asset seeding seam. Left unset in production: the default is built
+    # from ``simulate`` on first use and memoizes token identity + storage layout
+    # for the WHOLE context, so a job's candidates share one discovery.
+    seeder: Seeder | None = None
+    _seeder_cache: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     def sim_context(self) -> SimContext:
         return SimContext(chain_id=self.chain_id, block=self.block, hardfork=self.hardfork)
+
+    def effective_seeder(self) -> Seeder | None:
+        """The seeder Tier-1 probes retry through, or ``None`` (⇒ no seeding, the
+        pre-seeding probe verbatim). Requires ``eth_simulateV1``: seeding is a
+        state-override retry of the same block, with no Tier-2 equivalent."""
+        if self.seeder is not None:
+            return self.seeder
+        if not self.simulate_supported or not input_seeding_enabled():
+            return None
+        cached = self._seeder_cache.get("seeder")
+        if cached is None:
+            cached = SimulateSeeder(self.simulate, chain_id=self.chain_id)
+            self._seeder_cache["seeder"] = cached
+        return cached
 
 
 @dataclass
@@ -291,6 +312,10 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             value_holders=spec.value_holders,
             acting_balance_usd=spec.acting_balance_usd,
             gate_ref=spec.gate_ref,
+            seeder=ctx.effective_seeder(),
+            input_token_hints=spec.input_token_hints,
+            seeded_calldata=spec.seeded_calldata,
+            seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
@@ -310,6 +335,10 @@ def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> Pr
             sentinel_address=spec.sentinel_address,
             sentinel_calldata=spec.sentinel_calldata,
             gate_ref=spec.gate_ref,
+            seeder=ctx.effective_seeder(),
+            input_token_hints=spec.input_token_hints,
+            seeded_calldata=spec.seeded_calldata,
+            seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
