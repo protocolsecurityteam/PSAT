@@ -53,12 +53,9 @@ def _is_canonical_signature(signature: str) -> bool:
     type — i.e. hashing it yields the selector the chain would dispatch on. A
     residual user-defined name (``setAuthority(Authority)``) means the signature
     was never lowered, so its hash is not a real selector."""
-    if "(" not in signature or not signature.endswith(")"):
-        return False
-    from ..contract_analysis_pipeline.predicate_artifacts import _is_elementary_token, _split_top_level
+    from ..contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
 
-    body = signature[signature.index("(") + 1 : -1]
-    return all(_is_elementary_token(token) for token in _split_top_level(body) if token.strip())
+    return is_canonical_abi_signature(signature)
 
 
 def _lowered_types(elements: Any) -> list[str] | None:

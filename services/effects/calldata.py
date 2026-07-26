@@ -801,7 +801,12 @@ def function_payable(fn: "FunctionFacts") -> bool | None:
 
 
 def _selector_of(signature: str) -> str | None:
-    if not signature or "(" not in signature or not signature.endswith(")"):
+    """The 4-byte selector, or ``None`` when ``signature`` is not a fully lowered
+    ABI signature. A residual user-defined type name means the hash is not a
+    dispatch value, and a probe keyed on it would call the wrong function."""
+    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+
+    if not signature or not is_canonical_abi_signature(signature):
         return None
     return "0x" + keccak(text=signature)[:4].hex()
 

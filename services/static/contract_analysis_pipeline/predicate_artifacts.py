@@ -195,6 +195,21 @@ def _is_elementary_token(token: str) -> bool:
     return token.startswith(_ELEMENTARY_PREFIXES)
 
 
+def is_canonical_abi_signature(signature: str) -> bool:
+    """True when every parameter token of ``signature`` is an EVM elementary type
+    — i.e. ``keccak(signature)[:4]`` really is the function's ``msg.sig``.
+
+    A residual user-defined name (``setAuthority(Authority)``,
+    ``f(IFoo.PermitInput)``) means the signature was never lowered, so its hash
+    names a dispatch that does not exist. This is the same rejection
+    :func:`_canonical_signature` applies to its own output, shared so that every
+    consumer deriving a selector from a *string* can fail closed the same way."""
+    if "(" not in signature or not signature.endswith(")"):
+        return False
+    body = signature[signature.index("(") + 1 : -1]
+    return all(_is_elementary_token(token) for token in _split_top_level(body) if token.strip())
+
+
 def _split_top_level(s: str) -> list[str]:
     """Split a comma-joined tuple body at depth-0 commas only."""
     out: list[str] = []

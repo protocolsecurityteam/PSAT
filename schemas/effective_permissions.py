@@ -48,7 +48,10 @@ class ResolvedControllerGrant(TypedDict):
 class EffectiveFunctionPermission(TypedDict):
     function: str
     abi_signature: str
-    selector: str
+    # ``None`` when the signature could not be fully lowered to elementary ABI
+    # types: a hash of a string still naming a user-defined type is not a
+    # selector the chain dispatches on, and no answer beats a wrong one.
+    selector: str | None
     direct_owner: ResolvedPrincipal | None
     authority_public: bool
     authority_roles: list[AuthorityRoleGrant]
