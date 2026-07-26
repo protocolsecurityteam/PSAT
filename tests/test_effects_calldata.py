@@ -237,6 +237,59 @@ def test_value_out_sentinel_lands_in_taint_slot():
     assert spec.calldata[10:74].endswith("22" * 20)
 
 
+BATCH_SIG = "batchClaim(uint256[],address[])"
+BATCH_SEL = "0x55556666"
+
+
+def _batch_fn(signature: str = BATCH_SIG, names: list[str] | None = None) -> cd.FunctionFacts:
+    return cd.FunctionFacts(
+        full_name=signature,
+        selector=BATCH_SEL,
+        canonical_signature=signature,
+        effect_info=_effect_info(
+            signature,
+            BATCH_SEL,
+            value_flows=[{"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}],
+            parameter_names=names or ["ids", "recipients"],
+        ),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def _decode(calldata: str, signature: str) -> tuple[Any, ...]:
+    from eth_abi.abi import decode as abi_decode
+
+    types = cd._parse_arg_types(signature)
+    assert types is not None
+    return abi_decode(types, bytes.fromhex(calldata[10:]))
+
+
+def test_a_batch_function_is_probed_with_a_non_empty_array():
+    """G6-B. The encoder's default for a dynamic array is empty, and an empty
+    array is a loop body that never runs — so the probe executed, moved nothing,
+    and that non-observation was published and cached as a structural fact about
+    a function whose body it never entered."""
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
+    assert spec is not None
+    ids, recipients = _decode(spec.calldata, BATCH_SIG)
+    # Each element is what the SCALAR policy proves for that element type: ``ids``
+    # is a handle, ``recipients`` is where a payout can be observed.
+    assert ids == (cd.ARG_IDENTIFIER,)
+    assert [a.lower() for a in recipients] == [PRINCIPAL.lower()]
+
+
+def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
+    """A ``bytes[]`` has no honest element, and that is not a reason to send a
+    length-0 array: an empty one is the cacheable false negative, a length-1 one
+    is a call the contract itself gets to reject."""
+    sig = "submit(bytes[])"
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn(sig, names=["payloads"]))
+    assert spec is not None
+    (payloads,) = _decode(spec.calldata, sig)
+    assert payloads == (b"",)
+
+
 def test_value_out_none_without_a_value_flow():
     facts = _token_facts()
     fn = cd.resolve_function(facts, DEPOSIT)

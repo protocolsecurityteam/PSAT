@@ -444,13 +444,34 @@ def encode_calldata(
 
 
 _INTEGER_TYPE = re.compile(r"u?int\d*")
+_ARRAY_TYPE = re.compile(r"^(?P<element>.+)\[(?P<size>\d*)\]$")
+
+
+def _array_shape(type_str: str) -> tuple[str, int | None] | None:
+    """``(element_type, fixed_length)`` for an ABI array, ``None`` for a scalar.
+    ``fixed_length`` is ``None`` on a dynamic array."""
+    match = _ARRAY_TYPE.match(type_str.strip())
+    if match is None:
+        return None
+    size = match.group("size")
+    return match.group("element").strip(), (int(size) if size else None)
+
+
+def _element_type(type_str: str) -> str:
+    """The type a substitution has to satisfy for this slot: the element type of
+    an array, the type itself otherwise. A parameter's ROLE belongs to what it
+    carries, not to its arity — ``uint256[] amounts`` is as much a quantity slot
+    as ``uint256 amount``."""
+    shape = _array_shape(type_str)
+    return shape[0] if shape is not None else type_str.strip()
+
 
 # Word vocabulary for the ROLE of an integer parameter. Both sets are semantic,
 # not protocol-specific: a name is split into words and classified by what the
 # word MEANS in ABI usage, so ``assetAmount``/``_amount``/``wad`` are quantities
 # and ``tokenId``/``requestId``/``index``/``deadline`` are not, on any contract.
 _AMOUNT_WORDS = frozenset(
-    {"amount", "amounts", "value", "values", "qty", "quantity", "shares", "wad", "fee", "fees", "assets"}
+    {"amount", "amounts", "value", "values", "qty", "quantity", "share", "shares", "wad", "fee", "fees", "assets"}
 )
 # Names that denote a HANDLE to something the contract stores — a token id, a
 # queue position. These take the small id filler, which is also the key the
@@ -510,7 +531,7 @@ def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], direction
         index = flow.get("amount_param_index")
         if kind_name not in ("param", "param_derived") or not isinstance(index, int) or isinstance(index, bool):
             continue
-        if 0 <= index < len(types) and _INTEGER_TYPE.fullmatch(types[index].strip()):
+        if 0 <= index < len(types) and _INTEGER_TYPE.fullmatch(_element_type(types[index])):
             out.add(index)
     return out
 
@@ -532,7 +553,7 @@ def integer_param_roles(
     names = _declared_param_names(fn, len(types))
     roles: dict[int, str] = {}
     for idx, type_str in enumerate(types):
-        if not _INTEGER_TYPE.fullmatch(type_str.strip()):
+        if not _INTEGER_TYPE.fullmatch(_element_type(type_str)):
             continue
         words = _name_words(names[idx])
         # The two negative vocabularies are checked FIRST and beat every other
@@ -682,21 +703,56 @@ def _arg_values(
     produce. The identity keeps the slot occupied by something the probe never
     claims is a token; the seeded retry then writes a proven one
     (:func:`substitute_address_arg`), and the recipe withholds the backing
-    witness entirely when it could not."""
+    witness entirely when it could not.
+
+    An ARRAY parameter is encoded at length ONE, its element carrying whatever the
+    scalar policy proves for the element type. The encoder's own default for a
+    dynamic array is empty, and an empty array is a loop body that never runs: the
+    batch form of a function then executes, moves nothing, and publishes — and
+    CACHES — "this function moves no value" about a body no probe ever entered. A
+    length-1 array whose element is itself unproven is not a witness either, but
+    it is an honest attempt that the contract's own check gets to reject."""
     roles = integer_roles or {}
     subs: dict[int, Any] = {}
     for idx, type_str in enumerate(types):
-        t = type_str.strip()
-        if _is_address_type(t):
-            if identity:
-                subs[idx] = identity.lower()
-        elif _INTEGER_TYPE.fullmatch(t):
-            role = roles.get(idx)
-            if role == ROLE_AMOUNT:
-                subs[idx] = amount
-            elif role == ROLE_IDENTIFIER:
-                subs[idx] = ARG_IDENTIFIER
+        shape = _array_shape(type_str)
+        value = _scalar_arg_value(shape[0] if shape else type_str, idx, identity=identity, amount=amount, roles=roles)
+        if shape is None:
+            if value is not None:
+                subs[idx] = value
+            continue
+        element, length = shape
+        if value is None:
+            try:
+                value = _default_value_for_type(element)
+            except Exception:
+                # An element type the encoder can build no value for at all —
+                # leaving the slot to the encoder is the only honest option.
+                continue
+        subs[idx] = [value] * (1 if length is None else length)
     return subs
+
+
+def _scalar_arg_value(
+    type_str: str,
+    index: int,
+    *,
+    identity: str | None,
+    amount: int,
+    roles: Mapping[int, str],
+) -> Any | None:
+    """The value :func:`_arg_values` PROVES for one scalar slot, or ``None`` when
+    it proves nothing and the encoder's own default has to stand."""
+    t = type_str.strip()
+    if _is_address_type(t):
+        return identity.lower() if identity else None
+    if _INTEGER_TYPE.fullmatch(t):
+        role = roles.get(index)
+        if role == ROLE_AMOUNT:
+            return amount
+        if role == ROLE_IDENTIFIER:
+            return ARG_IDENTIFIER
+    return None
 
 
 # Flow kinds that move NATIVE ETH out of the contract's OWN balance (as opposed

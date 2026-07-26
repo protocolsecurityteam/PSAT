@@ -36,14 +36,17 @@ from typing import Any
 
 import pytest
 
+from services.effects import calldata as cd
 from services.effects import recipes
 from services.effects.anvil import SubprocessAnvil, anvil_available
 from services.effects.calldata import _mapping_entry_slot, encode_calldata
 from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
+from services.effects.selection import Candidate
 from services.effects.simulate import SimCall, eth_simulate_v1
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "effects" / "vault_value_supply.json"
+_BATCH_FIXTURE = Path(__file__).parent / "fixtures" / "effects" / "batch_executor_vault.json"
 
 # Clear of every other anvil in the suite — see the module docstring.
 _PORT = 8560
@@ -251,6 +254,140 @@ def test_a_funded_payout_to_the_immutable_treasury_is_proven_fixed(deployed):
     assert eff.details["destination_shape"] == "immutable_fixed"
     assert eff.details["shape_proved_by"] == "static"
     assert eff.concrete["destination"] == TREASURY.lower()
+
+
+# ---------------------------------------------------------------------------
+# §4.2 value-out — a body that only runs for a non-empty array (G6-B)
+# ---------------------------------------------------------------------------
+
+
+def _batch_fixture() -> dict[str, Any]:
+    return json.loads(_BATCH_FIXTURE.read_text())
+
+
+# Storage layout of the batch fixture: slot 0 is ``balanceOf``.
+_BATCH_BALANCE_BASE = "0x" + format(0, "064x")
+
+
+def _fn_facts(signature: str, selector: str, *, names: list[str], flows: list[dict[str, Any]]) -> cd.FunctionFacts:
+    return cd.FunctionFacts(
+        full_name=signature,
+        selector=selector,
+        canonical_signature=signature,
+        effect_info={
+            "function": signature,
+            "selector": selector,
+            "abi_signature": signature,
+            "sinks": [],
+            "state_writes": [],
+            "value_flows": flows,
+            "effect_labels": [],
+            "effect_targets": [],
+            "state_changing": True,
+            "parameter_names": names,
+        },
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def _candidate_for(address: str, principal: str, selector: str, **kw: Any) -> Candidate:
+    return Candidate(
+        function_id=1,
+        contract_id=1,
+        contract_address=address,
+        selector=selector,
+        function_name="f",
+        authority_public=True,
+        effect_targets=(),
+        principal_addresses=(principal,),
+        **kw,
+    )
+
+
+_OUT_FLOW = [{"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}]
+
+
+@pytest.fixture(scope="module")
+def batch_vault(chain):
+    """Deploy the batch/executor vault and hand back
+    ``(address, owner, simulate, fx, ctx)``.
+
+    The context carries the block this deployment landed in, and that is not
+    decoration: the recipes simulate at ``ctx.block``, and at any earlier block
+    this address is CODELESS — a call to which succeeds and moves nothing. Every
+    assertion below would then be about a contract that did not exist yet, which
+    is the fabricated non-observation this whole file exists to catch."""
+    fx = _batch_fixture()
+    owner = chain.accounts()[0]
+    address = chain.deploy(owner, fx["creation_bytecode"])
+    block = int(chain._rpc("eth_blockNumber", []), 16)
+    assert chain._rpc("eth_getCode", [address, hex(block)]) not in ("0x", "0x0", None)
+    ctx = SimContext(chain_id=31337, block=block, hardfork="prague")
+
+    def simulate(calls, block_tag, overrides=None):
+        return eth_simulate_v1(chain._url, list(calls), block_tag, overrides)
+
+    return address, owner, simulate, fx, ctx
+
+
+def _funded_vault(address: str, units: int = 10**18) -> dict[str, Any]:
+    slot = _mapping_entry_slot(_BATCH_BALANCE_BASE, [int(address, 16)])
+    assert slot is not None
+    return _slot_overrides(address, {slot: _word(units)})
+
+
+def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(batch_vault):
+    """The control, and the reason the fixture exists: with the encoder's own
+    default in the array slots the call SUCCEEDS and moves nothing, so the row
+    reads "executed, moved no value" — a negative published about a loop body the
+    probe never entered."""
+    address, owner, simulate, fx, ctx = batch_vault
+    empty = encode_calldata(fx["selectors"]["batchPay(uint256[],address[])"], "batchPay(uint256[],address[])")
+    assert empty is not None
+
+    eff = recipes.value_out(
+        simulate=lambda calls, tag, ov=None: simulate(calls, tag, _merge(ov, _funded_vault(address))),
+        store=RecordingStore(),
+        ctx=ctx,
+        contract_address=address,
+        principal=owner,
+        calldata=empty,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.details["observation"] == "executed"
+    assert eff.details["value_moved"] is False
+    assert eff.reason == "no_value_observed"
+
+
+def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
+    """G6-B end to end: PRODUCTION synthesis builds the calldata, and the same
+    function that moved nothing above now moves value on a real EVM."""
+    address, owner, simulate, fx, ctx = batch_vault
+    signature = "batchPay(uint256[],address[])"
+    fn = _fn_facts(
+        signature,
+        fx["selectors"][signature],
+        names=["amounts", "recipients"],
+        flows=_OUT_FLOW,
+    )
+    spec = cd.synthesize_value_out(_candidate_for(address, owner, fx["selectors"][signature]), fn)
+    assert spec is not None
+
+    eff = recipes.value_out(
+        simulate=lambda calls, tag, ov=None: simulate(calls, tag, _merge(ov, _funded_vault(address))),
+        store=RecordingStore(),
+        ctx=ctx,
+        contract_address=address,
+        principal=owner,
+        calldata=spec.calldata,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN, eff.reason
+    assert eff.details["value_moved"] is True
+    assert eff.details["observation"] == "executed"
+    assert eff.concrete["destination"] == owner.lower()
 
 
 def _merge(base: Any, extra: dict[str, Any]) -> dict[str, Any]:
