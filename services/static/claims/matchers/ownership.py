@@ -33,7 +33,7 @@ def _ownership_present(ctx: ClaimContext) -> bool:
         ac.is_ownable(ctx)
         or ac.solady_handover_gate(ctx)
         or ac.default_admin_rules_gate(ctx)
-        or (ctx.has_functions("transferOwnership") and bool(ac.caller_authority_scalar_vars(ctx)))
+        or (ctx.has_selectors(ac.TRANSFER_OWNERSHIP) and bool(ac.caller_authority_scalar_vars(ctx)))
     )
 
 
@@ -58,6 +58,8 @@ def _evidence(standard: str, selector: str, corroboration: str) -> ClaimEvidence
 )
 def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector == ac.TRANSFER_OWNERSHIP:
         if ac.is_ownable(ctx):
             return _evidence("ownable", selector, "owner_getter_sibling")
@@ -79,6 +81,8 @@ def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None
 )
 def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector != ac.RENOUNCE_OWNERSHIP:
         return None
     if ac.is_ownable(ctx):
@@ -97,6 +101,8 @@ def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None
 )
 def ownership_accept(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ac.canonical_selector(ctx, function)
+    if selector is None:
+        return None
     if selector == ac.ACCEPT_OWNERSHIP and ac.is_ownable(ctx):
         return _evidence("ownable2step", selector, "owner_getter_sibling")
     if selector == ac.ACCEPT_DEFAULT_ADMIN and ac.default_admin_rules_gate(ctx):

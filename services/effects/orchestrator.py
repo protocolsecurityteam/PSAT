@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -37,7 +38,7 @@ from sqlalchemy.orm import Session
 from db.models import Contract, UpgradeEvent
 from services.effects import calldata as calldata_synth
 from services.effects import recipes
-from services.effects.anvil import AnvilTransport, pause_recipe
+from services.effects.anvil import AnvilTransport, pause_recipe, timelock_execute_recipe
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
@@ -54,6 +55,7 @@ from services.effects.harness import (
     TranscriptStore,
     select_identities,
 )
+from services.effects.seeding import Seeder, SimulateSeeder, input_seeding_enabled
 from services.effects.selection import Candidate
 from services.effects.simulate import Simulate
 
@@ -76,9 +78,28 @@ class ProbeContext:
     # Called with the number of upstream requests a probe issued, for the
     # §3-preflight sizing metric (best-effort; recipes that don't report leave 0).
     on_requests: Callable[[int], None] | None = None
+    # Input-asset seeding seam. Left unset in production: the default is built
+    # from ``simulate`` on first use and memoizes token identity + storage layout
+    # for the WHOLE context, so a job's candidates share one discovery.
+    seeder: Seeder | None = None
+    _seeder_cache: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     def sim_context(self) -> SimContext:
         return SimContext(chain_id=self.chain_id, block=self.block, hardfork=self.hardfork)
+
+    def effective_seeder(self) -> Seeder | None:
+        """The seeder Tier-1 probes retry through, or ``None`` (⇒ no seeding, the
+        pre-seeding probe verbatim). Requires ``eth_simulateV1``: seeding is a
+        state-override retry of the same block, with no Tier-2 equivalent."""
+        if self.seeder is not None:
+            return self.seeder
+        if not self.simulate_supported or not input_seeding_enabled():
+            return None
+        cached = self._seeder_cache.get("seeder")
+        if cached is None:
+            cached = SimulateSeeder(self.simulate, chain_id=self.chain_id)
+            self._seeder_cache["seeder"] = cached
+        return cached
 
 
 @dataclass
@@ -138,6 +159,12 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
     (keyed ``(chain_id, address)``). DB-only (no wire) so hashing stays off the RPC
     path; a miss returns ``None`` and the candidate is skipped rather than guessed."""
     from db.models import BytecodeCache
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
+    addr = address.lower()
+    if pf is not None and pf.chain_id == chain_id and addr in pf.addresses:
+        return pf.bytecode_by_addr.get(addr)
 
     row = session.execute(
         select(BytecodeCache.bytecode).where(
@@ -155,8 +182,16 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
 
 def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
     """Build probe plans for one candidate: the Tier-0 code-upgrade plan plus one
-    plan per class the synthesizer produced concrete inputs for."""
-    return _code_upgrade_plans(session, candidate, ctx) + _synthesized_plans(session, candidate, ctx)
+    plan per class the synthesizer produced concrete inputs for.
+
+    §5c: a claim-enrolled candidate (``restrict_families`` set) is only re-probed
+    for its value/supply families — the code-upgrade probe is skipped so an
+    already-explained flow/supply function is not re-simulated for upgradeability."""
+    allow = candidate.restrict_families
+    plans: list[ProbePlan] = []
+    if allow is None or EFFECT_CLASS_CODE_UPGRADE in allow:
+        plans += _code_upgrade_plans(session, candidate, ctx)
+    return plans + _synthesized_plans(session, candidate, ctx)
 
 
 def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
@@ -170,19 +205,28 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
     resolved principal closes that. A renounced/unset authority resolves to the
     zero address / empty set here (predicate_evaluator / solmate_roles), so an
     empty resolved set WITHHOLDS (fail-closed §8), never over-claims."""
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
     plans: list[ProbePlan] = []
-    contract = session.execute(
-        select(Contract).where(Contract.id == candidate.contract_id).limit(1)
-    ).scalar_one_or_none()
+    if pf is not None and candidate.contract_id in pf.contract_ids:
+        contract = pf.contract_by_id.get(candidate.contract_id)
+    else:
+        contract = session.execute(
+            select(Contract).where(Contract.id == candidate.contract_id).limit(1)
+        ).scalar_one_or_none()
     if contract is None or not contract.is_proxy:
         return plans
 
-    has_indexed_upgrade = (
-        session.execute(
-            select(UpgradeEvent.id).where(UpgradeEvent.contract_id == candidate.contract_id).limit(1)
-        ).scalar_one_or_none()
-        is not None
-    )
+    if pf is not None and candidate.contract_id in pf.contract_ids:
+        has_indexed_upgrade = candidate.contract_id in pf.contract_ids_with_upgrade
+    else:
+        has_indexed_upgrade = (
+            session.execute(
+                select(UpgradeEvent.id).where(UpgradeEvent.contract_id == candidate.contract_id).limit(1)
+            ).scalar_one_or_none()
+            is not None
+        )
     if not has_indexed_upgrade:
         return plans
 
@@ -239,8 +283,17 @@ def _synthesized_plans(session: Session, candidate: Candidate, ctx: ProbeContext
     facts yields no plan at all rather than a probe on guessed calldata."""
     inputs = calldata_synth.synthesize(session, candidate)
     plans: list[ProbePlan] = []
-    if inputs.value_out is not None:
+    # A delayed executor gets the Tier-2 sequence INSTEAD of the Tier-1 probe, not
+    # alongside it. Tier 1 cannot satisfy a ``block.timestamp`` gate at all, so its
+    # row is a revert that reads as "we called it and it failed" while saying
+    # nothing about the function; and both plans carry the same effect class,
+    # scope and gate, so they would stage under one cache key. With no fork
+    # available the Tier-1 plan stands exactly as it does today.
+    timelocked = inputs.timelock is not None and ctx.anvil_factory is not None
+    if inputs.value_out is not None and not timelocked:
         plans.append(_value_out_plan(ctx, inputs.value_out))
+    if inputs.timelock is not None and ctx.anvil_factory is not None:
+        plans.append(_timelock_plan(ctx, inputs.timelock))
     if inputs.supply is not None:
         plans.append(_supply_plan(ctx, inputs.supply))
     if inputs.authority is not None:
@@ -265,7 +318,19 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             taint_param_reaches_sink=spec.taint_param_reaches_sink,
             sentinel_address=spec.sentinel_address,
             sentinel_calldata=spec.sentinel_calldata,
+            value_holders=spec.value_holders,
+            acting_balance_usd=spec.acting_balance_usd,
             gate_ref=spec.gate_ref,
+            seeder=ctx.effective_seeder(),
+            input_token_hints=spec.input_token_hints,
+            token_param_indexes=spec.token_param_indexes,
+            seeded_calldata=spec.seeded_calldata,
+            seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
+            target_payable=spec.target_payable,
+            native_payout=spec.native_payout,
+            static_shape=spec.static_shape,
+            inputs_vacuous=spec.inputs_vacuous,
+            contract_holdings=spec.contract_holdings,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
@@ -285,6 +350,15 @@ def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> Pr
             sentinel_address=spec.sentinel_address,
             sentinel_calldata=spec.sentinel_calldata,
             gate_ref=spec.gate_ref,
+            seeder=ctx.effective_seeder(),
+            input_token_hints=spec.input_token_hints,
+            token_param_indexes=spec.token_param_indexes,
+            seeded_calldata=spec.seeded_calldata,
+            seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
+            target_payable=spec.target_payable,
+            native_payout=spec.native_payout,
+            inputs_vacuous=spec.inputs_vacuous,
+            contract_holdings=spec.contract_holdings,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
@@ -309,6 +383,52 @@ def _authority_plan(ctx: ProbeContext, candidate: Candidate, spec: calldata_synt
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_AUTHORITY_CHANGE, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _timelock_plan(ctx: ProbeContext, spec: calldata_synth.TimelockPlanInputs) -> ProbePlan:
+    def _run() -> ObservedEffect:
+        factory = ctx.anvil_factory
+        if factory is None:  # pragma: no cover - guarded at plan time
+            raise RuntimeError("timelock plan requires an anvil factory")
+        transport = factory()
+        # The delay belongs to the CONTRACT (§0.0.2): OZ rejects a schedule below
+        # its own ``getMinDelay()``, and the value differs per deployment. An
+        # unreadable delay is not guessed — zero goes to the contract, whose own
+        # check rejects it and whose revert the recipe records verbatim.
+        delay = _uint_call(transport, spec.contract_address, spec.delay_calldata)
+        return timelock_execute_recipe(
+            transport=transport,
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            schedule_calldata=spec.schedule_calldata(delay),
+            execute_calldata=spec.execute_calldata,
+            delay_seconds=delay,
+            gate_ref=spec.gate_ref,
+            fixtures=spec.fixtures,
+            sentinel_address=spec.sentinel_address,
+            witness_token=spec.witness_token,
+            witness_calldata=spec.witness_calldata,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _uint_call(transport: AnvilTransport, to: str, data: str) -> int:
+    """A uint read off the fork, or 0 when the call fails or returns nothing.
+    Zero is not a fallback VALUE here — it is an input the contract itself
+    rejects, which is the honest outcome for a delay we could not read."""
+    try:
+        result = transport.call({"to": to, "data": data})
+    except Exception:
+        return 0
+    if not result.success or not result.return_data:
+        return 0
+    try:
+        return int(result.return_data, 16)
+    except ValueError:
+        return 0
 
 
 def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> ProbePlan:

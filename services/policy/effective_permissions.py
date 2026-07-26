@@ -27,6 +27,10 @@ from schemas.effective_permissions import (
     ResolvedPrincipal,
 )
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    _split_top_level,
+    is_canonical_abi_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +78,28 @@ def _normalize_abi_type(type_name: str) -> str:
         base, suffix = stripped.split("[", 1)
         return f"{_normalize_abi_type(base)}[{suffix}"
 
+    # An already-lowered tuple is canonical ABI; collapsing it to ``address``
+    # would destroy an arity a caller had already recovered. Parentheses are not
+    # legal in a user-defined type name, so this test cannot misfire.
+    if stripped.startswith("(") and stripped.endswith(")"):
+        members = [m for m in _split_top_level(stripped[1:-1]) if m.strip()]
+        return "(" + ",".join(_normalize_abi_type(m) for m in members) + ")"
+
     if stripped.startswith(ELEMENTARY_TYPE_PREFIXES):
         return stripped
 
+    # ``A.B`` is a struct / enum / user-defined value type declared inside ``A``.
+    # Solidity has no nested contracts, so a qualified token is provably NOT a
+    # contract reference and ``address`` is the wrong lowering — while the right
+    # one (a struct's field layout, an enum's width) is not recoverable from a
+    # name. Leave it un-lowered so a selector derived from this string fails
+    # closed instead of naming a dispatch that does not exist.
+    if "." in stripped:
+        return stripped
+
+    # A bare user-defined name stays ``address``: it is a contract reference more
+    # often than not, and a name alone cannot tell a contract from a file-level
+    # struct or enum. The canonical map above is what resolves it properly.
     return "address"
 
 
@@ -129,10 +152,20 @@ def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[
     }
 
 
-def _abi_signature_and_selector(function_signature: str, canonical_signatures: Mapping[str, str]) -> tuple[str, str]:
+def _abi_signature_and_selector(
+    function_signature: str, canonical_signatures: Mapping[str, str]
+) -> tuple[str, str | None]:
     """``(abi_signature, selector)`` preferring the precomputed canonical ABI
-    signature; falls back to the full_name string normalization when absent."""
+    signature; falls back to the full_name string normalization when absent.
+
+    The selector is ``None`` when the fallback could not fully lower the
+    signature. Hashing a string that still names a user-defined type publishes a
+    4-byte value the chain will never dispatch on, and the row's own signature
+    column would then disagree with its selector — a wrong answer where no
+    answer is the honest one."""
     abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
+    if not is_canonical_abi_signature(abi_sig):
+        return abi_sig, None
     return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]
 
 

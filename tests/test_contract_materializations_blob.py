@@ -401,6 +401,10 @@ def test_backfill_dry_run_writes_nothing(_route_to_test_db, _clean_cm):
         analysis_blob_key=None,
         tracking_plan_blob_key=None,
         status="ready",
+        # A row the version-filtered ``find_by_keccak`` can see: seed at the
+        # current analyzer version, not the DB default, so it stays findable
+        # across an ANALYSIS_SCHEMA_VERSION bump.
+        analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
     )
     _clean_cm.add(row)
     _clean_cm.commit()

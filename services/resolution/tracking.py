@@ -268,6 +268,61 @@ def classify_resolved_address(
     return kind, details
 
 
+# Canonical control getters, in precedence order, for reading *who controls* a
+# plain ``contract`` principal. ``classify_resolved_address`` only reads
+# ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
+# generic Ownable/AccessManaged contract falls through untyped — this fills that
+# gap for the contract-principal terminal walk (SCORING plan §4). Each is a
+# caller-independent view getter returning a single address.
+_CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
+
+
+def read_contract_controllers(
+    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
+) -> list[str] | None:
+    """The distinct nonzero controlling addresses of a plain contract, read via
+    the canonical getters ``owner()`` / ``authority()`` / ``admin()`` in that
+    precedence order (deduped case-insensitively), or ``None`` when the set is
+    not dispositively complete.
+
+    Returns the FULL set, not just the first hit: Solmate/Solady ``Auth`` (the
+    §4 motivating world — a BoringVault manager is a ``RolesAuthority``, itself
+    an ``Auth``) exposes ``owner`` AND ``authority`` as PARALLEL live control
+    planes (``requiresAuth`` accepts either). Naming one as THE key would
+    over-claim a settled controller while a second live plane also governs, so
+    the caller must see the whole set and fail closed on ambiguity.
+
+    **Probe-completeness (Register #3).** All three getters are probed every call
+    (no early return). A clean ``eth_call`` that reverts / returns absent / zero
+    means "this getter is genuinely not a control plane" — skipped, not an error.
+    But a transient ``_PROBE_ERROR`` on ANY getter means the plane set is NOT
+    dispositively known this round: a real second plane could be hiding behind the
+    erroring getter, so proceeding on the getters that answered would risk a
+    false single-plane terminal. In that case return ``None`` (retryable next
+    run) rather than a partial set. Bounded, read-only, caller-independent, through
+    the same ``rpc_request`` wire the offline suite stubs. ``[]`` when every getter
+    cleanly yields no controller.
+    """
+    controllers: list[str] = []
+    seen: set[str] = set()
+    had_probe_error = False
+    for signature in _CONTROLLER_GETTER_SIGS:
+        result = _try_eth_call_decoded(rpc_url, address, signature, "address", block_tag, chain_id=chain_id)
+        if result is _PROBE_ERROR:
+            had_probe_error = True
+            continue
+        if result is None:
+            continue
+        owner = str(result).lower()
+        if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"} and owner not in seen:
+            seen.add(owner)
+            controllers.append(owner)
+    if had_probe_error:
+        # Incomplete witness — do not proceed on a possibly-partial plane set.
+        return None
+    return controllers
+
+
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
 _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
     ("getOwners()", "address[]"),  # 0: Safe

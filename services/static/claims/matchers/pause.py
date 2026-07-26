@@ -3,9 +3,14 @@ unblocks its own state-changing entry points.
 
 Two tiers share one derivation:
 
-* **standard_exact** — OZ ``Pausable``: ``pause()`` + ``unpause()`` siblings and
-  a canonical ``{paused,isPaused,_paused}`` flag (or a ``paused()``/``isPaused()``
-  view), matched on those two functions.
+* **standard_exact** — OZ ``Pausable``: the contract publishes the standard's
+  full entry set (``pause()`` + ``unpause()`` + the ``paused()`` view), and the
+  claim is on one of the two toggles. A ``bool public paused`` counts: Solidity
+  publishes ``paused()`` for it, so this is the contract's ABI, not its
+  vocabulary. Nothing here inspects what the flag variable is *called* — a
+  pauser whose latch is named anything else still reaches standard_exact, and a
+  contract that merely spells a flag ``paused`` without the standard's ABI does
+  not.
 * **idiom_structural** — the PauseAnalyzer idiom with its four fixes, read off
   Plane-0 facts: the flag is a ``bool`` state-write (member-path facts recover
   struct-member and inherited-private flags) that another entry point reads as a
@@ -16,20 +21,20 @@ Two tiers share one derivation:
 
 from __future__ import annotations
 
-from ..context import ClaimContext
+from ..context import ClaimContext, abi_selector
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
-_CANONICAL_FLAG_NAMES = frozenset({"paused", "isPaused", "_paused"})
+# OpenZeppelin Pausable's published ABI.
+PAUSE = abi_selector("pause()")
+UNPAUSE = abi_selector("unpause()")
+PAUSED = abi_selector("paused()")
+_TOGGLE_SELECTORS = frozenset({PAUSE, UNPAUSE})
 
 
 def _oz_pausable_standard(ctx: ClaimContext) -> bool:
-    if not ctx.has_functions("pause", "unpause"):
-        return False
-    if any(var in _CANONICAL_FLAG_NAMES and member is None for var, member in _facts.pause_targets(ctx)):
-        return True
-    return ctx.has_functions("paused") or ctx.has_functions("isPaused")
+    return ctx.has_selectors(PAUSE, UNPAUSE, PAUSED)
 
 
 def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidence | None:
@@ -62,7 +67,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     if not matched:
         return None
 
-    standard = _oz_pausable_standard(ctx) and function in ("pause()", "unpause()")
+    standard = ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
     return ClaimEvidence(
         tier="standard_exact" if standard else "idiom_structural",
         witness={"kind": "pause_flag", "flags": matched, "polarity": want},

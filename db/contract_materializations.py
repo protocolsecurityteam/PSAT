@@ -75,7 +75,12 @@ logger = logging.getLogger(__name__)
 # when the static-analysis / tracking-plan / predicate-tree *output shape*
 # changes — deliberately NOT tied to a git SHA, which would cold-rebuild every
 # multi-MB forge+Slither bundle on unrelated deploys (frontend, docs, workers).
-ANALYSIS_SCHEMA_VERSION = 1
+# v2: the effects sink emitter resolves a library-wrapped/cast token receiver to
+# the state var it aliases (was a Slither temporary) and records a canonical
+# selector for a UDT-param direct call — both change the persisted sink shape, so
+# an existing deployment must rebuild rather than serve materializations written
+# against the old heads.
+ANALYSIS_SCHEMA_VERSION = 2
 
 
 def _builder_staleness_s() -> float:

@@ -1,9 +1,10 @@
 """Gnosis Safe control-plane claims: signer-set, module, and guard management.
 
 All three ride the Safe gate (getThreshold + getOwners + execTransaction), which
-h3sim measured at 0 false claims. Within that gate the canonical entry names are
-unambiguous, so each trigger matches by name. Safe's ``execTransaction`` /
-module-exec entries are handled by the ``exec.arbitrary`` matcher.
+h3sim measured at 0 false claims. Within that gate each trigger matches the
+published Safe selector for its entry, so a same-named sibling with a different
+argument list is not a Safe operation. Safe's ``execTransaction`` / module-exec
+entries are handled by the ``exec.arbitrary`` matcher.
 """
 
 from __future__ import annotations
@@ -11,16 +12,13 @@ from __future__ import annotations
 from ..context import ClaimContext
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
-from ._gates import function_name, is_safe_gate
-
-_SIGNER_FUNCTIONS = frozenset({"addOwnerWithThreshold", "removeOwner", "swapOwner", "changeThreshold"})
-_MODULE_FUNCTIONS = frozenset({"enableModule", "disableModule"})
+from ._gates import SAFE_MODULE_SELECTORS, SAFE_SET_GUARD, SAFE_SIGNER_SELECTORS, is_safe_gate
 
 
-def _safe_evidence(function: str) -> ClaimEvidence:
+def _safe_evidence(selector: str) -> ClaimEvidence:
     return ClaimEvidence(
         tier="standard_exact",
-        witness={"kind": "selector+gate", "standard": "safe", "function": function_name(function)},
+        witness={"kind": "selector+gate", "standard": "safe", "selector": selector},
     )
 
 
@@ -32,9 +30,10 @@ def _safe_evidence(function: str) -> ClaimEvidence:
     gate=is_safe_gate,
 )
 def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) not in _SIGNER_FUNCTIONS:
+    selector = ctx.canonical_selector(function)
+    if selector is None or selector not in SAFE_SIGNER_SELECTORS:
         return None
-    return _safe_evidence(function)
+    return _safe_evidence(selector)
 
 
 @claim_matcher(
@@ -45,9 +44,10 @@ def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     gate=is_safe_gate,
 )
 def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) not in _MODULE_FUNCTIONS:
+    selector = ctx.canonical_selector(function)
+    if selector is None or selector not in SAFE_MODULE_SELECTORS:
         return None
-    return _safe_evidence(function)
+    return _safe_evidence(selector)
 
 
 @claim_matcher(
@@ -58,6 +58,6 @@ def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     gate=is_safe_gate,
 )
 def safe_set_guard(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) != "setGuard":
+    if ctx.canonical_selector(function) != SAFE_SET_GUARD:
         return None
-    return _safe_evidence(function)
+    return _safe_evidence(SAFE_SET_GUARD)

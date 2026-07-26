@@ -29,11 +29,12 @@ from schemas.effective_permissions import PrincipalResolution
 from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
+from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
-from services.resolution.tracking import classify_resolved_address_with_status
+from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.concurrency import parallel_map
@@ -95,6 +96,35 @@ def _make_principal_type_resolver(
             return None, None
         resolved_type, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, chain_id=chain_id)
         return resolved_type, details
+
+    return _resolve
+
+
+def _make_terminal_controller_resolver(
+    rpc_url: str | None, *, chain_id: int | None = None
+) -> Callable[[str], list[dict[str, object]] | None] | None:
+    """Build the ``address -> [controller-step, ...] | None`` resolver that
+    drives the contract-principal terminal walk (A4). Reads a contract's
+    controllers via canonical getters (``owner()``/``authority()``/``admin()``)
+    and classifies each, so ``resolve_terminal_principal`` can chain contract ->
+    ... -> Safe/EOA and fail closed on parallel control planes (Solmate/Solady
+    ``Auth`` exposes owner AND authority). ``None`` when there is no RPC URL (the
+    walk is then skipped and every contract principal stays a non-terminal
+    way-point)."""
+    if not rpc_url:
+        return None
+
+    def _resolve(address: str) -> list[dict[str, object]] | None:
+        controllers = read_contract_controllers(rpc_url, address, chain_id=chain_id)
+        if not controllers:
+            return None
+        steps: list[dict[str, object]] = []
+        for owner in controllers:
+            resolved_type, details, _cacheable = classify_resolved_address_with_status(
+                rpc_url, owner, chain_id=chain_id
+            )
+            steps.append({"address": owner, "resolved_type": resolved_type, "details": details})
+        return steps
 
     return _resolve
 
@@ -347,6 +377,29 @@ def _semantic_controller_context_address(
         if isinstance(bundle, dict):
             addresses.add(address)
     return sorted(addresses)[0] if addresses else None
+
+
+def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, str]:
+    """``{function key -> selector}`` from the effective-permissions payload, so a
+    consumer holding either signature can find the row that payload produced.
+
+    Both keys are indexed because the two planes name a function differently: the
+    effects artifact and the predicate trees use Slither's ``full_name``, while
+    the row stores the canonical ABI signature — the same function under two
+    strings whenever a parameter is a contract, struct or enum. The selector is
+    the one value both sides agree on, and it is taken from the payload rather
+    than re-derived so it is byte-identical to what the writer stored."""
+    out: dict[str, str] = {}
+    for record in function_records or []:
+        if not isinstance(record, dict):
+            continue
+        selector = record.get("selector")
+        if not isinstance(selector, str) or not selector:
+            continue
+        for key in (record.get("function"), record.get("abi_signature")):
+            if isinstance(key, str) and key:
+                out.setdefault(key, selector.lower())
+    return out
 
 
 class PolicyWorker(BaseWorker):
@@ -656,6 +709,18 @@ class PolicyWorker(BaseWorker):
                 cross_chain_recognizer=make_cross_chain_recognizer(
                     _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
                 ),
+                # C1: protocol-wide exact-owner Safe registry for signer-overlap.
+                # Only populated for protocol-scoped jobs; a bare contract analysis
+                # has no sibling Safes to compare against.
+                protocol_safe_owner_sets=(
+                    load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
+                ),
+                # §2 sub-part B: shared-deployer groups (witnessed heuristic fact).
+                protocol_deployer_groups=(
+                    load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
+                ),
+                # A4: contract-principal -> ultimate Safe/EOA terminal walk.
+                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 
@@ -695,7 +760,13 @@ class PolicyWorker(BaseWorker):
 
         # Cross-contract enrichment: mint policy-derived claims from sibling facts.
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
+            enriched = self._enrich_cross_contract(
+                session,
+                job,
+                contract_analysis,
+                control_snapshot,
+                function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
+            )
             if enriched and ep_data is not None:
                 self._apply_cross_contract_claims(ep_data, enriched)
                 store_artifact(session, job.id, "effective_permissions", data=ep_data)
@@ -834,7 +905,12 @@ class PolicyWorker(BaseWorker):
             fn["claims"] = resolve_claim_precedence([*existing, *additions])
 
     def _enrich_cross_contract(
-        self, session, job: Job, contract_analysis: dict, control_snapshot: dict
+        self,
+        session,
+        job: Job,
+        contract_analysis: dict,
+        control_snapshot: dict,
+        function_records: list[dict] | None = None,
     ) -> dict[str, list[Claim]]:
         """Mint policy-derived claims from sibling facts.
 
@@ -842,6 +918,12 @@ class PolicyWorker(BaseWorker):
         ``services.static.cross_contract``: value-flow propagation, transfer-policy
         configuration, beacon upgrade, and proxy-verified upgrade provenance. The
         returned claims merge onto each function's existing claim list.
+
+        ``function_records`` is the effective-permissions payload the rows were
+        just written from. The derivations key on the Slither full_name the
+        effects artifact uses, while the row stores the canonical ABI signature,
+        so the two only meet through a key both sides derive identically — the
+        selector, taken from that same payload rather than re-derived here.
         """
         del contract_analysis
         from services.static.cross_contract import (
@@ -943,15 +1025,46 @@ class PolicyWorker(BaseWorker):
                 select(Contract).where(Contract.job_id == job.id).limit(1)
             ).scalar_one_or_none()
             if contract_row:
+                selector_for = _selector_by_function_key(function_records)
+                # The same impl row can back N proxy deployments, each with its
+                # own set of function rows. These claims were derived against
+                # THIS job's control snapshot, so they belong to the deployment
+                # the writer tagged — mirroring its scope derivation exactly,
+                # not the local ``deployment_address`` below, which falls back to
+                # the job's own address for a different purpose.
+                row_deployment = normalize_deployment(request.get("proxy_address"))
                 for fn_sig, new_claims in enriched.items():
-                    ef = session.execute(
-                        select(EffectiveFunction).where(
-                            EffectiveFunction.contract_id == contract_row.id,
-                            EffectiveFunction.abi_signature == fn_sig,
-                        )
-                    ).scalar_one_or_none()
-                    if ef:
+                    stmt = select(EffectiveFunction).where(
+                        EffectiveFunction.contract_id == contract_row.id,
+                        deployment_scope(EffectiveFunction.deployment_address, row_deployment),
+                    )
+                    selector = selector_for.get(fn_sig)
+                    if selector:
+                        stmt = stmt.where(EffectiveFunction.selector == selector)
+                    else:
+                        stmt = stmt.where(EffectiveFunction.abi_signature == fn_sig)
+                    # Exactly one row, or nothing. The scope above still ORs in
+                    # legacy untagged rows by design, so a tagged row and a NULL
+                    # one can both answer — and reading a single row from that
+                    # raises inside a stage that does not catch it, losing the
+                    # whole policy run over an enrichment detail. Ambiguity is
+                    # not an answer: skip it, say so, and leave the row alone.
+                    matches = session.execute(stmt).scalars().all()
+                    if len(matches) == 1:
+                        ef = matches[0]
                         ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
+                    else:
+                        logger.warning(
+                            "Job %s: cross-contract claims for %s matched %d effective_function rows; skipped",
+                            job.id,
+                            fn_sig,
+                            len(matches),
+                            extra={
+                                "phase": "cross_contract_enrichment",
+                                "function": fn_sig,
+                                "matched_rows": len(matches),
+                            },
+                        )
                 session.commit()
         return enriched
 

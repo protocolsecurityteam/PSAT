@@ -272,7 +272,7 @@ class TestProcessSemanticInputs:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot: {},
+            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
         )
 
         worker.process(session, cast(Any, job))
@@ -406,7 +406,7 @@ class TestCrossContractEnrichmentArtifactSync:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot: {"mintRewards()": [policy_claim]},
+            lambda self, session, job, contract_analysis, control_snapshot, **kw: {"mintRewards()": [policy_claim]},
         )
 
         worker.process(session, cast(Any, job))
@@ -549,7 +549,7 @@ class TestProcessFanoutParity:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot: {},
+            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
         )
 
         worker.process(session, cast(Any, job))

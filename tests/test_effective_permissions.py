@@ -483,8 +483,12 @@ def test_build_effective_permissions_handles_vyper_dynarray_signatures():
     function = payload["functions"][0]
 
     assert function["function"] == "seal(DynArray[address,MAX_SEALABLES])"
-    assert function["selector"].startswith("0x")
-    assert len(function["selector"]) == 10
+    # Not None: the DynArray lowers to ``address[]``, so the signature is fully
+    # elementary and a selector really is derivable from it.
+    selector = function["selector"]
+    assert selector is not None
+    assert selector.startswith("0x")
+    assert len(selector) == 10
     assert function["controllers"] == [
         {
             "controller_id": "state_variable:SEALING_COMMITTEE",

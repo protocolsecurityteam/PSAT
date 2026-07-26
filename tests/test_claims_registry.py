@@ -295,12 +295,6 @@ CORPUS_EXEMPT_CLAIM_IDS = {
         "no contract factory in the label corpus; covered by this file's synthetic "
         "factory and test_claims_pipeline_integration (compiled upgrade_factory_uups.sol)."
     ),
-    "flow.in": (
-        "no compiled corpus positive — corpus vault deposits use SafeTransferLib's "
-        "non-standard selector, which the hardened facts do not tag as a "
-        "callee_erc20_selector; covered by "
-        "test_claims_behavior_families::test_flow_in_pull_from_third_party."
-    ),
     "authorized_caller.rotate": _AUTH_MATCHERS_EXEMPTION,
     "ownership.accept": _AUTH_MATCHERS_EXEMPTION,
     "roles.grant": _AUTH_MATCHERS_EXEMPTION,
@@ -321,10 +315,9 @@ CORPUS_EXEMPT_CLAIM_IDS = {
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,
-    "exec.arbitrary": (
-        "no arbitrary-exec forwarder in the reduced corpus; covered by "
-        "test_claims_upgrade_exec_matchers (boring_vault_manage.sol idiom + safe/timelock gates)."
-    ),
+    # exec.arbitrary is produced by the corpus: cast_wrapped_pull.sol's execBatch is
+    # a DIRECT targets[i].call(data[i]) executor (a true executor, not a
+    # fixed-destination library forwarder), so it mints the claim in the golden.
     "transfer_policy.configure": (
         "policy-tier claim: minted only downstream from sibling facts, so the "
         "single-contract static corpus never produces it; covered by "

@@ -21,10 +21,19 @@ from services.effects.anvil import (
     anvil_available,
     assert_post_cancun,
     pause_recipe,
+    timelock_execute_recipe,
 )
-from services.effects.config import SCOPE_PROJECTION, TIER_FORK, VERDICT_PROVEN, VERDICT_UNKNOWN
+from services.effects.config import (
+    SCOPE_KERNEL,
+    SCOPE_PROJECTION,
+    SHAPE_CALLER_ARBITRARY,
+    TIER_FORK,
+    VERDICT_PROVEN,
+    VERDICT_UNKNOWN,
+)
 from services.effects.harness import SimContext
 from utils.rpc import EthCallResult
+from workers.effects_worker import _is_cacheable
 
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
@@ -172,6 +181,387 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_blast_radius_observed"
+    # A GENUINE no-blast: the pause took effect but froze nothing observable.
+    assert eff.details["pause_effective"] is True
+    # The pause RAN, so the empty blast radius is a measurement.
+    assert eff.details["observation"] == "executed"
+
+
+class IneffectivePauseAnvil(StubAnvil):
+    """Models a pauser the principal cannot enact: the pause calldata reverts on
+    ``call`` (missing authority / an active cooldown), so ``send`` never flips the
+    latch. Everything else inherits from :class:`StubAnvil`."""
+
+    def call(self, tx: dict) -> EthCallResult:
+        if tx.get("data") == self._pause_calldata:
+            return EthCallResult(False, "0x", "0x" + "cooldown".encode().hex(), "cooldown")
+        return super().call(tx)
+
+    def send(self, tx: dict) -> str:  # the pause tx would revert on-chain: no flip
+        return "0xhash"
+
+
+def test_pause_recipe_ineffective_pause_is_distinct_unknown():
+    # §1 A2 follow-up: the resolved pauser cannot enact the pause on this fork state
+    # → the freeze was never tested → a DISTINCT indeterminate unknown, never
+    # conflated with a genuine "pause froze nothing".
+    transport = IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+    store = RecordingStore()
+    eff = pause_recipe(
+        transport=transport,
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "pause_ineffective"
+    assert eff.details["pause_effective"] is False
+    assert eff.details["observed_blast_radius"] == []
+    # The pause call REVERTED, so the empty radius above describes a probe that
+    # never happened — the discriminator every consumer of ``witness`` joins on.
+    assert eff.details["observation"] == "reverted"
+    # The scored denominator (static's set) is preserved for the consumer.
+    assert eff.details["scored_denominator"] == ["foo"]
+    # The pause was never sent → the snapshot was still reverted, latch untouched.
+    assert transport.paused is False
+    # The raw revert is recorded on the transcript for the live cycle.
+    assert any(r.get("label") == "pause_effectiveness" and r["success"] is False for r in store.stored[-1]["results"])
+
+
+def test_pause_recipe_proven_records_pause_effective():
+    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600)
+    eff = pause_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=3600,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["pause_effective"] is True
+    assert eff.details["observation"] == "executed"
+
+
+class DeadSurfaceAnvil(StubAnvil):
+    """Every entry point already reverts on its OWN precondition — an unfunded
+    caller, an unmet business rule — pause or no pause. The pause itself enacts
+    fine. Nothing was live to freeze."""
+
+    def call(self, tx: dict) -> EthCallResult:
+        if tx.get("data") == self._pause_calldata:
+            return EthCallResult(True, "0x", None, None)
+        return EthCallResult(False, "0x", "0x" + "precondition".encode().hex(), "precondition")
+
+
+def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
+    """``observed_blast = pre - post``, so an empty PRE set makes the empty radius
+    true by construction: it measures the probe set, not the latch. Sharing the
+    ``no_blast_radius_observed`` reason let that transfer on the behavioral hash,
+    publishing "this pause froze nothing" to every bytecode twin on the strength
+    of a surface that happened to be dead at this block."""
+    eff = pause_recipe(
+        transport=DeadSurfaceAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "no_live_entry_points_to_freeze"
+    assert eff.details["pre_pause_succeeding"] == []
+    assert not _is_cacheable(eff)
+    # The scored denominator is still static's set, as on every other pause row.
+    assert eff.details["scored_denominator"] == ["foo"]
+
+
+def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
+    """The control the split exists for: points WERE live and the pause froze
+    none of them. That IS an observation about the latch, and a twin inherits it."""
+    eff = pause_recipe(
+        transport=StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+
+    assert eff.reason == "no_blast_radius_observed"
+    assert eff.details["pre_pause_succeeding"]
+    assert _is_cacheable(eff)
+
+
+def test_every_pause_row_carries_an_observation_discriminator():
+    """The fork tier writes ``witness=details`` through the same worker path as
+    every other effect class, so it owes the same discriminator. It did not: a
+    pause probe that REVERTED published ``{"pause_effective": false,
+    "observed_blast_radius": []}`` with nothing in the payload to say the freeze
+    was never tested. ``pause_effective`` happened to separate the two, but that
+    is a class-local stand-in for a contract stated stage-wide."""
+
+    def _run(transport):
+        return pause_recipe(
+            transport=transport,
+            store=RecordingStore(),
+            ctx=CTX,
+            contract_address=CONTRACT,
+            principal=PRINCIPAL,
+            pause_calldata=PAUSE,
+            entry_points=_entry_points(),
+            predicted_guard_set=["foo"],
+            max_pause_duration=None,
+        )
+
+    rows = [
+        _run(StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # proven
+        _run(StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)),  # ran, froze nothing
+        _run(IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # reverted
+    ]
+
+    assert {row.details["observation"] for row in rows} == {"executed", "reverted"}
+    for row in rows:
+        # An empty blast radius is only readable as a measurement on a row that ran.
+        if row.details.get("observed_blast_radius") == []:
+            assert row.details["observation"] in ("executed", "reverted")
+        if row.details["observation"] == "reverted":
+            assert row.verdict == VERDICT_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# §9.5 Tier-2 timelock — schedule → advance time → execute
+# ---------------------------------------------------------------------------
+
+SCHEDULE = "0x01d5062a"  # schedule(...)
+EXECUTE = "0x134008d3"  # execute(...)
+SENTINEL = "0x" + "ee" * 20
+TOKEN = "0x" + "44" * 20
+WITNESS = "0x70a08231" + SENTINEL[2:].rjust(64, "0")  # balanceOf(sentinel)
+TIMELOCK_DELAY = 172800  # 2 days
+NOT_READY = "0x5ead8eb5"  # TimelockUnexpectedOperationState(bytes32,bytes32)
+UNAUTHORIZED = "0xe2517d3f"  # AccessControlUnauthorizedAccount(address,bytes32)
+
+
+class TimelockAnvil:
+    """Models an OZ TimelockController on a fork: ``schedule`` records a pending
+    operation whose ``execute`` reverts ``TimelockUnexpectedOperationState`` until
+    ``delay`` seconds pass; a ready ``execute`` runs the inner op (a transfer that
+    credits the sentinel). snapshot/revert restore the whole state machine."""
+
+    def __init__(self, *, delay: int, proposer_ok: bool = True, moves_value: bool = True, hardfork: str = "prague"):
+        self.delay = delay
+        self.proposer_ok = proposer_ok
+        self.moves_value = moves_value
+        self._hf = hardfork
+        self.time = 0
+        self.ready: int | None = None
+        self.sentinel_balance = 0
+        self._snaps: dict[str, tuple] = {}
+        self._n = 0
+        self.impersonated: list[str] = []
+
+    def hardfork(self) -> str:
+        return self._hf
+
+    def versions(self) -> dict[str, str]:
+        return {"anvil": "anvil 1.5.1-stable", "foundry": "anvil 1.5.1-stable"}
+
+    def snapshot(self) -> str:
+        self._n += 1
+        sid = f"0x{self._n}"
+        self._snaps[sid] = (self.time, self.ready, self.sentinel_balance)
+        return sid
+
+    def revert(self, snapshot_id: str) -> bool:
+        self.time, self.ready, self.sentinel_balance = self._snaps[snapshot_id]
+        return True
+
+    def impersonate(self, address: str) -> None:
+        self.impersonated.append(address)
+
+    def stop_impersonate(self, address: str) -> None:
+        pass
+
+    def increase_time(self, seconds: int) -> None:
+        self.time += seconds
+
+    def mine(self) -> None:
+        pass
+
+    def set_balance(self, address: str, value: str) -> None:
+        pass
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None:
+        pass
+
+    def call(self, tx: dict) -> EthCallResult:
+        data = tx.get("data", "")
+        if data == WITNESS:
+            return EthCallResult(True, "0x" + self.sentinel_balance.to_bytes(32, "big").hex(), None, None)
+        if data == SCHEDULE:
+            if not self.proposer_ok:
+                return EthCallResult(False, "0x", UNAUTHORIZED + "00" * 32, "unauthorized")
+            return EthCallResult(True, "0x", None, None)
+        if data == EXECUTE:
+            if self.ready is None or self.time < self.ready:
+                return EthCallResult(False, "0x", NOT_READY + "00" * 32, "not ready")
+            return EthCallResult(True, "0x", None, None)
+        return EthCallResult(True, "0x", None, None)
+
+    def send(self, tx: dict) -> str:
+        data = tx.get("data", "")
+        if data == SCHEDULE and self.proposer_ok:
+            self.ready = self.time + self.delay
+        elif data == EXECUTE and self.ready is not None and self.time >= self.ready and self.moves_value:
+            self.sentinel_balance += 1000
+        return "0xhash"
+
+
+def _timelock(transport, **kw):
+    return timelock_execute_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+        **kw,
+    )
+
+
+def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY)
+    store = RecordingStore()
+    eff = timelock_execute_recipe(
+        transport=transport,
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.tier == TIER_FORK
+    assert eff.scope == SCOPE_KERNEL
+    assert eff.details["value_moved"] is True
+    assert eff.details["destination_shape"] == SHAPE_CALLER_ARBITRARY
+    assert eff.details["shape_proved_by"] == "simulation"
+    # STATE-DEPENDENT (schedule landed + time advanced), so it must NEVER transfer
+    # on the kernel hash — even though a proven verdict is otherwise cacheable.
+    assert eff.state_dependent is True
+    assert not _is_cacheable(eff)
+    # The premature execute (before the warp) must have reverted on the not-ready
+    # gate — that is what proves the recipe ADVANCED time rather than side-stepping.
+    labels = {r["label"]: r for r in store.stored[-1]["results"]}
+    assert labels["execute_premature"]["success"] is False
+    assert labels["execute"]["success"] is True
+    assert transport.impersonated == [PRINCIPAL]
+
+
+def test_timelock_premature_execute_reverts_not_ready_proving_the_delay_gate():
+    """The Tier-1 impossibility made explicit: before the warp the operation is not
+    ready, so ``execute`` reverts with the not-ready selector. Observing that revert
+    and its later success is what proves the recipe advanced time."""
+    store = RecordingStore()
+    timelock_execute_recipe(
+        transport=TimelockAnvil(delay=TIMELOCK_DELAY),
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+    )
+    prem = {r["label"]: r for r in store.stored[-1]["results"]}["execute_premature"]
+    assert prem["success"] is False
+    assert prem["revert"].startswith(NOT_READY)
+
+
+def test_timelock_schedule_rejection_is_its_own_unknown():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, proposer_ok=False)
+    eff = _timelock(transport)
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "timelock_schedule_reverted"
+    assert eff.details["schedule_revert"].startswith(UNAUTHORIZED)
+    # Never cacheable — a Tier-2 fork verdict is state-plane.
+    assert not _is_cacheable(eff)
+
+
+def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_execution():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
+    eff = _timelock(transport)
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "no_value_observed"
+    assert eff.details["timelock_executed"] is True
+    assert eff.details["observation"] == "executed"
+    # The soundness invariant: no_value_observed is in _CACHEABLE_UNKNOWN_REASONS,
+    # but a TIMELOCK no_value_observed is state-dependent (it required schedule +
+    # time advance), so it must NOT be cacheable — else it transfers a
+    # "moves nothing" negative to a bytecode twin whose op was never scheduled.
+    assert eff.state_dependent is True
+    assert not _is_cacheable(eff)
+    # It HELD the asset and moved none of it — the other half of the distinction
+    # the next test pins.
+    assert eff.details["witness_asset_held"] is True
+
+
+def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
+    """The measured case on mainnet: a timelock holds authority, not funds, so
+    there is no asset for a scheduled operation to move. Reporting that as
+    "executed, moved nothing" would state a fact about the CONTRACT when the fact
+    is about our inability to witness one (§0.0.4) — the sequence still ran, and
+    the row has to say which of the two it observed."""
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
+    eff = timelock_execute_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=None,
+        witness_calldata=None,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "timelock_holds_no_witness_asset"
+    assert eff.details["witness_asset_held"] is False
+    # The delayed execution path itself still ran, which is the thing Tier 1
+    # cannot reach and the thing this row is entitled to claim.
+    assert eff.details["timelock_executed"] is True
+    assert eff.details["observation"] == "executed"
+    assert not _is_cacheable(eff)
 
 
 # ---------------------------------------------------------------------------

@@ -6,15 +6,195 @@ import logging
 import re
 import threading
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from db.models import Contract, EffectiveFunction, FunctionPrincipal
 from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
+from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)
+
+
+# --- C1: signer-overlap attribution fact -------------------------------------
+def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
+    """The protocol's dispositively-enumerated Safe owner sets, keyed by lowercased
+    Safe address, for signer-overlap comparison (SCORING plan §2 / C1).
+
+    Sources ``function_principals`` (the authoritative owner store with the
+    ``membership_quality`` witness). Only ``resolved_type='safe'`` rows whose
+    ``details.owners`` is present AND ``membership_quality == 'exact'`` are
+    admitted — the on-chain owner set was dispositively read, not a lower-bound
+    guess. A Safe appears on many function rows; identical exact rows dedup by
+    address. If two exact rows DISAGREE on the owner set, that Safe is a witness
+    conflict and is OMITTED (Register #4 — no recency column to arbitrate, so we
+    never silently pick one contradictory enumeration). The set is only as
+    complete as the protocol contracts analyzed so far, which is correct: the
+    comparison pool grows monotonically as more contracts resolve (inv-6), never
+    producing a wrong deduction, only fewer comparisons.
+    """
+    rows = session.execute(
+        select(func.lower(FunctionPrincipal.address), FunctionPrincipal.details)
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .where(Contract.protocol_id == protocol_id, FunctionPrincipal.resolved_type == "safe")
+    ).all()
+
+    # Per-Safe accumulator: the first exact owner set seen, its threshold, and a
+    # conflict flag. ``function_principals`` has no recency column (no
+    # updated_at/probe-block on the row — see db/models.py), so two exact rows
+    # that DISAGREE on the owner set are contradictory witnesses with no
+    # dispositive way to pick between them: fail closed (Register #4). Identical
+    # duplicate exact rows agree and are kept.
+    accum: dict[str, dict[str, Any]] = {}
+    for address, details in rows:
+        if not isinstance(details, dict):
+            continue
+        # Fallback (no guessing): omit when the owner set was not dispositively
+        # enumerated. ``lower_bound`` membership means the resolution did not
+        # prove the full owner set — inadmissible as a Tier-1 owner fact. An exact
+        # + lower_bound pair is NOT a conflict: the lower_bound row is skipped here
+        # and the exact one stands.
+        if details.get("membership_quality") != "exact":
+            continue
+        owners_raw = details.get("owners")
+        if not isinstance(owners_raw, list) or not owners_raw:
+            continue
+        owners = sorted({str(o).lower() for o in owners_raw if isinstance(o, str) and o.startswith("0x")})
+        if not owners:
+            continue
+        addr = str(address).lower()
+        existing = accum.get(addr)
+        if existing is None:
+            accum[addr] = {"owners": owners, "threshold": details.get("threshold"), "conflict": False}
+        elif existing["owners"] != owners:
+            # Two exact witnesses disagree — refuse to arbitrate, drop the Safe.
+            existing["conflict"] = True
+    return {
+        addr: {"owners": entry["owners"], "threshold": entry["threshold"], "membership_quality": "exact"}
+        for addr, entry in accum.items()
+        if not entry["conflict"]
+    }
+
+
+def _compute_signer_overlap(
+    self_address: str, protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any] | None:
+    """The ``signer_overlap`` fact for one Safe principal, or ``None`` to omit.
+
+    Emits subset/superset/equal flags + Jaccard of this Safe's owner set against
+    every *other* dispositively-enumerated Safe of the same protocol. Omitted
+    when this Safe isn't in the exact-owners registry (owners absent or
+    ``membership_quality != exact``) or when there is no other Safe to compare
+    against. A disjoint pair is still emitted (empty overlap) — that is itself a
+    dispositive fact ("no shared signers"). NB the honesty boundary: shared
+    signers is grade-admissible attribution CONTEXT (Tier 1, on-chain owner
+    reads), NOT proof of shared organizational identity — org identity stays a
+    warning/confidence signal and is never deduced here.
+    """
+    self_entry = protocol_safe_owner_sets.get(self_address)
+    if self_entry is None:
+        return None
+    self_owners = frozenset(self_entry.get("owners") or ())
+    if not self_owners:
+        return None
+
+    overlaps: list[dict[str, Any]] = []
+    for other_addr, other_entry in sorted(protocol_safe_owner_sets.items()):
+        if other_addr == self_address:
+            continue
+        other_owners = frozenset(other_entry.get("owners") or ())
+        if not other_owners:
+            continue
+        shared = self_owners & other_owners
+        union = self_owners | other_owners
+        overlaps.append(
+            {
+                "address": other_addr,
+                "other_owner_count": len(other_owners),
+                "shared_count": len(shared),
+                "shared_owners": sorted(shared),
+                "subset": self_owners <= other_owners,
+                "superset": self_owners >= other_owners,
+                "equal": self_owners == other_owners,
+                "jaccard": round(len(shared) / len(union), 4) if union else 0.0,
+            }
+        )
+    if not overlaps:
+        return None
+    return {
+        # Dispositive Safe getOwners() reads — scoring Tier 1, grade-admissible.
+        # Kept as a semantic provenance string (NOT "tier1"/"tier2") so a consumer
+        # never collides it with services/effects/config.py's fork/call tier
+        # strings. See docstring for the same-signers != same-org boundary.
+        "provenance": "onchain_owner_read",
+        "self_owner_count": len(self_owners),
+        "overlaps": overlaps,
+    }
+
+
+# --- shared-deployer attribution fact (§2 sub-part B) -------------------------
+def load_protocol_deployer_groups(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
+    """Per-address shared-deployer groups for a protocol, keyed by lowercased
+    contract address (SCORING plan §2 sub-part B).
+
+    Groups the protocol's ``contracts`` by ``deployer`` (lowercased); a group of
+    ≥2 contracts sharing one deployer yields, for each member, ``{"deployer",
+    "addresses": [full sorted group]}``. Contracts with a NULL ``deployer`` (73/205
+    populated locally) are omitted — no fact without the witness. Same-deployer is
+    a WITNESSED on-chain fact but a HEURISTIC for attribution (factories defeat
+    "same deployer ⇒ same org"); the emitted fact carries that flag and never
+    yields an org-identity deduction (see ``_shared_deployer_fact``).
+    """
+    rows = session.execute(
+        select(func.lower(Contract.address), func.lower(Contract.deployer)).where(
+            Contract.protocol_id == protocol_id, Contract.deployer.is_not(None)
+        )
+    ).all()
+
+    by_deployer: dict[str, set[str]] = defaultdict(set)
+    for address, deployer in rows:
+        addr = str(address).lower()
+        dep = str(deployer).lower()
+        if addr.startswith("0x") and dep.startswith("0x"):
+            by_deployer[dep].add(addr)
+
+    groups: dict[str, dict[str, Any]] = {}
+    for deployer, addresses in by_deployer.items():
+        if len(addresses) < 2:
+            continue  # a lone contract shares a deployer with nobody — no fact
+        ordered = sorted(addresses)
+        for addr in ordered:
+            groups[addr] = {"deployer": deployer, "addresses": ordered}
+    return groups
+
+
+def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The ``shared_deployer`` fact for a principal that co-shares a deployer with
+    other protocol contracts, or ``None`` to omit (deployer absent / singleton).
+
+    WITNESSED fact, NOT a conclusion: ``provenance="deployer_read"`` is a Tier-1
+    on-chain read, but ``heuristic=True`` flags that same-deployer does NOT prove
+    same organization (factories, shared deployer EOAs, and vanity-deployer
+    services all defeat it). Routes to confidence/warnings, never a grade
+    deduction, and MUST NOT mint an org-identity label. Mirrors the C1 bucket
+    honesty: fact yes, org conclusion no.
+    """
+    entry = deployer_groups.get(address)
+    if entry is None:
+        return None
+    return {
+        "provenance": "deployer_read",
+        "heuristic": True,
+        "deployer": entry["deployer"],
+        "addresses": list(entry["addresses"]),
+    }
 
 
 def _safe_role_int(role: Any) -> int | None:
@@ -374,6 +554,9 @@ def build_principal_labels(
     chain_id: int | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
+    protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
+    protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
+    resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
 ) -> PrincipalLabels:
     """Construct principal records for every authority address.
 
@@ -389,6 +572,25 @@ def build_principal_labels(
     bridge predeploy as a generic contract, yet both are cross-chain
     authorities, never anonymous principals. ``None`` (the mainnet path, and
     every chain without bridge constants) leaves classification byte-identical.
+
+    ``protocol_safe_owner_sets`` (C1, SCORING plan §2) — the protocol's
+    exact-owner Safe registry (``load_protocol_safe_owner_sets``). When present,
+    each Safe principal gains a ``details.signer_overlap`` attribution fact
+    against every other protocol Safe. ``None`` omits the fact (no guessing).
+
+    ``protocol_deployer_groups`` (§2 sub-part B) — the protocol's shared-deployer
+    groups (``load_protocol_deployer_groups``). When present, a principal whose
+    address co-shares a deployer with other protocol contracts gains a witnessed
+    (heuristic-tagged) ``details.shared_deployer`` fact. ``None`` omits it.
+
+    ``resolve_controllers`` (A4, SCORING plan §4) — an
+    ``address -> [{"address","resolved_type","details"}, ...] | None`` step
+    function (backed by on-chain owner reads). When present, each
+    ``resolved_type=contract`` principal is walked to its ultimate Safe/EOA and
+    the result stored in ``details.terminal_principal``. ``None`` skips the walk;
+    the non-terminal
+    ``details.terminal`` marking is still stamped on every principal so a
+    contract way-point never reads as a settled key.
     """
     nodes_by_id = _node_by_id(resolved_control_graph or {})
     nodes_by_address = {node["address"].lower(): node for node in (resolved_control_graph or {}).get("nodes", [])}
@@ -486,6 +688,31 @@ def build_principal_labels(
             role = str(details.get("role") or "")
             if role:
                 labels.add(role)
+
+        # Non-terminal marking (A4): a contract/unresolved principal is a
+        # way-point, never a settled controlling key. Stamped on every principal
+        # so a consumer never mistakes a ``contract`` row for a resolved key.
+        details["terminal"] = is_terminal_principal_type(resolved_type)
+        if resolved_type == "contract" and resolve_controllers is not None:
+            # Bounded, cycle-safe walk to the ultimate Safe/EOA. Fails closed to
+            # an ``unknown`` terminal record (never a guessed key) when the
+            # controller is unfetched/unverified, the chain doesn't terminate, or
+            # a step exposes parallel control planes (ambiguous_controllers).
+            details["terminal_principal"] = resolve_terminal_principal(
+                address, resolved_type, resolve_controllers=resolve_controllers
+            )
+        # Signer-overlap attribution fact (C1) for dispositively-enumerated Safes.
+        if resolved_type == "safe" and protocol_safe_owner_sets:
+            overlap = _compute_signer_overlap(address, protocol_safe_owner_sets)
+            if overlap is not None:
+                details["signer_overlap"] = overlap
+        # Shared-deployer attribution fact (§2 sub-part B) — witnessed, heuristic,
+        # never an org-identity deduction. Applies to any principal that is itself
+        # a protocol contract co-sharing a deployer.
+        if protocol_deployer_groups:
+            shared = _shared_deployer_fact(address, protocol_deployer_groups)
+            if shared is not None:
+                details["shared_deployer"] = shared
 
         return {
             "address": address,

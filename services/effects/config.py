@@ -49,12 +49,91 @@ EFFECT_CLASSES = frozenset(
 SCOPE_KERNEL = "kernel"
 SCOPE_PROJECTION = "projection"
 
+# Destination-shape vocabulary (§4.2). Only ``immutable_fixed`` is benign; only
+# static can positively PROVE the two fixed shapes (universals, argued from the
+# source); simulation can only PROVE ``caller_arbitrary`` (an existential, via a
+# sentinel that lands). Shared vocabulary because both planes speak it: the
+# synthesizer derives a shape from static facts and the recipe adjudicates it
+# against what the fork observed.
+SHAPE_CALLER_ARBITRARY = "caller_arbitrary"
+SHAPE_STORAGE_DETERMINED = "storage_determined"
+SHAPE_IMMUTABLE_FIXED = "immutable_fixed"
+SHAPE_UNKNOWN = "unknown"
+
+# ``details["observation"]`` — the DISCRIMINATOR every verdict row carries. It is
+# not decoration: ``effect_verdicts.witness`` is written for ``unknown`` rows too
+# (``workers.effects_worker._write_verdicts``), so a payload like
+# ``{"value_moved": false}`` sits on disk with no self-contained way to tell a
+# call that RAN and moved nothing from one that never got past its own
+# precondition.
+#
+# CONTRACT for any consumer of ``witness`` (scorer included), stated the way
+# ``claims_bridge._observed_summary`` states its own:
+#   * ``executed`` — the probe call SUCCEEDED. Every other key in the payload is
+#     then a statement about F.
+#   * ``reverted`` — the probe call REVERTED. The other keys describe a call that
+#     never happened; ``value_moved: false`` here means "not measured", NEVER
+#     "F moves no value". The verdict on such a row is always ``unknown``.
+#   * ``not_run`` — no probe call was issued at all (capability fallback,
+#     malformed response, insufficient inputs). Nothing was measured.
+# An ABSENT key means the row predates this discriminator; treat it as unmeasured
+# unless ``verdict == proven``.
+#
+# It lives HERE, in the shared vocabulary, because it binds every module that
+# emits a verdict — ``recipes`` and the fork-tier ``anvil`` pause recipe alike.
+# While it sat in ``recipes`` the pause paths quietly published no discriminator
+# at all, and a pause probe that REVERTED went to disk carrying
+# ``{"pause_effective": false, "observed_blast_radius": []}`` — indistinguishable,
+# to anything reading the documented contract, from a pause that froze nothing.
+OBSERVATION_EXECUTED = "executed"
+OBSERVATION_REVERTED = "reverted"
+OBSERVATION_NOT_RUN = "not_run"
+
 # Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
 # non-observation and for the inv. 15 fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"
 VERDICT_UNKNOWN = "unknown"
 
 # Evidence tiers (§3), cheapest/most-authoritative first.
+#
+# WARNING — these strings name the effects stage's INTERNAL evidence ladder
+# (historical index → eth_call → fork), NOT the scoring framework's Tier 1/2/3.
+# They collide numerically with it and the collision is a trap: a fork-OBSERVED
+# verdict persists ``"tier2"`` (``TIER_FORK``), yet a fork observation is scoring
+# **Tier 1** — a witnessed on-chain state transition, the STRONGEST evidence —
+# whereas scoring "Tier 2" means *static-with-fallback*, the opposite provenance.
+# Every effects tier below is observation-origin, so all three are scoring Tier 1.
+# No consumer (scorer, frontend, aggregation) may map a stored tier by its raw
+# string; translate by semantic origin through :func:`scoring_tier_for_effects_tier`.
 TIER_HISTORICAL = "tier0"
 TIER_CALL = "tier1"
 TIER_FORK = "tier2"
+
+# Scoring-framework tiers (the vocabulary the eventual scorer/consumers read).
+# Kept distinct from the ``tierN`` strings above precisely so nothing round-trips
+# through the colliding raw string. Observed = grade-admissible (a proven positive
+# / proven negative); static-with-fallback is never minted by this stage.
+SCORING_TIER_OBSERVED = "scoring_tier_1"
+SCORING_TIER_STATIC_FALLBACK = "scoring_tier_2"
+
+# Every effects verdict tier is a fork/observation tier, so each maps to the
+# OBSERVED scoring tier — never to scoring Tier 2, despite ``TIER_FORK == "tier2"``.
+_EFFECTS_TIER_SCORING_ORIGIN = {
+    TIER_HISTORICAL: SCORING_TIER_OBSERVED,
+    TIER_CALL: SCORING_TIER_OBSERVED,
+    TIER_FORK: SCORING_TIER_OBSERVED,
+}
+
+
+def scoring_tier_for_effects_tier(stored_tier: str | None) -> str | None:
+    """Translate a stored effects verdict-tier string (``"tier0"``/``"tier1"``/
+    ``"tier2"``, e.g. a claim witness's ``verdict_tier``) to its SCORING-framework
+    tier by semantic origin — the ONE place the collision is resolved.
+
+    Every effects tier is an on-chain observation tier, so all map to
+    :data:`SCORING_TIER_OBSERVED` (scoring Tier 1); the ``"tier2"`` string never
+    means scoring Tier 2 here. Returns ``None`` for an unrecognized string so an
+    unknown provenance fails closed (never silently promoted to observed)."""
+    if stored_tier is None:
+        return None
+    return _EFFECTS_TIER_SCORING_ORIGIN.get(stored_tier)

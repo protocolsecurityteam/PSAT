@@ -34,13 +34,45 @@ def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvi
         witness={
             "kind": "value_flow",
             "direction": direction,
-            "flows": [
-                {"kind": f.get("kind"), "selector": f.get("selector"), "from_is_self": f.get("from_is_self")}
-                for f in flows
-            ],
+            "flows": [_flow_entry(f) for f in flows],
             "sink_ids": sorted(set(sink_ids)),
         },
     )
+
+
+def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
+    """Project a value-flow fact into the witness. ``target_kind`` (where funds
+    go) and ``amount_kind`` (how much can leave) — each ``{kind, tier}`` — carry
+    the theft-vs-routing discriminators when the fact layer classified them;
+    omitted when absent so a consumer never reads a guessed value.
+
+    ``target_kinds``/``amount_kinds`` accompany them only where the contributing
+    IR sites disagreed, which is exactly where the scalar stops naming one kind:
+    it reads ``several`` when every site is itself resolved (the list is the
+    COMPLETE set of what the function does — read it and take the WORST, and note
+    that these are not alternatives: the sites may be branches or may all execute
+    in one call) and ``indeterminate`` when some site is not (the list is a
+    partial explanation, not a closed set). The scalar keeps its exact meaning
+    either way — a consumer reading only it never over-reads, it just learns
+    less."""
+    entry: dict[str, Any] = {
+        "kind": f.get("kind"),
+        "selector": f.get("selector"),
+        "from_is_self": f.get("from_is_self"),
+    }
+    if f.get("target_kind"):
+        entry["target_kind"] = f["target_kind"]
+        if f.get("target_kinds"):
+            entry["target_kinds"] = f["target_kinds"]
+    if f.get("amount_kind"):
+        entry["amount_kind"] = f["amount_kind"]
+        if f.get("amount_kinds"):
+            entry["amount_kinds"] = f["amount_kinds"]
+    if f.get("target_param_index") is not None:
+        entry["target_param_index"] = f["target_param_index"]
+    if f.get("amount_param_index") is not None:
+        entry["amount_param_index"] = f["amount_param_index"]
+    return entry
 
 
 def _is_value_call(sink: dict[str, Any]) -> bool:
@@ -65,3 +97,18 @@ def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
 )
 def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _flow_evidence(ctx, function, "in")
+
+
+@claim_matcher(
+    claim_id="value_router",
+    sentence="routes value through a contract it calls",
+    legacy_projection=None,
+    consumer_family="flow",
+)
+def value_router(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+    """A function that itself neither holds nor sends value but CALLS an in-unit
+    contract whose body moves it (a Teller forwarding into a BoringVault). The
+    fact layer tags such moves ``direction: "value_router"`` and carries the
+    destination/amount witness resolved back through the call to the entry's own
+    parameters — so a caller-chosen router destination is provable when it is one."""
+    return _flow_evidence(ctx, function, "value_router")

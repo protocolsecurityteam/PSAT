@@ -121,7 +121,7 @@ def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp
     # set `error` instead.
     assert "trees" in predicate_trees or "error" in predicate_trees
     assert effects is not None
-    assert effects.get("schema_version") == "semantic-2"
+    assert effects.get("schema_version") == "semantic-3"
     assert "functions" in effects or "error" in effects
 
 

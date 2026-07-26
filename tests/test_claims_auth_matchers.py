@@ -22,7 +22,7 @@ from services.static.claims import (
     legacy_projections,
     registry,
 )
-from services.static.claims.matchers import _authcommon as ac
+from services.static.claims.context import selector_of
 
 AUTH_FAMILY = frozenset(
     {
@@ -82,6 +82,34 @@ def _ca_membership_leaf():
     }
 
 
+def _delegated_authority_leaf(var):
+    """The ``authority.canCall(msg.sender, ...)`` half of Solmate's
+    ``requiresAuth``: an external_bool leaf whose set descriptor records the state
+    variable holding the authority contract. This is the IR fact
+    ``authority.replace`` reads — the pointer the guard consults, not a variable
+    called ``authority``."""
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "external_bool",
+            "authority_role": "delegated_authority",
+            "references_msg_sender": True,
+            "operands": [{"source": "msg_sender"}, {"source": "self_address"}],
+            "callee_signature": "canCall(address,address,bytes4)",
+            "set_descriptor": {
+                "kind": "external_set",
+                "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": var}},
+                "callee_signature": "canCall(address,address,bytes4)",
+            },
+        },
+    }
+
+
+def _requires_auth_tree(owner_var, authority_var):
+    """Solmate ``msg.sender == owner || authority.canCall(...)``."""
+    return {"op": "OR", "children": [_ca_equality_leaf(owner_var), _delegated_authority_leaf(authority_var)]}
+
+
 def _business_leaf(var):
     return {
         "op": "LEAF",
@@ -97,7 +125,7 @@ def _business_leaf(var):
 def _fn(signature, *, state_writes=None, view=False):
     return {
         "function": signature,
-        "selector": ac.selector_of(signature) or "",
+        "selector": selector_of(signature) or "",
         "sinks": [],
         "state_writes": list(state_writes or []),
         "effect_labels": [],
@@ -207,7 +235,7 @@ def test_dsauth_owner_var_write_identity_no_getter():
             ),
             "setAuthority(address)": (
                 _fn("setAuthority(address)", state_writes=[_sw("authority", "Authority")]),
-                _ca_equality_leaf("owner"),
+                _requires_auth_tree("owner", "authority"),
             ),
             "setUserRole(address,uint8,bool)": (
                 _fn(
@@ -257,18 +285,57 @@ def test_dsauth_renounce_via_owner_var_write_identity():
 
 
 def test_set_authority_without_authority_write_is_not_claimed():
-    # setAuthority selector but it writes no `authority` var -> no authority.replace.
+    # setAuthority selector, and the contract really does consult an external
+    # authority — but this function writes a different var, so the replacement is
+    # unproven and no claim is minted.
     functions = _run(
         "NotAuth",
         {
             "setAuthority(address)": (
                 _fn("setAuthority(address)", state_writes=[_sw("somethingElse", "address")]),
-                None,
+                _requires_auth_tree("owner", "authority"),
             ),
             "owner()": (_fn("owner()", view=True), None),
         },
     )
     assert _auth(functions, "setAuthority(address)") == set()
+
+
+def test_set_authority_without_a_consulted_authority_is_not_claimed():
+    """The selector plus a scalar write is not enough: with no gate anywhere that
+    delegates to an external authority, nothing proves the written pointer IS the
+    permission authority. Name-matching the variable used to supply that proof."""
+    functions = _run(
+        "NoDelegatedGate",
+        {
+            "setAuthority(address)": (
+                _fn("setAuthority(address)", state_writes=[_sw("authority", "Authority")]),
+                _ca_equality_leaf("owner"),
+            ),
+            "owner()": (_fn("owner()", view=True), None),
+        },
+    )
+    assert _auth(functions, "setAuthority(address)") == set()
+
+
+def test_authority_replace_ignores_the_variable_name():
+    """The authority pointer is whatever the delegated-authority gate leaf names.
+    Here it is called ``permissionOracle`` — off every conventional vocabulary —
+    and the claim still lands, because the evidence is the IR, not the identifier."""
+    functions = _run(
+        "OffVocabularyAuth",
+        {
+            "setAuthority(address)": (
+                _fn("setAuthority(address)", state_writes=[_sw("permissionOracle", "IPermissions")]),
+                _requires_auth_tree("owner", "permissionOracle"),
+            ),
+            "owner()": (_fn("owner()", view=True), None),
+        },
+    )
+    assert _auth(functions, "setAuthority(address)") == {"authority.replace"}
+    claim = next(c for c in functions["setAuthority(address)"] if c["claim_id"] == "authority.replace")
+    assert claim["tier"] == "standard_exact"
+    assert claim["witness"]["write_target"] == "permissionOracle"
 
 
 # ---------------------------------------------------------------------------
@@ -462,3 +529,66 @@ def test_composequeue_is_not_role_management():
     assert _auth(functions, "sendCompose(address,bytes32,uint16,bytes)") == set()
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert _auth(functions, "renounceOwnership()") == {"ownership.renounce"}
+
+
+# ---------------------------------------------------------------------------
+# Solady EnumerableRoles behind OZ-named wrappers
+# ---------------------------------------------------------------------------
+
+
+def _solady_roles_surface():
+    """The Solady ``EnumerableRoles`` ABI, plus the OZ-named wrappers a registry
+    layers over it. Deliberately NO ``getRoleAdmin``: a flat ``uint256`` role set
+    has no per-role admin to publish, which is why the OZ gate refuses."""
+    return {
+        "setRole(address,uint256,bool)": (_fn("setRole(address,uint256,bool)"), None),
+        "hasRole(address,uint256)": (_fn("hasRole(address,uint256)", view=True), None),
+        "roleHolders(uint256)": (_fn("roleHolders(uint256)", view=True), None),
+        "grantRole(bytes32,address)": (_fn("grantRole(bytes32,address)"), None),
+        "revokeRole(bytes32,address)": (_fn("revokeRole(bytes32,address)"), None),
+    }
+
+
+def test_solady_enumerable_roles_wrappers_are_claimed():
+    """A registry can wear OZ's grantRole/revokeRole names over Solady's role set
+    and publish no getRoleAdmin. The OZ gate is right to refuse it, and refusing
+    left a live authority-mutation surface with no claim at all."""
+    functions = _run("SoladyRegistry", _solady_roles_surface())
+    assert _auth(functions, "grantRole(bytes32,address)") == {"roles.grant"}
+    assert _auth(functions, "revokeRole(bytes32,address)") == {"roles.revoke"}
+    assert _tiers(functions, "grantRole(bytes32,address)", "roles.grant") == {"standard_exact"}
+
+
+def test_solady_roles_witness_names_the_standard_that_proved_it():
+    """The witness records which standard the gate matched, so it must not say
+    ``oz_access_control`` for a contract that publishes no OZ role ABI."""
+    functions = _run("SoladyRegistry", _solady_roles_surface())
+    grant = next(c for c in functions["grantRole(bytes32,address)"] if c["claim_id"] == "roles.grant")
+    assert grant["witness"]["standard"] == "solady_enumerable_roles"
+
+
+def test_solady_gate_needs_the_enumerable_surface_not_the_wrappers():
+    """The wrappers are what the claim is ABOUT, so they cannot also be its gate.
+    Without the library's own surface there is nothing proving these selectors
+    touch a role set rather than a caller-keyed data map."""
+    surface = _solady_roles_surface()
+    del surface["roleHolders(uint256)"]
+    functions = _run("HalfSurface", surface)
+    assert _auth(functions, "grantRole(bytes32,address)") == set()
+    assert _auth(functions, "revokeRole(bytes32,address)") == set()
+
+
+def test_oz_registry_still_reports_oz_provenance():
+    """A registry publishing the full OZ ABI keeps its OZ witness — the new arm
+    must not shadow the existing one."""
+    functions = _run(
+        "OZRegistry",
+        {
+            "grantRole(bytes32,address)": (_fn("grantRole(bytes32,address)"), None),
+            "revokeRole(bytes32,address)": (_fn("revokeRole(bytes32,address)"), None),
+            "hasRole(bytes32,address)": (_fn("hasRole(bytes32,address)", view=True), None),
+            "getRoleAdmin(bytes32)": (_fn("getRoleAdmin(bytes32)", view=True), None),
+        },
+    )
+    grant = next(c for c in functions["grantRole(bytes32,address)"] if c["claim_id"] == "roles.grant")
+    assert grant["witness"]["standard"] == "oz_access_control"

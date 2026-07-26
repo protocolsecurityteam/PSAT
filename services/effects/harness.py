@@ -104,10 +104,33 @@ class ObservedEffect:
     transcript: dict[str, Any] | None = None
     transcript_ptr: str | None = None
     discrepancy: Discrepancy | None = None
+    # A verdict whose truth depends on per-probe STATE MANIPULATION this recipe
+    # performed on the fork — a scheduled operation landing, time advancing — is
+    # not a code-plane structural fact and must never transfer to a bytecode twin
+    # on the behavioural hash (the same reason ``TIER_HISTORICAL`` never caches,
+    # inv. 13 / §0.0.4). ``_is_cacheable`` refuses any verdict carrying this flag,
+    # whatever its tier, scope, verdict or reason.
+    state_dependent: bool = False
 
     @property
     def is_proven(self) -> bool:
         return self.verdict == VERDICT_PROVEN
+
+    @property
+    def witness_payload(self) -> dict[str, Any]:
+        """What gets PERSISTED as the witness — ``details`` plus the reason.
+
+        ``details`` alone does not identify the verdict: every unknown supply
+        verdict carries ``{"observation": "executed"}``, so a sign WITHHELD
+        because the arithmetic and the zero-address ``Transfer`` logs contradicted
+        each other is byte-identical on the row to "supply did not move". The
+        reason is code-plane (it is what ``_is_cacheable`` already keys the
+        transfer decision on), so it travels with the verdict into the behavioral
+        cache too and a twin that free-hits can still say why.
+        """
+        if not self.reason:
+            return dict(self.details)
+        return {**self.details, "reason": self.reason}
 
 
 # ---------------------------------------------------------------------------

@@ -933,6 +933,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     """
     from eth_utils.crypto import keccak
 
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import ContractMaterialization
     from services.monitoring.enrollment import enroll_protocol_contracts
     from services.monitoring.unified_watcher import scan_for_events
@@ -1010,6 +1011,10 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
             contract_name="TestSolmateOwned",
             tracking_plan=tracking_plan,
             status="ready",
+            # Enrollment reads via the version-filtered ``find_by_address``; seed
+            # at the current analyzer version so the row is visible after an
+            # ANALYSIS_SCHEMA_VERSION bump, not just at the DB default.
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         )
     )
     test_db.commit()

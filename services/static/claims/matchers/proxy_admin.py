@@ -1,8 +1,8 @@
 """``proxy.admin_change`` — changes the proxy admin who can upgrade a deployment.
 
-New claim (no legacy equivalent). Gate: the ``AdminChanged`` marker event or a
-delegatecall-fallback proxy shell; trigger: the fixed ``changeAdmin(address)``
-selector. FiatTokenProxy.changeAdmin (today: nothing) and transparent-proxy
+New claim (no legacy equivalent). Gate: the EIP-1967 ``AdminChanged`` log
+(matched on topic0) or a delegatecall-fallback proxy shell; trigger: the fixed
+``changeAdmin(address)`` selector. FiatTokenProxy.changeAdmin (today: nothing) and transparent-proxy
 changeAdmin (today: only a "delegatecall path" fact) get their exact claim.
 """
 
@@ -22,7 +22,7 @@ from ._gates import CHANGE_ADMIN, is_admin_change_gate
     gate=is_admin_change_gate,
 )
 def proxy_admin_change(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if ctx.selector(function) != CHANGE_ADMIN:
+    if ctx.canonical_selector(function) != CHANGE_ADMIN:
         return None
     return ClaimEvidence(
         tier="standard_exact",

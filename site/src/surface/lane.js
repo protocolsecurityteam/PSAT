@@ -17,6 +17,7 @@ import {
   hasClaims,
   laneForClaims,
   priorityForClaims,
+  qualifierForClaims,
   sentenceForClaims,
   toneForClaims,
 } from "../claimsVocab.js";
@@ -59,9 +60,14 @@ export function toneForFunction(fn, lane) {
 
 export function compactActionSummary(fn) {
   // Every vocab entry carries a sentence, so a claim-bearing function always
-  // resolves here and never falls through to the legacy phrases below.
+  // resolves here and never falls through to the legacy phrases below. The
+  // witness qualifier (destination/expiry/backing) is appended when present and
+  // at the bar — absent/indeterminate leaves the plain phrase (§7 honesty rule).
   const claimSentence = sentenceForClaims(fn);
-  if (claimSentence) return claimSentence;
+  if (claimSentence) {
+    const qualifier = qualifierForClaims(fn);
+    return qualifier ? `${claimSentence} ${qualifier}` : claimSentence;
+  }
 
   const effects = new Set(fn.effect_labels || []);
   if (effects.has("implementation_update")) return "changes logic";

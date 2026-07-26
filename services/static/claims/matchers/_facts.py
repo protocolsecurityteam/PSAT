@@ -13,12 +13,13 @@ from __future__ import annotations
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from ..context import ClaimContext
+from ..context import ClaimContext, abi_selector, selector_of
 
 # Per-context memo tables (keyed by the ClaimContext instance, which lives only
 # for one contract's build_claims pass).
 _PAUSE_TARGETS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
 _MANDATORY_READS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
+_TOTAL_SUPPLY_VARS: WeakKeyDictionary[ClaimContext, set[str]] = WeakKeyDictionary()
 
 
 # ---------------------------------------------------------------------------
@@ -181,17 +182,30 @@ def body_sinks(ctx: ClaimContext, function: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _is_scalar_pointer_type(declared_type: str) -> bool:
-    """address- or contract/interface-typed scalar (a callable pointer), not a
-    mapping/array/value type."""
-    if not declared_type:
+_ADDRESS_ELEMENTARY = frozenset({"address", "address payable"})
+
+
+def is_scalar_pointer(variable: Any) -> bool:
+    """True when the Slither variable is stored as a callable 20-byte pointer: an
+    elementary ``address``/``address payable``, or a contract/interface reference
+    (an ``IBeforeTransferHook`` field holds that contract's address). A mapping,
+    array, struct, enum, or user-defined value type is not.
+
+    Decided on the resolved ``Type`` object rather than the rendered declaration,
+    so a struct or enum field cannot pass for a code pointer — the tag this feeds
+    (``callee_pointer.rotate``) grants its principal the admin capability."""
+    try:
+        from slither.core.declarations.contract import Contract
+        from slither.core.solidity_types.elementary_type import ElementaryType
+        from slither.core.solidity_types.user_defined_type import UserDefinedType
+    except Exception:  # pragma: no cover - import edge
         return False
-    if declared_type.startswith("mapping") or "[]" in declared_type:
-        return False
-    if declared_type == "address":
-        return True
-    # User-defined contract / interface types render capitalised.
-    return declared_type[0].isupper()
+    var_type = getattr(variable, "type", None)
+    if isinstance(var_type, ElementaryType):
+        return var_type.name in _ADDRESS_ELEMENTARY
+    if isinstance(var_type, UserDefinedType):
+        return isinstance(var_type.type, Contract)
+    return False
 
 
 def is_erc20(ctx: ClaimContext) -> bool:
@@ -385,17 +399,44 @@ def _constant_bool_polarity(rvalue: Any) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Supply-sign derivation (totalSupply +/- via the Binary IR operation)
+# Supply-sign derivation (the ERC-20 total-supply var, +/- via the Binary IR)
 # ---------------------------------------------------------------------------
 
-_TOTAL_SUPPLY_NAMES = frozenset({"totalSupply", "_totalSupply"})
+_TOTAL_SUPPLY_SELECTOR = abi_selector("totalSupply()")
 
 
-def total_supply_sign(function: Any) -> str | None:
-    """``"mint"`` if the function increases a ``totalSupply`` var, ``"burn"`` if
+def total_supply_vars(ctx: ClaimContext) -> set[str]:
+    """Names of the state variables this contract publishes as its ERC-20 total
+    supply: a ``public`` variable whose auto-generated getter is the standard's
+    ``totalSupply()`` (``0x18160ddd``).
+
+    The ABI entry — not the identifier — is what identifies the supply. A private
+    supply var behind a hand-written getter is deliberately NOT resolved here: its
+    binding to ``totalSupply()`` would have to be guessed, and the zero-address
+    ``Transfer`` path (:func:`mint_burn_transfer_sign`) already covers that shape
+    with real evidence."""
+    cached = _TOTAL_SUPPLY_VARS.get(ctx)
+    if cached is not None:
+        return cached
+    found: set[str] = set()
+    for variable in getattr(ctx.contract, "state_variables", None) or []:
+        if getattr(variable, "visibility", None) != "public":
+            continue
+        signature = getattr(variable, "solidity_signature", None)
+        name = getattr(variable, "name", None)
+        if isinstance(signature, str) and isinstance(name, str) and selector_of(signature) == _TOTAL_SUPPLY_SELECTOR:
+            found.add(name)
+    _TOTAL_SUPPLY_VARS[ctx] = found
+    return found
+
+
+def total_supply_sign(function: Any, supply_vars: set[str]) -> str | None:
+    """``"mint"`` if the function increases one of ``supply_vars``, ``"burn"`` if
     it decreases one, via the Binary IR *operation type* (Addition/Subtraction)
-    on the supply var — no source-string parsing. Walks internal/library callees
+    on that variable — no source-string parsing. Walks internal/library callees
     so a supply change through ``_mint``/``_burn`` is attributed to the entry."""
+    if not supply_vars:
+        return None
     signs: set[str] = set()
     visited: set[int] = set()
 
@@ -414,15 +455,15 @@ def total_supply_sign(function: Any) -> str | None:
                 right = _base_name(getattr(getattr(ir, "variable_right", None), "name", None))
                 lvalue = getattr(ir, "lvalue", None)
                 sign = None
-                if op_type == "ADDITION" and (left in _TOTAL_SUPPLY_NAMES or right in _TOTAL_SUPPLY_NAMES):
+                if op_type == "ADDITION" and (left in supply_vars or right in supply_vars):
                     sign = "mint"
-                elif op_type == "SUBTRACTION" and left in _TOTAL_SUPPLY_NAMES:
+                elif op_type == "SUBTRACTION" and left in supply_vars:
                     sign = "burn"
                 if sign is None:
                     continue
                 # In-place (`totalSupply += x`): the Binary lvalue is the supply
                 # var itself. Two-step: a TMP the next Assignment stores back.
-                if _base_name(getattr(lvalue, "name", None)) in _TOTAL_SUPPLY_NAMES:
+                if _base_name(getattr(lvalue, "name", None)) in supply_vars:
                     signs.add(sign)
                 elif lvalue is not None:
                     binary_sign[id(lvalue)] = sign
@@ -431,7 +472,7 @@ def total_supply_sign(function: Any) -> str | None:
                     continue
                 target = _base_name(getattr(getattr(ir, "lvalue", None), "name", None))
                 rvalue = getattr(ir, "rvalue", None)
-                if target in _TOTAL_SUPPLY_NAMES and rvalue is not None and id(rvalue) in binary_sign:
+                if target in supply_vars and rvalue is not None and id(rvalue) in binary_sign:
                     signs.add(binary_sign[id(rvalue)])
             for ir in irs:
                 if type(ir).__name__ in ("InternalCall", "LibraryCall"):
@@ -445,6 +486,212 @@ def total_supply_sign(function: Any) -> str | None:
     return None
 
 
+def monotone_balance_delta(function: Any) -> str | None:
+    """``"mint"`` / ``"burn"`` when every monotone write this function makes to
+    the contract's own storage moves in one direction, else ``None``.
+
+    Unlike :func:`total_supply_sign` this resolves a ``ReferenceVariable`` back to
+    the state variable it indexes, so the WETH9 shape — a balance ledger credited
+    out of nothing (``balanceOf[msg.sender] += msg.value``) with no supply
+    variable anywhere — is observed rather than assumed. A body that both credits
+    and debits (a ledger move) is ambiguous and yields ``None``."""
+    from slither.core.variables.state_variable import StateVariable
+
+    def state_origin(value: Any) -> Any:
+        if isinstance(value, StateVariable):
+            return value
+        origin = getattr(value, "points_to_origin", None)
+        return origin if isinstance(origin, StateVariable) else None
+
+    signs: set[str] = set()
+    visited: set[int] = set()
+
+    def walk(unit: Any) -> None:
+        if id(unit) in visited:
+            return
+        visited.add(id(unit))
+        for node in getattr(unit, "nodes", []) or []:
+            irs = list(getattr(node, "irs", []) or [])
+            for ir in irs:
+                if type(ir).__name__ != "Binary":
+                    continue
+                op_type = getattr(getattr(ir, "type", None), "name", "") or ""
+                if op_type not in ("ADDITION", "SUBTRACTION"):
+                    continue
+                if state_origin(getattr(ir, "lvalue", None)) is None:
+                    continue
+                if state_origin(getattr(ir, "variable_left", None)) is None:
+                    continue
+                signs.add("mint" if op_type == "ADDITION" else "burn")
+            for ir in irs:
+                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and getattr(callee, "nodes", None):
+                        walk(callee)
+
+    walk(function)
+    if len(signs) == 1:
+        return next(iter(signs))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Mint/burn via the ERC-20 standard Transfer event (name-independent supply)
+# ---------------------------------------------------------------------------
+
+# The ERC-20 published signature ``Transfer(address,address,uint256)``. A
+# rebasing token (EETH) tracks supply in a differently-named var and computes
+# ``totalSupply()`` externally, so ``total_supply_sign`` cannot see the write;
+# the standard zero-address ``Transfer`` is the general, name-independent mint /
+# burn signal.
+_ERC20_TRANSFER_ARG_TYPES = ("address", "address", "uint256")
+
+
+def _is_erc20_transfer_event(ir: Any) -> bool:
+    if getattr(ir, "name", None) != "Transfer":
+        return False
+    args = list(getattr(ir, "arguments", []) or [])
+    if len(args) != 3:
+        return False
+    return tuple(str(getattr(arg, "type", None)) for arg in args) == _ERC20_TRANSFER_ARG_TYPES
+
+
+def _arg_is_zero(arg: Any, origins: dict[int, tuple[str, str | None]]) -> bool:
+    from slither.slithir.variables import Constant
+
+    if isinstance(arg, Constant):
+        return getattr(arg, "value", None) in (0, "0", "0x0", False)
+    return origins.get(id(arg)) == ("zero", None)
+
+
+def _transfer_zero_direction(ir: Any, origins: dict[int, tuple[str, str | None]]) -> str | None:
+    """``"mint"`` for an ERC-20 ``Transfer`` whose FROM is the zero address,
+    ``"burn"`` when the TO is, ``None`` otherwise (neither endpoint zero, both
+    zero, or not the canonical ``Transfer(address,address,uint256)`` shape)."""
+    if not _is_erc20_transfer_event(ir):
+        return None
+    args = list(getattr(ir, "arguments", []) or [])
+    from_zero = _arg_is_zero(args[0], origins)
+    to_zero = _arg_is_zero(args[1], origins)
+    if from_zero and not to_zero:
+        return "mint"
+    if to_zero and not from_zero:
+        return "burn"
+    return None
+
+
+def mint_burn_transfer_sign(function: Any) -> str | None:
+    """``"mint"`` / ``"burn"`` when the function both emits a zero-endpoint
+    ERC-20 ``Transfer`` and makes a matching-direction monotone Binary write to
+    a state variable, else ``None``.
+
+    Both halves are required. The zero-address ``Transfer`` alone would fire on a
+    proxy/forwarder that re-emits it without changing its own supply, so a
+    monotone ``+`` (mint) or ``-`` (burn) to some ``StateVariable`` in the same
+    body must corroborate it. Walks internal/library callees like
+    :func:`total_supply_sign` so a mint/burn routed through a helper is
+    attributed to the entry point. Fails to ``None`` on any doubt — a mixed body
+    that emits both a from-zero and a to-zero ``Transfer`` is ambiguous."""
+    from slither.core.variables.state_variable import StateVariable
+
+    transfer_dirs: set[str] = set()
+    write_signs: set[str] = set()
+    visited: set[int] = set()
+
+    def walk(unit: Any) -> None:
+        if id(unit) in visited:
+            return
+        visited.add(id(unit))
+        origins = _operand_origins(unit)
+        for node in getattr(unit, "nodes", []) or []:
+            irs = list(getattr(node, "irs", []) or [])
+            for ir in irs:
+                if type(ir).__name__ == "EventCall":
+                    direction = _transfer_zero_direction(ir, origins)
+                    if direction:
+                        transfer_dirs.add(direction)
+            binary_sign: dict[int, str] = {}
+            for ir in irs:
+                if type(ir).__name__ != "Binary":
+                    continue
+                op_type = getattr(getattr(ir, "type", None), "name", "") or ""
+                left = getattr(ir, "variable_left", None)
+                right = getattr(ir, "variable_right", None)
+                lvalue = getattr(ir, "lvalue", None)
+                sign = None
+                if op_type == "ADDITION" and (isinstance(left, StateVariable) or isinstance(right, StateVariable)):
+                    sign = "mint"
+                elif op_type == "SUBTRACTION" and isinstance(left, StateVariable):
+                    sign = "burn"
+                if sign is None:
+                    continue
+                # In-place (`S += x`): the Binary lvalue is the state var itself.
+                # Two-step: a TMP the next Assignment stores back into a state var.
+                if isinstance(lvalue, StateVariable):
+                    write_signs.add(sign)
+                elif lvalue is not None:
+                    binary_sign[id(lvalue)] = sign
+            for ir in irs:
+                if type(ir).__name__ != "Assignment":
+                    continue
+                target = getattr(ir, "lvalue", None)
+                rvalue = getattr(ir, "rvalue", None)
+                if isinstance(target, StateVariable) and rvalue is not None and id(rvalue) in binary_sign:
+                    write_signs.add(binary_sign[id(rvalue)])
+            for ir in irs:
+                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and getattr(callee, "nodes", None):
+                        walk(callee)
+
+    walk(function)
+    if transfer_dirs == {"mint"} and "mint" in write_signs:
+        return "mint"
+    if transfer_dirs == {"burn"} and "burn" in write_signs:
+        return "burn"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Emitted-log identity (topic0, not the event's name)
+# ---------------------------------------------------------------------------
+
+
+def emits_event_topic(ctx: ClaimContext, function: Any, topic0: str) -> bool:
+    """True when ``function`` (or an internal/library callee it reaches) emits the
+    log whose ``topic0`` is given — the standard's published event, identified by
+    the 32 bytes the chain indexes rather than by the event's name.
+
+    Each ``emit`` site is resolved through the contract's event *declarations*
+    (:meth:`ClaimContext.declared_event_topic`), which is where the signature
+    lives: the emitted arguments carry post-conversion types (a ``uint96``
+    balance emitted into a ``uint256`` member) and would hash to a topic no chain
+    ever logs."""
+    visited: set[int] = set()
+
+    def walk(unit: Any) -> bool:
+        if id(unit) in visited:
+            return False
+        visited.add(id(unit))
+        for node in getattr(unit, "nodes", []) or []:
+            irs = list(getattr(node, "irs", []) or [])
+            for ir in irs:
+                if type(ir).__name__ != "EventCall":
+                    continue
+                name = getattr(ir, "name", None)
+                arity = len(list(getattr(ir, "arguments", []) or []))
+                if isinstance(name, str) and ctx.declared_event_topic(name, arity) == topic0:
+                    return True
+            for ir in irs:
+                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and getattr(callee, "nodes", None) and walk(callee):
+                        return True
+        return False
+
+    return walk(function)
+
+
 # ---------------------------------------------------------------------------
 # Callee-pointer use-link (destination identity, not name strings)
 # ---------------------------------------------------------------------------
@@ -453,13 +700,11 @@ def total_supply_sign(function: Any) -> str | None:
 def pointer_write_targets(ctx: ClaimContext, function: str) -> list[Any]:
     """State variables ``function`` writes that are callable scalar pointers
     (address / contract-typed, hygiene-normal), as Slither ``StateVariable``
-    objects for identity comparison."""
-    normal_pointer_names = {
-        write["var"]
-        for write in state_writes(ctx, function)
-        if write.get("hygiene_class") == "normal" and _is_scalar_pointer_type(str(write.get("declared_type") or ""))
-    }
-    if not normal_pointer_names:
+    objects for identity comparison. The pointer test reads the variable's
+    resolved type; the effects facts contribute only the hygiene filter, which
+    keeps the OZ-v5 slot pseudo-variables out."""
+    normal_names = {write["var"] for write in state_writes(ctx, function) if write.get("hygiene_class") == "normal"}
+    if not normal_names:
         return []
     fn = contract_function(ctx, function)
     if fn is None:
@@ -468,7 +713,7 @@ def pointer_write_targets(ctx: ClaimContext, function: str) -> list[Any]:
 
     out = []
     for var in written_state_variables(fn):
-        if isinstance(var, StateVariable) and getattr(var, "name", None) in normal_pointer_names:
+        if isinstance(var, StateVariable) and getattr(var, "name", None) in normal_names and is_scalar_pointer(var):
             out.append(var)
     return out
 

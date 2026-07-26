@@ -27,7 +27,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, SCOPE_PROJECTION, TIER_FORK
+from services.effects.config import (
+    EFFECT_CLASS_FREEZE_PAUSE,
+    EFFECT_CLASS_VALUE_OUT,
+    OBSERVATION_EXECUTED,
+    OBSERVATION_REVERTED,
+    SCOPE_KERNEL,
+    SCOPE_PROJECTION,
+    SHAPE_CALLER_ARBITRARY,
+    TIER_FORK,
+)
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 from services.effects.harness import (
     Discrepancy,
@@ -183,6 +192,48 @@ def pause_recipe(
         _apply_fixtures(transport, [*fixtures, *(fx for ep in entry_points for fx in ep.fixtures)], tr)
         pre_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "pre_pause")
 
+        # §1 A2 probe follow-up — verify the pause can actually take effect before
+        # reading the freeze. An ``eth_call`` of the pauser from the principal runs
+        # the same EVM logic a ``send`` would, so a revert here means the resolved
+        # pauser cannot enact the pause on this forked state (missing authority, an
+        # active per-pauser cooldown, an unmet precondition). The freeze was then
+        # NEVER TESTED, so an empty blast radius would be INDETERMINATE — reported as
+        # its own ``pause_ineffective`` unknown with the raw revert, never conflated
+        # with a genuine "pause froze nothing" (the §1 fallback: an empty
+        # ``observed_blast_radius`` ≠ no-freeze). This split is what lets the live
+        # cycle tell the recoverable ineffective-pause verdicts from the correct
+        # no-blast ones instead of seeing one undifferentiated pile of empties.
+        pause_probe = transport.call({"from": principal, "to": contract_address, "data": pause_calldata})
+        tr["results"].append(
+            {"label": "pause_effectiveness", "success": pause_probe.success, "revert": pause_probe.revert_data}
+        )
+        if not pause_probe.success:
+            tr["pause_effective"] = False
+            tr["pre_pause_succeeding"] = sorted(pre_succeeding)
+            tr["observed_blast_radius"] = []
+            return emit(
+                store,
+                unknown(
+                    EFFECT_CLASS_FREEZE_PAUSE,
+                    tier=TIER_FORK,
+                    scope=SCOPE_PROJECTION,
+                    gate_ref=gate_ref,
+                    reason="pause_ineffective",
+                    details={
+                        # The pause call itself REVERTED, so the freeze was never
+                        # tested: the empty blast radius below describes a probe
+                        # that did not happen, not a pause that froze nothing.
+                        "observation": OBSERVATION_REVERTED,
+                        "pause_effective": False,
+                        "pre_pause_succeeding": sorted(pre_succeeding),
+                        "observed_blast_radius": [],
+                        "scored_denominator": sorted(str(g) for g in predicted_guard_set),
+                    },
+                    transcript=tr,
+                ),
+            )
+        tr["pause_effective"] = True
+
         transport.impersonate(principal)
         try:
             transport.send({"from": principal, "to": contract_address, "data": pause_calldata})
@@ -229,6 +280,39 @@ def pause_recipe(
         else None
     )
 
+    if not pre_succeeding:
+        # NOTHING WAS LIVE TO FREEZE. Every entry point we could synthesize was
+        # already reverting on its own precondition before the pause, so
+        # ``observed_blast = pre - post`` is empty by construction and measures
+        # the probe set, not the pause. Distinct from the branch below, where
+        # points WERE live and the pause left them alone — that is a real
+        # observation about the latch; this is the absence of one.
+        #
+        # Deliberately its own reason so it stays OUT of
+        # ``_CACHEABLE_UNKNOWN_REASONS``: the emptiness is a property of this
+        # deployment's state at this block (an unfunded caller, an unmet
+        # business precondition), not of the bytecode, so transferring it would
+        # publish "this pause froze nothing" to every twin on the strength of a
+        # surface that happened to be dead here.
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_FREEZE_PAUSE,
+                tier=TIER_FORK,
+                scope=SCOPE_PROJECTION,
+                gate_ref=gate_ref,
+                reason="no_live_entry_points_to_freeze",
+                details={
+                    "observation": OBSERVATION_EXECUTED,
+                    "pause_effective": True,
+                    "pre_pause_succeeding": [],
+                    "observed_blast_radius": [],
+                    "scored_denominator": sorted(predicted),
+                },
+                transcript=tr,
+                discrepancy=disc,
+            ),
+        )
     if not observed_blast:
         return emit(
             store,
@@ -239,6 +323,15 @@ def pause_recipe(
                 gate_ref=gate_ref,
                 reason="no_blast_radius_observed",
                 details={
+                    # The pause ran. The empty blast radius below is therefore a
+                    # measurement, which is exactly what separates this row from
+                    # the reverted one above.
+                    "observation": OBSERVATION_EXECUTED,
+                    # pause_effective True + empty blast = a GENUINE no-blast: the
+                    # pause took effect yet froze nothing observable. This is at the
+                    # bar (correct to leave unknown), and distinct from the
+                    # pause_ineffective branch above where the freeze was untested.
+                    "pause_effective": True,
                     "pre_pause_succeeding": sorted(pre_succeeding),
                     "observed_blast_radius": [],
                     "scored_denominator": sorted(predicted),
@@ -255,10 +348,12 @@ def pause_recipe(
         gate_ref=gate_ref,
         reason="pause_froze_entry_points",
         details={
+            "observation": OBSERVATION_EXECUTED,
             # Kernel witness (latch flip caused reverts) + projection witness
             # (which points). The scored denominator stays static's set (§8.8);
             # the observed set is a lower bound recorded alongside it.
             "latch_flip": True,
+            "pause_effective": True,
             "observed_blast_radius": sorted(observed_blast),
             "pre_pause_succeeding": sorted(pre_succeeding),
             "scored_denominator": sorted(predicted),
@@ -268,6 +363,185 @@ def pause_recipe(
         transcript=tr,
     )
     eff.discrepancy = disc
+    return emit(store, eff)
+
+
+def _uint_return(result: EthCallResult) -> int | None:
+    if not result.success or not result.return_data:
+        return None
+    try:
+        return int(result.return_data, 16)
+    except ValueError:
+        return None
+
+
+def timelock_execute_recipe(
+    *,
+    transport: AnvilTransport,
+    store: TranscriptStore,
+    ctx: SimContext,
+    contract_address: str,
+    principal: str,
+    schedule_calldata: str,
+    execute_calldata: str,
+    delay_seconds: int,
+    gate_ref: str = "",
+    fixtures: Sequence[ForkFixture] = (),
+    sentinel_address: str | None = None,
+    witness_token: str | None = None,
+    witness_calldata: str | None = None,
+) -> ObservedEffect:
+    """§9.5 Tier-2 timelock: schedule → advance time → execute, the sequence Tier-1
+    cannot reach (``eth_simulateV1`` issues ONE block with no ``blockOverrides``, so
+    it can never satisfy a delayed operation's ``block.timestamp`` gate — every
+    ``execute`` reverts ``TimelockUnexpectedOperationState`` there).
+
+    Reuses ``pause_recipe``'s fork machinery: snapshot/revert isolation (inv. 16),
+    an impersonated principal, and ``increase_time`` to advance past the operation
+    delay. The scheduled inner operation is an ERC-20 ``transfer`` to a sentinel on
+    a token the timelock provably holds (synthesised upstream from measured
+    holdings, §0.0.2), so a positive sentinel-balance delta after ``execute`` proves
+    the timelock forwards value to a PROPOSER-CHOSEN destination — a
+    ``caller_arbitrary`` outflow, the exact shape an arbitrary-call executor has.
+
+    Fail-closed at every step: a ``schedule`` or ``execute`` revert is its own
+    unknown carrying the raw revert, never conflated with "executes nothing"; an
+    execution that moves no value to the sentinel stays ``no_value_observed``.
+
+    NONE of this recipe's verdicts may be cached or transferred on the behavioural
+    hash — not because of their tier (``_is_cacheable`` excludes only
+    ``TIER_HISTORICAL``, and a proven verdict / a ``no_value_observed`` are
+    otherwise cacheable), but because EVERY one of them is STATE-DEPENDENT: it
+    rests on state this probe manufactured on the fork (the scheduled operation
+    landing, ``block.timestamp`` advancing past the delay), which is not a
+    code-plane structural fact a bytecode twin inherits. So each verdict carries
+    ``state_dependent=True``, which ``_is_cacheable`` refuses outright (§0.0.4)."""
+    hardfork = assert_post_cancun(transport)
+    ctx = SimContext(
+        chain_id=ctx.chain_id,
+        block=ctx.block,
+        hardfork=hardfork,
+        anvil_version=transport.versions().get("anvil"),
+        foundry_version=transport.versions().get("foundry"),
+    )
+    tr = new_transcript(ctx, feature="timelock", tier=TIER_FORK, effect_class=EFFECT_CLASS_VALUE_OUT)
+    tr["contract_address"] = contract_address.lower()
+    tr["delay_seconds"] = delay_seconds
+
+    def _unknown(reason: str, **details: Any) -> ObservedEffect:
+        eff = unknown(
+            EFFECT_CLASS_VALUE_OUT,
+            tier=TIER_FORK,
+            scope=SCOPE_KERNEL,
+            gate_ref=gate_ref,
+            reason=reason,
+            details={"observation": OBSERVATION_REVERTED, **details},
+            transcript=tr,
+        )
+        eff.state_dependent = True
+        return emit(store, eff)
+
+    def _witness() -> int | None:
+        if witness_token is None or witness_calldata is None:
+            return None
+        return _uint_return(transport.call({"to": witness_token, "data": witness_calldata}))
+
+    snap = transport.snapshot()
+    try:
+        _apply_fixtures(transport, fixtures, tr)
+        witness_before = _witness()
+
+        transport.impersonate(principal)
+        try:
+            # An ``eth_call`` runs the same EVM logic ``send`` would, so a revert here
+            # is the resolved proposer being unable to schedule on this forked state
+            # (missing PROPOSER_ROLE, an operation already pending) — the sequence was
+            # never testable, recorded with its raw revert.
+            schedule_probe = transport.call({"from": principal, "to": contract_address, "data": schedule_calldata})
+            tr["results"].append(
+                {"label": "schedule", "success": schedule_probe.success, "revert": schedule_probe.revert_data}
+            )
+            if not schedule_probe.success:
+                return _unknown("timelock_schedule_reverted", schedule_revert=schedule_probe.revert_data)
+            transport.send({"from": principal, "to": contract_address, "data": schedule_calldata})
+            transport.mine()
+
+            # THE Tier-1 impossibility: before the delay elapses ``execute`` must
+            # revert on the operation-not-ready gate. Observing that revert here, then
+            # its success after the warp, is what proves the recipe advanced time
+            # rather than side-stepped the gate.
+            premature = transport.call({"from": principal, "to": contract_address, "data": execute_calldata})
+            tr["results"].append(
+                {"label": "execute_premature", "success": premature.success, "revert": premature.revert_data}
+            )
+
+            transport.increase_time(delay_seconds + 1)
+            transport.mine()
+
+            execute_probe = transport.call({"from": principal, "to": contract_address, "data": execute_calldata})
+            tr["results"].append(
+                {"label": "execute", "success": execute_probe.success, "revert": execute_probe.revert_data}
+            )
+            if not execute_probe.success:
+                return _unknown("timelock_execute_reverted", execute_revert=execute_probe.revert_data)
+            transport.send({"from": principal, "to": contract_address, "data": execute_calldata})
+            transport.mine()
+        finally:
+            transport.stop_impersonate(principal)
+
+        witness_after = _witness()
+    finally:
+        transport.revert(snap)
+
+    moved = witness_before is not None and witness_after is not None and witness_after > witness_before
+    if not moved:
+        eff = unknown(
+            EFFECT_CLASS_VALUE_OUT,
+            tier=TIER_FORK,
+            scope=SCOPE_KERNEL,
+            gate_ref=gate_ref,
+            # Two different facts, and a consumer must be able to tell them apart.
+            # With no witness asset the timelock held NOTHING for the operation to
+            # move, so "moved nothing" would be a statement about our inability to
+            # measure rather than about the contract — the §0.0.4 distinction. With
+            # an asset, the operation really did execute and move none of it.
+            reason="no_value_observed" if witness_token is not None else "timelock_holds_no_witness_asset",
+            details={
+                # The delayed operation EXECUTED (the point Tier-1 cannot reach);
+                # it simply moved nothing to the sentinel we could witness.
+                "observation": OBSERVATION_EXECUTED,
+                "value_moved": False,
+                "timelock_executed": True,
+                "witness_asset_held": witness_token is not None,
+            },
+            transcript=tr,
+        )
+        # State-dependent (schedule landed + time advanced): must not transfer on
+        # the kernel hash, even though ``no_value_observed`` is otherwise cacheable.
+        eff.state_dependent = True
+        return emit(store, eff)
+    eff = proven(
+        EFFECT_CLASS_VALUE_OUT,
+        tier=TIER_FORK,
+        scope=SCOPE_KERNEL,
+        gate_ref=gate_ref,
+        reason="value_moved",
+        details={
+            "observation": OBSERVATION_EXECUTED,
+            "value_moved": True,
+            "timelock_executed": True,
+            # The scheduled operation targeted a sentinel the PROPOSER chose, and
+            # the timelock forwarded value to it — a caller/proposer-arbitrary
+            # destination, proved by the sentinel balance delta (simulation).
+            "destination_shape": SHAPE_CALLER_ARBITRARY,
+            "shape_proved_by": "simulation",
+        },
+        concrete={"destination": sentinel_address} if sentinel_address else {},
+        transcript=tr,
+    )
+    # State-dependent: a proven value_moved from schedule→warp→execute is as
+    # untransferable as its reverts — it rests on state THIS probe manufactured.
+    eff.state_dependent = True
     return emit(store, eff)
 
 

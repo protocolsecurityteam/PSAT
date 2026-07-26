@@ -526,11 +526,18 @@ def _selector_for_signature(
         return "0x" + keccak(text=canonical).hex()[:8]
 
     from services.policy.effective_permissions import _abi_signature
+    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
 
     # Fallback: string normalization of full_name. Correct for contract/interface
     # params (→ ``address``); enum/struct params can't be recovered from the name
     # alone (no tuple layout, no uint width), which is why the map above exists.
-    return "0x" + keccak(text=_abi_signature(signature)).hex()[:8]
+    # When the lowering is provably incomplete we return no selector rather than
+    # one the chain will never dispatch on — a wrong selector silently matches
+    # the wrong function, while a missing one only fails to match.
+    lowered = _abi_signature(signature)
+    if not is_canonical_abi_signature(lowered):
+        return None
+    return "0x" + keccak(text=lowered).hex()[:8]
 
 
 # ---------------------------------------------------------------------------

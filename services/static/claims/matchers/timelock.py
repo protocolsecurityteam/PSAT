@@ -2,9 +2,9 @@
 
 The dead legacy label had 0 producers while 4 consumer branches waited on it.
 Each entry rides the oz_timelock gate (getMinDelay + schedule + execute +
-hashOperation) and matches its canonical entry name. ``execute``/``executeBatch``
-additionally carry ``exec.arbitrary`` (forwarded target + calldata) from that
-matcher.
+hashOperation) and matches the published TimelockController selector for its
+operation. ``execute``/``executeBatch`` additionally carry ``exec.arbitrary``
+(forwarded target + calldata) from that matcher.
 """
 
 from __future__ import annotations
@@ -12,16 +12,19 @@ from __future__ import annotations
 from ..context import ClaimContext
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
-from ._gates import function_name, is_oz_timelock_gate
+from ._gates import (
+    TIMELOCK_CANCEL,
+    TIMELOCK_EXECUTE_SELECTORS,
+    TIMELOCK_SCHEDULE_SELECTORS,
+    TIMELOCK_UPDATE_DELAY,
+    is_oz_timelock_gate,
+)
 
-_SCHEDULE_FUNCTIONS = frozenset({"schedule", "scheduleBatch"})
-_EXECUTE_FUNCTIONS = frozenset({"execute", "executeBatch"})
 
-
-def _timelock_evidence(function: str) -> ClaimEvidence:
+def _timelock_evidence(selector: str) -> ClaimEvidence:
     return ClaimEvidence(
         tier="standard_exact",
-        witness={"kind": "selector+gate", "standard": "oz_timelock", "function": function_name(function)},
+        witness={"kind": "selector+gate", "standard": "oz_timelock", "selector": selector},
     )
 
 
@@ -33,9 +36,10 @@ def _timelock_evidence(function: str) -> ClaimEvidence:
     gate=is_oz_timelock_gate,
 )
 def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) not in _SCHEDULE_FUNCTIONS:
+    selector = ctx.canonical_selector(function)
+    if selector is None or selector not in TIMELOCK_SCHEDULE_SELECTORS:
         return None
-    return _timelock_evidence(function)
+    return _timelock_evidence(selector)
 
 
 @claim_matcher(
@@ -46,9 +50,10 @@ def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     gate=is_oz_timelock_gate,
 )
 def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) not in _EXECUTE_FUNCTIONS:
+    selector = ctx.canonical_selector(function)
+    if selector is None or selector not in TIMELOCK_EXECUTE_SELECTORS:
         return None
-    return _timelock_evidence(function)
+    return _timelock_evidence(selector)
 
 
 @claim_matcher(
@@ -59,9 +64,9 @@ def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     gate=is_oz_timelock_gate,
 )
 def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) != "cancel":
+    if ctx.canonical_selector(function) != TIMELOCK_CANCEL:
         return None
-    return _timelock_evidence(function)
+    return _timelock_evidence(TIMELOCK_CANCEL)
 
 
 @claim_matcher(
@@ -72,6 +77,6 @@ def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     gate=is_oz_timelock_gate,
 )
 def timelock_set_delay(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function_name(function) != "updateDelay":
+    if ctx.canonical_selector(function) != TIMELOCK_UPDATE_DELAY:
         return None
-    return _timelock_evidence(function)
+    return _timelock_evidence(TIMELOCK_UPDATE_DELAY)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -290,3 +291,206 @@ def test_stale_function_id_does_not_poison_sibling_verdicts(clean_effects):
     assert len(rows) == 2
     assert rows[live_addr].function_id == live_id
     assert rows[stale_addr].function_id is None
+
+
+# ---------------------------------------------------------------------------
+# State-plane residue survives observation-less rewrites (the cache-HIT shape).
+#
+# The code-plane cache structurally carries no concrete values (inv. 3), so every
+# cache-HIT resolution re-writes its verdict row with ``concrete_destination=None``.
+# An unconditional SET erased the cold first-sighting observation on every hit.
+# ---------------------------------------------------------------------------
+
+RESIDUE_ADDR = "0x" + "55" * 20
+DEST = "0x" + "de" * 20
+
+
+def _write(session, **kw):
+    base: dict[str, Any] = {
+        "chain_id": 1,
+        "contract_address": RESIDUE_ADDR,
+        "selector": "0x40c10f19",
+        "effect_class": "value_out",
+        "behavior_hash": "bh_residue",
+        "verdict": "proven",
+        "tier": "tier1",
+    }
+    base.update(kw)
+    record_effect_verdict(session, **base)
+    session.commit()
+    session.expire_all()
+    return session.query(EffectVerdict).one()
+
+
+@requires_postgres
+def test_cache_hit_rewrite_preserves_state_plane_residue(clean_effects):
+    """The exact live-DB failure: a cold write captures the destination, a later
+    cache-HIT job re-writes the SAME verdict carrying none, and the residue must
+    survive — while the resolution facts still track the newest write."""
+    session = clean_effects
+    _write(session, concrete_destination=DEST, current_check_passed=True, witness={"destination_shape": "param"})
+
+    row = _write(session, tier="tier0", concrete_destination=None, current_check_passed=None)
+
+    assert row.concrete_destination == DEST
+    assert row.current_check_passed is True
+    assert row.verdict == "proven"
+    assert row.tier == "tier0"
+
+
+@requires_postgres
+def test_downgraded_verdict_drops_the_residue_that_justified_it(clean_effects):
+    """Residue must not outlive the evidence for it. The witness and transcript
+    are already overwritten on a downgrade precisely so a *proven* witness never
+    sits beside an ``unknown`` verdict; an orphaned ``concrete_destination`` is
+    the same contradiction in another column — and ``find_verdict_residue_batch``
+    reads it, so the orphan would also suppress re-observation forever."""
+    session = clean_effects
+    _write(
+        session,
+        concrete_destination=DEST,
+        current_check_passed=True,
+        observed_residue={"observed_reach_value_usd": 5_000_000.0},
+        witness={"destination_shape": "param"},
+    )
+
+    row = _write(session, verdict="unknown", concrete_destination=None, current_check_passed=None)
+
+    assert row.verdict == "unknown"
+    assert row.concrete_destination is None
+    assert row.current_check_passed is None
+    assert row.observed_residue is None
+    assert row.witness is None
+
+
+@requires_postgres
+def test_observed_residue_merges_key_wise_across_observation_less_rewrites(clean_effects):
+    """``observed_residue`` is a bag of independent residue facts written by
+    different paths (§5b reach on a cold probe, re-probe bookkeeping on a hit), so
+    a write carrying only some keys must leave the others standing."""
+    session = clean_effects
+    _write(session, observed_residue={"observed_reach_value_usd": 42.0, "observed_reach_holders": ["0xaa"]})
+
+    row = _write(session, observed_residue={"destination_probe_attempts": 1})
+
+    assert row.observed_residue == {
+        "observed_reach_value_usd": 42.0,
+        "observed_reach_holders": ["0xaa"],
+        "destination_probe_attempts": 1,
+    }
+    # A fresh observation of the same key still wins.
+    row = _write(session, observed_residue={"observed_reach_value_usd": 7.0})
+    assert row.observed_residue["observed_reach_value_usd"] == 7.0
+    assert row.observed_residue["destination_probe_attempts"] == 1
+
+
+@requires_postgres
+def test_probe_bookkeeping_survives_a_verdict_flip(clean_effects):
+    """A verdict flip must clear the OBSERVATIONS (they described the old answer)
+    without refunding the re-probe budget.
+
+    ``destination_probe_attempts`` is not an observation of the contract — it is
+    how many times this deployment has already been re-probed, which stays true
+    across a flip. Dropping the whole bag reset the ≤2 cap, so a behavior that is
+    proven in the cache but unreproducible HERE flips its way to an unbounded
+    number of Tier-1 probes: two per flip, on every job, forever."""
+    session = clean_effects
+    _write(
+        session,
+        observed_residue={"destination_probe_attempts": 2, "observed_reach_value_usd": 42.0},
+        concrete_destination=DEST,
+    )
+
+    row = _write(session, verdict="unknown", observed_residue=None, concrete_destination=None)
+
+    assert row.verdict == "unknown"
+    # The observation is gone (it justified the old verdict) ...
+    assert "observed_reach_value_usd" not in (row.observed_residue or {})
+    assert row.concrete_destination is None
+    # ... and the bound the observation was probed under is not refunded.
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+    # A flip back does not resurrect the observation either.
+    row = _write(session, verdict="proven", observed_residue=None)
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
+def test_a_flip_with_a_fresh_attempt_count_takes_the_new_one(clean_effects):
+    session = clean_effects
+    _write(session, observed_residue={"destination_probe_attempts": 1, "observed_reach_holders": ["0xaa"]})
+    row = _write(session, verdict="unknown", observed_residue={"destination_probe_attempts": 2})
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
+def test_a_code_change_also_keeps_the_probe_bookkeeping(clean_effects):
+    """A new behavior hash drops the residue for the same reason a flip does; the
+    attempt count is still about this DEPLOYMENT's probe spend, not the code."""
+    session = clean_effects
+    _write(session, observed_residue={"destination_probe_attempts": 2, "observed_reach_value_usd": 1.0})
+    row = _write(session, behavior_hash="other-hash", observed_residue=None)
+    assert row.observed_residue == {"destination_probe_attempts": 2}
+
+
+@requires_postgres
+def test_fresh_observation_overwrites_stale_residue(clean_effects):
+    """Preservation is only for the absent case — a real new observation wins."""
+    session = clean_effects
+    _write(session, concrete_destination=DEST, current_check_passed=True)
+    other = "0x" + "ab" * 20
+    row = _write(session, concrete_destination=other, current_check_passed=False)
+    assert row.concrete_destination == other
+    assert row.current_check_passed is False
+
+
+@requires_postgres
+def test_behavior_hash_change_drops_stale_residue(clean_effects):
+    """Residue is code-relative: an upgraded implementation must not inherit the
+    previous one's observed destination just because the address is unchanged."""
+    session = clean_effects
+    _write(
+        session,
+        concrete_destination=DEST,
+        current_check_passed=True,
+        observed_residue={"observed_reach_value_usd": 9.0},
+    )
+    row = _write(session, behavior_hash="bh_after_upgrade", concrete_destination=None, current_check_passed=None)
+    assert row.behavior_hash == "bh_after_upgrade"
+    assert row.concrete_destination is None
+    assert row.current_check_passed is None
+    assert row.observed_residue is None
+
+
+@requires_postgres
+def test_witness_and_transcript_track_the_verdict(clean_effects):
+    """Evidence is NOT residue-preserved: a downgrade to ``unknown`` must not keep
+    publishing the witness that proved the previous verdict."""
+    session = clean_effects
+    _write(session, witness={"destination_shape": "param"}, transcript_ptr="job-a::t1")
+    row = _write(session, verdict="unknown", witness=None, transcript_ptr=None)
+    assert row.witness is None
+    assert row.transcript_ptr is None
+
+
+@requires_postgres
+def test_function_id_link_survives_an_unresolved_rewrite(clean_effects):
+    """The FK is ON DELETE SET NULL, so a stored non-NULL id is always live. A
+    write that could not resolve one must not orphan the row."""
+    session = clean_effects
+    addr = "0x" + "66" * 20
+    fn_id = _seed_function_row(session, addr, "0x8456cb59")
+    for fid in (fn_id, None):
+        record_effect_verdict(
+            session,
+            chain_id=1,
+            contract_address=addr,
+            selector="0x8456cb59",
+            effect_class="freeze_pause",
+            verdict="proven",
+            tier="tier2",
+            function_id=fid,
+        )
+    session.commit()
+    session.expire_all()
+    assert session.query(EffectVerdict).one().function_id == fn_id

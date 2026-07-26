@@ -417,4 +417,58 @@ def test_schema_version_bumped_for_additive_fact_fields(tmp_path):
     the artifact schema version."""
     contract = _compile(tmp_path, _MEMBER_SRC, "Accountant")
     artifact = build_effects(contract)
-    assert artifact["schema_version"] == SCHEMA_VERSION == "semantic-2"
+    assert artifact["schema_version"] == SCHEMA_VERSION == "semantic-3"
+
+
+# ---------------------------------------------------------------------------
+# Probe-input facts: which argument is the quantity, and can the target take ETH
+# ---------------------------------------------------------------------------
+
+_PROBE_INPUT_SRC = """
+    pragma solidity ^0.8.20;
+
+    contract Redeemer {
+        mapping(uint256 => address) public ownerOf;
+
+        // A quantity and a clock value, plus an id-keyed redemption: the three
+        // argument roles a prober must tell apart.
+        function payOut(address to, uint256 amount, uint256 deadline) external {
+            require(block.timestamp <= deadline);
+            payable(to).transfer(amount);
+        }
+
+        function redeem(uint256 tokenId) external {
+            require(ownerOf[tokenId] == msg.sender);
+            delete ownerOf[tokenId];
+        }
+
+        function deposit() external payable {}
+    }
+"""
+
+
+def test_parameter_names_and_payability_are_recorded(tmp_path):
+    """A prober cannot tell a quantity from a token id without the declared
+    names, and cannot know a ``msg.value`` attempt is doomed without payability.
+    Both are ABI facts the compiler already has."""
+    contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
+    effects = build_effects(contract)
+
+    pay = _info(effects, "payOut(address,uint256,uint256)")
+    assert pay["parameter_names"] == ["to", "amount", "deadline"]
+    assert pay["payable"] is False
+    assert _info(effects, "redeem(uint256)")["parameter_names"] == ["tokenId"]
+    assert _info(effects, "deposit()")["payable"] is True
+
+
+def test_value_flow_records_which_parameter_carries_the_amount(tmp_path):
+    """``amount_param_index`` is the dispositive answer to "which argument is the
+    quantity" — the mirror of ``target_param_index`` for the destination."""
+    contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
+    effects = build_effects(contract)
+    flows = [f for f in _info(effects, "payOut(address,uint256,uint256)")["value_flows"] if f["direction"] == "out"]
+    assert flows, "expected a native transfer out"
+    assert any(f.get("amount_kind", {}).get("kind") == "param" for f in flows)
+    assert {f.get("amount_param_index") for f in flows} == {1}
+    # ...and the destination slot is still resolved independently.
+    assert {f.get("target_param_index") for f in flows} == {0}

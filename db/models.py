@@ -1483,6 +1483,12 @@ class EffectVerdict(Base):
     # State-plane concrete values — the reason this row is not the cache.
     concrete_destination: Mapped[str | None] = mapped_column(String(42), nullable=True)
     current_check_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The state-plane residue with no column of its own: §5b downstream value
+    # reach (holder ADDRESSES + their USD) and the bookkeeping that bounds the
+    # hit-path residue re-probe. Deliberately NOT ``witness`` — witness carries
+    # the code-plane structural details a cache hit re-publishes verbatim, so
+    # anything per-deployment placed there travels to other deployments.
+    observed_residue: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     witness: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
@@ -1498,6 +1504,42 @@ class EffectVerdict(Base):
         ),
         Index("ix_effect_verdicts_function_id", "function_id"),
     )
+
+
+class EffectsPlanMarker(Base):
+    """ "This contract's effect candidates were planned and yielded NO plans."
+
+    A contract whose candidates all synthesize away leaves no trace of having
+    been looked at: no ``effect_verdicts`` row, and — when it has no job of its
+    own — no ``stage_timing_effects`` artifact either. Effects selection would
+    then class it *unowned* forever and re-sweep it from every subsequent job in
+    the protocol. This row is the missing trace.
+
+    Only the empty outcome is recorded. A contract that DID yield plans is
+    already marked by the verdicts those plans wrote, and recording it here would
+    risk claiming coverage for a job that later died before writing them.
+
+    ``planned_at`` is load-bearing, not bookkeeping: the marker is honored only
+    while it is at least as new as the reading job (``JobScope.planned_since``),
+    so it suppresses the re-sweep *within* a run and expires for the next one.
+    Planning inputs are not immutable — an ``upgrade_events`` row lands
+    asynchronously, a re-analysis rewrites ``effective_functions`` — so a
+    permanent marker could strand a contract that has since become plannable.
+    That is silent recall loss, the one failure direction this must not have.
+    """
+
+    __tablename__ = "effects_plan_markers"
+
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), primary_key=True)
+    # The job whose planning pass observed the empty outcome. SET NULL rather
+    # than CASCADE: losing the job must not resurrect the re-sweep.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    # How many candidate functions were planned to reach the empty outcome —
+    # ops-facing, so a marker can be audited against the cascade that produced it.
+    candidates_planned: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    planned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")

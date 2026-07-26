@@ -13,15 +13,25 @@ not persist to the DB and do not route discrepancies anywhere (Phase 3).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
+from services.effects.calldata import substitute_address_arg
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
+    OBSERVATION_EXECUTED,
+    OBSERVATION_NOT_RUN,
+    OBSERVATION_REVERTED,
     SCOPE_KERNEL,
+    SHAPE_CALLER_ARBITRARY,
+    SHAPE_IMMUTABLE_FIXED,
+    SHAPE_STORAGE_DETERMINED,
+    SHAPE_UNKNOWN,
     TIER_CALL,
     TIER_HISTORICAL,
 )
@@ -37,21 +47,35 @@ from services.effects.harness import (
     record_calls,
     unknown,
 )
-from services.effects.simulate import SimCall, SimCallResult, Simulate, transfers_out
+from services.effects.seeding import (
+    SEED_ETH_VALUE,
+    Seeder,
+    Seeding,
+    SeedRequest,
+    budget_of,
+    contract_balance_override,
+    eth_value_override,
+)
+from services.effects.simulate import (
+    SimCall,
+    SimCallResult,
+    Simulate,
+    StateOverride,
+    transfers_in,
+    transfers_out,
+)
 from utils.rpc import EthCallResult
+
+logger = logging.getLogger(__name__)
 
 # EIP-1967 implementation slot. keccak("eip1967.proxy.implementation") - 1.
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 # ERC-20 totalSupply().
 TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 
-# Destination-shape vocabulary (§4.2). Only ``immutable_fixed`` is benign; only
-# static can positively PROVE the two fixed shapes (universals); simulation can
-# only PROVE ``caller_arbitrary`` (an existential, via a sentinel that lands).
-SHAPE_CALLER_ARBITRARY = "caller_arbitrary"
-SHAPE_STORAGE_DETERMINED = "storage_determined"
-SHAPE_IMMUTABLE_FIXED = "immutable_fixed"
-SHAPE_UNKNOWN = "unknown"
+# Re-exported: the discriminator is the whole stage's contract, not this module's
+# (``services.effects.anvil`` emits pause rows under it too), so it lives in the
+# shared vocabulary. See :mod:`services.effects.config` for what each value means.
 
 
 def _sim_to_ethcall(r: SimCallResult) -> EthCallResult:
@@ -81,6 +105,438 @@ def uups_sentinel_override(sentinel_address: str, impl_slot: str = EIP1967_IMPL_
 
 
 # ---------------------------------------------------------------------------
+# Input-asset seeding (shared by §4.2 and §4.5)
+# ---------------------------------------------------------------------------
+
+
+# Attempt labels. ``contract_balance`` is the most synthetic and always runs last.
+_ATTEMPT_SEEDED = "seeded_probe"
+_ATTEMPT_PAYABLE = "seeded_probe_payable"
+_ATTEMPT_CONTRACT_BALANCE = "seeded_probe_contract_balance"
+_ATTEMPT_CONTRACT_TOKEN = "seeded_probe_contract_token"
+# ERC-20 analogue of the native contract-balance seed runs on at most this many of
+# the deployment's measured holdings; the seeder's own layout budget caps distinct
+# tokens further.
+_MAX_CONTRACT_HOLDINGS = 2
+
+# Why a seeded attempt (or the whole retry path) produced no observation. Recorded
+# per attempt on the transcript AND counted on the seed budget's metrics, so a live
+# run reporting ``executed=0`` names the failing precondition instead of going
+# silent.
+_OUTCOME_EXECUTED = "executed"
+_OUTCOME_TARGET_REVERTED = "target_reverted"
+_OUTCOME_READBACK_FAILED = "readback_failed"
+_OUTCOME_MALFORMED = "malformed_response"
+_SKIP_NO_SEEDER = "skipped_no_seeder"
+_SKIP_NO_CALLDATA = "skipped_no_seeded_calldata"
+_SKIP_BUDGET = "skipped_budget_exhausted"
+_SKIP_NO_TOKEN = "skipped_no_token_resolved"
+_SKIP_NO_ATTEMPT_PATH = "skipped_no_viable_attempt"
+# A token PARAMETER was left at the encoder's default because nothing honest
+# could be named for it. The call reverts on its own argument — a non-observation
+# with a recorded reason, never a guessed address.
+_SKIP_NO_TOKEN_ARG = "skipped_no_token_for_param"
+
+
+@dataclass(frozen=True)
+class _SeedAttempt:
+    """One seeded retry of a probe call."""
+
+    label: str
+    overrides: StateOverride | None
+    value: int
+    calldata: str
+    sentinel_calldata: str | None
+    seeding: Seeding | None
+    contract_balance_seeded: bool = False
+    # ``param index -> token address`` written into this attempt's calldata. Only
+    # a read-back-proved token appears here, so it is what the backing witness is
+    # gated on (see :func:`_backing_admissible`).
+    token_args: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def readback(self) -> tuple[SimCall, ...]:
+        return self.seeding.readback_calls if self.seeding else ()
+
+    @property
+    def expected(self) -> tuple[str, ...]:
+        return self.seeding.readback_expected if self.seeding else ()
+
+
+def _record_seed_outcome(
+    transcript: dict[str, Any],
+    seeder: Seeder | None,
+    label: str,
+    outcome: str,
+    *,
+    detail: str | None = None,
+) -> None:
+    """Append one attempt/skip outcome to the transcript and count it on the
+    budget. The transcript already carries the raw calls; this says which
+    PRECONDITION each attempt died on, which the call list alone cannot."""
+    entry: dict[str, Any] = {"label": label, "outcome": outcome}
+    if detail:
+        entry["detail"] = detail
+    transcript.setdefault("seed_attempts", []).append(entry)
+    budget = budget_of(seeder)
+    if budget is not None:
+        budget.record_outcome(outcome)
+    if outcome != _OUTCOME_EXECUTED:
+        logger.debug(
+            "effects recipes: seeded attempt %s discarded (%s%s)", label, outcome, f": {detail}" if detail else ""
+        )
+
+
+def _seed_attempts(
+    *,
+    seeder: Seeder | None,
+    transcript: dict[str, Any],
+    contract_address: str,
+    principal: str | None,
+    token_hints: Sequence[str],
+    seeded_calldata: Mapping[int, str],
+    seeded_sentinel_calldata: Mapping[int, str],
+    block_tag: str,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
+    token_param_indexes: Sequence[int] = (),
+    contract_holdings: Sequence[str] = (),
+) -> list[_SeedAttempt]:
+    """The ordered retries for a probe whose UNSEEDED call already reverted.
+
+    Ordering is the soundness argument, not an optimization:
+
+    * the ERC-20 attempt runs first, at ``value == 0``, so an asset the call then
+      consumes is one it genuinely pulls;
+    * ``msg.value`` is attached only on the SECOND attempt — i.e. only after a
+      zero-value call provably failed. Attaching ETH up front would let a payable
+      admin mint bank our own ``msg.value`` as an "inflow" when a real caller
+      could mint with nothing attached. This ordering makes an ETH deposit's
+      inflow a witnessed REQUIREMENT;
+    * the TARGET CONTRACT's own balance is seeded LAST and only for a function
+      static says pays native ETH out. It is the most synthetic override the
+      stage makes — a verdict it produces means "would move value if the contract
+      were funded", not "moves value in current state" — so it may only ever run
+      after every attempt that carries the stronger meaning has failed.
+
+    Attempts a target cannot execute are not issued at all: a NON-payable function
+    rejects an attached ``msg.value`` with an empty revert before its body runs,
+    which witnesses nothing and cost 9 of the 13 seeded calls on the 2026-07-22
+    run. With no token seeding, no payable path and no native payout there is
+    nothing left to try, and the probe keeps exactly today's unseeded verdict.
+
+    The whole path is charged to the job's :class:`~services.effects.seeding.SeedBudget`
+    FIRST — an exhausted budget returns no attempt at all, which is the exact
+    pre-seeding probe, never a less careful one."""
+    if seeder is None or not principal:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_SEEDER)
+        return []
+    if not seeded_calldata:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_CALLDATA)
+        return []
+    budget = budget_of(seeder)
+    if budget is not None and not budget.take_retry(contract_address.lower()):
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_BUDGET)
+        return []
+    seeding: Seeding | None = None
+    if token_hints:
+        try:
+            seeding = seeder(
+                SeedRequest(
+                    spender=contract_address,
+                    principal=principal,
+                    token_hints=tuple(token_hints),
+                    block_tag=block_tag,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a failed seeder only means "do not seed"
+            logger.debug("effects recipes: seeder failed for %s", contract_address, exc_info=True)
+            seeding = None
+    if seeding is None:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_TOKEN)
+    decimals = seeding.decimals if seeding else 18
+    calldata = seeded_calldata.get(decimals) or seeded_calldata.get(18)
+    if calldata is None:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_CALLDATA)
+        return []
+    sentinel = seeded_sentinel_calldata.get(decimals) or seeded_sentinel_calldata.get(18)
+    if seeding is not None:
+        transcript["seeding"] = dict(seeding.detail)
+    placed: dict[str, str] = {}
+    if token_param_indexes:
+        calldata, sentinel, placed = _place_token_args(
+            calldata, sentinel, token_param_indexes, seeding, contract_address
+        )
+        if not placed:
+            _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_TOKEN_ARG)
+        elif seeding is not None:
+            transcript.setdefault("seeding", {})["token_args"] = placed
+    attempts: list[_SeedAttempt] = []
+    if seeding is not None:
+        attempts.append(
+            _SeedAttempt(_ATTEMPT_SEEDED, seeding.overrides, 0, calldata, sentinel, seeding, token_args=placed)
+        )
+    if target_payable is not False:
+        attempts.append(
+            _SeedAttempt(
+                _ATTEMPT_PAYABLE,
+                eth_value_override(principal, seeding.overrides if seeding else None),
+                SEED_ETH_VALUE,
+                calldata,
+                sentinel,
+                seeding,
+                token_args=placed,
+            )
+        )
+    else:
+        _record_seed_outcome(transcript, seeder, _ATTEMPT_PAYABLE, _SKIP_NO_ATTEMPT_PATH, detail="non_payable_target")
+    if native_payout:
+        attempts.append(
+            _SeedAttempt(
+                _ATTEMPT_CONTRACT_BALANCE,
+                contract_balance_override(contract_address, seeding.overrides if seeding else None),
+                0,
+                calldata,
+                sentinel,
+                seeding,
+                contract_balance_seeded=True,
+                token_args=placed,
+            )
+        )
+    # ERC-20 analogue of the native contract-balance seed (§16.6-A): a payout the
+    # contract's LIVE balance cannot cover reaches its send once the contract's own
+    # token balance is overridden. Seeding with ``principal == spender == contract``
+    # makes the seeder write the CONTRACT's balance slot (``slot(principal, spender)``)
+    # and read it back via ``balanceOf(contract)`` — the same discipline as every
+    # other seed. Runs LAST (most synthetic) and carries ``contract_balance_seeded``:
+    # a verdict it produces is "would move value IF THE CONTRACT WERE FUNDED", a
+    # capability of the code, not a live outflow. The token is whatever the
+    # deployment provably holds (§0.0.2), never a hardcoded asset.
+    for token in list(contract_holdings)[:_MAX_CONTRACT_HOLDINGS]:
+        if not isinstance(token, str) or token.lower() == contract_address.lower():
+            continue
+        try:
+            held = seeder(
+                SeedRequest(
+                    spender=contract_address,
+                    principal=contract_address,
+                    token_hints=(token,),
+                    block_tag=block_tag,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a failed seeder only means "do not seed"
+            logger.debug("effects recipes: contract-holding seed failed for %s", token, exc_info=True)
+            held = None
+        if held is None or not held.overrides:
+            _record_seed_outcome(transcript, seeder, _ATTEMPT_CONTRACT_TOKEN, _SKIP_NO_TOKEN, detail=token)
+            continue
+        attempts.append(
+            _SeedAttempt(
+                _ATTEMPT_CONTRACT_TOKEN,
+                held.overrides,
+                0,
+                calldata,
+                sentinel,
+                held,
+                contract_balance_seeded=True,
+                token_args=placed,
+            )
+        )
+    if not attempts:
+        _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_ATTEMPT_PATH)
+    return attempts
+
+
+def _place_token_args(
+    calldata: str,
+    sentinel: str | None,
+    indexes: Sequence[int],
+    seeding: Seeding | None,
+    contract_address: str,
+) -> tuple[str, str | None, dict[str, str]]:
+    """Write a SEEDED token address into each proved token parameter.
+
+    Only a token the seeder actually seeded may be written: the principal now
+    holds it, so the pull the function performs can succeed and emit the Transfer
+    the backing witness is read from. The probe target itself is excluded even
+    when it was the only token seeded — feeding a vault its own share token as
+    the deposit asset produces a mint whose inflow is the minted asset, which the
+    backing rule discards, and the resulting ``inflow_observed: false`` would
+    describe the prober's argument rather than the function.
+
+    Returns the (possibly unchanged) calldata pair and a map of what was placed;
+    an empty map means the slots kept the encoder's default."""
+    tokens = [t for t in (seeding.tokens if seeding else ()) if t != contract_address.lower()]
+    if not tokens:
+        return calldata, sentinel, {}
+    placed: dict[str, str] = {}
+    for n, index in enumerate(indexes):
+        token = tokens[min(n, len(tokens) - 1)]
+        rewritten = substitute_address_arg(calldata, index, token)
+        if rewritten is None:
+            continue
+        calldata = rewritten
+        if sentinel is not None:
+            sentinel = substitute_address_arg(sentinel, index, token) or sentinel
+        placed[str(index)] = token
+    return calldata, sentinel, placed
+
+
+def _token_slots_unresolved(token_param_indexes: Sequence[int], used: _SeedAttempt | None) -> bool:
+    """Did a slot the static plane PROVED carries a token keep the encoder's
+    filler instead of a read-back-verified one?
+
+    The cheap half of the §5a admissibility gate: a call made with a non-token in
+    a known token slot cannot witness anything about backing. It is only half
+    because ``token_param_indexes`` is derived from parameter NAMES plus body-sink
+    heads (``calldata.address_param_roles``), so an asset argument named outside
+    that vocabulary leaves it EMPTY — the reason the negative additionally needs
+    :func:`_prober_address_inert`."""
+    if not token_param_indexes:
+        return False
+    return used is None or not set(used.token_args) >= {str(i) for i in token_param_indexes}
+
+
+def _stamp_seed_qualifiers(details: dict[str, Any], used: _SeedAttempt | None) -> None:
+    """Mirror ``value_out``'s top-level qualifiers (:func:`value_out`, the
+    ``input_seeded`` / ``contract_balance_seeded`` block) onto a supply verdict's
+    ``details``.
+
+    ``claims_bridge._observed_summary`` propagates these by TOP-LEVEL key, so a
+    qualifier written only into the nested ``backing`` map (or only onto the
+    transcript) never reaches the witness and the claim then reads stronger than
+    the seeded observation it came from (§4/G8). ``contract_balance_seeded`` is the
+    capability-not-current-state weakener and MUST travel wherever the verdict
+    does; a plain ``input_seeded`` records that the caller was funded first. A
+    no-op when nothing was seeded, so absence still means "no override was
+    needed", never "seeded but undisclosed"."""
+    if used is None:
+        return
+    details["input_seeded"] = True
+    if used.contract_balance_seeded:
+        details["contract_balance_seeded"] = True
+
+
+# Runtime that reverts on ANY call, on every fork: ``PUSH1 0 PUSH1 0 REVERT``.
+# Deliberately not ``PUSH0``-based (that would pin the probe to post-Shanghai) and
+# deliberately non-empty, so ``extcodesize`` is nonzero and an ``isContract``
+# guard takes the same branch a real token would.
+_REVERT_STUB_CODE = "0x60006000fd"
+
+
+def _prober_supplied_address_args(calldata: str, principal: str | None) -> list[str]:
+    """Addresses THIS prober invented and wrote into ``calldata``'s head words.
+
+    The encoder's address policy (``calldata._arg_values``) writes the acting
+    identity into EVERY address parameter, and the seeded retry overwrites the
+    proved token slots with a read-back-verified token
+    (``calldata.substitute_address_arg``). So a head word still equal to the
+    principal is an address argument the prober chose, and a slot holding a seeded
+    token is excluded by construction — it no longer holds the principal.
+
+    Read off the BYTES that were executed rather than off a parameter-type list,
+    so it stays true whatever the encoder did with the signature. A ``uint`` head
+    word can only collide with this by carrying the principal's exact 160-bit
+    value, which the encoder never writes into an integer slot."""
+    if not principal or not isinstance(calldata, str):
+        return []
+    raw = principal[2:] if principal.startswith("0x") else principal
+    word = raw.lower().rjust(64, "0")
+    body = calldata[2:] if calldata.startswith("0x") else calldata
+    args = body[8:]
+    for start in range(0, len(args) // 64 * 64, 64):
+        if args[start : start + 64].lower() == word:
+            return [principal.lower()]
+    return []
+
+
+def _prober_address_inert(
+    simulate: Simulate,
+    transcript: dict[str, Any],
+    *,
+    token_address: str,
+    principal: str | None,
+    calldata: str,
+    attempt: _SeedAttempt | None,
+    delta: int,
+    suspects: Sequence[str],
+) -> bool:
+    """Is the mint we just observed PROVABLY independent of the addresses the
+    prober itself supplied as arguments?
+
+    This is the proof the §5a NEGATIVE rests on, and it exists because absence of
+    evidence is not evidence of absence here. A call to a CODELESS address is a
+    silent no-op success inside ``SafeTransferLib`` and its imitators, so a
+    deposit-backed conversion handed a codeless address for its asset still mints
+    while pulling nothing — and ``inflow_observed: false`` would then describe the
+    prober's argument, not the function. Parameter names cannot rule that out
+    (that is exactly what let it through), and a codesize read cannot either: the
+    acting principal is routinely an EOA, and withholding on that alone would
+    delete the unbacked-admin-mint witness this stage exists to produce.
+
+    The differential decides it by OBSERVATION instead. Re-run the same read →
+    mint → read block, under the same seed, with plain reverting code placed at
+    each prober-supplied address. If the mint still executes and moves supply by
+    the SAME delta, then no call to those addresses was on the executed path: no
+    pull was silently skipped, and ``inflow_observed: false`` is a statement about
+    F. If it now reverts, diverges, or cannot be run at all, the execution DID
+    depend on an address this prober invented and the witness is withheld.
+
+    Known limit, stated rather than papered over: a pull made through an
+    UNCHECKED low-level call would survive the stub and still be counted inert.
+    Every safe-transfer wrapper in circulation checks, so this is the residual
+    the differential does not close."""
+    overrides: StateOverride = {}
+    if attempt is not None and attempt.overrides:
+        overrides = {addr: dict(fields) for addr, fields in attempt.overrides.items()}
+    for addr in suspects:
+        overrides.setdefault(addr.lower(), {})["code"] = _REVERT_STUB_CODE
+    readback = attempt.readback if attempt is not None else ()
+    read = SimCall(to=token_address, data=TOTAL_SUPPLY_SELECTOR)
+    mint = SimCall(
+        to=token_address, data=calldata, from_addr=principal, value=attempt.value if attempt is not None else 0
+    )
+    calls = [*readback, read, mint, read]
+    try:
+        res = _run(simulate, transcript, calls, overrides=overrides or None, label="backing_inertness_probe")
+    except Exception:  # noqa: BLE001 - a transport failure withholds, never publishes
+        logger.debug("effects recipes: backing inertness probe failed for %s", token_address, exc_info=True)
+        return False
+    if res is None or len(res.calls) != len(calls):
+        return False
+    if attempt is not None and not _readback_ok(attempt, res.calls):
+        return False
+    head = len(readback)
+    before_c, mint_c, after_c = res.calls[head], res.calls[head + 1], res.calls[head + 2]
+    if not (before_c.success and mint_c.success and after_c.success):
+        return False
+    before_ts, after_ts = _to_int(before_c.return_data), _to_int(after_c.return_data)
+    if before_ts is None or after_ts is None:
+        return False
+    return after_ts - before_ts == delta
+
+
+def _readback_ok(attempt: _SeedAttempt, results: Sequence[SimCallResult]) -> bool:
+    """Did every seeded slot echo its written word inside THIS probe's block?
+
+    The strict gate on every seeded verdict. The discovery block proved the
+    getter reads the slot; this proves the seed landed in the block the witness
+    comes from. Any revert or any mismatch ⇒ the whole attempt is discarded and
+    the probe falls back to its unseeded verdict — an unseeded ``unknown`` is
+    honest, a wrongly-seeded positive is not."""
+    expected = attempt.expected
+    if len(results) < len(expected):
+        return False
+    for want, got in zip(expected, results, strict=False):
+        if not got.success:
+            return False
+        value = _to_int(got.return_data)
+        if value is None or value != _to_int(want):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # §4.2 — value-out (+ three-valued destination shape)
 # ---------------------------------------------------------------------------
 
@@ -99,7 +555,18 @@ def value_out(
     sentinel_calldata: str | None = None,
     static_shape: str | None = None,
     static_destination: str | None = None,
+    value_holders: Sequence[tuple[str, float]] = (),
+    acting_balance_usd: float = 0.0,
     gate_ref: str = "",
+    seeder: Seeder | None = None,
+    input_token_hints: Sequence[str] = (),
+    token_param_indexes: Sequence[int] = (),
+    seeded_calldata: Mapping[int, str] | None = None,
+    seeded_sentinel_calldata: Mapping[int, str] | None = None,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
+    inputs_vacuous: bool = False,
+    contract_holdings: Sequence[str] = (),
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
 
@@ -109,7 +576,21 @@ def value_out(
     are static UNIVERSALS; only ``caller_arbitrary`` is proven by simulation via
     a sentinel that lands — a sentinel that moves nothing proves nothing
     (rule 8.1) and, when taint said the param reaches the sink, is a §9
-    discrepancy (recorded, not routed)."""
+    discrepancy (recorded, not routed).
+
+    VERDICT SEMANTICS under seeding. A proven verdict normally reads "calling F
+    moves value out, in the state at this block". Two flags on ``details`` weaken
+    that, and both travel with the verdict through the cache and the claims
+    bridge because a consumer that misses them over-reads the witness:
+
+    * ``input_seeded`` — the caller was given the asset F pulls. The effect is
+      still fully observed; what is not claimed is that this principal holds the
+      asset today.
+    * ``contract_balance_seeded`` — the TARGET CONTRACT's own ETH balance was
+      overridden before the payout executed. The verdict then means "would move
+      value IF THE CONTRACT WERE FUNDED" — a capability of the code — not "moves
+      value in current state". Its absence means no override was needed, never
+      that the treasury is funded."""
     tr = new_transcript(ctx, feature="value_out", tier=TIER_CALL, effect_class=EFFECT_CLASS_VALUE_OUT)
     if not simulate_supported:
         tr["fallback"] = "tier2"
@@ -119,7 +600,7 @@ def value_out(
                 EFFECT_CLASS_VALUE_OUT,
                 gate_ref=gate_ref,
                 reason="simulate_unsupported_tier2_fallback",
-                details={"fallback": "tier2"},
+                details={"fallback": "tier2", "observation": OBSERVATION_NOT_RUN},
                 transcript=tr,
             ),
         )
@@ -128,10 +609,52 @@ def value_out(
     base_res = _run(simulate, tr, [base_call], label="value_probe")
     if base_res is None:
         return emit(store, _sim_precondition_unknown(EFFECT_CLASS_VALUE_OUT, gate_ref, tr))
-    moved = transfers_out(base_res.calls[0], contract_address)
+    observed = base_res.calls[0]
+    used: _SeedAttempt | None = None
+    if not observed.success:
+        # A precondition revert, not an absence of value movement: a payable or
+        # asset-pulling withdrawal never reaches its send with an empty caller.
+        used, seeded_result = _seeded_call(
+            simulate,
+            tr,
+            attempts=_seed_attempts(
+                seeder=seeder,
+                transcript=tr,
+                contract_address=contract_address,
+                principal=principal,
+                token_hints=input_token_hints,
+                token_param_indexes=token_param_indexes,
+                seeded_calldata=seeded_calldata or {},
+                seeded_sentinel_calldata=seeded_sentinel_calldata or {},
+                block_tag=hex(tr["block_number"]),
+                target_payable=target_payable,
+                native_payout=native_payout,
+                contract_holdings=contract_holdings,
+            ),
+            to=contract_address,
+            principal=principal,
+            seeder=seeder,
+        )
+        if seeded_result is not None:
+            observed = seeded_result
+    moved = transfers_out(observed, contract_address)
     value_moved = bool(moved)
+    budget = budget_of(seeder)
+    if used is not None:
+        tr["input_seeded"] = True
+        tr["contract_balance_seeded"] = used.contract_balance_seeded
+        if budget is not None:
+            budget.record_executed()
 
-    sentinel_transfers = _run_sentinel(simulate, tr, contract_address, principal, sentinel_calldata, sentinel_address)
+    sentinel_transfers = _run_sentinel(
+        simulate,
+        tr,
+        contract_address,
+        principal,
+        used.sentinel_calldata if used is not None else sentinel_calldata,
+        sentinel_address,
+        attempt=used,
+    )
     shape, proved_by, concrete_dest, disc = _resolve_destination_shape(
         effect_class=EFFECT_CLASS_VALUE_OUT,
         base_transfers=moved,
@@ -141,26 +664,74 @@ def value_out(
         static_shape=static_shape,
         static_destination=static_destination,
     )
+    # Did the execution the transfers were read off actually RUN? ``observed.logs``
+    # is empty for a reverted call, so ``transfers_out`` returns ``[]`` for "F moved
+    # nothing" and for "F never got past its own precondition" alike. Without this
+    # flag both land the identical ``value_moved: false`` payload on the row.
+    executed = observed.success
     details: dict[str, Any] = {
         "value_moved": value_moved,
+        "observation": OBSERVATION_EXECUTED if executed else OBSERVATION_REVERTED,
         "destination_shape": shape,
         "shape_proved_by": proved_by,
     }
+    if used is not None:
+        # Code-plane: the function could only be exercised once the caller held
+        # the input asset it pulls. Which token / how much is state-plane residue
+        # and stays in the transcript.
+        details["input_seeded"] = True
+        if used.contract_balance_seeded:
+            # WEAKER CLAIM, and it has to travel with the verdict everywhere the
+            # verdict does (cache included): the payout was only reachable after
+            # the TARGET CONTRACT's own ETH balance was overridden, so this proves
+            # "would move value if the contract were funded" — a capability of the
+            # code — not "moves value in current state". A consumer that ignores
+            # this key reads a treasury-empty contract as a live outflow.
+            details["contract_balance_seeded"] = True
     concrete: dict[str, Any] = {}
     if concrete_dest is not None:
         concrete["destination"] = concrete_dest
     if not value_moved and shape != SHAPE_CALLER_ARBITRARY:
+        # Two different facts, and they must not share a reason string: a call that
+        # RAN and moved nothing is a code-plane structural non-observation a
+        # bytecode twin inherits, while a call that reverted — on a precondition,
+        # or on an argument this prober guessed — is state-/input-dependent and
+        # must re-probe. ``value_probe_reverted`` is deliberately absent from
+        # ``effects_worker._CACHEABLE_UNKNOWN_REASONS`` for exactly that reason
+        # (§7); ``no_supply_delta``/``mint_call_reverted`` already split this way.
+        #
+        # A THIRD split (§3): a call that RAN but did so with an effect-relevant
+        # argument left at the encoder default (an empty dynamic array, an integer
+        # role that never resolved) observed nothing about F — it observed a fact
+        # about the vacuous argument. That is input-dependent by the same criterion
+        # a revert is, so its reason must ALSO stay out of the behaviour cache; a
+        # twin must not inherit "moves no value" from an empty-array probe.
+        if executed and inputs_vacuous:
+            reason = "no_value_observed_vacuous_input"
+            details["vacuous_input"] = True
+        elif executed:
+            reason = "no_value_observed"
+        else:
+            reason = "value_probe_reverted"
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_VALUE_OUT,
                 gate_ref=gate_ref,
-                reason="no_value_observed",
+                reason=reason,
                 details=details,
                 transcript=tr,
                 discrepancy=disc,
             ),
         )
+    # §5b downstream value-reach rides the proven flow.out verdict only, and is
+    # STATE-plane (holder addresses + this protocol's USD) — hence ``concrete``.
+    # Measured on ``observed``, the execution the VERDICT came from: on a seeded
+    # retry the unseeded call reverted and carries no logs at all, so reading
+    # reach off it made every seeded verdict indeterminate by construction.
+    _add_reach(concrete, observed, value_holders, acting_balance_usd)
+    if budget is not None and used is not None:
+        budget.record_proven()
     eff = proven(
         EFFECT_CLASS_VALUE_OUT,
         gate_ref=gate_ref,
@@ -216,7 +787,7 @@ def code_upgrade(
                     tier=TIER_HISTORICAL,
                     gate_ref=gate_ref,
                     reason="indexed_upgrade_plus_current_state",
-                    details={"historical": True, "current_capability": True},
+                    details={"historical": True, "current_capability": True, "observation": OBSERVATION_NOT_RUN},
                     concrete={"current_check_passed": True},
                     transcript=tr0,
                 ),
@@ -228,7 +799,7 @@ def code_upgrade(
                 tier=TIER_HISTORICAL,
                 gate_ref=gate_ref,
                 reason="historical_only_current_check_failed",
-                details={"historical": True, "current_capability": None},
+                details={"historical": True, "current_capability": None, "observation": OBSERVATION_NOT_RUN},
                 concrete={"current_check_passed": False},
                 transcript=tr0,
             ),
@@ -246,7 +817,7 @@ def code_upgrade(
                 EFFECT_CLASS_CODE_UPGRADE,
                 gate_ref=gate_ref,
                 reason="bare_sentinel_proves_nothing",
-                details={"sentinel_override": False},
+                details={"sentinel_override": False, "observation": OBSERVATION_NOT_RUN},
                 transcript=tr,
             ),
         )
@@ -254,10 +825,29 @@ def code_upgrade(
     res = _run(simulate, tr, [call], overrides={sentinel_address.lower(): sentinel_override}, label="upgrade_probe")
     if res is None:
         return emit(store, _sim_precondition_unknown(EFFECT_CLASS_CODE_UPGRADE, gate_ref, tr))
+    probe = res.calls[0]
     impl_after = res.storage.get(proxy_address.lower(), {}).get(impl_slot.lower()) or res.storage.get(
         proxy_address.lower(), {}
     ).get(impl_slot)
     tr["impl_after"] = impl_after
+    if not probe.success:
+        # Same split as ``value_out``: an upgrade call that REVERTED leaves the
+        # impl slot untouched for a reason that has nothing to do with the code's
+        # upgradeability — the principal was rejected, or an argument this prober
+        # chose was. Reading it as ``impl_slot_unchanged`` put a state-dependent
+        # non-observation into the code-plane cache, where it transferred to every
+        # bytecode twin. Checked BEFORE the positive branch: a reverted call cannot
+        # have moved the slot, so a match here would be a node artifact.
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_CODE_UPGRADE,
+                gate_ref=gate_ref,
+                reason="upgrade_probe_reverted",
+                details={"upgradeable": None, "observation": OBSERVATION_REVERTED},
+                transcript=tr,
+            ),
+        )
     if impl_after is not None and _addr_eq(impl_after, sentinel_address):
         return emit(
             store,
@@ -265,7 +855,7 @@ def code_upgrade(
                 EFFECT_CLASS_CODE_UPGRADE,
                 gate_ref=gate_ref,
                 reason="impl_slot_changed_to_sentinel",
-                details={"upgradeable": True},
+                details={"upgradeable": True, "observation": OBSERVATION_EXECUTED},
                 concrete={"impl_before": impl_before, "impl_after": impl_after},
                 transcript=tr,
             ),
@@ -276,7 +866,7 @@ def code_upgrade(
             EFFECT_CLASS_CODE_UPGRADE,
             gate_ref=gate_ref,
             reason="impl_slot_unchanged",
-            details={"upgradeable": None},
+            details={"upgradeable": None, "observation": OBSERVATION_EXECUTED},
             transcript=tr,
         ),
     )
@@ -318,7 +908,7 @@ def authority_change(
                 EFFECT_CLASS_AUTHORITY_CHANGE,
                 gate_ref=gate_ref,
                 reason="insufficient_identities",
-                details={"identities": len(rlist)},
+                details={"identities": len(rlist), "observation": OBSERVATION_NOT_RUN},
                 transcript=tr,
             ),
         )
@@ -333,13 +923,20 @@ def authority_change(
     after = [_sim_to_ethcall(c) for c in res.calls[len(rlist) + 1 :]]
     if not mutate.success:
         # The principal could not even execute F — a precondition revert, not a
-        # proven absence of effect (§8.4).
+        # proven absence of effect (§8.4). This class takes NO seeder (§9.3): its
+        # reverts are on the gate, not a missing asset, so there is nothing to
+        # seed away. But the decoded revert IS worth keeping — without it the next
+        # census cannot name why the mutation reverted. Record it the way
+        # ``value_out`` records a seeded attempt's revert, via ``_revert_detail``.
+        revert_reason = _revert_detail(mutate)
+        tr["mutate_revert"] = revert_reason
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_AUTHORITY_CHANGE,
                 gate_ref=gate_ref,
                 reason="mutation_call_reverted",
+                details={"observation": OBSERVATION_REVERTED, "revert_reason": revert_reason},
                 transcript=tr,
             ),
         )
@@ -351,7 +948,7 @@ def authority_change(
                 scope=SCOPE_KERNEL,
                 gate_ref=gate_ref,
                 reason="gate_opened_to_randoms",
-                details={"gate_mutation": True},
+                details={"gate_mutation": True, "observation": OBSERVATION_EXECUTED},
                 transcript=tr,
             ),
         )
@@ -361,6 +958,7 @@ def authority_change(
             EFFECT_CLASS_AUTHORITY_CHANGE,
             gate_ref=gate_ref,
             reason="no_authorization_delta_observed",
+            details={"observation": OBSERVATION_EXECUTED},
             transcript=tr,
         ),
     )
@@ -386,6 +984,15 @@ def supply(
     static_shape: str | None = None,
     static_destination: str | None = None,
     gate_ref: str = "",
+    seeder: Seeder | None = None,
+    input_token_hints: Sequence[str] = (),
+    token_param_indexes: Sequence[int] = (),
+    seeded_calldata: Mapping[int, str] | None = None,
+    seeded_sentinel_calldata: Mapping[int, str] | None = None,
+    target_payable: bool | None = None,
+    native_payout: bool = False,
+    inputs_vacuous: bool = False,
+    contract_holdings: Sequence[str] = (),
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``? (§4.5)
 
@@ -402,7 +1009,7 @@ def supply(
                 EFFECT_CLASS_SUPPLY,
                 gate_ref=gate_ref,
                 reason="simulate_unsupported_tier2_fallback",
-                details={"fallback": "tier2"},
+                details={"fallback": "tier2", "observation": OBSERVATION_NOT_RUN},
                 transcript=tr,
             ),
         )
@@ -412,47 +1019,265 @@ def supply(
     if res is None or len(res.calls) != 3:
         return emit(store, _sim_precondition_unknown(EFFECT_CLASS_SUPPLY, gate_ref, tr))
     before_c, mint_c, after_c = res.calls
+    used: _SeedAttempt | None = None
+    if not mint_c.success:
+        # A deposit-backed conversion (wrap / enter / deposit) reverts here on the
+        # asset it pulls, never reaching the mint — so it drops out of the mint
+        # population and takes its backing witness with it. Retry with the input
+        # asset seeded.
+        used, seeded = _seeded_supply_call(
+            simulate,
+            tr,
+            attempts=_seed_attempts(
+                seeder=seeder,
+                transcript=tr,
+                contract_address=token_address,
+                principal=principal,
+                token_hints=input_token_hints,
+                token_param_indexes=token_param_indexes,
+                seeded_calldata=seeded_calldata or {},
+                seeded_sentinel_calldata=seeded_sentinel_calldata or {},
+                block_tag=hex(tr["block_number"]),
+                target_payable=target_payable,
+                native_payout=native_payout,
+                contract_holdings=contract_holdings,
+            ),
+            token_address=token_address,
+            principal=principal,
+            seeder=seeder,
+        )
+        if seeded is not None:
+            before_c, mint_c, after_c = seeded
+            tr["input_seeded"] = True
+            tr["contract_balance_seeded"] = used.contract_balance_seeded if used is not None else False
+            budget = budget_of(seeder)
+            if budget is not None:
+                budget.record_executed()
+    observation = OBSERVATION_EXECUTED if mint_c.success else OBSERVATION_REVERTED
     if not (before_c.success and after_c.success):
+        read_failed_details: dict[str, Any] = {"observation": observation}
+        _stamp_seed_qualifiers(read_failed_details, used)
         return emit(
             store,
-            unknown(EFFECT_CLASS_SUPPLY, gate_ref=gate_ref, reason="total_supply_read_failed", transcript=tr),
+            unknown(
+                EFFECT_CLASS_SUPPLY,
+                gate_ref=gate_ref,
+                reason="total_supply_read_failed",
+                details=read_failed_details,
+                transcript=tr,
+            ),
         )
     if not mint_c.success:
+        mint_reverted_details: dict[str, Any] = {"observation": OBSERVATION_REVERTED}
+        _stamp_seed_qualifiers(mint_reverted_details, used)
         return emit(
             store,
-            unknown(EFFECT_CLASS_SUPPLY, gate_ref=gate_ref, reason="mint_call_reverted", transcript=tr),
+            unknown(
+                EFFECT_CLASS_SUPPLY,
+                gate_ref=gate_ref,
+                reason="mint_call_reverted",
+                details=mint_reverted_details,
+                transcript=tr,
+            ),
         )
     before_ts = _to_int(before_c.return_data)
     after_ts = _to_int(after_c.return_data)
     if before_ts is None or after_ts is None:
+        undecodable_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+        _stamp_seed_qualifiers(undecodable_details, used)
         return emit(
             store,
-            unknown(EFFECT_CLASS_SUPPLY, gate_ref=gate_ref, reason="total_supply_undecodable", transcript=tr),
+            unknown(
+                EFFECT_CLASS_SUPPLY,
+                gate_ref=gate_ref,
+                reason="total_supply_undecodable",
+                details=undecodable_details,
+                transcript=tr,
+            ),
         )
-    delta = after_ts - before_ts
+    delta = _signed_delta(after_ts, before_ts)
+    # mint = Transfer from the zero address, EMITTED BY the token whose
+    # ``totalSupply`` moved. Any other token minting inside the same call is a
+    # different asset's supply event and must not stand in for this one's.
+    minted = transfers_out(mint_c, "0x" + "00" * 20, only_asset=token_address)
+    # The mirror: units destroyed are a Transfer TO the zero address.
+    burned = transfers_in(mint_c, "0x" + "00" * 20, only_asset=token_address)
     if delta == 0:
+        # S2: ``totalSupply`` is NOT the unit count for a share-accounted or
+        # rebasing token — EETH's reads ``liquidityPool.getTotalPooledEther()``,
+        # stETH's reads pooled ether — so a zero delta there does not mean no units
+        # were minted or burned. An UNAMBIGUOUS zero-address ``Transfer`` (exactly
+        # one direction present) IS that witness; take the sign from it. Only when
+        # the transfer evidence is ambiguous (both directions, or neither) is this
+        # the honest non-observation. Under-claim direction (§0.0.5): missing this
+        # capped the entire share-accounted population, not two functions.
+        if bool(minted) != bool(burned):
+            sign = "mint" if minted else "burn"
+        else:
+            no_delta_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+            _stamp_seed_qualifiers(no_delta_details, used)
+            if inputs_vacuous:
+                # §3/G6-A: the mint call ran but an effect-relevant argument was
+                # left at the encoder default, so "no supply delta" is a fact about
+                # the vacuous input, not about F — its reason must stay OUT of the
+                # behaviour cache (a twin must not inherit it).
+                no_delta_details["vacuous_input"] = True
+                reason = "no_supply_delta_vacuous_input"
+            else:
+                reason = "no_supply_delta"
+            return emit(
+                store,
+                unknown(
+                    EFFECT_CLASS_SUPPLY,
+                    gate_ref=gate_ref,
+                    reason=reason,
+                    details=no_delta_details,
+                    transcript=tr,
+                ),
+            )
+    else:
+        sign = "mint" if delta > 0 else "burn"
+    if _sign_contradicted_by_events(sign, minted, burned):
+        # Two independent witnesses of the same event disagree, so we hold none of
+        # it. Publishing the arithmetic anyway is how a burn was once published as
+        # proven dilution — the strongest claim this stage can make, on a call that
+        # destroyed units. An unknown here is not a gap in coverage; it is the only
+        # honest reading of contradictory evidence.
+        contradicted_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+        _stamp_seed_qualifiers(contradicted_details, used)
         return emit(
             store,
-            unknown(EFFECT_CLASS_SUPPLY, gate_ref=gate_ref, reason="no_supply_delta", transcript=tr),
+            unknown(
+                EFFECT_CLASS_SUPPLY,
+                gate_ref=gate_ref,
+                reason="supply_sign_contradicted_by_transfers",
+                details=contradicted_details,
+                transcript=tr,
+            ),
         )
-    sign = "mint" if delta > 0 else "burn"
-    minted = transfers_out(mint_c, "0x" + "00" * 20)  # mint = Transfer from the zero address
     _, _, _, disc = _resolve_destination_shape(
         effect_class=EFFECT_CLASS_SUPPLY,
         base_transfers=minted,
         sentinel_address=sentinel_address,
         sentinel_transfers=_run_sentinel(
-            simulate, tr, token_address, principal, sentinel_calldata, sentinel_address, mint_from_zero=True
+            simulate,
+            tr,
+            token_address,
+            principal,
+            used.sentinel_calldata if used is not None else sentinel_calldata,
+            sentinel_address,
+            mint_from_zero=True,
+            only_asset=token_address,
+            attempt=used,
         ),
         taint_param_reaches_sink=taint_param_reaches_sink,
         static_shape=static_shape,
         static_destination=static_destination,
     )
+    details: dict[str, Any] = {"supply_delta_sign": sign, "observation": OBSERVATION_EXECUTED}
+    # G8: the synthesis qualifiers must live at ``details`` TOP LEVEL — the only
+    # place ``claims_bridge._observed_summary`` carries them from — for EVERY
+    # supply verdict, mint or burn. The nested ``backing`` copy below (mint-only,
+    # withheld-gated) never reaches a burn witness, so a seeded burn read stronger
+    # than its observation until this stamp.
+    _stamp_seed_qualifiers(details, used)
+    concrete: dict[str, Any] = {}
+    withheld: str | None = None
+    if sign == "mint":
+        # §5a backing: an asset Transfer INTO the vault during the SAME simulated
+        # mint call is the co-occurring inflow that separates a deposit-backed
+        # conversion (WeETH.wrap / BoringVault.enter) from an unbacked, dilutive
+        # admin mint. The mint ran as the resolved principal for an attacker-chosen
+        # amount, and ``mint_c.logs`` is the COMPLETE set of Transfers it emitted —
+        # so ``inflow_observed is False`` is a WITNESSED negative (supply rose with
+        # zero matching asset inflow in the same observed call = dilution), not an
+        # absence-of-evidence guess. Fork-observed, Tier 1. Proportionality (the
+        # backed-vs-partial distinction) is left to the scorer from these counts —
+        # the assets differ in token/decimals, so the recipe does NOT collapse them
+        # to a ratio here. NEVER inferred from static flow.in + supply.mint
+        # co-occurrence (that proves neither causation nor proportionality).
+        #
+        # The inflow must be an asset OTHER than the one just minted: a mint that
+        # credits the vault itself (``_mint(address(this), fee)``) emits a
+        # ``Transfer(0x0 -> vault)`` from the minted token, which is the dilution
+        # being measured, not backing for it. Counting it produced a
+        # ``backing.inflow_observed: true`` byte-identical to a real deposit-backed
+        # conversion on the purest case of unbacked issuance.
+        inflow = transfers_in(mint_c, token_address, exclude_asset=token_address)
+        # ASYMMETRIC BURDEN, and the asymmetry is the whole point. ``inflow_observed:
+        # true`` is a positive observation — a Transfer log exists — and needs no
+        # further proof. The NEGATIVE has to be EARNED: it is published as witnessed
+        # dilution, so it may not rest on a pull that failed to happen because of an
+        # argument this prober invented. Two independent ways that can happen, each
+        # with its own gate:
+        #
+        #   * a slot static NAMED as a token never received a proven one
+        #     (:func:`_token_slots_unresolved`);
+        #   * a slot static never named at all — an asset parameter called ``want``
+        #     or ``market`` yields an EMPTY ``token_param_indexes``, so the first
+        #     gate passes vacuously — still holds the acting identity, and a call to
+        #     a codeless address is a silent no-op inside ``SafeTransferLib``. That
+        #     one is settled by OBSERVATION (:func:`_prober_address_inert`), never by
+        #     vocabulary.
+        withheld = "token_param_unresolved" if _token_slots_unresolved(token_param_indexes, used) else None
+        if withheld is None and not inflow:
+            suspects = _prober_supplied_address_args(used.calldata if used is not None else mint_calldata, principal)
+            if suspects and not _prober_address_inert(
+                simulate,
+                tr,
+                token_address=token_address,
+                principal=principal,
+                calldata=used.calldata if used is not None else mint_calldata,
+                attempt=used,
+                delta=delta,
+                suspects=suspects,
+            ):
+                withheld = "prober_address_not_proven_inert"
+            elif not suspects and not principal:
+                # No identity to fill address arguments with means the encoder's
+                # ``address(0)`` occupies them — the codeless case in its purest
+                # form — and nothing here can tell which slots those were.
+                withheld = "prober_address_unidentifiable"
+        if withheld is not None:
+            # WITHHOLDING IS NOT A NEGATIVE. The ``backing`` key is simply absent,
+            # which ``claims_bridge._observed_summary`` and the scorer read as
+            # unmeasured; the reason lives on the transcript so a live run can name
+            # what it could not prove instead of going quiet.
+            tr["backing_withheld"] = withheld
+        else:
+            # HOW MANY transfers this execution emitted is an observation of THIS
+            # deployment at this block, not a property of the bytecode: the same code
+            # on a vault with two fee recipients emits a different count. The
+            # code-plane witness is the BOOLEAN pair (an inflow co-occurred / units
+            # were minted), which is what a twin deployment may inherit; the counts go
+            # to the per-deployment residue (inv. 3).
+            concrete["backing_inflow_transfers"] = len(inflow)
+            concrete["backing_mint_transfers"] = len(minted)
+            details["backing"] = {
+                "inflow_observed": bool(inflow),
+                "minted": bool(minted),
+                # Whether the acting principal had to be given the input asset before
+                # the mint would execute at all. It records HOW the call was reached,
+                # never what the call did: ``inflow_observed`` above still comes
+                # solely from Transfers this execution emitted, and storage seeding
+                # emits none. A seeded mint that pulls nothing is still an honest
+                # ``inflow_observed: false`` (witnessed dilution); an unseeded mint is
+                # unaffected by any of this.
+                "input_seeded": used is not None,
+                # See ``value_out``: a mint only reachable once the CONTRACT's own ETH
+                # balance was overridden is a capability claim, not a live one.
+                "contract_balance_seeded": used is not None and used.contract_balance_seeded,
+            }
+    if used is not None:
+        seed_budget = budget_of(seeder)
+        if seed_budget is not None:
+            seed_budget.record_proven()
     eff = proven(
         EFFECT_CLASS_SUPPLY,
         gate_ref=gate_ref,
         reason=f"supply_{sign}",
-        details={"supply_delta_sign": sign},
+        details=details,
+        concrete=concrete,
         transcript=tr,
     )
     eff.discrepancy = disc
@@ -483,6 +1308,84 @@ def _run(
     return result
 
 
+def _seeded_call(
+    simulate: Simulate,
+    transcript: dict[str, Any],
+    *,
+    attempts: Sequence[_SeedAttempt],
+    to: str,
+    principal: str | None,
+    seeder: Seeder | None = None,
+) -> tuple[_SeedAttempt | None, SimCallResult | None]:
+    """Run the seeded retries of a single-call probe until one EXECUTES.
+
+    Returns the attempt and its result only when the read-back held AND the call
+    succeeded; otherwise ``(None, None)`` and the caller keeps its unseeded
+    verdict verbatim. Every discarded attempt records WHY."""
+    for attempt in attempts:
+        calls = [
+            *attempt.readback,
+            SimCall(to=to, data=attempt.calldata, from_addr=principal, value=attempt.value),
+        ]
+        res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
+        if res is None:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_MALFORMED)
+            continue
+        if not _readback_ok(attempt, res.calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_READBACK_FAILED)
+            continue
+        target = res.calls[len(attempt.readback)]
+        if target.success:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_EXECUTED)
+            return attempt, target
+        _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_TARGET_REVERTED, detail=_revert_detail(target))
+    return None, None
+
+
+def _revert_detail(result: SimCallResult) -> str:
+    """A short, replayable reason for one reverted attempt: the decoded error when
+    the revert data decodes, else the raw selector, else ``empty_revert``."""
+    from services.resolution.differential_probe import decode_error
+
+    raw = result.revert_data
+    if not raw or raw == "0x":
+        return "empty_revert"
+    decoded = decode_error(raw)
+    return str(decoded) if decoded else raw[:10]
+
+
+def _seeded_supply_call(
+    simulate: Simulate,
+    transcript: dict[str, Any],
+    *,
+    attempts: Sequence[_SeedAttempt],
+    token_address: str,
+    principal: str | None,
+    seeder: Seeder | None = None,
+) -> tuple[_SeedAttempt | None, tuple[SimCallResult, SimCallResult, SimCallResult] | None]:
+    """Seeded-retry form of the read → mint → read block. The two ``totalSupply``
+    reads must bracket the seeded call in the SAME block, so the whole triple is
+    re-run rather than splicing a seeded mint into the unseeded reads."""
+    read = SimCall(to=token_address, data=TOTAL_SUPPLY_SELECTOR)
+    for attempt in attempts:
+        mint = SimCall(to=token_address, data=attempt.calldata, from_addr=principal, value=attempt.value)
+        calls = [*attempt.readback, read, mint, read]
+        res = _run(simulate, transcript, calls, overrides=attempt.overrides, label=attempt.label)
+        if res is None or len(res.calls) != len(calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_MALFORMED)
+            continue
+        if not _readback_ok(attempt, res.calls):
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_READBACK_FAILED)
+            continue
+        head = len(attempt.readback)
+        before_c, mint_c, after_c = res.calls[head], res.calls[head + 1], res.calls[head + 2]
+        if mint_c.success:
+            _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_EXECUTED)
+            return attempt, (before_c, mint_c, after_c)
+        _record_seed_outcome(transcript, seeder, attempt.label, _OUTCOME_TARGET_REVERTED, detail=_revert_detail(mint_c))
+    return None, None
+
+
 def _run_sentinel(
     simulate: Simulate,
     transcript: dict[str, Any],
@@ -492,19 +1395,31 @@ def _run_sentinel(
     sentinel_address: str | None,
     *,
     mint_from_zero: bool = False,
+    only_asset: str | None = None,
+    attempt: _SeedAttempt | None = None,
 ) -> list[tuple[str, str, str]] | None:
     """Run the attacker-sentinel probe if one was supplied, returning its
     transfers of interest (or ``None`` when no sentinel probe ran). A sentinel
     that moves nothing returns ``[]`` — a non-observation the shape resolver
-    treats as rule-8.1 ``unknown``, never "fixed"."""
+    treats as rule-8.1 ``unknown``, never "fixed".
+
+    When the base probe only executed under a seed, the sentinel runs under the
+    SAME seed: an unseeded sentinel would revert on the same precondition and its
+    empty result would read as "the caller cannot redirect this", which is a
+    conclusion the probe never actually tested."""
     if not sentinel_calldata or not sentinel_address:
         return None
-    call = SimCall(to=source_address, data=sentinel_calldata, from_addr=principal)
-    res = _run(simulate, transcript, [call], label="sentinel_probe")
+    overrides = attempt.overrides if attempt is not None else None
+    value = attempt.value if attempt is not None else 0
+    readback = attempt.readback if attempt is not None else ()
+    call = SimCall(to=source_address, data=sentinel_calldata, from_addr=principal, value=value)
+    res = _run(simulate, transcript, [*readback, call], overrides=overrides, label="sentinel_probe")
     if res is None:
         return None
+    if attempt is not None and not _readback_ok(attempt, res.calls):
+        return None
     src = "0x" + "00" * 20 if mint_from_zero else source_address
-    return transfers_out(res.calls[0], src)
+    return transfers_out(res.calls[len(readback)], src, only_asset=only_asset)
 
 
 def _resolve_destination_shape(
@@ -524,24 +1439,100 @@ def _resolve_destination_shape(
     simulation) → static's positive proof of a fixed shape (universal) → the
     rule-8.1 discrepancy when taint said the param reaches the sink but the
     sentinel moved nothing → otherwise ``unknown`` (an observation of one
-    destination can't prove "fixed" — §8 rule 1)."""
+    destination can't prove "fixed" — §8 rule 1).
+
+    ``concrete_destination`` means one thing everywhere it is returned: an address
+    value that was OBSERVED to receive the outflow (or, on the static branch, the
+    fixed address static positively proved). It is deliberately computed from the
+    BASE probe's transfers and never from the sentinel: the sentinel is an address
+    this prober invented, so publishing it in the column that otherwise means
+    "where the money went" would present a fabricated address as an observation.
+    The caller_arbitrary PROOF loses nothing by that — it lives in
+    ``destination_shape``/``shape_proved_by``, which is where a consumer reads
+    "the caller chooses this destination"; the sentinel's own address adds no
+    information (it is recomputable, and it is in the transcript)."""
+    # State-plane residue: the address value actually left to THIS run. Capture it
+    # whenever every observed outflow converged on a single destination — a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to
+    # the same address) still has one concrete destination. Divergent destinations
+    # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
+    # single observation can't prove "always this address").
+    out_destinations = {to for _f, to, _v in base_transfers}
+    observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            return SHAPE_CALLER_ARBITRARY, "simulation", None, None
-    if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED) and static_destination:
-        return static_shape, "static", static_destination, None
-    if taint_param_reaches_sink and sentinel_transfers is not None:
-        # Taint says the param reaches the sink, yet the sentinel moved nothing:
-        # a §9 discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
-        disc = Discrepancy(
+            return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
+    # Rule 8.1, evaluated BEFORE the static branch returns. Taint saying the param
+    # reaches the sink while the sentinel moved nothing is a matcher/probe
+    # soundness problem (§9) whatever static believes — and it is most interesting
+    # precisely when static claims a fixed shape, because then the two planes
+    # contradict each other. Returning early on the static branch filed no
+    # discrepancy in exactly that case.
+    disc = (
+        Discrepancy(
             kind="taint_param_sentinel_negative",
             effect_class=effect_class,
             detail={"sentinel_address": sentinel_address},
         )
-        return SHAPE_UNKNOWN, "none", None, disc
-    observed_dest = base_transfers[0][1] if len(base_transfers) == 1 else None
-    return SHAPE_UNKNOWN, "none", observed_dest, None
+        if taint_param_reaches_sink and sentinel_transfers is not None
+        else None
+    )
+    if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED):
+        # The SHAPE is static's to prove and it is a universal — "this destination
+        # cannot be redirected" holds whether or not this particular probe moved
+        # anything. The ADDRESS is the observation's to supply, and it is fine for
+        # it to be absent: a probe that reverted still leaves the shape true and
+        # ``concrete_destination`` simply unfilled.
+        #
+        # Requiring a static ADDRESS here is what made this branch dead code for
+        # the stage's whole life: the static plane classifies destinations by KIND
+        # and never resolves the value behind an immutable, so no caller could
+        # ever satisfy the condition and ``destination_shape`` stayed ~95%
+        # ``unknown`` — the single most security-relevant bit, unproven.
+        return static_shape, "static", static_destination or observed_dest, disc
+    # Taint says the param reaches the sink, yet the sentinel moved nothing: a §9
+    # discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
+    return SHAPE_UNKNOWN, "none", observed_dest, disc
+
+
+def _add_reach(
+    concrete: dict[str, Any],
+    base_call: SimCallResult,
+    value_holders: Sequence[tuple[str, float]],
+    acting_balance_usd: float,
+) -> None:
+    """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
+    from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
+    fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
+    conservative upper bound, inv. 5/7). No holder moved ⇒ the reach beyond the
+    acting deployment is fork-observed to be nothing, so value FLOORS to the acting
+    contract's own balance and the ``reach_indeterminate`` flag records that
+    downstream reach was not witnessed. Downstream value is NEVER imputed via the
+    control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
+    edge). Skipped entirely when no value-holder set was supplied (nothing to
+    measure), leaving the verdict shape unchanged.
+
+    Writes to ``concrete``, NOT ``details`` (inv. 3). Every value here is
+    per-deployment — the holders are addresses and the USD is this protocol's
+    balance sheet at this block — while ``details`` is the code-plane witness the
+    behavioral cache stores and re-publishes to every OTHER deployment sharing the
+    bytecode. Reach in ``details`` meant a second deployment's verdict named the
+    first one's holders and USD as its own."""
+    if not value_holders:
+        return
+    reached_usd = 0.0
+    reach_holders: list[str] = []
+    for holder, usd in value_holders:
+        if transfers_out(base_call, holder):
+            reach_holders.append(holder.lower())
+            reached_usd += usd
+    if reach_holders:
+        concrete["observed_reach_value_usd"] = reached_usd
+        concrete["observed_reach_holders"] = sorted(reach_holders)
+    else:
+        concrete["observed_reach_value_usd"] = acting_balance_usd
+        concrete["reach_indeterminate"] = True
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:
@@ -549,8 +1540,51 @@ def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict
         effect_class,
         gate_ref=gate_ref,
         reason="malformed_simulation_response",
+        details={"observation": OBSERVATION_NOT_RUN},
         transcript=transcript,
     )
+
+
+_UINT256_MOD = 1 << 256
+
+
+def _signed_delta(after: int, before: int) -> int:
+    """``after - before`` read as the uint256 word it actually is.
+
+    ``totalSupply`` is a uint256 and the ubiquitous ``_burn`` idiom decrements it
+    inside ``unchecked``. Python subtracts arbitrary-precision integers, so a burn
+    that wrapped past zero on-chain comes back here as a delta of nearly ``2^256``
+    — a positive number, i.e. a MINT, on a call that destroyed units. Reading the
+    difference modulo ``2^256`` and taking the short way round restores the sign
+    the EVM computed.
+
+    The halfway split is sound because both readings cannot be plausible at once:
+    a supply that genuinely moved by more than ``2^255`` units has overflowed any
+    real token's economics, and the burn reading is the only one that corresponds
+    to code that can execute."""
+    raw = (after - before) % _UINT256_MOD
+    return raw - _UINT256_MOD if raw > _UINT256_MOD // 2 else raw
+
+
+def _sign_contradicted_by_events(
+    sign: str, minted: list[tuple[str, str, str]], burned: list[tuple[str, str, str]]
+) -> bool:
+    """True when the zero-address ``Transfer`` logs say the OPPOSITE of what the
+    ``totalSupply`` arithmetic said.
+
+    A mint is ``Transfer(0x0 -> holder)`` and a burn is ``Transfer(holder -> 0x0)``,
+    both emitted by the token whose supply moved. When the events present are
+    exclusively the other direction's, one of the two witnesses is wrong and this
+    stage must publish neither — least of all the §5a "witnessed dilution" output,
+    which asserts that units were printed against no inflow.
+
+    Deliberately requires POSITIVE contradicting evidence rather than mere absence:
+    a token that mints without emitting anything is unhelpful but not lying, and
+    treating its silence as a contradiction would withhold every honest verdict on
+    it. Absence of evidence is not evidence of absence — here as everywhere."""
+    if sign == "mint":
+        return bool(burned) and not minted
+    return bool(minted) and not burned
 
 
 def _to_int(hexval: str | None) -> int | None:

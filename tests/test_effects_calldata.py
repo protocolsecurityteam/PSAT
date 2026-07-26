@@ -9,6 +9,7 @@ exercised against a stubbed spawn).
 
 from __future__ import annotations
 
+import inspect
 import sys
 import uuid
 from pathlib import Path
@@ -83,6 +84,7 @@ def _effect_info(
     state_writes: list[dict[str, Any]] | None = None,
     effect_labels: list[str] | None = None,
     value_flows: list[dict[str, Any]] | None = None,
+    parameter_names: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "function": full_name,
@@ -94,6 +96,9 @@ def _effect_info(
         "effect_labels": effect_labels or [],
         "effect_targets": [],
         "state_changing": True,
+        # Real artifacts always carry these; the prober needs a NAMED quantity
+        # before it may substitute one (``integer_param_roles``).
+        "parameter_names": parameter_names or [],
     }
 
 
@@ -120,8 +125,11 @@ def _token_facts(**overrides: Any) -> cd.ContractFacts:
             "transfer(address,uint256)",
             TRANSFER,
             value_flows=[{"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}],
+            parameter_names=["to", "amount"],
         ),
-        "mint(address,uint256)": _effect_info("mint(address,uint256)", MINT, effect_labels=["mint"]),
+        "mint(address,uint256)": _effect_info(
+            "mint(address,uint256)", MINT, effect_labels=["mint"], parameter_names=["to", "amount"]
+        ),
         "pause()": _effect_info("pause()", PAUSE_SEL, state_writes=[_write("paused", "bool")]),
         "deposit()": _effect_info("deposit()", DEPOSIT),
         "adminOnly()": _effect_info("adminOnly()", ADMIN_ONLY),
@@ -148,16 +156,24 @@ def _token_facts(**overrides: Any) -> cd.ContractFacts:
     return cd.ContractFacts(**kwargs)
 
 
-def _candidate(selector: str, *, principals: tuple[str, ...] = (PRINCIPAL,), function_id: int = 1) -> Candidate:
+def _candidate(
+    selector: str,
+    *,
+    principals: tuple[str, ...] = (PRINCIPAL,),
+    function_id: int = 1,
+    authority_public: bool = False,
+    holdings: tuple[str, ...] = (),
+) -> Candidate:
     return Candidate(
         function_id=function_id,
         contract_id=1,
         contract_address=CONTRACT,
         selector=selector,
         function_name="f",
-        authority_public=False,
+        authority_public=authority_public,
         effect_targets=("slot0",),
         principal_addresses=principals,
+        input_token_addresses=holdings,
     )
 
 
@@ -223,6 +239,240 @@ def test_value_out_sentinel_lands_in_taint_slot():
     assert spec.calldata[10:74].endswith("22" * 20)
 
 
+BATCH_SIG = "batchClaim(uint256[],address[])"
+BATCH_SEL = "0x55556666"
+
+
+def _batch_fn(signature: str = BATCH_SIG, names: list[str] | None = None) -> cd.FunctionFacts:
+    return cd.FunctionFacts(
+        full_name=signature,
+        selector=BATCH_SEL,
+        canonical_signature=signature,
+        effect_info=_effect_info(
+            signature,
+            BATCH_SEL,
+            value_flows=[{"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}],
+            parameter_names=names or ["ids", "recipients"],
+        ),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def _decode(calldata: str, signature: str) -> tuple[Any, ...]:
+    from eth_abi.abi import decode as abi_decode
+
+    types = cd._parse_arg_types(signature)
+    assert types is not None
+    return abi_decode(types, bytes.fromhex(calldata[10:]))
+
+
+def test_a_batch_function_is_probed_with_a_non_empty_array():
+    """G6-B. The encoder's default for a dynamic array is empty, and an empty
+    array is a loop body that never runs — so the probe executed, moved nothing,
+    and that non-observation was published and cached as a structural fact about
+    a function whose body it never entered."""
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
+    assert spec is not None
+    ids, recipients = _decode(spec.calldata, BATCH_SIG)
+    # Each element is what the SCALAR policy proves for that element type: ``ids``
+    # is a handle, ``recipients`` is where a payout can be observed.
+    assert ids == (cd.ARG_IDENTIFIER,)
+    assert [a.lower() for a in recipients] == [PRINCIPAL.lower()]
+
+
+def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
+    """A ``bytes[]`` has no honest element, and that is not a reason to send a
+    length-0 array: an empty one is the cacheable false negative, a length-1 one
+    is a call the contract itself gets to reject."""
+    sig = "submit(bytes[])"
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn(sig, names=["payloads"]))
+    assert spec is not None
+    (payloads,) = _decode(spec.calldata, sig)
+    assert payloads == (b"",)
+
+
+# ---------------------------------------------------------------------------
+# G6-A vacuous inputs
+# ---------------------------------------------------------------------------
+
+
+def test_an_unresolved_quantity_makes_the_inputs_vacuous():
+    """``n`` is in no vocabulary and no lattice fact names it, so the probe sends
+    a zero — and a zero-amount call that moves nothing says nothing about the
+    function."""
+    spec = cd.synthesize_value_out(_candidate(UNWRAP), _unwrap_fn())
+    assert spec is not None
+    assert int(spec.calldata[10:74], 16) == 0
+    assert spec.inputs_vacuous is True
+
+
+def test_a_probe_whose_every_slot_is_proven_is_not_vacuous():
+    """The control that keeps the predicate honest: fire on these inputs and the
+    flag would suppress every legitimate negative in the corpus."""
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+def test_an_array_of_proven_elements_is_not_vacuous():
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+def test_an_array_whose_element_is_filler_is_vacuous():
+    """A length-1 array is the honest attempt, not a witness: the loop ran over a
+    value nobody proved, so an empty result is a fact about the filler."""
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn("submit(bytes[])", names=["payloads"]))
+    assert spec is not None
+    assert spec.inputs_vacuous is True
+
+
+def test_the_supply_plan_carries_the_same_fact():
+    """G6-A spans both classes — ``no_supply_delta`` is cached on the same
+    argument."""
+    spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+# ---------------------------------------------------------------------------
+# §16.6-A executor inner-call synthesis
+# ---------------------------------------------------------------------------
+
+HELD_TOKEN = "0x" + "ab" * 20
+_FORWARDS_PARAM = {
+    "kind": "low_level_value_call",
+    "direction": "out",
+    "origin": "body",
+    "from_is_self": True,
+    "target_kind": {"kind": "param", "tier": "static_trace"},
+}
+
+
+def _exec_fn(signature: str, names: list[str], *, flows: list[dict[str, Any]], claims: Any = None) -> cd.FunctionFacts:
+    info = _effect_info(signature, BATCH_SEL, value_flows=flows, parameter_names=names)
+    if claims is not None:
+        info["claims"] = claims
+    return cd.FunctionFacts(
+        full_name=signature,
+        selector=BATCH_SEL,
+        canonical_signature=signature,
+        effect_info=info,
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def _executor_for(signature: str, names: list[str], **kw: Any) -> Any:
+    fn = _exec_fn(signature, names, **kw)
+    types = cd._parse_arg_types(signature)
+    assert types is not None
+    return cd.executor_call(fn, types, held_tokens=(HELD_TOKEN,), recipient=PRINCIPAL)
+
+
+def test_an_upgrade_hook_is_not_an_executor():
+    """The over-claim this recognizer has to refuse. ``upgradeToAndCall`` has the
+    same ABI shape as an executor, but nothing proves it forwards a call — and
+    writing a token into a proxy's implementation slot would run that token's code
+    in the proxy's own storage, manufacturing a transfer out of the contract under
+    probe."""
+    assert _executor_for("upgradeToAndCall(address,bytes)", ["newImplementation", "data"], flows=[]) is None
+
+
+def test_an_executor_with_two_payload_slots_synthesizes_nothing():
+    """Fail closed on ambiguity: static proved the destination is caller-supplied
+    but not WHICH argument is the forwarded calldata, and a transfer written into
+    an argument that is not calldata is a probe input nobody can justify."""
+    assert (
+        _executor_for(
+            "execTransaction(address,bytes,bytes)",
+            ["to", "data", "signatures"],
+            flows=[_FORWARDS_PARAM],
+        )
+        is None
+    )
+
+
+def test_the_lattice_names_the_executor_slots_when_the_claim_does_not():
+    """OZ ``TimelockController.execute`` — non-etherfi, and its ``exec.arbitrary``
+    claim carries no parameter names, so the slots come from the lattice's proof
+    plus the only pair the ABI admits."""
+    executor = _executor_for(
+        "execute(address,uint256,bytes,bytes32,bytes32)",
+        ["target", "value", "payload", "predecessor", "salt"],
+        flows=[_FORWARDS_PARAM],
+    )
+    assert executor is not None
+    assert executor.slots == (0, 2)
+    assert executor.values[0] == HELD_TOKEN
+    # An ERC-20 transfer to the probe's own identity — the standard selector, and
+    # a recipient that is never the sentinel on the BASE probe.
+    assert executor.values[2].hex().startswith("a9059cbb")
+    assert PRINCIPAL[2:].lower() in executor.values[2].hex()
+
+
+def test_the_claim_witness_names_the_executor_slots_directly():
+    """Where static named the two parameters, they are used verbatim rather than
+    inferred from the ABI."""
+    executor = _executor_for(
+        "rebalance(address,address,uint256,bytes)",
+        ["fromAsset", "toAsset", "amount", "swapData"],
+        flows=[],
+        claims=[
+            {
+                "claim_id": "exec.arbitrary",
+                "witness": {"kind": "param_taint", "destination_param": "fromAsset", "calldata_param": "swapData"},
+            }
+        ],
+    )
+    assert executor is not None
+    assert executor.slots == (0, 3)
+
+
+def test_an_executor_with_no_inner_call_reports_vacuous_inputs():
+    """The payload slot kept the encoder's empty bytes, so the call forwarded
+    nothing — and forwarding nothing succeeds. Without this flag that success is
+    published and CACHED as "this function moves no value"."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is True
+
+
+def test_a_synthesized_inner_call_is_not_vacuous():
+    """And the other direction: with the inner call built, the executor's other
+    zeros are deliberate, not unfilled — a negative here IS about the function."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+def test_an_executor_with_nothing_to_move_claims_nothing():
+    """No measured holding, no honest inner call — the shape is still known, but
+    the payload slot keeps the encoder's default."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    types = cd._parse_arg_types(fn.canonical_signature)
+    assert types is not None
+    executor = cd.executor_call(fn, types, held_tokens=(), recipient=PRINCIPAL)
+    assert executor is not None and not executor.values
+
+
+def test_the_executor_probe_attaches_no_native_value_it_cannot_prove():
+    """The quantity vocabulary would put one wei in ``values``, and a vault that
+    does not hold it reverts on the very call this synthesis exists to observe."""
+    fn = _exec_fn("forward(address[],bytes[],uint256[])", ["targets", "data", "values"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
+    assert spec is not None
+    _targets, _data, values = _decode(spec.calldata, "forward(address[],bytes[],uint256[])")
+    assert values == (0,)
+
+
 def test_value_out_none_without_a_value_flow():
     facts = _token_facts()
     fn = cd.resolve_function(facts, DEPOSIT)
@@ -235,6 +485,24 @@ def test_value_out_none_without_a_resolved_principal():
     fn = cd.resolve_function(facts, TRANSFER)
     assert fn is not None
     assert cd.synthesize_value_out(_candidate(TRANSFER, principals=()), fn) is None
+
+
+def test_value_out_public_falls_back_to_neutral_caller():
+    # A public value-mover has no FunctionPrincipal rows; it is still probed, from
+    # the neutral identity, instead of being skipped.
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=True), fn)
+    assert spec is not None
+    assert spec.principal == cd.NEUTRAL_CALLER
+
+
+def test_value_out_gated_without_principal_stays_none():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    assert cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=False), fn) is None
 
 
 def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
@@ -251,6 +519,159 @@ def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
     assert spec is not None
     assert spec.sentinel_calldata is None
     assert spec.taint_param_reaches_sink is False
+
+
+# --- the static lattice's recipient slot (``target_param_index``) ----------
+#
+# 76 of 78 live fund-out flows are native ETH sends, whose recipient the legacy
+# ``token_var``/``is_parameter`` shape never named and whose slot the gate-operand
+# name map cannot recover when no gate mentions the recipient. The flow lattice
+# resolves the destination interprocedurally and reports WHICH entry parameter it
+# is; that index is what makes a sentinel probe possible at all.
+
+REDEEM = "0x7bde82f2"  # redeem(uint256,address)
+REDEEM_SIG = "redeem(uint256,address)"
+
+
+def _redeem_facts(*, flows: list[dict[str, Any]], legacy: list[dict[str, Any]] | None = None) -> cd.ContractFacts:
+    """An ETH-redeem entry point whose recipient appears in NO gate — the shape
+    the name->slot map is blind to."""
+    effects = {REDEEM_SIG: _effect_info(REDEEM_SIG, REDEEM, value_flows=flows, parameter_names=["amount", "recipient"])}
+    return cd.ContractFacts(
+        address=CONTRACT,
+        job_id="job-1",
+        effects=effects,
+        trees={REDEEM_SIG: OWNER_GATE},
+        canonical_signatures={REDEEM_SIG: REDEEM_SIG},
+        legacy_value_flows={REDEEM_SIG: legacy} if legacy else {},
+        by_selector={REDEEM: REDEEM_SIG},
+    )
+
+
+def _eth_flow(**extra: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "low_level_value_call",
+        "direction": "out",
+        "origin": "body",
+        "target_kind": {"kind": "param", "tier": "static_trace"},
+    }
+    flow.update(extra)
+    return flow
+
+
+def _redeem_spec(facts: cd.ContractFacts) -> Any:
+    fn = cd.resolve_function(facts, REDEEM)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(REDEEM), fn)
+    assert spec is not None
+    return spec
+
+
+def test_lattice_param_index_plants_the_sentinel_without_a_gate_operand():
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=1)]))
+    assert spec.taint_param_reaches_sink is True
+    assert spec.sentinel_address == cd.SENTINEL_ADDRESS
+    assert spec.sentinel_calldata is not None
+    # Slot 1 (the recipient) carries the sentinel; slot 0 (the amount) is
+    # untouched, and the base probe keeps the principal in the recipient slot.
+    assert int(spec.sentinel_calldata[10:74], 16) == cd.ARG_AMOUNT
+    assert spec.sentinel_calldata[74:].endswith("ee" * 20)
+    assert spec.calldata[74:].endswith("22" * 20)
+
+
+def test_lattice_index_ignored_unless_the_kind_is_param():
+    """The index only ever accompanies ``param``; a stale/foreign index on any
+    other kind must not plant a probe."""
+    for kind in ("immutable", "msg_sender", "storage_setter", "indeterminate"):
+        flow = _eth_flow(target_param_index=1, target_kind={"kind": kind, "tier": "static_trace"})
+        spec = _redeem_spec(_redeem_facts(flows=[flow]))
+        assert spec.sentinel_calldata is None, kind
+        assert spec.taint_param_reaches_sink is False, kind
+
+
+def test_lattice_index_ignored_when_the_slot_is_not_an_address():
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=0)]))  # uint256 amount
+    assert spec.sentinel_calldata is None
+    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=7)]))  # out of range
+    assert spec.sentinel_calldata is None
+
+
+def test_lattice_indexes_that_disagree_plant_nothing():
+    flows = [_eth_flow(target_param_index=1), _eth_flow(kind="native_transfer_send", target_param_index=0)]
+    spec = _redeem_spec(_redeem_facts(flows=flows))
+    assert spec.sentinel_calldata is None
+
+
+def test_lattice_guard_origin_flow_is_not_a_recipient():
+    flow = _eth_flow(target_param_index=1, origin="guard")
+    spec = _redeem_spec(_redeem_facts(flows=[flow, _eth_flow()]))
+    assert spec.sentinel_calldata is None
+
+
+def test_legacy_name_path_still_serves_a_flow_without_an_index():
+    """The ERC-20 shape keeps resolving through the predicate-tree name map."""
+    facts = _token_facts(
+        legacy_value_flows={
+            "transfer(address,uint256)": [
+                {"direction": "out", "token_var": "token", "is_parameter": True, "method": "transfer"}
+            ]
+        }
+    )
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None and spec.sentinel_calldata is not None
+    assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
+
+
+# --- the static lattice's QUANTITY slot (``amount_param_index``) ------------
+#
+# Which integer argument is the quantity was previously answered by a parameter
+# NAME vocabulary (``_AMOUNT_WORDS``). For the whole ERC-4626 redemption class the
+# amount is not an argument at all — it is a conversion of one — so the lattice
+# publishes ``param_derived`` plus the slot of the input that fed the conversion,
+# and the prober fills THAT slot. Every case below names the slot ``n``, a word in
+# no vocabulary, so only a lattice fact can produce a role.
+
+UNWRAP_SIG = "unwrap(uint256,address)"
+UNWRAP = "0x11112222"
+
+
+def _unwrap_fn(**flow_extra: Any) -> cd.FunctionFacts:
+    flow: dict[str, Any] = {"kind": "callee_erc20_selector", "direction": "out", "origin": "body"}
+    flow.update(flow_extra)
+    return cd.FunctionFacts(
+        full_name=UNWRAP_SIG,
+        selector=UNWRAP,
+        canonical_signature=UNWRAP_SIG,
+        effect_info=_effect_info(UNWRAP_SIG, UNWRAP, value_flows=[flow], parameter_names=["n", "to"]),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def test_param_derived_lattice_names_the_quantity_slot_without_a_name_hint():
+    """The point of the change: ``n`` is in no word vocabulary, so a role here can
+    only have come from the proven lattice fact."""
+    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=0)
+    roles = cd.integer_param_roles(fn, ["uint256", "address"])
+    assert roles == {0: cd.ROLE_AMOUNT}, roles
+
+
+def test_unnamed_quantity_without_a_lattice_fact_gets_no_role():
+    """The control: identical facts minus the lattice's answer leave the slot with
+    no evidence, and the prober substitutes nothing."""
+    fn = _unwrap_fn()
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
+    fn = _unwrap_fn(amount_kind={"kind": "indeterminate", "tier": "static_trace"})
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
+
+
+def test_param_derived_index_still_needs_an_integer_slot():
+    """The type check is unchanged: a slot the lattice names but that is not an
+    integer takes no quantity."""
+    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=1)
+    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +691,72 @@ def test_supply_from_mint_label():
     assert spec.gate_ref == "gate:caller_authority"
 
 
+BURN_SIG = "redeem(uint256,address)"
+BURN_SEL = "0x33334444"
+
+
+def _redeem_fn() -> cd.FunctionFacts:
+    """A burn whose quantity and recipient slots carry no vocabulary name, so the
+    only evidence about either is the static flow lattice — and the lattice
+    records the burn's own movement under the direction the artifact actually
+    emits (an outbound payout), never under ``burn``."""
+    flow = {
+        "kind": "callee_erc20_selector",
+        "direction": "out",
+        "origin": "body",
+        "amount_kind": {"kind": "param", "tier": "static_trace"},
+        "amount_param_index": 0,
+        "target_kind": {"kind": "param", "tier": "static_trace"},
+        "target_param_index": 1,
+    }
+    return cd.FunctionFacts(
+        full_name=BURN_SIG,
+        selector=BURN_SEL,
+        canonical_signature=BURN_SIG,
+        effect_info=_effect_info(
+            BURN_SIG, BURN_SEL, effect_labels=["burn"], value_flows=[flow], parameter_names=["n", "dst"]
+        ),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def test_supply_reads_its_lattice_through_the_directions_flows_actually_carry():
+    """S1. Filtering the supply plan's lattice reads by ``mint``/``burn`` rejected
+    every flow an artifact emits, so the class got no quantity and no recipient."""
+    spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
+    assert spec is not None
+    # Nothing but the lattice can put the amount in slot 0: ``n`` is in no word
+    # vocabulary, so a zero here means the plan never read the lattice.
+    assert int(spec.mint_calldata[10:74], 16) == cd.ARG_AMOUNT
+    # And the recipient the lattice named earns the sentinel probe the supply
+    # class could never synthesize.
+    assert spec.sentinel_calldata is not None
+    assert spec.sentinel_calldata[74:138].endswith("ee" * 20)
+    assert spec.taint_param_reaches_sink is True
+
+
 def test_supply_none_for_a_non_supply_function():
     facts = _token_facts()
     fn = cd.resolve_function(facts, TRANSFER)
     assert fn is not None
     assert cd.synthesize_supply(_candidate(TRANSFER), fn) is None
+
+
+def test_supply_public_falls_back_to_neutral_caller():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, MINT)
+    assert fn is not None
+    spec = cd.synthesize_supply(_candidate(MINT, principals=(), authority_public=True), fn)
+    assert spec is not None
+    assert spec.principal == cd.NEUTRAL_CALLER
+
+
+def test_supply_gated_without_principal_stays_none():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, MINT)
+    assert fn is not None
+    assert cd.synthesize_supply(_candidate(MINT, principals=(), authority_public=False), fn) is None
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +854,7 @@ def test_max_pause_duration_read_from_a_timestamp_guard_constant():
             )
         }
     )
-    assert cd.read_max_pause_duration(MagicMock(), facts, {"TIMED_SLOT"}) == 2592000
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == 2592000
 
 
 def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
@@ -388,22 +870,21 @@ def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
             )
         }
     )
-    session = MagicMock()
-    session.execute.side_effect = RuntimeError("no db")
-    assert cd.read_max_pause_duration(session, facts, {"INDEFINITE_SLOT"}) is None
+    assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) is None
 
 
-@pytest.mark.parametrize(
-    ("expr", "expected"),
-    [
-        ("30 days", 2592000),
-        ("7 * 24 hours", 604800),
-        ("3600", 3600),
-        ("someIdentifier", None),
-    ],
-)
-def test_time_expression_evaluation(expr, expected):
-    assert cd._eval_time_expr(expr) == expected
+def test_max_pause_duration_is_never_scraped_from_a_constant_name():
+    """A bound reaches the claim witness as a severity REDUCER, so it may only come
+    from a constant the latch's own guard leaf compares ``block.timestamp``
+    against. Source text naming a PAUSE/FREEZE constant is identifier matching: the
+    same pattern catches a cooldown or a minimum, and publishing one of those would
+    discount an indefinite freeze."""
+    facts = _token_facts(trees={"unpause()": _and(_leaf(_state("TIMED_SLOT", "pausedUntil")))})
+    # The guard reads the latch but compares it against nothing time-shaped, so no
+    # constant in the unit is provably this latch's window.
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) is None
+    # And the reader takes no session at all: there is no source plane to consult.
+    assert "session" not in inspect.signature(cd.read_max_pause_duration).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +975,94 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
     # identity that is NOT the attacker sentinel.
     transfer_ep = next(ep for ep in spec.entry_points if ep.key == "transfer(address,uint256)")
     assert transfer_ep.from_addr == cd.NEUTRAL_CALLER
+
+
+@requires_postgres
+def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_session):
+    """§1 A2 follow-up (cause a): a PREDICTED victim with no resolved principal is
+    additionally probed from the PAUSE principal, so a freeze the neutral caller
+    can't reach pre-pause is still witnessed. Union semantics via a shared key."""
+    proto = Protocol(name=f"pauser-probe-{uuid.uuid4().hex[:8]}")
+    db_session.add(proto)
+    db_session.flush()
+    contract = Contract(protocol_id=proto.id, address=CONTRACT, chain="ethereum", is_proxy=False)
+    db_session.add(contract)
+    db_session.flush()
+    ids: dict[str, int] = {}
+    for name, selector in (("pause", PAUSE_SEL), ("deposit", DEPOSIT), ("transfer", TRANSFER)):
+        f = EffectiveFunction(
+            contract_id=contract.id,
+            function_name=name,
+            selector=selector,
+            authority_public=False,
+            effect_targets=["paused"],
+        )
+        db_session.add(f)
+        db_session.flush()
+        ids[selector] = f.id
+    # deposit() has a resolved principal; transfer() does NOT (the unresolved victim).
+    db_session.add(FunctionPrincipal(function_id=ids[DEPOSIT], address=PRINCIPAL))
+    db_session.commit()
+
+    # Both deposit() and transfer() read the `paused` latch → both predicted victims.
+    # transfer() is ALSO behind a caller-authority gate (its principal is unresolved),
+    # so the neutral caller can't reach it — the pauser-identity probe target.
+    pause_and_auth = _and(_leaf(_state("paused")), _leaf(_state("owner"), authority_role="caller_authority"))
+    facts = _token_facts(
+        trees={
+            "pause()": OWNER_GATE,
+            "deposit()": PAUSE_GATE,
+            "transfer(address,uint256)": pause_and_auth,
+        }
+    )
+    fn = cd.resolve_function(facts, PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    by_key: dict[str, list[str | None]] = {}
+    for ep in spec.entry_points:
+        by_key.setdefault(ep.key, []).append(ep.from_addr)
+    # transfer() (unresolved) is probed from BOTH the neutral caller and the pauser.
+    assert set(by_key["transfer(address,uint256)"]) == {cd.NEUTRAL_CALLER, PRINCIPAL}
+    # deposit() (resolved) keeps a single probe from its own principal — no dup.
+    assert by_key["deposit()"] == [PRINCIPAL]
+
+
+@requires_postgres
+def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
+    """When static predicts nothing (empty guard set → probe-everything fallback),
+    NO pauser-identity probes are added — the recovery is scoped to the predicted
+    victims, so a contract whose pause gates nothing gains no extra work."""
+    contract, ids = _pause_contract(db_session)
+    facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
+    fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
+    assert fn is not None
+    candidate = Candidate(
+        function_id=ids[PAUSE_SEL],
+        contract_id=contract.id,
+        contract_address=CONTRACT,
+        selector=PAUSE_SEL,
+        function_name="pause",
+        authority_public=False,
+        effect_targets=("paused",),
+        principal_addresses=(PRINCIPAL,),
+    )
+    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
+    assert spec is not None
+    assert spec.predicted_guard_set == ()
+    # No key appears twice: no pauser-identity probe was added to the fallback set.
+    keys = [ep.key for ep in spec.entry_points]
+    assert len(keys) == len(set(keys))
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +1166,10 @@ def _eeth_facts(latch_var: str) -> cd.ContractFacts:
                     "origin": "guard",
                 }
             ],
+            # eETH's real ABI names: the trailing quantity is ``_amount`` on each.
+            parameter_names=["_sender", "_recipient", "_amount"]
+            if name.startswith("transferFrom")
+            else ["_recipient", "_amount"],
         )
         trees[name] = guarded_tree
     return cd.ContractFacts(
@@ -716,9 +1289,11 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
 
 
 @requires_postgres
-def test_acceptance_timed_latch_reads_its_own_bound_from_source(db_session, monkeypatch):
-    """The same contract's ``*_UNTIL_*`` latch DOES carry MAX_PAUSE_DURATION, read
-    out of the source unit that declares that latch."""
+def test_acceptance_timed_latch_publishes_no_bound_it_cannot_prove(db_session):
+    """The same contract's ``*_UNTIL_*`` latch DECLARES a MAX_PAUSE_DURATION in
+    source, and that is still not enough: nothing here proves the latch's guard
+    reads it. No bound is the conservative output — an indefinite-looking latch is
+    scored as the most severe freeze, never discounted by a scraped constant."""
     pausable_until_source = """
         library PausableUntilStorage {
             bytes32 internal constant PAUSABLE_UNTIL_STORAGE_SLOT = keccak256("pausableUntil.storage");
@@ -727,21 +1302,13 @@ def test_acceptance_timed_latch_reads_its_own_bound_from_source(db_session, monk
             uint256 public constant PAUSER_UNTIL_COOLDOWN = 7 days;
         }
     """
-    pausable_source = """
-        library PausableStorage {
-            bytes32 internal constant PAUSABLE_STORAGE_SLOT = keccak256("pausable.storage");
-        }
-    """
-    monkeypatch.setattr(
-        cd,
-        "get_source_files",
-        lambda _s, _j: {"Pausable.sol": pausable_source, "PausableUntil.sol": pausable_until_source},
-    )
+    # Declared in source, and deliberately unreachable from here.
+    assert "MAX_PAUSE_DURATION" in pausable_until_source
     facts = _eeth_facts(PAUSABLE_UNTIL_SLOT)
-    assert cd.read_max_pause_duration(db_session, facts, {PAUSABLE_UNTIL_SLOT}) == 30 * 86400
+    assert cd.read_max_pause_duration(facts, {PAUSABLE_UNTIL_SLOT}) is None
     # ...and the indefinite latch, whose declaring unit has no duration constant,
     # still gets nothing.
-    assert cd.read_max_pause_duration(db_session, facts, {PAUSABLE_SLOT}) is None
+    assert cd.read_max_pause_duration(facts, {PAUSABLE_SLOT}) is None
 
 
 def test_acceptance_liquidity_pool_withdraw_value_out():
@@ -758,6 +1325,7 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
                 full_name,
                 selector,
                 value_flows=[{"kind": "native_transfer_send", "direction": "out", "origin": "body"}],
+                parameter_names=["_recipient", "_amount"],
             )
         },
         trees={full_name: _and(_leaf(_param("_recipient", 0)))},
@@ -785,6 +1353,168 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
     assert spec.sentinel_calldata is not None
     assert spec.sentinel_calldata[10:74].endswith("ee" * 20)  # sentinel at param 0
     assert int(spec.sentinel_calldata[74:], 16) == 1  # uint256 stays the 1-wei default
+
+
+# ---------------------------------------------------------------------------
+# §9.5 Tier-2 timelock synthesis
+# ---------------------------------------------------------------------------
+
+EXECUTE_SIG = "execute(address,uint256,bytes,bytes32,bytes32)"
+SCHEDULE_SIG = "schedule(address,uint256,bytes,bytes32,bytes32,uint256)"
+EXECUTE_BATCH_SIG = "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)"
+SCHEDULE_BATCH_SIG = "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)"
+
+
+def _timelock_facts(*, signatures: list[str] | None = None) -> cd.ContractFacts:
+    """A delayed executor's own ABI. Nothing here is protocol-specific: the plan
+    finds the scheduling half by SHAPE (the executed tuple plus a trailing
+    delay), so the same facts stand for any timelock."""
+    names = signatures if signatures is not None else [EXECUTE_SIG, SCHEDULE_SIG, "getMinDelay()"]
+    effects = {
+        name: _effect_info(
+            name,
+            cd._selector_of(name) or "0x00000000",
+            value_flows=(
+                [
+                    {
+                        "kind": "low_level_value_call",
+                        "direction": "out",
+                        "origin": "body",
+                        "from_is_self": True,
+                        "target_kind": {"kind": "param", "tier": "static_trace"},
+                    }
+                ]
+                if name.startswith("execute")
+                else []
+            ),
+            parameter_names=(
+                ["target", "value", "payload", "predecessor", "salt"] if name.startswith("execute") else []
+            ),
+        )
+        for name in names
+    }
+    return cd.ContractFacts(
+        address=CONTRACT,
+        job_id="job-1",
+        effects=effects,
+        trees={},
+        canonical_signatures={name: name for name in effects},
+        legacy_value_flows={},
+        by_selector={info["selector"]: name for name, info in effects.items()},
+    )
+
+
+def _timelock_session(schedule_principal: str | None = None) -> Any:
+    session = MagicMock()
+    rows = [(cd._selector_of(SCHEDULE_SIG), schedule_principal)] if schedule_principal else []
+    session.execute.return_value.all.return_value = rows
+    return session
+
+
+def _timelock_spec(*, holdings: tuple[str, ...] = (), signature: str = EXECUTE_SIG, session: Any = None):
+    facts = _timelock_facts()
+    fn = cd.resolve_function(facts, cd._selector_of(signature) or "")
+    assert fn is not None
+    return cd.synthesize_timelock(
+        session or _timelock_session(),
+        _candidate(cd._selector_of(signature) or "", holdings=holdings),
+        facts,
+        fn,
+    )
+
+
+def test_the_timelock_plan_schedules_and_executes_one_operation_tuple():
+    """OZ's ``execute`` recomputes the operation id from its own arguments, so the
+    two calls only have to agree — and if they ever stop agreeing the timelock
+    executes an operation nobody scheduled, which reverts and proves nothing."""
+    spec = _timelock_spec()
+    assert spec is not None
+    executed = _decode(spec.execute_calldata, EXECUTE_SIG)
+    scheduled = _decode(spec.schedule_calldata(864000), SCHEDULE_SIG)
+    assert scheduled[:5] == executed
+    assert scheduled[5] == 864000  # the delay, and only the delay, is added
+
+
+def test_the_timelock_plan_targets_the_sentinel_when_the_contract_holds_nothing():
+    """The normal case: a timelock holds authority, not funds. The operation is
+    still one the proposer chose, and the value question is left to the recipe to
+    answer honestly rather than answered here by an invented asset."""
+    spec = _timelock_spec()
+    assert spec is not None
+    target, value, payload, predecessor, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
+    assert target.lower() == cd.SENTINEL_ADDRESS.lower()
+    assert payload == b""
+    # No native value the timelock does not hold, and no dependency on another op.
+    assert value == 0
+    assert predecessor == b"\x00" * 32
+    assert spec.witness_token is None and spec.witness_calldata is None
+
+
+def test_the_timelock_plan_moves_an_asset_the_contract_provably_holds():
+    spec = _timelock_spec(holdings=(HELD_TOKEN,))
+    assert spec is not None
+    target, _value, payload, _pred, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
+    assert target.lower() == HELD_TOKEN.lower()
+    assert payload.hex().startswith("a9059cbb")
+    assert spec.witness_token == HELD_TOKEN
+    assert spec.witness_calldata is not None and cd.SENTINEL_ADDRESS[2:].lower() in spec.witness_calldata.lower()
+
+
+def test_the_timelock_plan_finds_the_scheduling_half_of_the_batch_arity_too():
+    """Same rule, no second code path: the batch tuple plus a trailing delay."""
+    facts = _timelock_facts(signatures=[EXECUTE_BATCH_SIG, SCHEDULE_BATCH_SIG, "getMinDelay()"])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_BATCH_SIG) or "")
+    assert fn is not None
+    spec = cd.synthesize_timelock(_timelock_session(), _candidate(cd._selector_of(EXECUTE_BATCH_SIG) or ""), facts, fn)
+    assert spec is not None
+    targets, values, payloads, _pred, _salt = _decode(spec.execute_calldata, EXECUTE_BATCH_SIG)
+    assert [t.lower() for t in targets] == [cd.SENTINEL_ADDRESS.lower()]
+    assert values == (0,) and payloads == (b"",)
+
+
+def test_no_timelock_plan_without_the_scheduling_half():
+    """An executor that cannot be scheduled is not a timelock, and probing it as
+    one would schedule nothing and execute an operation that does not exist."""
+    facts = _timelock_facts(signatures=[EXECUTE_SIG, "getMinDelay()"])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
+    assert fn is not None
+    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
+
+
+def test_no_timelock_plan_without_the_contracts_own_delay():
+    """The delay is read, never assumed — so a contract that will not tell us its
+    minimum yields no plan rather than a guessed one."""
+    facts = _timelock_facts(signatures=[EXECUTE_SIG, SCHEDULE_SIG])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
+    assert fn is not None
+    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
+
+
+def test_the_timelock_plan_prefers_a_principal_behind_both_gates():
+    """Scheduling and executing are separately gated. Picking the address the
+    resolution plane put behind BOTH is what keeps the probe from having to grant
+    itself a role — which §9.3 forbids outright."""
+    spec = _timelock_spec(session=_timelock_session(schedule_principal=PRINCIPAL))
+    assert spec is not None
+    assert spec.principal == PRINCIPAL.lower()
+
+
+def test_the_timelock_plan_still_probes_as_the_executor_when_the_roles_diverge():
+    """No intersection is not a reason to invent one: probe as the executor and
+    let the contract reject the schedule, which the recipe records verbatim."""
+    spec = _timelock_spec(session=_timelock_session(schedule_principal="0x" + "99" * 20))
+    assert spec is not None
+    assert spec.principal == PRINCIPAL.lower()
+
+
+def test_the_timelock_plan_reads_the_delay_off_the_contract():
+    delay_selector = cd._selector_of("getMinDelay()")
+    spec = _timelock_spec()
+    assert spec is not None
+    assert spec.delay_calldata == delay_selector
+    # A delay we could not read is not defaulted to something plausible: zero goes
+    # to the contract, whose own minimum rejects it.
+    assert spec.schedule_calldata(0) == spec.schedule_calldata_zero
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +1581,52 @@ def test_prober_emits_one_plan_per_synthesized_class(monkeypatch):
         EFFECT_CLASS_AUTHORITY_CHANGE,
         EFFECT_CLASS_FREEZE_PAUSE,
     }
+
+
+def _both_plans_inputs() -> cd.CandidatePlanInputs:
+    """A delayed executor as the synthesizer sees it: Tier-1 has a probe for it,
+    and so does Tier 2. The two gate_refs are what tells the plans apart."""
+    spec = _timelock_spec()
+    assert spec is not None
+    return cd.CandidatePlanInputs(
+        value_out=cd.ValueOutPlanInputs(
+            contract_address=CONTRACT, principal=PRINCIPAL, calldata=TRANSFER, gate_ref="gate:tier1"
+        ),
+        timelock=cd.TimelockPlanInputs(
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            execute_calldata=spec.execute_calldata,
+            schedule_selector=spec.schedule_selector,
+            schedule_signature=spec.schedule_signature,
+            schedule_arguments=spec.schedule_arguments,
+            delay_index=spec.delay_index,
+            schedule_calldata_zero=spec.schedule_calldata_zero,
+            delay_calldata=spec.delay_calldata,
+            gate_ref="gate:tier2",
+        ),
+    )
+
+
+def test_the_timelock_plan_replaces_the_tier1_probe_for_a_delayed_executor(monkeypatch):
+    """Tier 1 cannot satisfy a block.timestamp gate at all, so its row is a revert
+    that says nothing about the function — and both plans carry the same effect
+    class, scope and gate, so they would stage under one cache key."""
+    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: _both_plans_inputs())
+    plans = default_prober(
+        _stub_session(),
+        _candidate(TRANSFER),
+        _ctx(anvil_factory=lambda: StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)),
+    )
+    assert [p.gate_ref for p in plans] == ["gate:tier2"]
+    assert [p.effect_class for p in plans] == [EFFECT_CLASS_VALUE_OUT]
+
+
+def test_without_a_fork_the_tier1_probe_still_stands(monkeypatch):
+    """No fork, no Tier-2 sequence — and dropping the Tier-1 probe as well would
+    lose the row entirely."""
+    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: _both_plans_inputs())
+    plans = default_prober(_stub_session(), _candidate(TRANSFER), _ctx())
+    assert [p.gate_ref for p in plans] == ["gate:tier1"]
 
 
 def test_prober_drops_the_pause_plan_without_a_fork(monkeypatch):

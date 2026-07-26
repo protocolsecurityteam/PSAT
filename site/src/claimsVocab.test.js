@@ -3,13 +3,18 @@ import { describe, it, expect } from "vitest";
 import {
   CLAIM_VOCAB,
   claimSummaryLine,
+  claimWitnessFacts,
   claimsOf,
   hasClaims,
   laneForClaims,
   primaryClaim,
   priorityForClaims,
+  qualifierForClaims,
   scoreForClaims,
   sentenceForClaims,
+  sharedDeployerNote,
+  signerOverlapNote,
+  terminalControllerNote,
   toneForClaims,
 } from "./claimsVocab.js";
 import {
@@ -69,6 +74,7 @@ const EXPECTED_CLAIM_IDS = [
   "timelock.schedule",
   "timelock.set_delay",
   "upgrade.implementation",
+  "value_router",
   "weth.deposit",
   "weth.withdraw",
 ];
@@ -189,6 +195,34 @@ describe("scoreForClaims — protocolScore kinds", () => {
     expect(scoreForClaims({ claims: [claim("flow.in")] })).toEqual({ kind: "asset_in", severity: 0.5 });
   });
 
+  it("scores a routed INFLOW as an inflow, not as an asset outflow", () => {
+    // The same value_router claim covers both directions. A pull the entry only
+    // caused between two other parties sends none of this unit's assets
+    // anywhere, so filing it as a high-risk asset_out would raise the protocol
+    // score off a move the contract never made.
+    const inbound = {
+      claims: [
+        {
+          claim_id: "value_router",
+          tier: "standard_exact",
+          witness: { flows: [{ from_is_self: false, target_kind: { kind: "immutable" } }] },
+        },
+      ],
+    };
+    expect(scoreForClaims(inbound)).toEqual({ kind: "asset_in", severity: 0.5 });
+
+    const outbound = {
+      claims: [
+        {
+          claim_id: "value_router",
+          tier: "standard_exact",
+          witness: { flows: [{ from_is_self: true, target_kind: { kind: "param" } }] },
+        },
+      ],
+    };
+    expect(scoreForClaims(outbound)).toEqual({ kind: "asset_out", severity: 0.78 });
+  });
+
   it("takes the strongest severity across several claims", () => {
     expect(scoreForClaims({ claims: [claim("flow.out"), claim("upgrade.implementation")] }))
       .toEqual({ kind: "upgrade", severity: 1 });
@@ -230,6 +264,711 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
     const line = claimSummaryLine({ claims: [claim("authority.grant", "behavioral_observed")] });
     expect(line.text).toBe("opens a gate");
     expect(line.label).toBe("opens a gate · observed");
+  });
+});
+
+// ── SCORING plan §7: witness qualifiers (the honesty rule) ───────────────────
+
+// A static flow.out claim carrying a target_kind / amount_kind on one flow entry.
+function flowOut(targetKind, { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null } = {}) {
+  const flow = { kind: "low_level_value_call", selector: null, from_is_self: true };
+  if (targetKind) flow.target_kind = targetKind;
+  if (amountKind) flow.amount_kind = amountKind;
+  if (targetKinds) flow.target_kinds = targetKinds;
+  if (amountKinds) flow.amount_kinds = amountKinds;
+  return {
+    claim_id: "flow.out",
+    tier,
+    witness: { kind: "value_flow", direction: "out", flows: [flow], sink_ids: [] },
+  };
+}
+
+// A behavioral (fork-observed) claim with an `observed` summary.
+function observedClaim(claim_id, observed) {
+  return {
+    claim_id,
+    tier: "behavioral_observed",
+    witness: { effect_verdict_id: 1, effect_class: "x", observed },
+  };
+}
+
+describe("qualifierForClaims — flow.out destination (theft vs routing)", () => {
+  it("renders (fixed destination) only for a proven immutable/constant/no-setter target", () => {
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "immutable", tier: "dispositive_ast" })] }))
+      .toBe("(fixed destination)");
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "constant", tier: "dispositive_ast" })] }))
+      .toBe("(fixed destination)");
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "storage_no_setter", tier: "static_trace" })] }))
+      .toBe("(fixed destination)");
+  });
+
+  it("renders (caller-chosen destination) for param / msg_sender / caller_controlled", () => {
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "param", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "msg_sender", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+    // caller_controlled = tx.origin — a distinct EOA fact, same theft-shaped class.
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+  });
+
+  it("lets caller_controlled dominate a fixed path in the worst case (never reads fixed)", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "caller_controlled", tier: "dispositive_ast" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
+  });
+
+  it("reads a several fold through its members, worst case first", () => {
+    // splitPay(): one send to a caller argument, one to an admin-settable
+    // storage slot. Both members are resolved, so the fold is several — and the
+    // caller-chosen member has to dominate. Reading only the scalar would
+    // suppress the theft signal on a function that provably pays a caller-named
+    // address.
+    const oneOf = flowOut(
+      { kind: "several", tier: "dispositive_ast" },
+      {
+        targetKinds: [
+          { kind: "param", tier: "dispositive_ast" },
+          { kind: "storage_setter", tier: "dispositive_ast" },
+        ],
+      },
+    );
+    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(caller-chosen destination)");
+  });
+
+  it("reads a several of admin-settable and fixed members as admin-settable", () => {
+    const oneOf = flowOut(
+      { kind: "several", tier: "dispositive_ast" },
+      {
+        targetKinds: [
+          { kind: "immutable", tier: "dispositive_ast" },
+          { kind: "storage_setter", tier: "dispositive_ast" },
+        ],
+      },
+    );
+    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(admin-settable destination)");
+  });
+
+  it("never reads a several as fixed when its members are not readable", () => {
+    // A several with no member list is an artifact we cannot interpret; it must
+    // block a "fixed" claim rather than disappear from the tally.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "several", tier: "dispositive_ast" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBeNull();
+  });
+
+  it("treats storage_setter as admin-redirectable, NOT fixed", () => {
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "storage_setter", tier: "static_trace" })] }))
+      .toBe("(admin-settable destination)");
+  });
+
+  it("suppresses the qualifier for indeterminate / self / absent target_kind", () => {
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "indeterminate", tier: "static_trace" })] })).toBeNull();
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "self", tier: "dispositive_ast" })] })).toBeNull();
+    expect(qualifierForClaims({ claims: [flowOut(null)] })).toBeNull();
+  });
+
+  it("reads token_owner as neither caller-chosen nor fixed", () => {
+    // The caller names the token id, not the payee, so it is not theft-shaped —
+    // but an NFT transfer repoints it, so it is not a proven-fixed destination
+    // either. It must also block a sibling fixed flow from claiming "fixed".
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "token_owner", tier: "static_trace" })] })).toBeNull();
+    const mixed = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "token_owner", tier: "static_trace" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(mixed)).toBeNull();
+  });
+
+  it("shows the worst path in a multi-flow function (caller-chosen dominates fixed)", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
+  });
+
+  it("does NOT claim fixed when one out-flow is unclassified (no false negative laundering)", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y" }, // no target_kind → unclassified, blocks a "fixed" claim
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBeNull();
+  });
+});
+
+describe("qualifierForClaims — pause freeze specifics", () => {
+  it("renders (auto-expires ~Nd) only when auto_expiry true AND a duration bound is read", () => {
+    const fn = { claims: [observedClaim("pause.set", { auto_expiry: true, duration_bound_seconds: 30 * 86400 })] };
+    expect(qualifierForClaims(fn)).toBe("(auto-expires ~30d)");
+  });
+
+  it("renders hours when the bound is under a day", () => {
+    const fn = { claims: [observedClaim("pause.set", { auto_expiry: true, duration_bound_seconds: 8 * 3600 })] };
+    expect(qualifierForClaims(fn)).toBe("(auto-expires ~8h)");
+  });
+
+  it("renders (indefinite) for the null/null latch on a present behavioral witness", () => {
+    const fn = { claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })] };
+    expect(qualifierForClaims(fn)).toBe("(indefinite)");
+  });
+
+  it("suppresses when auto_expiry is false (fork contradicted the static bound)", () => {
+    const fn = { claims: [observedClaim("pause.set", { auto_expiry: false, duration_bound_seconds: 30 * 86400 })] };
+    expect(qualifierForClaims(fn)).toBeNull();
+  });
+
+  it("suppresses on a static-only pause.set (no observed witness = unknown)", () => {
+    expect(qualifierForClaims({ claims: [claim("pause.set", "idiom_structural")] })).toBeNull();
+    // present observed but no freeze fields → unknown, not indefinite
+    expect(qualifierForClaims({ claims: [observedClaim("pause.set", { gate_mutation: "x" })] })).toBeNull();
+  });
+});
+
+describe("qualifierForClaims — mint backing", () => {
+  it("renders (backed) only for inflow_observed === true", () => {
+    const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: true, minted: true } })] };
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+  });
+
+  it("renders (unbacked) for a witnessed dilution (inflow_observed === false)", () => {
+    const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: false, minted: true } })] };
+    expect(qualifierForClaims(fn)).toBe("(unbacked)");
+  });
+
+  it("suppresses when backing is absent (unknown, never 'backed' from absence)", () => {
+    expect(qualifierForClaims({ claims: [claim("supply.mint")] })).toBeNull();
+    expect(qualifierForClaims({ claims: [observedClaim("supply.mint", {})] })).toBeNull();
+  });
+});
+
+describe("qualifierForClaims — wrap-shape backing on the chip (register #10)", () => {
+  // A wrap carries flow.in + supply.mint (both priority 6); primaryClaim
+  // tie-breaks to flow.in, so the backing witness must be promoted onto the
+  // value-in chip or it would only ever show in the inspector.
+  const wrap = (observed) => ({
+    claims: [claim("flow.in"), observedClaim("supply.mint", observed)],
+  });
+
+  it("promotes (backed) onto the value-in chip when the co-mint is backed", () => {
+    const fn = wrap({ backing: { inflow_observed: true, minted: true } });
+    expect(primaryClaim(fn).claim_id).toBe("flow.in");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+    expect(compactActionSummary(fn)).toBe("moves value in (backed)");
+  });
+
+  it("promotes (unbacked) onto the value-in chip for a witnessed dilution", () => {
+    const fn = wrap({ backing: { inflow_observed: false, minted: true } });
+    expect(qualifierForClaims(fn)).toBe("(unbacked)");
+    expect(compactActionSummary(fn)).toBe("moves value in (unbacked)");
+  });
+
+  it("suppresses when the co-mint carries no backing witness (unknown, not backed)", () => {
+    expect(qualifierForClaims(wrap({}))).toBeNull();
+    expect(compactActionSummary(wrap({}))).toBe("moves value in");
+  });
+
+  it("leaves a plain inflow (no mint) unqualified", () => {
+    expect(qualifierForClaims({ claims: [claim("flow.in")] })).toBeNull();
+    expect(compactActionSummary({ claims: [claim("flow.in")] })).toBe("moves value in");
+  });
+
+  it("does not change pure-mint-primary behavior (no flow.in present)", () => {
+    const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] };
+    expect(primaryClaim(fn).claim_id).toBe("supply.mint");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+  });
+});
+
+describe("qualifierForClaims — non-target claims and empties", () => {
+  it("returns null for a primary claim with no qualifier concept", () => {
+    expect(qualifierForClaims({ claims: [claim("ownership.transfer")] })).toBeNull();
+    expect(qualifierForClaims({ claims: [] })).toBeNull();
+    expect(qualifierForClaims({})).toBeNull();
+  });
+});
+
+describe("compactActionSummary appends the witness qualifier", () => {
+  it("appends the destination qualifier to the flow.out chip", () => {
+    expect(compactActionSummary({ claims: [flowOut({ kind: "immutable", tier: "dispositive_ast" })] }))
+      .toBe("moves value out (fixed destination)");
+    expect(compactActionSummary({ claims: [flowOut({ kind: "param", tier: "dispositive_ast" })] }))
+      .toBe("moves value out (caller-chosen destination)");
+  });
+
+  it("leaves the plain phrase when the witness is indeterminate/absent", () => {
+    expect(compactActionSummary({ claims: [flowOut({ kind: "indeterminate", tier: "static_trace" })] }))
+      .toBe("moves value out");
+    expect(compactActionSummary({ claims: [claim("flow.out")] })).toBe("moves value out");
+  });
+});
+
+describe("claimSummaryLine appends the qualifier to the primary phrase", () => {
+  it("qualifies the pause phrase in the joined line + label", () => {
+    const fn = { claims: [observedClaim("pause.set", { auto_expiry: true, duration_bound_seconds: 30 * 86400 })] };
+    const line = claimSummaryLine(fn);
+    expect(line.text).toBe("pauses (auto-expires ~30d)");
+    expect(line.label).toBe("pauses (auto-expires ~30d) · observed");
+  });
+
+  it("leaves the plain phrase when there is no at-bar witness", () => {
+    const line = claimSummaryLine({ claims: [claim("pause.set")] });
+    expect(line.text).toBe("pauses");
+  });
+
+  it("lands on the primary claim's phrase on a priority tie, not the array-first sibling", () => {
+    // supply.burn and flow.out share priority 7; primaryClaim tie-breaks by
+    // claim_id to flow.out. With supply.burn first in the array, the stable sort
+    // puts "burns supply" at index 0 — the destination qualifier must still
+    // attach to "moves value out", never the tied sibling's phrase.
+    const flowOut = {
+      claim_id: "flow.out",
+      tier: "idiom_structural",
+      witness: {
+        kind: "value_flow",
+        direction: "out",
+        flows: [{ kind: "low_level_value_call", selector: null, from_is_self: true, target_kind: { kind: "param", tier: "dispositive_ast" } }],
+      },
+    };
+    const line = claimSummaryLine({ claims: [claim("supply.burn"), flowOut] });
+    expect(line.text).toBe("burns supply · moves value out (caller-chosen destination)");
+  });
+});
+
+describe("claimWitnessFacts — inspector verbose rows", () => {
+  it("emits destination + amount rows with their tier labels", () => {
+    const fn = {
+      claims: [flowOut(
+        { kind: "immutable", tier: "dispositive_ast" },
+        { amountKind: { kind: "param", tier: "static_trace" } },
+      )],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({ label: "Destination", value: "immutable address · dispositive AST" });
+    expect(facts).toContainEqual({ label: "Amount", value: "caller-supplied argument · static trace" });
+  });
+
+  it("labels a caller_controlled destination honestly as caller (tx.origin)", () => {
+    const fn = { claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Destination", value: "caller (tx.origin) · dispositive AST" });
+  });
+
+  it("words a token_owner destination and a balance_delta amount", () => {
+    const fn = {
+      claims: [flowOut(
+        { kind: "token_owner", tier: "static_trace" },
+        { amountKind: { kind: "balance_delta", tier: "static_trace" } },
+      )],
+    };
+    const facts = claimWitnessFacts(fn);
+    // Both must render as prose, not leak the raw enum through the fallback.
+    expect(facts).toContainEqual({ label: "Destination", value: "the token's current owner · static trace" });
+    expect(facts).toContainEqual({ label: "Amount", value: "a balance delta · static trace" });
+  });
+
+  it("emits freeze scope + auto-expiry rows for a fork-observed pause", () => {
+    const fn = {
+      claims: [observedClaim("pause.set", {
+        observed_blast_radius: ["pauseUntil(uint256)", "blacklist(address)"],
+        auto_expiry: true,
+        duration_bound_seconds: 30 * 86400,
+      })],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts.find((f) => f.label === "Freeze scope").value).toContain("2 entry point(s)");
+    expect(facts).toContainEqual({ label: "Auto-expiry", value: "self-recovers after ~30d" });
+  });
+
+  it("labels an indefinite latch honestly", () => {
+    const facts = claimWitnessFacts({
+      claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
+    });
+    expect(facts).toContainEqual({ label: "Auto-expiry", value: "indefinite latch (no self-recovery bound)" });
+  });
+
+  it("emits backing rows for both witnessed directions", () => {
+    expect(claimWitnessFacts({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] }))
+      .toContainEqual({ label: "Backing", value: "matching asset inflow observed (backed)" });
+    expect(claimWitnessFacts({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: false } })] }))
+      .toContainEqual({ label: "Backing", value: "no matching inflow — supply rose alone (dilution)" });
+  });
+
+  it("renders reach as an explicit UPPER BOUND, never exact", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: { effect_verdict_id: 1, observed: { observed_reach_value_usd: 55_200_000 } },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
+  });
+
+  it("floors reach to own balance when fork-observed indeterminate", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: { effect_verdict_id: 1, observed: { reach_indeterminate: true, observed_reach_value_usd: 999 } },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach", value: "floored to own balance (reach indeterminate)" });
+  });
+
+  it("emits no rows when no witness facts are present (silence, not defaults)", () => {
+    expect(claimWitnessFacts({ claims: [claim("flow.out")] })).toEqual([]);
+    expect(claimWitnessFacts({ claims: [claim("ownership.transfer")] })).toEqual([]);
+    expect(claimWitnessFacts({})).toEqual([]);
+  });
+
+  // The per-site breakdown: a fold that reads "indeterminate" only because its
+  // sites disagreed must show what those sites actually were.
+  it("names both destinations instead of the fold when the sites disagreed", () => {
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, {
+        targetKinds: [
+          { kind: "token_owner", tier: "static_trace" },
+          { kind: "immutable", tier: "dispositive_ast" },
+        ],
+        amountKind: { kind: "indeterminate", tier: "static_trace" },
+        amountKinds: [
+          { kind: "indeterminate", tier: "static_trace" },
+          { kind: "balance_delta", tier: "static_trace" },
+        ],
+      })],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Destination",
+      value: "2 sites: the token's current owner · static trace / immutable address · dispositive AST",
+    });
+    // An unresolved site stays visible as unresolved — the row explains the
+    // fold, it never launders it into something more settled.
+    expect(facts).toContainEqual({
+      label: "Amount",
+      value: "2 sites: indeterminate · static trace / a balance delta · static trace",
+    });
+  });
+
+  it("keeps the folded row when there is no breakdown", () => {
+    const fn = { claims: [flowOut({ kind: "indeterminate", tier: "static_trace" })] };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Destination", value: "indeterminate · static trace" });
+  });
+
+  it("caps a pathological site list and still states the true total", () => {
+    const sites = ["immutable", "param", "msg_sender", "storage_setter", "self", "token_owner"].map((kind) => ({
+      kind,
+      tier: "static_trace",
+    }));
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, { targetKinds: sites })],
+    };
+    const value = claimWitnessFacts(fn).find((f) => f.label === "Destination").value;
+    expect(value).toMatch(/^6 sites: /);
+    expect(value).toContain("+2 more");
+    expect(value).not.toContain("the token's current owner");
+  });
+
+  it("leaves the chip and the tone on the FOLD, never a single site", () => {
+    // A caller-supplied site inside a disagreeing fold must not promote the chip
+    // to "(caller-chosen destination)" — the fold never reached that verdict.
+    const fn = {
+      claims: [flowOut({ kind: "indeterminate", tier: "static_trace" }, {
+        targetKinds: [
+          { kind: "param", tier: "dispositive_ast" },
+          { kind: "immutable", tier: "static_trace" },
+        ],
+      })],
+    };
+    expect(qualifierForClaims(fn)).toBeNull();
+    expect(toneForClaims(fn)).toBe(toneForClaims({ claims: [claim("flow.out")] }));
+  });
+});
+
+describe("terminalControllerNote — non-terminal way-points never read as settled keys", () => {
+  it("returns null for a principal that is itself a settled key", () => {
+    expect(terminalControllerNote({ resolvedType: "safe", details: { terminal: true } })).toBeNull();
+    expect(terminalControllerNote({ resolvedType: "eoa", details: { terminal: true } })).toBeNull();
+  });
+
+  it("flags a bare contract way-point (no terminal walk) as unresolved", () => {
+    const note = terminalControllerNote({ resolvedType: "contract", details: { terminal: false } });
+    expect(note).toEqual({ kind: "unresolved", status: "unknown_unfetched" });
+  });
+
+  it("surfaces a terminated walk's ultimate key", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: { terminal: true, resolved_type: "safe", address: "0xabc", chain: ["0x1", "0xabc"], status: "terminated" },
+      },
+    });
+    expect(note).toEqual({ kind: "terminated", address: "0xabc", resolvedType: "safe" });
+  });
+
+  it("shows multiple control planes for ambiguous_controllers, never one key", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: { terminal: false, resolved_type: "unknown", address: null, status: "ambiguous_controllers", controllers: ["0x1", "0x2"] },
+      },
+    });
+    expect(note.kind).toBe("ambiguous");
+    expect(note.planes).toEqual(["0x1", "0x2"]);
+  });
+
+  it("renders each plane's own terminal outcome for a multi_plane walk, never one key", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: {
+          terminal: false,
+          resolved_type: "unknown",
+          address: null,
+          status: "multi_plane",
+          controllers: ["0x1", "0x2"],
+          planes: [
+            { controller: "0x1", terminal_record: { terminal: true, resolved_type: "safe", address: "0xsafe", status: "terminated" } },
+            { controller: "0x2", terminal_record: { terminal: false, resolved_type: "unknown", address: null, status: "unknown_unfetched" } },
+          ],
+        },
+      },
+    });
+    expect(note.kind).toBe("multi_plane");
+    expect(note.planes).toEqual([
+      { controller: "0x1", outcome: { resolved: true, address: "0xsafe", resolvedType: "safe" } },
+      { controller: "0x2", outcome: { resolved: false, status: "unknown_unfetched" } },
+    ]);
+  });
+
+  it("degrades a multi_plane record with no usable planes array to the flat ambiguous render", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: {
+          terminal: false, resolved_type: "unknown", address: null,
+          status: "multi_plane", controllers: ["0x1", "0x2"],
+        },
+      },
+    });
+    expect(note.kind).toBe("ambiguous");
+    expect(note.planes).toEqual(["0x1", "0x2"]);
+  });
+
+  it("renders a nested ambiguous_controllers fork as the flat 'no single settled key'", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: { terminal: false, resolved_type: "unknown", address: null, status: "ambiguous_controllers", controllers: ["0x1", "0x2", "0x3"] },
+      },
+    });
+    expect(note.kind).toBe("ambiguous");
+    expect(note.planes).toEqual(["0x1", "0x2", "0x3"]);
+  });
+
+  it("treats cycle / depth_exceeded / unfetched as honestly unresolved", () => {
+    for (const status of ["cycle", "depth_exceeded", "unknown_unfetched"]) {
+      const note = terminalControllerNote({
+        resolvedType: "contract",
+        details: { terminal: false, terminal_principal: { terminal: false, resolved_type: "unknown", address: null, status } },
+      });
+      expect(note).toEqual({ kind: "unresolved", status });
+    }
+  });
+});
+
+describe("signerOverlapNote — attribution context, not org identity", () => {
+  it("surfaces the strongest subset relation", () => {
+    const principal = {
+      resolvedType: "safe",
+      details: {
+        signer_overlap: {
+          provenance: "onchain_owner_read",
+          self_owner_count: 5,
+          overlaps: [
+            { address: "0x2aca", other_owner_count: 7, shared_count: 5, shared_owners: [], subset: true, superset: false, equal: false, jaccard: 0.71 },
+            { address: "0xdead", other_owner_count: 3, shared_count: 1, shared_owners: [], subset: false, superset: false, equal: false, jaccard: 0.14 },
+          ],
+        },
+      },
+    };
+    const note = signerOverlapNote(principal);
+    expect(note.selfOwnerCount).toBe(5);
+    expect(note.strongest.address).toBe("0x2aca");
+    expect(note.strongest.subset).toBe(true);
+  });
+
+  it("emits null when the fact is absent or has no shared signers", () => {
+    expect(signerOverlapNote({ resolvedType: "safe", details: {} })).toBeNull();
+    const disjoint = {
+      resolvedType: "safe",
+      details: { signer_overlap: { self_owner_count: 3, overlaps: [{ address: "0x1", shared_count: 0, jaccard: 0 }] } },
+    };
+    expect(signerOverlapNote(disjoint)).toEqual({ selfOwnerCount: 3, strongest: null });
+  });
+});
+
+describe("sharedDeployerNote — heuristic hint, never an org-identity claim", () => {
+  it("counts the OTHER addresses in the deployer group and carries the heuristic hedge", () => {
+    const note = sharedDeployerNote({
+      address: "0xself",
+      details: {
+        shared_deployer: {
+          provenance: "deployer_read", heuristic: true, deployer: "0xdep",
+          addresses: ["0xself", "0xaaa", "0xbbb"],
+        },
+      },
+    });
+    expect(note).toEqual({ deployer: "0xdep", otherCount: 2, heuristic: true });
+  });
+
+  it("counts case-insensitively and excludes the principal itself", () => {
+    const note = sharedDeployerNote({
+      address: "0xSELF",
+      details: { shared_deployer: { deployer: "0xdep", addresses: ["0xself", "0xaaa"] } },
+    });
+    expect(note.otherCount).toBe(1);
+  });
+
+  it("emits null when the fact is absent (no hint from absence)", () => {
+    expect(sharedDeployerNote({ address: "0xself", details: {} })).toBeNull();
+    expect(sharedDeployerNote({ details: {} })).toBeNull();
+    expect(sharedDeployerNote({})).toBeNull();
+  });
+
+  it("emits null for a singleton group (no OTHER address to share with)", () => {
+    const note = sharedDeployerNote({
+      address: "0xself",
+      details: { shared_deployer: { deployer: "0xdep", addresses: ["0xself"] } },
+    });
+    expect(note).toBeNull();
+  });
+});
+
+describe("toneForClaims — §7.4 hazard/calm tinting (proven positives vs negatives)", () => {
+  const flowOutTone = (targetKind) => toneForClaims({ claims: [flowOut({ kind: targetKind, tier: "dispositive_ast" })] });
+
+  it("tints a caller-chosen out-flow more hazardous than a proven-fixed one", () => {
+    const caller = flowOutTone("param");
+    const callerOrigin = flowOutTone("caller_controlled");
+    const fixed = flowOutTone("immutable");
+    expect(caller).toBe("#a8746a");
+    expect(callerOrigin).toBe("#a8746a");
+    expect(fixed).toBe("#8f947a");
+    expect(caller).not.toBe(fixed);
+    // both differ from the neutral base tone.
+    expect(caller).not.toBe(CLAIM_VOCAB["flow.out"].tone);
+    expect(fixed).not.toBe(CLAIM_VOCAB["flow.out"].tone);
+  });
+
+  it("keeps the neutral base tone for an admin-settable / indeterminate / absent destination", () => {
+    const base = CLAIM_VOCAB["flow.out"].tone;
+    expect(flowOutTone("storage_setter")).toBe(base);
+    expect(flowOutTone("indeterminate")).toBe(base);
+    expect(toneForClaims({ claims: [claim("flow.out")] })).toBe(base);
+  });
+
+  it("does not calm-tint a mixed out-flow where one path is caller-chosen", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow", direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" } },
+          ],
+        },
+      }],
+    };
+    expect(toneForClaims(fn)).toBe("#a8746a");
+  });
+
+  it("tints an unbacked mint hazardous and leaves a backed/unknown mint neutral", () => {
+    const base = CLAIM_VOCAB["supply.mint"].tone;
+    expect(toneForClaims({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: false } })] }))
+      .toBe("#9e8a6a");
+    expect(toneForClaims({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] }))
+      .toBe(base);
+    expect(toneForClaims({ claims: [claim("supply.mint")] })).toBe(base);
+  });
+
+  it("reflects an unbacked co-mint on a wrap's value-in tone", () => {
+    const base = CLAIM_VOCAB["flow.in"].tone;
+    const unbacked = { claims: [claim("flow.in"), observedClaim("supply.mint", { backing: { inflow_observed: false } })] };
+    const backed = { claims: [claim("flow.in"), observedClaim("supply.mint", { backing: { inflow_observed: true } })] };
+    expect(toneForClaims(unbacked)).toBe("#9e8a6a");
+    expect(toneForClaims(backed)).toBe(base);
+  });
+
+  it("leaves non-flow claims on their vocabulary tone", () => {
+    expect(toneForClaims({ claims: [claim("ownership.transfer")] })).toBe(CLAIM_VOCAB["ownership.transfer"].tone);
+    expect(toneForClaims({ claims: [] })).toBeNull();
   });
 });
 

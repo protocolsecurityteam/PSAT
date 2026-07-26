@@ -83,21 +83,81 @@ class SimulateUnsupportedError(RuntimeError):
     the class to its declared Tier-2 fallback, never a silent degrade."""
 
 
-def transfers_out(result: SimCallResult, source_address: str) -> list[tuple[str, str, str]]:
+def transfers_out(
+    result: SimCallResult, source_address: str, *, only_asset: str | None = None
+) -> list[tuple[str, str, str]]:
     """``(from, to, value_hex)`` for every ``Transfer`` log whose sender is
     ``source_address`` — i.e. value LEAVING that contract. Raw-log level only;
     no name/semantic inference. ETH moves surface here too via ``traceTransfers``.
+
+    ``only_asset`` restricts the match to logs EMITTED BY that token
+    (``SimLog.address``). A ``Transfer`` topic says nothing about which contract
+    emitted it, so a caller asking "did *this specific* asset move" must pin the
+    emitter: the §4.5 supply recipe measures ``totalSupply`` on ONE token, and an
+    unrelated token minting inside the same call would otherwise satisfy its
+    mint/sentinel witness. Unset (the §4.2 value-out use) means any asset leaving
+    the contract counts, which is the intended reading there.
     """
     src = source_address.lower()
+    asset = only_asset.lower() if only_asset else None
     out: list[tuple[str, str, str]] = []
     for log in result.logs:
         if not log.topics or log.topics[0].lower() != TRANSFER_TOPIC.lower():
             continue
         if len(log.topics) < 3:
             continue
+        if asset is not None and log.address.lower() != asset:
+            continue
         frm = _topic_addr(log.topics[1])
         to = _topic_addr(log.topics[2])
         if frm == src:
+            out.append((frm, to, log.data))
+    return out
+
+
+def transfers_in(
+    result: SimCallResult, dest_address: str, *, exclude_asset: str | None = None, only_asset: str | None = None
+) -> list[tuple[str, str, str]]:
+    """``(from, to, value_hex)`` for every ``Transfer`` log whose recipient is
+    ``dest_address`` — i.e. value ARRIVING at that contract. The mirror of
+    :func:`transfers_out`: raw-log level only, no name/semantic inference, ETH moves
+    surface here too via ``traceTransfers``.
+
+    Used by the §4.5 backing check (§5a): an asset transfer INTO the vault during a
+    mint call is the co-occurring inflow that distinguishes a deposit-backed
+    conversion from an unbacked (dilutive) admin mint. No new I/O — the logs are the
+    ones the mint call already emitted.
+
+    ``exclude_asset`` drops logs EMITTED BY that token, and the backing check passes
+    the minted token itself. Without it ``_mint(address(this), fee)`` — a mint of the
+    vault's OWN token to the vault — emits ``Transfer(0x0 -> vault)`` from the vault's
+    own token contract and reads as an asset inflow, so pure dilution produces the
+    byte-identical ``inflow_observed: true`` a genuine deposit-backed conversion
+    does. Backing means an inflow of some OTHER asset; newly-printed units of the
+    token whose supply just rose back nothing.
+
+    ``only_asset`` is the opposite pin, and the §4.5 burn witness needs it: units
+    destroyed are a ``Transfer`` to the zero address emitted BY the token whose
+    ``totalSupply`` moved, and some OTHER token burning inside the same call says
+    nothing about this one's supply. Passing both is contradictory and yields
+    nothing, which is the honest answer to a contradictory question.
+    """
+    dst = dest_address.lower()
+    excluded = exclude_asset.lower() if exclude_asset else None
+    included = only_asset.lower() if only_asset else None
+    out: list[tuple[str, str, str]] = []
+    for log in result.logs:
+        if not log.topics or log.topics[0].lower() != TRANSFER_TOPIC.lower():
+            continue
+        if len(log.topics) < 3:
+            continue
+        if excluded is not None and log.address.lower() == excluded:
+            continue
+        if included is not None and log.address.lower() != included:
+            continue
+        frm = _topic_addr(log.topics[1])
+        to = _topic_addr(log.topics[2])
+        if to == dst:
             out.append((frm, to, log.data))
     return out
 

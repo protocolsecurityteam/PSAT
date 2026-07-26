@@ -8,14 +8,22 @@ of the control lane while the LayerZero config claims read as control-plane.
 
 from __future__ import annotations
 
-from ..context import ClaimContext
+from ..context import ClaimContext, abi_selector, abi_topic0
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
+# LayerZero OApp published configuration ABI.
+_SET_PEER = abi_selector("setPeer(uint32,bytes32)")
+_PEERS = abi_selector("peers(uint32)")
+_ENDPOINT = abi_selector("endpoint()")
+_SET_DELEGATE = abi_selector("setDelegate(address)")
+_DEPOSIT = abi_selector("deposit()")
+_WITHDRAW = abi_selector("withdraw(uint256)")
+
 
 def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> ClaimEvidence | None:
-    if not _facts.is_erc20(ctx) or ctx.selector(function) != selector:
+    if not _facts.is_erc20(ctx) or ctx.canonical_selector(function) != selector:
         return None
     return ClaimEvidence(tier="standard_exact", witness={"kind": "erc20_selector", "selector": selector})
 
@@ -51,7 +59,7 @@ def erc20_transfer_from(ctx: ClaimContext, function: str) -> ClaimEvidence | Non
 
 
 def _weth_gate(ctx: ClaimContext) -> bool:
-    return _facts.is_erc20(ctx) and ctx.has_signature("deposit()") and ctx.has_signature("withdraw(uint256)")
+    return _facts.is_erc20(ctx) and ctx.has_selectors(_DEPOSIT, _WITHDRAW)
 
 
 @claim_matcher(
@@ -61,7 +69,7 @@ def _weth_gate(ctx: ClaimContext) -> bool:
     consumer_family="user_plane",
 )
 def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function != "deposit()" or not _weth_gate(ctx):
+    if ctx.canonical_selector(function) != _DEPOSIT or not _weth_gate(ctx):
         return None
     return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "deposit"})
 
@@ -73,9 +81,14 @@ def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="user_plane",
 )
 def weth_withdraw(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function != "withdraw(uint256)" or not _weth_gate(ctx):
+    if ctx.canonical_selector(function) != _WITHDRAW or not _weth_gate(ctx):
         return None
     return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "withdraw"})
+
+
+# The Compound/OZ Votes delegation log. Its argument list is fixed by the
+# standard, so topic0 is what a delegation provably writes to the chain.
+DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
 
 
 @claim_matcher(
@@ -85,20 +98,30 @@ def weth_withdraw(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="user_plane",
 )
 def gov_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    """Comp-style delegation: writing both the ``delegates`` map and the
-    ``checkpoints`` map is the voting-power move (self-gating identity)."""
+    """Comp/OZ-Votes delegation.
+
+    ``standard_exact`` when the call emits ``DelegateChanged`` — the published
+    governance log, matched on topic0, so the proof is the record the chain
+    keeps. The older state-write shape (``delegates`` + ``checkpoints``) is kept
+    as a fallback, but only at ``idiom_structural``: those are variable names, and
+    a name cannot prove a standard.
+    """
+    fn = _facts.contract_function(ctx, function)
+    if fn is not None and _facts.emits_event_topic(ctx, fn, DELEGATE_CHANGED_TOPIC0):
+        return ClaimEvidence(
+            tier="standard_exact",
+            witness={"kind": "delegate_changed_log", "topic0": DELEGATE_CHANGED_TOPIC0},
+        )
     written = {w["var"] for w in _facts.state_writes(ctx, function)}
     if "delegates" in written and "checkpoints" in written:
         return ClaimEvidence(
-            tier="standard_exact", witness={"kind": "comp_votes", "writes": ["delegates", "checkpoints"]}
+            tier="idiom_structural", witness={"kind": "comp_votes_writes", "writes": ["delegates", "checkpoints"]}
         )
     return None
 
 
 def _lz_oapp_gate(ctx: ClaimContext) -> bool:
-    return ctx.has_signature("setPeer(uint32,bytes32)") and (
-        ctx.has_signature("peers(uint32)") or ctx.has_functions("endpoint")
-    )
+    return ctx.has_selectors(_SET_PEER) and (ctx.has_selectors(_PEERS) or ctx.has_selectors(_ENDPOINT))
 
 
 @claim_matcher(
@@ -108,7 +131,7 @@ def _lz_oapp_gate(ctx: ClaimContext) -> bool:
     consumer_family="control_plane",
 )
 def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function != "setPeer(uint32,bytes32)" or not _lz_oapp_gate(ctx):
+    if ctx.canonical_selector(function) != _SET_PEER or not _lz_oapp_gate(ctx):
         return None
     return ClaimEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_peer"})
 
@@ -120,6 +143,6 @@ def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
 )
 def lz_oapp_set_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    if function != "setDelegate(address)" or not _lz_oapp_gate(ctx):
+    if ctx.canonical_selector(function) != _SET_DELEGATE or not _lz_oapp_gate(ctx):
         return None
     return ClaimEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_delegate"})
