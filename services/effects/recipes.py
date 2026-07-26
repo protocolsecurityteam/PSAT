@@ -113,6 +113,11 @@ def uups_sentinel_override(sentinel_address: str, impl_slot: str = EIP1967_IMPL_
 _ATTEMPT_SEEDED = "seeded_probe"
 _ATTEMPT_PAYABLE = "seeded_probe_payable"
 _ATTEMPT_CONTRACT_BALANCE = "seeded_probe_contract_balance"
+_ATTEMPT_CONTRACT_TOKEN = "seeded_probe_contract_token"
+# ERC-20 analogue of the native contract-balance seed runs on at most this many of
+# the deployment's measured holdings; the seeder's own layout budget caps distinct
+# tokens further.
+_MAX_CONTRACT_HOLDINGS = 2
 
 # Why a seeded attempt (or the whole retry path) produced no observation. Recorded
 # per attempt on the transcript AND counted on the seed budget's metrics, so a live
@@ -195,6 +200,7 @@ def _seed_attempts(
     target_payable: bool | None = None,
     native_payout: bool = False,
     token_param_indexes: Sequence[int] = (),
+    contract_holdings: Sequence[str] = (),
 ) -> list[_SeedAttempt]:
     """The ordered retries for a probe whose UNSEEDED call already reverted.
 
@@ -293,6 +299,45 @@ def _seed_attempts(
                 calldata,
                 sentinel,
                 seeding,
+                contract_balance_seeded=True,
+                token_args=placed,
+            )
+        )
+    # ERC-20 analogue of the native contract-balance seed (§16.6-A): a payout the
+    # contract's LIVE balance cannot cover reaches its send once the contract's own
+    # token balance is overridden. Seeding with ``principal == spender == contract``
+    # makes the seeder write the CONTRACT's balance slot (``slot(principal, spender)``)
+    # and read it back via ``balanceOf(contract)`` — the same discipline as every
+    # other seed. Runs LAST (most synthetic) and carries ``contract_balance_seeded``:
+    # a verdict it produces is "would move value IF THE CONTRACT WERE FUNDED", a
+    # capability of the code, not a live outflow. The token is whatever the
+    # deployment provably holds (§0.0.2), never a hardcoded asset.
+    for token in list(contract_holdings)[:_MAX_CONTRACT_HOLDINGS]:
+        if not isinstance(token, str) or token.lower() == contract_address.lower():
+            continue
+        try:
+            held = seeder(
+                SeedRequest(
+                    spender=contract_address,
+                    principal=contract_address,
+                    token_hints=(token,),
+                    block_tag=block_tag,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a failed seeder only means "do not seed"
+            logger.debug("effects recipes: contract-holding seed failed for %s", token, exc_info=True)
+            held = None
+        if held is None or not held.overrides:
+            _record_seed_outcome(transcript, seeder, _ATTEMPT_CONTRACT_TOKEN, _SKIP_NO_TOKEN, detail=token)
+            continue
+        attempts.append(
+            _SeedAttempt(
+                _ATTEMPT_CONTRACT_TOKEN,
+                held.overrides,
+                0,
+                calldata,
+                sentinel,
+                held,
                 contract_balance_seeded=True,
                 token_args=placed,
             )
@@ -521,6 +566,7 @@ def value_out(
     target_payable: bool | None = None,
     native_payout: bool = False,
     inputs_vacuous: bool = False,
+    contract_holdings: Sequence[str] = (),
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
 
@@ -583,6 +629,7 @@ def value_out(
                 block_tag=hex(tr["block_number"]),
                 target_payable=target_payable,
                 native_payout=native_payout,
+                contract_holdings=contract_holdings,
             ),
             to=contract_address,
             principal=principal,
@@ -945,6 +992,7 @@ def supply(
     target_payable: bool | None = None,
     native_payout: bool = False,
     inputs_vacuous: bool = False,
+    contract_holdings: Sequence[str] = (),
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``? (§4.5)
 
@@ -992,6 +1040,7 @@ def supply(
                 block_tag=hex(tr["block_number"]),
                 target_payable=target_payable,
                 native_payout=native_payout,
+                contract_holdings=contract_holdings,
             ),
             token_address=token_address,
             principal=principal,

@@ -167,6 +167,12 @@ class ValueOutPlanInputs:
     # a fact about the arguments, not about F — so the recipe must name it as one
     # and it must never enter the code-plane behaviour cache.
     inputs_vacuous: bool = False
+    # ERC-20 analogue of the native ``contract_balance`` seed: assets the acting
+    # deployment PROVABLY holds (§16.6-A), so a payout the contract's live balance
+    # cannot cover can be reached by seeding the CONTRACT's own token balance. A
+    # verdict proven under it is a CAPABILITY claim (would move IF funded) and
+    # carries the same weaker ``contract_balance_seeded`` qualifier.
+    contract_holdings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,6 +196,8 @@ class SupplyPlanInputs:
     native_payout: bool = False
     # See :class:`ValueOutPlanInputs`.
     inputs_vacuous: bool = False
+    # See :class:`ValueOutPlanInputs`.
+    contract_holdings: tuple[str, ...] = ()
     # NO ``static_shape``. The supply recipe reads a destination shape only to
     # collect a §9 discrepancy and discards the shape itself, and the supply
     # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
@@ -1348,6 +1356,9 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         native_payout=has_native_payout(fn),
         static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
         inputs_vacuous=built.inputs_vacuous,
+        # Measured holdings only (§0.0.2) — the seed derives its token from what
+        # the deployment provably holds, never a hardcoded asset.
+        contract_holdings=tuple(candidate.input_token_addresses),
     )
 
 
@@ -1387,6 +1398,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
         inputs_vacuous=built.inputs_vacuous,
+        contract_holdings=tuple(candidate.input_token_addresses),
     )
 
 
