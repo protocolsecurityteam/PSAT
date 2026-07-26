@@ -23,6 +23,12 @@ pragma solidity ^0.8.27;
 //  * splitPay — two sends with separately-resolved destinations, so the
 //    cross-site fold has to say something about a disagreement in which every
 //    member is itself resolved.
+//  * payGateway / payGatewayDirect — a pull in which NEITHER party is this
+//    contract (the caller pays a bridge endpoint directly), through the library
+//    and through the plain ERC-20 selector. The two code paths classify
+//    independently and both used to read the `from` argument alone, so both
+//    published "value entered this contract" about a contract the funds never
+//    touched.
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
@@ -55,6 +61,7 @@ contract AssetRecovery {
 
     address public owner;
     address public immutable treasury;
+    address public immutable gateway;
     address public feeRecipient;
 
     modifier onlyOwner() {
@@ -62,9 +69,10 @@ contract AssetRecovery {
         _;
     }
 
-    constructor(address treasury_) {
+    constructor(address treasury_, address gateway_) {
         owner = msg.sender;
         treasury = treasury_;
+        gateway = gateway_;
     }
 
     function setFeeRecipient(address recipient) external onlyOwner {
@@ -84,6 +92,18 @@ contract AssetRecovery {
     // Token-first pull INTO this contract.
     function pull(IERC20 token, address from, uint256 amount) external onlyOwner {
         token.safeTransferFrom(from, address(this), amount);
+    }
+
+    // The caller pays the gateway. This contract is neither the source nor the
+    // sink; it only causes the move.
+    function payGateway(IERC20 token, uint256 fee) external {
+        token.safeTransferFrom(msg.sender, gateway, fee);
+    }
+
+    // The same shape reaching the other classifier: a plain ERC-20 pull selector
+    // at the call site instead of the token-first library.
+    function payGatewayDirect(IERC20 token, address payer, uint256 fee) external {
+        token.transferFrom(payer, gateway, fee);
     }
 
     // The trailing uint256 is a token id, not a quantity.

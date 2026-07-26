@@ -444,6 +444,68 @@
       "solc_version": "0.8.27",
       "functions": [
         {
+          "full_name": "payGateway(IERC20,uint256)",
+          "selector": "0x2563c53c",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "value_router",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x5beae096",
+              "direction": "value_router",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "immutable",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_param_index": 1
+            }
+          ]
+        },
+        {
+          "full_name": "payGatewayDirect(IERC20,address,uint256)",
+          "selector": "0x1003da51",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "value_router",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x23b872dd",
+              "direction": "value_router",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "immutable",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_param_index": 2
+            }
+          ]
+        },
+        {
           "full_name": "pull(IERC20,address,uint256)",
           "selector": "0x7372c2b5",
           "effect_labels": [

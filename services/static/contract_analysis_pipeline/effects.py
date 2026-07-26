@@ -120,11 +120,14 @@ class ValueFlow(TypedDict):
 
     kind: str  # callee_erc20_selector | native_transfer_send | low_level_value_call
     selector: str | None
-    # ``in`` / ``out`` are the entry contract's OWN value moves. ``value_router``
-    # is a move the entry caused a DIFFERENT, in-unit contract to make by calling
-    # it (a router forwarding into a vault) — the entry is neither source nor
-    # sink, so it is kept distinct from in/out and never drives an asset-direction
-    # label on the router.
+    # ``in`` / ``out`` are the entry contract's OWN value moves, and each is
+    # earned: ``out`` needs the payer to be this contract, ``in`` needs the payee
+    # to be. ``value_router`` is a move the entry only CAUSED — a call into an
+    # in-unit contract whose body moves the funds (a router forwarding into a
+    # vault), or a pull between two third parties (a fee the caller pays straight
+    # to a bridge endpoint). The entry is neither source nor sink, so it is kept
+    # distinct from in/out and never drives an asset-direction label. Read
+    # ``from_is_self`` to tell an outbound route from an inbound one.
     direction: str  # in | out | value_router
     from_is_self: bool
     origin: str  # body | guard
@@ -2908,6 +2911,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         crossed: bool,
         amount_override: tuple[str, str] | None = None,
         identity_possible: bool = False,
+        routed_unless_sink_is_self: bool = False,
     ) -> None:
         # A move of a provably-zero amount moves nothing — ``transfer(to, 0)``
         # transfers no tokens, and a router handing a callee a literal ``0`` (which
@@ -2935,8 +2939,20 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 amount_override = ("indeterminate", "static_trace")
             else:
                 return
+        target_site = _classify_site(target, ctx, amount=False)
+        # ``in`` says the funds landed HERE, and only a destination resolved to
+        # this contract proves that. A pull whose ``from`` is someone else and
+        # whose ``to`` is someone else is a move between two third parties that
+        # this function merely caused — the entry is neither source nor sink,
+        # which is what ``value_router`` already means. Publishing ``in`` there
+        # claimed value entered a contract it never touched (a fee paid by the
+        # caller straight to a bridge endpoint reads as a deposit into the
+        # bridger). An unresolved destination lands here too: it is not proof the
+        # funds arrive, and the weaker routed fact does not assert that they do.
+        if routed_unless_sink_is_self and target_site[0] != "self":
+            flow = {**flow, "direction": "value_router"}
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
-        target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
+        target_sites.setdefault(key, []).append(target_site)
         # ``amount_override`` is for a sink whose trailing slot the ABI proves is
         # not a quantity at all: tracing its provenance would answer a question
         # nobody asked and publish the answer under the name "amount".
@@ -3040,6 +3056,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             crossed,
                             _TOKEN_IDENTITY_AMOUNT if selector in _ERC721_IDENTITY_SELECTORS else None,
                             identity_possible=selector == _AMBIGUOUS_PULL_SELECTOR,
+                            routed_unless_sink_is_self=not from_self,
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         add(
@@ -3115,6 +3132,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             amount_arg,
                             context(),
                             crossed,
+                            routed_unless_sink_is_self=not from_self,
                         )
                 if op in ("InternalCall", "LibraryCall"):
                     # Descend even into a callee the recognizer just classified.
@@ -3266,7 +3284,25 @@ def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]
     pull. Only body-origin flows count. ``value_router`` flows are excluded: they
     are a callee's move, not the entry's own asset direction, so they must not add
     ``asset_send``/``asset_pull`` to the router."""
-    body_flows = [vf for vf in value_flows if vf["origin"] != "guard" and vf["direction"] != "value_router"]
+    body = [vf for vf in value_flows if vf["origin"] != "guard"]
+    body_flows = [vf for vf in body if vf["direction"] != "value_router"]
+
+    def _is_erc20_pull(vf: ValueFlow) -> bool:
+        return vf["kind"] == "callee_erc20_selector" and vf["selector"] in _ERC20_PULL_SELECTORS
+
+    # Plane 0 maps a pull SELECTOR straight to ``asset_pull``, which reads the
+    # call and not the destination. When every pull this function makes is one it
+    # merely caused between two other parties, nothing arrived here and the label
+    # has to come off — otherwise the row still says "fund-in" and the summary
+    # still reads "Pulls assets into the contract" about a contract the funds
+    # never touched. Removal only, and only on positive evidence: a routed flow
+    # never ADDS a direction label, and a function with no flow facts keeps
+    # whatever the selector scan said, because silence is not evidence.
+    if any(_is_erc20_pull(vf) and vf["direction"] == "value_router" for vf in body) and not any(
+        _is_erc20_pull(vf) for vf in body_flows
+    ):
+        labels = [lbl for lbl in labels if lbl != "asset_pull"]
+
     if not body_flows:
         return labels
 
@@ -3275,14 +3311,8 @@ def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]
         if "asset_send" not in labels:
             labels.append("asset_send")
 
-    pull_from_self = any(
-        vf["kind"] == "callee_erc20_selector" and vf["from_is_self"] and vf["selector"] in _ERC20_PULL_SELECTORS
-        for vf in body_flows
-    )
-    genuine_pull = any(
-        vf["kind"] == "callee_erc20_selector" and not vf["from_is_self"] and vf["selector"] in _ERC20_PULL_SELECTORS
-        for vf in body_flows
-    )
+    pull_from_self = any(_is_erc20_pull(vf) and vf["from_is_self"] for vf in body_flows)
+    genuine_pull = any(_is_erc20_pull(vf) and not vf["from_is_self"] for vf in body_flows)
     if pull_from_self and not genuine_pull and "asset_pull" in labels:
         labels = [lbl for lbl in labels if lbl != "asset_pull"]
         if "asset_send" not in labels:
@@ -3319,12 +3349,14 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "sinks": list(body_sinks),
     }
     labels = _effect_labels(function, effect_context)
+    labels = _reconcile_value_flow_labels(labels, value_flows)
     # Functions with body external_call sinks but no specific (mint/burn/asset/etc)
-    # label get ``external_contract_call`` directly from the sink shape.
+    # label get ``external_contract_call`` directly from the sink shape. AFTER the
+    # reconcile, so a function whose only specific label the flow facts just
+    # disproved falls back to the generic sink fact rather than to nothing.
     has_external_call = any(s["kind"] == "external_call" for s in body_sinks)
     if has_external_call and not any(lbl in _SPECIFIC_EFFECT_LABELS for lbl in labels):
         labels.append("external_contract_call")
-    labels = _reconcile_value_flow_labels(labels, value_flows)
     summary = _action_summary(labels, list(effect_targets))
 
     signature = _function_full_name(function)

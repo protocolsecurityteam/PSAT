@@ -1107,13 +1107,27 @@ export function sharedDeployerNote(principal) {
   };
 }
 
+// An inbound route scored as an outflow. The vocab entry's severity is the
+// outbound default (the caller can name where the routed funds land), but the
+// same claim also covers a move INTO a vault and a pull between two third
+// parties — neither sends this unit's assets anywhere. laneForClaims already
+// splits the two on ``from_is_self``; the score has to use the same
+// discriminator or an inbound route is filed as a high-risk asset_out.
+const ROUTED_IN_SCORE = { kind: "asset_in", severity: 0.5 };
+
+function scoreOfClaim(c) {
+  const score = CLAIM_VOCAB[c.claim_id].score;
+  if (!score || c.claim_id !== "value_router") return score;
+  return routedOutFlows(c.witness).length ? score : ROUTED_IN_SCORE;
+}
+
 // {kind, severity} for protocolScore — the strongest-severity scoreable claim.
 // Returns null when a function carries only non-scoreable claims (user_plane,
 // contract_deployment), so the caller can decide how to treat it.
 export function scoreForClaims(fn) {
   let best = null;
   for (const c of claimsOf(fn)) {
-    const score = CLAIM_VOCAB[c.claim_id].score;
+    const score = scoreOfClaim(c);
     if (!score) continue;
     if (best === null || score.severity > best.severity) best = score;
   }

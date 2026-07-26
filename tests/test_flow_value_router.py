@@ -99,6 +99,51 @@ contract Router {
         asset.safeTransfer(to, amount);
     }
 }
+
+// A pull needs no contract boundary to be routed: when neither the payer nor
+// the payee is this contract, the move is one this entry merely caused.
+contract Bridger {
+    using SafeTransferLib for IERC20;
+    IERC20 public feeToken;
+    address public immutable endpoint;
+    address public custodian;
+
+    constructor(address endpoint_) { endpoint = endpoint_; }
+
+    // The caller pays the endpoint. Nothing arrives here.
+    function payFee(uint256 fee) external {
+        feeToken.transferFrom(msg.sender, endpoint, fee);
+    }
+
+    // The caller names the payee, so the sink is not provably this contract.
+    function payAnyone(address to, uint256 amount) external {
+        feeToken.transferFrom(msg.sender, to, amount);
+    }
+
+    // An admin-settable sink: still not this contract.
+    function payCustodian(uint256 amount) external {
+        feeToken.safeTransferFrom(msg.sender, custodian, amount);
+    }
+
+    // The genuine deposit, and the same deposit reaching the sink through a
+    // helper parameter — both must keep their inbound direction.
+    function deposit(uint256 amount) external {
+        feeToken.transferFrom(msg.sender, address(this), amount);
+    }
+
+    function depositVia(uint256 amount) external {
+        _pull(msg.sender, address(this), amount);
+    }
+
+    function _pull(address from, address to, uint256 amount) internal {
+        feeToken.safeTransferFrom(from, to, amount);
+    }
+
+    // This contract IS the payer: an out-flow, unchanged.
+    function pushOut(address to, uint256 amount) external {
+        feeToken.transferFrom(address(this), to, amount);
+    }
+}
 """
 
 
@@ -170,6 +215,54 @@ def test_vault_as_direct_entry_keeps_plain_in_out(_unit):
     assert _router_flows(exit_) == []
     assert any(f["direction"] == "in" for f in enter["value_flows"])
     assert any(f["direction"] == "out" for f in exit_["value_flows"])
+
+
+# --- a pull is inbound only when the funds provably land HERE ---------------
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "payFee(uint256)",
+        "payAnyone(address,uint256)",
+        "payCustodian(uint256)",
+    ],
+)
+def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
+    """``in`` asserts the funds arrived here, and only a destination resolved to
+    this contract proves that. Reading the ``from`` argument alone published
+    "pulls value into the contract" about a bridge fee the caller paid straight
+    to an endpoint — value that never touched the analyzed contract."""
+    info = _effects(_unit, "Bridger")[signature]
+    assert [f["direction"] for f in info["value_flows"]] == ["value_router"]
+    assert "asset_pull" not in info["effect_labels"]
+
+
+@pytest.mark.parametrize("signature", ["deposit(uint256)", "depositVia(uint256)"])
+def test_a_pull_whose_sink_is_this_contract_stays_inbound(_unit, signature):
+    """The control, direct and through a helper's bound parameter: a real deposit
+    keeps ``in`` and its legacy label. Demoting these would have traded one false
+    claim for a silence on every wrapper in the corpus."""
+    info = _effects(_unit, "Bridger")[signature]
+    flows = info["value_flows"]
+    assert [f["direction"] for f in flows] == ["in"]
+    assert flows[0].get("target_kind", {}).get("kind") == "self"
+    assert "asset_pull" in info["effect_labels"]
+
+
+def test_a_pull_this_contract_pays_stays_outbound(_unit):
+    info = _effects(_unit, "Bridger")["pushOut(address,uint256)"]
+    assert [f["direction"] for f in info["value_flows"]] == ["out"]
+
+
+def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
+    contract = _contract(_unit, "Bridger")
+    claims = build_claims(contract, build_effects(contract), {})["functions"]
+    ids = {c["claim_id"] for c in claims["payFee(uint256)"]}
+    assert "value_router" in ids
+    assert "flow.in" not in ids
+    # The real deposit is unaffected: it still claims an inflow.
+    assert "flow.in" in {c["claim_id"] for c in claims["deposit(uint256)"]}
 
 
 # --- claim plane ------------------------------------------------------------

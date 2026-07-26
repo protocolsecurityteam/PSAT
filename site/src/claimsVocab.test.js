@@ -195,6 +195,34 @@ describe("scoreForClaims — protocolScore kinds", () => {
     expect(scoreForClaims({ claims: [claim("flow.in")] })).toEqual({ kind: "asset_in", severity: 0.5 });
   });
 
+  it("scores a routed INFLOW as an inflow, not as an asset outflow", () => {
+    // The same value_router claim covers both directions. A pull the entry only
+    // caused between two other parties sends none of this unit's assets
+    // anywhere, so filing it as a high-risk asset_out would raise the protocol
+    // score off a move the contract never made.
+    const inbound = {
+      claims: [
+        {
+          claim_id: "value_router",
+          tier: "standard_exact",
+          witness: { flows: [{ from_is_self: false, target_kind: { kind: "immutable" } }] },
+        },
+      ],
+    };
+    expect(scoreForClaims(inbound)).toEqual({ kind: "asset_in", severity: 0.5 });
+
+    const outbound = {
+      claims: [
+        {
+          claim_id: "value_router",
+          tier: "standard_exact",
+          witness: { flows: [{ from_is_self: true, target_kind: { kind: "param" } }] },
+        },
+      ],
+    };
+    expect(scoreForClaims(outbound)).toEqual({ kind: "asset_out", severity: 0.78 });
+  });
+
   it("takes the strongest severity across several claims", () => {
     expect(scoreForClaims({ claims: [claim("flow.out"), claim("upgrade.implementation")] }))
       .toEqual({ kind: "upgrade", severity: 1 });
