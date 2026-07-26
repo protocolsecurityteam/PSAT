@@ -347,6 +347,7 @@ def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> Pr
             seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
             target_payable=spec.target_payable,
             native_payout=spec.native_payout,
+            inputs_vacuous=spec.inputs_vacuous,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)

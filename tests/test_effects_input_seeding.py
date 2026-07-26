@@ -16,17 +16,18 @@ The witness bar is what most of this file is about:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 from eth_utils.crypto import keccak
 
-from services.effects import recipes
+from services.effects import claims_bridge, recipes
 from services.effects.calldata import (
     FunctionFacts,
     _seeded_probe_calldata,
     input_token_hints,
     seeded_calldata,
 )
-from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN
+from services.effects.config import EFFECT_CLASS_SUPPLY, TIER_CALL, VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
 from services.effects.seeding import (
     SEED_AMOUNT,
@@ -435,6 +436,58 @@ def test_seeded_conversion_proves_the_mint_and_witnesses_the_inflow():
     assert eff.concrete["backing_inflow_transfers"] == 1
     assert eff.details["backing"]["input_seeded"] is True
     assert store.stored[-1]["seeding"]["tokens"] == [ASSET.lower()]
+
+
+def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
+    """G8, seam ``claims_bridge.verdict_to_claim``. The synthesis qualifiers must
+    sit at the TOP LEVEL of a supply witness — the only plane ``_observed_summary``
+    carries — or the minted/burned claim reads STRONGER than the seeded observation
+    it came from. The recipe wrote ``input_seeded`` only into the nested
+    ``backing`` map (mint-only, withheld-gated), which the bridge never reads, so
+    every seeded supply row (incl. all 4 burns) disclosed nothing. Feeds the REAL
+    recipe witness through the bridge, so reverting the recipe's top-level stamp
+    fails this."""
+    chain = FakeChain()
+    eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
+    assert eff.verdict == VERDICT_PROVEN
+    # The fix: the qualifier is at witness TOP LEVEL, not only under ``backing``.
+    assert eff.details["input_seeded"] is True
+
+    claim = claims_bridge.verdict_to_claim(
+        SimpleNamespace(
+            id=1,
+            effect_class=EFFECT_CLASS_SUPPLY,
+            verdict=VERDICT_PROVEN,
+            tier=TIER_CALL,
+            behavior_hash="bh",
+            current_check_passed=None,
+            witness=eff.witness_payload,
+            observed_residue=None,
+        )
+    )
+    assert claim["witness"]["observed"]["input_seeded"] is True
+
+
+def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
+    """The burn half of G8 explicitly: a ``supply.burn`` witness carrying the
+    top-level qualifiers projects them into ``observed`` exactly as a mint does.
+    (There was no burn equivalent of the value_out top-level assertion, which is
+    why the gap shipped green.)"""
+    claim = claims_bridge.verdict_to_claim(
+        SimpleNamespace(
+            id=1,
+            effect_class=EFFECT_CLASS_SUPPLY,
+            verdict=VERDICT_PROVEN,
+            tier=TIER_CALL,
+            behavior_hash="bh",
+            current_check_passed=None,
+            witness={"supply_delta_sign": "burn", "input_seeded": True, "contract_balance_seeded": True},
+            observed_residue=None,
+        )
+    )
+    observed = claim["witness"]["observed"]
+    assert observed["input_seeded"] is True
+    assert observed["contract_balance_seeded"] is True
 
 
 def test_seeded_mint_that_pulls_nothing_still_reports_inflow_false():

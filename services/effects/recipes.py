@@ -352,6 +352,26 @@ def _token_slots_unresolved(token_param_indexes: Sequence[int], used: _SeedAttem
     return used is None or not set(used.token_args) >= {str(i) for i in token_param_indexes}
 
 
+def _stamp_seed_qualifiers(details: dict[str, Any], used: _SeedAttempt | None) -> None:
+    """Mirror ``value_out``'s top-level qualifiers (:func:`value_out`, the
+    ``input_seeded`` / ``contract_balance_seeded`` block) onto a supply verdict's
+    ``details``.
+
+    ``claims_bridge._observed_summary`` propagates these by TOP-LEVEL key, so a
+    qualifier written only into the nested ``backing`` map (or only onto the
+    transcript) never reaches the witness and the claim then reads stronger than
+    the seeded observation it came from (§4/G8). ``contract_balance_seeded`` is the
+    capability-not-current-state weakener and MUST travel wherever the verdict
+    does; a plain ``input_seeded`` records that the caller was funded first. A
+    no-op when nothing was seeded, so absence still means "no override was
+    needed", never "seeded but undisclosed"."""
+    if used is None:
+        return
+    details["input_seeded"] = True
+    if used.contract_balance_seeded:
+        details["contract_balance_seeded"] = True
+
+
 # Runtime that reverts on ANY call, on every fork: ``PUSH1 0 PUSH1 0 REVERT``.
 # Deliberately not ``PUSH0``-based (that would pin the probe to post-Shanghai) and
 # deliberately non-empty, so ``extcodesize`` is nonzero and an ``isContract``
@@ -918,6 +938,7 @@ def supply(
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
     target_payable: bool | None = None,
     native_payout: bool = False,
+    inputs_vacuous: bool = False,
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``? (§4.5)
 
@@ -979,72 +1000,103 @@ def supply(
                 budget.record_executed()
     observation = OBSERVATION_EXECUTED if mint_c.success else OBSERVATION_REVERTED
     if not (before_c.success and after_c.success):
+        read_failed_details: dict[str, Any] = {"observation": observation}
+        _stamp_seed_qualifiers(read_failed_details, used)
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_SUPPLY,
                 gate_ref=gate_ref,
                 reason="total_supply_read_failed",
-                details={"observation": observation},
+                details=read_failed_details,
                 transcript=tr,
             ),
         )
     if not mint_c.success:
+        mint_reverted_details: dict[str, Any] = {"observation": OBSERVATION_REVERTED}
+        _stamp_seed_qualifiers(mint_reverted_details, used)
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_SUPPLY,
                 gate_ref=gate_ref,
                 reason="mint_call_reverted",
-                details={"observation": OBSERVATION_REVERTED},
+                details=mint_reverted_details,
                 transcript=tr,
             ),
         )
     before_ts = _to_int(before_c.return_data)
     after_ts = _to_int(after_c.return_data)
     if before_ts is None or after_ts is None:
+        undecodable_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+        _stamp_seed_qualifiers(undecodable_details, used)
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_SUPPLY,
                 gate_ref=gate_ref,
                 reason="total_supply_undecodable",
-                details={"observation": OBSERVATION_EXECUTED},
+                details=undecodable_details,
                 transcript=tr,
             ),
         )
     delta = _signed_delta(after_ts, before_ts)
-    if delta == 0:
-        return emit(
-            store,
-            unknown(
-                EFFECT_CLASS_SUPPLY,
-                gate_ref=gate_ref,
-                reason="no_supply_delta",
-                details={"observation": OBSERVATION_EXECUTED},
-                transcript=tr,
-            ),
-        )
-    sign = "mint" if delta > 0 else "burn"
     # mint = Transfer from the zero address, EMITTED BY the token whose
     # ``totalSupply`` moved. Any other token minting inside the same call is a
     # different asset's supply event and must not stand in for this one's.
     minted = transfers_out(mint_c, "0x" + "00" * 20, only_asset=token_address)
     # The mirror: units destroyed are a Transfer TO the zero address.
     burned = transfers_in(mint_c, "0x" + "00" * 20, only_asset=token_address)
+    if delta == 0:
+        # S2: ``totalSupply`` is NOT the unit count for a share-accounted or
+        # rebasing token — EETH's reads ``liquidityPool.getTotalPooledEther()``,
+        # stETH's reads pooled ether — so a zero delta there does not mean no units
+        # were minted or burned. An UNAMBIGUOUS zero-address ``Transfer`` (exactly
+        # one direction present) IS that witness; take the sign from it. Only when
+        # the transfer evidence is ambiguous (both directions, or neither) is this
+        # the honest non-observation. Under-claim direction (§0.0.5): missing this
+        # capped the entire share-accounted population, not two functions.
+        if bool(minted) != bool(burned):
+            sign = "mint" if minted else "burn"
+        else:
+            no_delta_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+            _stamp_seed_qualifiers(no_delta_details, used)
+            if inputs_vacuous:
+                # §3/G6-A: the mint call ran but an effect-relevant argument was
+                # left at the encoder default, so "no supply delta" is a fact about
+                # the vacuous input, not about F — its reason must stay OUT of the
+                # behaviour cache (a twin must not inherit it).
+                no_delta_details["vacuous_input"] = True
+                reason = "no_supply_delta_vacuous_input"
+            else:
+                reason = "no_supply_delta"
+            return emit(
+                store,
+                unknown(
+                    EFFECT_CLASS_SUPPLY,
+                    gate_ref=gate_ref,
+                    reason=reason,
+                    details=no_delta_details,
+                    transcript=tr,
+                ),
+            )
+    else:
+        sign = "mint" if delta > 0 else "burn"
     if _sign_contradicted_by_events(sign, minted, burned):
         # Two independent witnesses of the same event disagree, so we hold none of
         # it. Publishing the arithmetic anyway is how a burn was once published as
         # proven dilution — the strongest claim this stage can make, on a call that
         # destroyed units. An unknown here is not a gap in coverage; it is the only
         # honest reading of contradictory evidence.
+        contradicted_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
+        _stamp_seed_qualifiers(contradicted_details, used)
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_SUPPLY,
                 gate_ref=gate_ref,
                 reason="supply_sign_contradicted_by_transfers",
-                details={"observation": OBSERVATION_EXECUTED},
+                details=contradicted_details,
                 transcript=tr,
             ),
         )
@@ -1068,6 +1120,12 @@ def supply(
         static_destination=static_destination,
     )
     details: dict[str, Any] = {"supply_delta_sign": sign, "observation": OBSERVATION_EXECUTED}
+    # G8: the synthesis qualifiers must live at ``details`` TOP LEVEL — the only
+    # place ``claims_bridge._observed_summary`` carries them from — for EVERY
+    # supply verdict, mint or burn. The nested ``backing`` copy below (mint-only,
+    # withheld-gated) never reaches a burn witness, so a seeded burn read stronger
+    # than its observation until this stamp.
+    _stamp_seed_qualifiers(details, used)
     concrete: dict[str, Any] = {}
     withheld: str | None = None
     if sign == "mint":
