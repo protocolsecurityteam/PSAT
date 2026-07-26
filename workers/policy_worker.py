@@ -1043,15 +1043,27 @@ class PolicyWorker(BaseWorker):
                         stmt = stmt.where(EffectiveFunction.selector == selector)
                     else:
                         stmt = stmt.where(EffectiveFunction.abi_signature == fn_sig)
-                    ef = session.execute(stmt).scalar_one_or_none()
-                    if ef:
+                    # Exactly one row, or nothing. The scope above still ORs in
+                    # legacy untagged rows by design, so a tagged row and a NULL
+                    # one can both answer — and reading a single row from that
+                    # raises inside a stage that does not catch it, losing the
+                    # whole policy run over an enrichment detail. Ambiguity is
+                    # not an answer: skip it, say so, and leave the row alone.
+                    matches = session.execute(stmt).scalars().all()
+                    if len(matches) == 1:
+                        ef = matches[0]
                         ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
                     else:
                         logger.warning(
-                            "Job %s: cross-contract claims for %s matched no effective_function row",
+                            "Job %s: cross-contract claims for %s matched %d effective_function rows; skipped",
                             job.id,
                             fn_sig,
-                            extra={"phase": "cross_contract_enrichment", "function": fn_sig},
+                            len(matches),
+                            extra={
+                                "phase": "cross_contract_enrichment",
+                                "function": fn_sig,
+                                "matched_rows": len(matches),
+                            },
                         )
                 session.commit()
         return enriched

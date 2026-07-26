@@ -491,3 +491,78 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
 
     assert "flow.out" in _claims_for(D1)
     assert _claims_for(D2) == set()
+
+
+@requires_postgres
+def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_local, caplog):
+    """``deployment_scope`` ORs in legacy untagged rows on purpose, so a tagged
+    row and a NULL one can both answer for the same selector even after scoping.
+
+    Reading a single row from that raises, and nothing here catches it — one
+    ambiguous enrichment would take down the whole policy stage for the job.
+    A claim we cannot place is worth losing; the stage is not."""
+    company = f"co-{uuid.uuid4()}"
+    target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
+    sibling_job = _make_job(db_session, address=TOKEN, company=company)
+
+    store_artifact(
+        db_session,
+        sibling_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
+        },
+    )
+    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    store_artifact(
+        db_session,
+        target_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {
+                "sweep(address)": {
+                    "selector": _selector("sweep(address)"),
+                    "sinks": [
+                        {
+                            "id": "s0",
+                            "kind": "external_call",
+                            "target": "token.transfer",
+                            "selector": TRANSFER_SELECTOR,
+                            "origin": "body",
+                        }
+                    ],
+                    "claims": [],
+                }
+            },
+        },
+    )
+
+    # A row tagged for this deployment AND a legacy untagged row: both in scope.
+    contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
+    db_session.add(contract)
+    db_session.flush()
+    for deployment in (D1, None):
+        db_session.add(
+            EffectiveFunction(
+                contract_id=contract.id,
+                deployment_address=deployment,
+                function_name="sweep",
+                selector=_selector("sweep(address)")[:10],
+                abi_signature="sweep(address)",
+                effect_labels=["external_contract_call"],
+                claims=None,
+            )
+        )
+    db_session.commit()
+
+    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    with caplog.at_level("WARNING", logger="workers.policy_worker"):
+        enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+
+    # The derivation still ran; only the placement was declined.
+    assert "sweep(address)" in enriched
+    assert any("matched 2 effective_function rows" in r.getMessage() for r in caplog.records)
+    rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).all()
+    assert [r.claims for r in rows] == [None, None]
