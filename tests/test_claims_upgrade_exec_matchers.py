@@ -151,6 +151,28 @@ def test_boring_vault_manage_idiom_positive(tmp_path):
     assert _find(claims, "manageDirect") == {idiom}
 
 
+def test_batch_manage_idiom_positive(tmp_path):
+    """The batch overload is the same executor with one array level added, and it
+    minted nothing: the declared types are ``address[]``/``bytes[]`` rather than
+    ``address``/``bytes``, and inside the loop the call op reads an element
+    reference rather than the parameter. Both had to give for the claim to land.
+
+    Under-claiming here is safe but not harmless — an arbitrary-call executor
+    that publishes no exec.arbitrary claim reads as an ordinary function."""
+    claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
+    idiom = ("exec.arbitrary", "idiom_structural")
+    assert _find(claims, "manageBatch") == {idiom}
+    assert _find(claims, "manageBatchViaLibrary") == {idiom}
+
+
+def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
+    """``bytes32[]`` reduces to ``bytes32``, which is not arbitrary calldata —
+    widening the element type must not sweep in every batch that happens to carry
+    an address array."""
+    claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
+    assert _find(claims, "commitBatch") == set()
+
+
 def test_plain_transfer_is_taint_near_miss_negative(tmp_path):
     """Address-tainted destination but no arbitrary calldata parameter → the
     value send earns no exec.arbitrary claim."""
