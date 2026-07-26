@@ -730,12 +730,12 @@ _ADMIN_TARGET_KIND = "storage_setter"
 
 
 def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
-    """The destination kinds one flow asserts. ``one_of`` expands to its members
+    """The destination kinds one flow asserts. ``several`` expands to its members
     — the fold names them precisely so a consumer can take the worst — and any
     flow whose kind cannot be read yields ``[""]``, which no rule below accepts."""
     kind = flow.get("target_kind")
     name = kind.get("kind") if isinstance(kind, dict) else None
-    if name != "one_of":
+    if name != "several":
         return [name if isinstance(name, str) else ""]
     entries = flow.get("target_kinds") or []
     members = [k.get("kind") if isinstance(k, dict) else None for k in entries]

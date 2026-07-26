@@ -610,16 +610,18 @@ const OUT_TARGET_CALLER = new Set(["param", "msg_sender", "caller_controlled"]);
 // alternatives are not a closed set and promoting one of them would turn "we
 // cannot say" into a verdict the fold never reached.
 //
-// "one_of" is different in kind. Every member IS resolved and they are the
-// complete set of possibilities, so each member is counted — and because the
-// qualifier below takes the worst case, a set containing one caller-chosen
-// destination reads as caller-chosen. That is not promoting a guess: the caller
-// provably names the destination on that path. Ignoring the members here would
-// suppress the theft signal on precisely the functions that pay a caller-named
-// address alongside a fixed one.
-// The member kinds behind a "one_of" fold. An empty/absent list falls back to a
-// single null, which the caller counts as "other" — a one_of without its members
-// is an artifact we cannot read, and it must not silently vanish from the tally.
+// "several" is different in kind. Every member IS resolved and together they are
+// the complete set of what the function does, so each member is counted — and
+// because the qualifier below takes the worst case, a set containing one
+// caller-chosen destination reads as caller-chosen. That is not promoting a
+// guess: the caller provably names the destination on that path, and the members
+// are not even alternatives — they may all execute in one call. Ignoring them
+// here would suppress the theft signal on precisely the functions that pay a
+// caller-named address alongside a fixed one.
+// The member kinds behind a "several" fold. An empty/absent list falls back to a
+// single null, which the caller counts as "other" — a "several" without its
+// members is an artifact we cannot read, and it must not silently vanish from
+// the tally.
 function memberKinds(kinds) {
   const out = Array.isArray(kinds)
     ? kinds
@@ -655,7 +657,7 @@ function flowOutTargetSummary(claims) {
         f && f.target_kind && typeof f.target_kind.kind === "string"
           ? f.target_kind.kind
           : null;
-      for (const k of kind === "one_of" ? memberKinds(f.target_kinds) : [kind]) {
+      for (const k of kind === "several" ? memberKinds(f.target_kinds) : [kind]) {
         if (OUT_TARGET_CALLER.has(k)) sawCaller = true;
         else if (k === "storage_setter") sawSetter = true;
         else if (OUT_TARGET_FIXED.has(k)) sawFixed = true;
@@ -794,7 +796,7 @@ const TARGET_KIND_WORD = {
   caller_controlled: "caller (tx.origin)",
   self: "the contract itself",
   token_owner: "the token's current owner",
-  one_of: "several destinations (each resolved)",
+  several: "several destinations (each resolved)",
   indeterminate: "indeterminate",
 };
 
@@ -817,7 +819,7 @@ const AMOUNT_KIND_WORD = {
   caller_supplied: "a caller-supplied amount",
   // Not a quantity at all: the slot names WHICH non-fungible token moves.
   token_identity: "a token id (one NFT)",
-  one_of: "several amounts (each resolved)",
+  several: "several amounts (each resolved)",
   indeterminate: "indeterminate",
 };
 

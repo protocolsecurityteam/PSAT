@@ -195,7 +195,7 @@ def test_merge_with_storage_names_both_amounts(flows):
     resolved, so the fold names them instead of reporting "unknown" — and neither
     may be promoted to stand for the whole."""
     flow = flows["unwrapUnion(uint256,bool)"]
-    assert flow["amount_kind"]["kind"] == "one_of", flow
+    assert flow["amount_kind"]["kind"] == "several", flow
     assert {e["kind"] for e in flow["amount_kinds"]} == {"param_derived", "bounded_by_storage"}, flow
     # A disjunction is not a slot: neither branch's index may be published.
     assert "amount_param_index" not in flow, flow

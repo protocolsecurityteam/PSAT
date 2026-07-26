@@ -532,7 +532,7 @@
               "from_is_self": true,
               "origin": "body",
               "target_kind": {
-                "kind": "one_of",
+                "kind": "several",
                 "tier": "dispositive_ast"
               },
               "amount_kind": {

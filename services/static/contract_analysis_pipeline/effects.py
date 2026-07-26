@@ -129,11 +129,13 @@ class ValueFlow(TypedDict):
     from_is_self: bool
     origin: str  # body | guard
     # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
-    #   param, msg_sender, caller_controlled, self, token_owner, one_of,
+    #   param, msg_sender, caller_controlled, self, token_owner, several,
     #   indeterminate}
-    # one_of: the contributing sites resolved to SEVERAL distinct kinds, each
-    #   itself resolved — see ``target_kinds`` for the members, and take the
-    #   worst one. Never a licence to pick the most favourable member.
+    # several: the contributing sites resolved to more than one distinct kind,
+    #   each itself resolved — see ``target_kinds`` for the members, and take the
+    #   worst one. Never a licence to pick the most favourable member. The
+    #   members are NOT alternatives: they may be exclusive branches or may all
+    #   execute in one call (see :func:`_fold_sites`).
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
     #   fixed_constant, balance_delta, capped_by_balance, param_derived,
@@ -160,8 +162,8 @@ class ValueFlow(TypedDict):
     #
     # Honesty: a site that is itself ``indeterminate`` appears in the list as
     # such — the list explains the fold, it never launders it. So this key being
-    # present means the fold is either ``one_of`` — every member below is
-    # resolved and they ARE the alternatives — or ``indeterminate``, where at
+    # present means the fold is either ``several`` — every member below is
+    # resolved and they ARE the whole set — or ``indeterminate``, where at
     # least one member is not and the list is therefore a partial explanation
     # rather than a closed set of possibilities.
     target_kinds: NotRequired[list[KindTier]]
@@ -2457,7 +2459,7 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
     Three outcomes, and the middle one is the point:
 
     * sites AGREE on one resolved kind — that kind.
-    * sites DISAGREE but every member is itself resolved — ``one_of``. The
+    * sites DISAGREE but every member is itself resolved — ``several``. The
       function has several destinations (or several amounts) and we know what
       each of them is; saying ``indeterminate`` there claimed we had traced
       nothing, on flows where we had traced everything. A scorer reading the
@@ -2465,13 +2467,16 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
       fixed one identically to a function nothing is known about.
     * any member is itself ``indeterminate`` — ``indeterminate``. One unresolved
       site means the set of destinations is not closed, so the members cannot be
-      published as the alternatives.
+      published as the whole of it.
 
-    ``one_of`` is a set, not a sequence: the sites may be mutually exclusive
-    branches or may all execute in one call, and nothing here distinguishes those.
-    A consumer must read ``target_kinds``/``amount_kinds`` and take the WORST
-    member — one caller-chosen site in the set means the caller can name a
-    destination on some path, which is the whole question."""
+    The name is deliberately quantitative and says nothing about control flow:
+    ``several`` is a set, not a sequence and not a disjunction. The sites may be
+    mutually exclusive branches or may all execute in one call, and nothing here
+    distinguishes those — a withdrawal that pays the user and then sweeps the
+    remainder to a pool makes BOTH moves in the same invocation. A consumer must
+    read ``target_kinds``/``amount_kinds`` and take the WORST member — one
+    caller-chosen site in the set means the caller can name a destination on some
+    path, which is the whole question."""
     if not sites:
         return None
     kinds = {kind for kind, _ in sites}
@@ -2481,7 +2486,7 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
         return {"kind": kind, "tier": "static_trace" if kind == "indeterminate" else tier}
     if "indeterminate" in kinds:
         return {"kind": "indeterminate", "tier": "static_trace"}
-    return {"kind": "one_of", "tier": tier}
+    return {"kind": "several", "tier": tier}
 
 
 def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
@@ -2919,7 +2924,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         # a literal ``0`` there is either a zero quantity (moves nothing) or token
         # id 0 (moves an NFT) and nothing in the selector says which. Dropping the
         # site deleted a real transfer, and worse, silently shrank the member set
-        # a ``one_of`` fold then asserts is the COMPLETE list of alternatives.
+        # a ``several`` fold then asserts is COMPLETE.
         if _amount_is_provably_zero(amount, ctx):
             if amount_override is not None:
                 pass

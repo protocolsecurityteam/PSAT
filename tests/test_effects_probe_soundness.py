@@ -422,7 +422,7 @@ def test_a_token_that_emits_no_zero_address_transfer_is_not_treated_as_a_contrad
 # ---------------------------------------------------------------------------
 
 
-def _facts_with_out_flows(*target_kinds, one_of_members=None):
+def _facts_with_out_flows(*target_kinds, several_members=None):
     """FunctionFacts whose out-flows carry the given folded destination kinds."""
     from services.effects.calldata import FunctionFacts
 
@@ -434,8 +434,8 @@ def _facts_with_out_flows(*target_kinds, one_of_members=None):
             "origin": "body",
             "target_kind": {"kind": kind, "tier": "dispositive_ast"},
         }
-        if kind == "one_of":
-            flow["target_kinds"] = [{"kind": m, "tier": "dispositive_ast"} for m in (one_of_members or [])]
+        if kind == "several":
+            flow["target_kinds"] = [{"kind": m, "tier": "dispositive_ast"} for m in (several_members or [])]
         flows.append(flow)
     return FunctionFacts(
         full_name="pay(uint256)",
@@ -464,11 +464,11 @@ def test_static_destination_shape_is_earned_across_every_out_flow():
     assert shape(_facts_with_out_flows("msg_sender"), out) is None
     assert shape(_facts_with_out_flows("indeterminate"), out) is None
     assert shape(_facts_with_out_flows("self"), out) is None
-    # A one_of is read through its members, worst member first.
-    assert shape(_facts_with_out_flows("one_of", one_of_members=["immutable", "constant"]), out) == "immutable_fixed"
-    assert shape(_facts_with_out_flows("one_of", one_of_members=["immutable", "param"]), out) is None
-    # An unreadable one_of proves nothing.
-    assert shape(_facts_with_out_flows("one_of", one_of_members=[]), out) is None
+    # A several is read through its members, worst member first.
+    assert shape(_facts_with_out_flows("several", several_members=["immutable", "constant"]), out) == "immutable_fixed"
+    assert shape(_facts_with_out_flows("several", several_members=["immutable", "param"]), out) is None
+    # An unreadable several proves nothing.
+    assert shape(_facts_with_out_flows("several", several_members=[]), out) is None
     # No out-flows at all is no claim, not a vacuous "fixed".
     assert shape(_facts_with_out_flows(), out) is None
 

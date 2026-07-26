@@ -194,7 +194,7 @@ def test_cross_branch_mix_names_both_destinations(tmp_path):
     # to a MEMBER of the union — but both members are themselves resolved, so it
     # is a known disjunction rather than an absence of knowledge, and saying
     # "indeterminate" claimed we had traced nothing on a flow we had traced fully.
-    assert flow["target_kind"]["kind"] == "one_of"
+    assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
     # Tier stays the weaker of the contributing sites, as for any other fold.
     assert flow["target_kind"]["tier"] == "static_trace"
@@ -610,12 +610,25 @@ contract Sites {
     function setTreasury(address t) external { treasury = t; }
 
     // Two sends sharing one flow key, each with its OWN resolved destination:
-    // a fixed address and a caller-supplied one. The fold must stay
-    // indeterminate; the breakdown must name both.
+    // a fixed address and a caller-supplied one. The fold must not collapse to
+    // either member; the breakdown must name both.
     function twoResolved(address dest, uint256 a) external payable {
         (bool ok1,) = payable(sink).call{value: a}("");
         (bool ok2,) = payable(dest).call{value: msg.value}("");
         require(ok1 && ok2);
+    }
+
+    // A withdrawal queue's real shape: the user is paid, and then, in the SAME
+    // invocation, the remainder is swept to a fixed pool. Both sites execute —
+    // neither is an alternative to the other — which is what the fold's name
+    // must not contradict.
+    function payThenSweep(address to, uint256 a) external {
+        (bool ok1,) = payable(to).call{value: a}("");
+        require(ok1);
+        if (address(this).balance > 0) {
+            (bool ok2,) = payable(sink).call{value: address(this).balance}("");
+            require(ok2);
+        }
     }
 
     // One resolved site + one genuinely-unknown site (a cross-branch merged
@@ -663,12 +676,31 @@ def test_two_resolved_sites_publish_both_destinations(tmp_path):
     flow = _out_flow(effects["functions"]["twoResolved(address,uint256)"])
     # Two sites, each resolved: the scalar names the disjunction and the members
     # ARE the alternatives (a consumer reads them and takes the worst).
-    assert flow["target_kind"]["kind"] == "one_of"
+    assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"immutable", "param"}
     assert all(e["tier"] in ("dispositive_ast", "static_trace") for e in flow["target_kinds"])
     # The amount lattice gets the same treatment, independently.
-    assert flow["amount_kind"]["kind"] == "one_of"
+    assert flow["amount_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["amount_kinds"]} == {"param", "msg_value"}
+
+
+def test_sites_that_all_execute_in_one_call_still_fold_to_several(tmp_path):
+    """``several`` counts classifications, it does not claim exclusivity.
+
+    Both sends here run in the same invocation, so a name meaning "one of these"
+    would be a false statement about control flow — and a consumer that read it
+    that way would look for the single destination the funds went to when in fact
+    they went to two.
+    """
+    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    effects = build_effects(contract)
+    flow = _out_flow(effects["functions"]["payThenSweep(address,uint256)"])
+    assert flow["target_kind"]["kind"] == "several"
+    assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
+    # No parameter slot is published for the destination: only one of the two
+    # sites is the caller's argument, so a probe planted in that slot would not
+    # redirect the other.
+    assert flow.get("target_param_index") is None
 
 
 def test_indeterminate_site_stays_visible_in_the_breakdown(tmp_path):
@@ -715,7 +747,7 @@ def test_breakdown_is_bounded_by_the_lattice_not_the_site_count(tmp_path):
     contract = _compile(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["manySites(address,uint256)"])
-    assert flow["target_kind"]["kind"] == "one_of"
+    assert flow["target_kind"]["kind"] == "several"
     entries = flow["target_kinds"]
     # Seven sends, three meanings — deduplication by (kind, tier) is the cap.
     assert {e["kind"] for e in entries} == {"immutable", "param", "msg_sender"}
@@ -732,7 +764,7 @@ def test_breakdown_reaches_the_claim_witness(tmp_path):
     rows = [c for c in claims["twoResolved(address,uint256)"] if c["claim_id"] == "flow.out"]
     assert rows, "no flow.out claim"
     entry = rows[0]["witness"]["flows"][0]
-    assert entry["target_kind"]["kind"] == "one_of"
+    assert entry["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in entry["target_kinds"]} == {"immutable", "param"}
     assert {e["kind"] for e in entry["amount_kinds"]} == {"param", "msg_value"}
 

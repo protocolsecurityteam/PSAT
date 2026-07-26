@@ -48,11 +48,13 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
 
     ``target_kinds``/``amount_kinds`` accompany them only where the contributing
     IR sites disagreed, which is exactly where the scalar stops naming one kind:
-    it reads ``one_of`` when every site is itself resolved (the list IS the set of
-    alternatives — read it and take the WORST) and ``indeterminate`` when some
-    site is not (the list is a partial explanation, not a closed set). The scalar
-    keeps its exact meaning either way — a consumer reading only it never
-    over-reads, it just learns less."""
+    it reads ``several`` when every site is itself resolved (the list is the
+    COMPLETE set of what the function does — read it and take the WORST, and note
+    that these are not alternatives: the sites may be branches or may all execute
+    in one call) and ``indeterminate`` when some site is not (the list is a
+    partial explanation, not a closed set). The scalar keeps its exact meaning
+    either way — a consumer reading only it never over-reads, it just learns
+    less."""
     entry: dict[str, Any] = {
         "kind": f.get("kind"),
         "selector": f.get("selector"),

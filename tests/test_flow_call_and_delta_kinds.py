@@ -659,7 +659,7 @@ def test_a_zero_trailing_arg_on_the_ambiguous_pull_selector_still_moves(_zero_id
     """Both standards define ``transferFrom(address,address,uint256)``, so a
     literal 0 is a zero QUANTITY under ERC-20 and token id 0 — an ordinary NFT —
     under ERC-721. Suppressing the site deleted a real transfer, and shrank the
-    member set a ``one_of`` fold asserts is the complete list of alternatives.
+    member set a ``several`` fold asserts is the complete list of alternatives.
     The move stands; the amount stays unresolved, because naming it
     ``fixed_constant`` would assert the reading the selector cannot support."""
     flows = _zero_id["sendPlain(address)"]["value_flows"]

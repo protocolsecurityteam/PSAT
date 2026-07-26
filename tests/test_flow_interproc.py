@@ -324,7 +324,7 @@ def test_divergent_multi_caller_destination_is_indeterminate(tmp_path):
     flow = _out_flow(effects["functions"]["router(address,uint256)"])
     # param (site 1) vs immutable (site 2) -> never guess a member of the union.
     # Both members are resolved, so the union is NAMED rather than hidden.
-    assert flow["target_kind"]["kind"] == "one_of"
+    assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
     # The amount is unambiguously the same forwarded param at both sites.
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
@@ -668,7 +668,7 @@ def test_divergent_two_hop_binding_stays_indeterminate(tmp_path):
     contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["router(address,uint256)"])
-    assert flow["target_kind"]["kind"] == "one_of"
+    assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
