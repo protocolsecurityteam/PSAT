@@ -49,6 +49,46 @@ EFFECT_CLASSES = frozenset(
 SCOPE_KERNEL = "kernel"
 SCOPE_PROJECTION = "projection"
 
+# Destination-shape vocabulary (§4.2). Only ``immutable_fixed`` is benign; only
+# static can positively PROVE the two fixed shapes (universals, argued from the
+# source); simulation can only PROVE ``caller_arbitrary`` (an existential, via a
+# sentinel that lands). Shared vocabulary because both planes speak it: the
+# synthesizer derives a shape from static facts and the recipe adjudicates it
+# against what the fork observed.
+SHAPE_CALLER_ARBITRARY = "caller_arbitrary"
+SHAPE_STORAGE_DETERMINED = "storage_determined"
+SHAPE_IMMUTABLE_FIXED = "immutable_fixed"
+SHAPE_UNKNOWN = "unknown"
+
+# ``details["observation"]`` — the DISCRIMINATOR every verdict row carries. It is
+# not decoration: ``effect_verdicts.witness`` is written for ``unknown`` rows too
+# (``workers.effects_worker._write_verdicts``), so a payload like
+# ``{"value_moved": false}`` sits on disk with no self-contained way to tell a
+# call that RAN and moved nothing from one that never got past its own
+# precondition.
+#
+# CONTRACT for any consumer of ``witness`` (scorer included), stated the way
+# ``claims_bridge._observed_summary`` states its own:
+#   * ``executed`` — the probe call SUCCEEDED. Every other key in the payload is
+#     then a statement about F.
+#   * ``reverted`` — the probe call REVERTED. The other keys describe a call that
+#     never happened; ``value_moved: false`` here means "not measured", NEVER
+#     "F moves no value". The verdict on such a row is always ``unknown``.
+#   * ``not_run`` — no probe call was issued at all (capability fallback,
+#     malformed response, insufficient inputs). Nothing was measured.
+# An ABSENT key means the row predates this discriminator; treat it as unmeasured
+# unless ``verdict == proven``.
+#
+# It lives HERE, in the shared vocabulary, because it binds every module that
+# emits a verdict — ``recipes`` and the fork-tier ``anvil`` pause recipe alike.
+# While it sat in ``recipes`` the pause paths quietly published no discriminator
+# at all, and a pause probe that REVERTED went to disk carrying
+# ``{"pause_effective": false, "observed_blast_radius": []}`` — indistinguishable,
+# to anything reading the documented contract, from a pause that froze nothing.
+OBSERVATION_EXECUTED = "executed"
+OBSERVATION_REVERTED = "reverted"
+OBSERVATION_NOT_RUN = "not_run"
+
 # Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
 # non-observation and for the inv. 15 fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"

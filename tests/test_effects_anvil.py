@@ -174,6 +174,8 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     assert eff.reason == "no_blast_radius_observed"
     # A GENUINE no-blast: the pause took effect but froze nothing observable.
     assert eff.details["pause_effective"] is True
+    # The pause RAN, so the empty blast radius is a measurement.
+    assert eff.details["observation"] == "executed"
 
 
 class IneffectivePauseAnvil(StubAnvil):
@@ -211,6 +213,9 @@ def test_pause_recipe_ineffective_pause_is_distinct_unknown():
     assert eff.reason == "pause_ineffective"
     assert eff.details["pause_effective"] is False
     assert eff.details["observed_blast_radius"] == []
+    # The pause call REVERTED, so the empty radius above describes a probe that
+    # never happened — the discriminator every consumer of ``witness`` joins on.
+    assert eff.details["observation"] == "reverted"
     # The scored denominator (static's set) is preserved for the consumer.
     assert eff.details["scored_denominator"] == ["foo"]
     # The pause was never sent → the snapshot was still reverted, latch untouched.
@@ -234,6 +239,43 @@ def test_pause_recipe_proven_records_pause_effective():
     )
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["pause_effective"] is True
+    assert eff.details["observation"] == "executed"
+
+
+def test_every_pause_row_carries_an_observation_discriminator():
+    """The fork tier writes ``witness=details`` through the same worker path as
+    every other effect class, so it owes the same discriminator. It did not: a
+    pause probe that REVERTED published ``{"pause_effective": false,
+    "observed_blast_radius": []}`` with nothing in the payload to say the freeze
+    was never tested. ``pause_effective`` happened to separate the two, but that
+    is a class-local stand-in for a contract stated stage-wide."""
+
+    def _run(transport):
+        return pause_recipe(
+            transport=transport,
+            store=RecordingStore(),
+            ctx=CTX,
+            contract_address=CONTRACT,
+            principal=PRINCIPAL,
+            pause_calldata=PAUSE,
+            entry_points=_entry_points(),
+            predicted_guard_set=["foo"],
+            max_pause_duration=None,
+        )
+
+    rows = [
+        _run(StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # proven
+        _run(StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)),  # ran, froze nothing
+        _run(IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # reverted
+    ]
+
+    assert {row.details["observation"] for row in rows} == {"executed", "reverted"}
+    for row in rows:
+        # An empty blast radius is only readable as a measurement on a row that ran.
+        if row.details.get("observed_blast_radius") == []:
+            assert row.details["observation"] in ("executed", "reverted")
+        if row.details["observation"] == "reverted":
+            assert row.verdict == VERDICT_UNKNOWN
 
 
 # ---------------------------------------------------------------------------

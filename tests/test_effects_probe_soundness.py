@@ -350,3 +350,171 @@ def test_every_row_carries_an_observation_discriminator():
         # A ``false`` in the payload only describes F on an executed row.
         if row.verdict == VERDICT_UNKNOWN and row.details.get("value_moved") is False:
             assert row.details["observation"] in ("reverted", "executed")
+
+
+# ---------------------------------------------------------------------------
+# A burn must never be published as a mint
+# ---------------------------------------------------------------------------
+
+
+def _burn_only(burned_from: str = PRINCIPAL, amount: int = 100):
+    return [transfer_log(VAULT, burned_from, ZERO, amount)]
+
+
+def test_a_burn_that_wrapped_past_zero_reads_as_a_burn():
+    """``unchecked { totalSupply -= amount }`` is the universal ``_burn`` idiom.
+    When the seeded holder balance exceeded the supply, the subtraction wrapped
+    and ``totalSupply`` came back as a number just under ``2^256`` — which a plain
+    Python subtraction reads as an enormous INCREASE, i.e. a mint. Reading the
+    difference as the uint256 word it is restores the sign the EVM computed."""
+    before = 26_078_429_092_482
+    after = (before - 10**18) % (1 << 256)
+    assert after > 1 << 250  # the wrap really happened
+
+    eff = _supply(
+        _Recorder(_supply_block(before, after, _burn_only())),
+        _calldata("exit(uint256)", 1),
+        token_param_indexes=(),
+    )
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "burn"
+    # The §5a dilution witness belongs to mints alone and must not appear here.
+    assert "backing" not in eff.details
+
+
+def test_a_sign_contradicted_by_the_transfer_logs_publishes_nothing():
+    """Two independent witnesses of one event: the ``totalSupply`` arithmetic and
+    the zero-address ``Transfer`` logs. When they disagree the stage holds neither
+    — least of all the proven "witnessed dilution" output."""
+    eff = _supply(
+        # Arithmetic says supply ROSE; the only zero-address transfer is a BURN.
+        _Recorder(_supply_block(0, 100, _burn_only())),
+        _calldata("exit(uint256)", 1),
+        token_param_indexes=(),
+    )
+
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "supply_sign_contradicted_by_transfers"
+    assert eff.details["observation"] == "executed"
+    # And it must NOT transfer on the behavioral hash. The contradiction is a
+    # property of this probe's state — which token emitted what, under whatever
+    # was seeded — not a structural fact a bytecode twin inherits. Caching it
+    # would republish "we could not read this call" as a fact about every twin.
+    assert not _is_cacheable(eff)
+
+
+def test_a_token_that_emits_no_zero_address_transfer_is_not_treated_as_a_contradiction():
+    """Absence of evidence is not evidence of absence: a token that mints without
+    emitting anything is unhelpful, not lying, and its verdict still stands."""
+    eff = _supply(
+        _Recorder(_supply_block(0, 100, ())),
+        _calldata("mint(address,uint256)", PRINCIPAL, 1),
+        token_param_indexes=(),
+    )
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "mint"
+
+
+# ---------------------------------------------------------------------------
+# The static destination-shape proof — a universal, adjudicated against the fork
+# ---------------------------------------------------------------------------
+
+
+def _facts_with_out_flows(*target_kinds, one_of_members=None):
+    """FunctionFacts whose out-flows carry the given folded destination kinds."""
+    from services.effects.calldata import FunctionFacts
+
+    flows = []
+    for kind in target_kinds:
+        flow: dict[str, Any] = {
+            "direction": "out",
+            "kind": "native_transfer_send",
+            "origin": "body",
+            "target_kind": {"kind": kind, "tier": "dispositive_ast"},
+        }
+        if kind == "one_of":
+            flow["target_kinds"] = [{"kind": m, "tier": "dispositive_ast"} for m in (one_of_members or [])]
+        flows.append(flow)
+    return FunctionFacts(
+        full_name="pay(uint256)",
+        selector="0xabcdef01",
+        canonical_signature="pay(uint256)",
+        effect_info={"value_flows": flows, "payable": False},
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def test_static_destination_shape_is_earned_across_every_out_flow():
+    from services.effects.calldata import _OUT_DIRECTIONS, static_destination_shape
+
+    out = frozenset(_OUT_DIRECTIONS)
+    shape = static_destination_shape
+
+    # Every site provably fixed.
+    assert shape(_facts_with_out_flows("immutable"), out) == "immutable_fixed"
+    assert shape(_facts_with_out_flows("constant", "storage_no_setter"), out) == "immutable_fixed"
+    # An admin-settable site downgrades the whole function, never the reverse.
+    assert shape(_facts_with_out_flows("immutable", "storage_setter"), out) == "storage_determined"
+    # ONE caller-chosen site and there is no claim to make: the function is
+    # caller-redirectable however fixed its other destinations are.
+    assert shape(_facts_with_out_flows("immutable", "param"), out) is None
+    assert shape(_facts_with_out_flows("msg_sender"), out) is None
+    assert shape(_facts_with_out_flows("indeterminate"), out) is None
+    assert shape(_facts_with_out_flows("self"), out) is None
+    # A one_of is read through its members, worst member first.
+    assert shape(_facts_with_out_flows("one_of", one_of_members=["immutable", "constant"]), out) == "immutable_fixed"
+    assert shape(_facts_with_out_flows("one_of", one_of_members=["immutable", "param"]), out) is None
+    # An unreadable one_of proves nothing.
+    assert shape(_facts_with_out_flows("one_of", one_of_members=[]), out) is None
+    # No out-flows at all is no claim, not a vacuous "fixed".
+    assert shape(_facts_with_out_flows(), out) is None
+
+
+def test_a_proven_fixed_shape_reaches_the_verdict():
+    """The branch that publishes it was unreachable for the stage's whole life:
+    it demanded a static ADDRESS, which the static plane classifies destinations
+    by KIND and never resolves. The shape is a universal and stands on its own;
+    the address comes from the observation when there is one."""
+    moved = [transfer_log(VAULT, VAULT, TOKEN_A, 5)]
+    eff = recipes.value_out(
+        simulate=_Recorder(SimResult(calls=(SimCallResult(True, "0x", None, tuple(moved)),))),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        static_shape="immutable_fixed",
+    )
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["destination_shape"] == "immutable_fixed"
+    assert eff.details["shape_proved_by"] == "static"
+    # The address is the OBSERVED one — static named the shape, not the value.
+    assert eff.concrete["destination"] == TOKEN_A.lower()
+
+
+def test_a_landed_sentinel_still_outranks_the_static_shape():
+    """An existential proof that the caller CAN redirect the funds beats a
+    universal argued from the source. If they ever conflict, static is wrong."""
+    eff = recipes.value_out(
+        simulate=_Recorder(
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, SENTINEL, 5),)),)),
+        ),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        sentinel_address=SENTINEL,
+        sentinel_calldata="0x22222222",
+        static_shape="immutable_fixed",
+    )
+
+    assert eff.details["destination_shape"] == "caller_arbitrary"
+    assert eff.details["shape_proved_by"] == "simulation"

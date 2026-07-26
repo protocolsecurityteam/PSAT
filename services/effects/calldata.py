@@ -54,6 +54,8 @@ from services.effects.config import (
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
+    SHAPE_IMMUTABLE_FIXED,
+    SHAPE_STORAGE_DETERMINED,
 )
 from services.effects.seeding import SEED_UNIT_DECIMALS
 from services.effects.selection import Candidate
@@ -156,6 +158,10 @@ class ValueOutPlanInputs:
     # Static says F sends native ETH out of the CONTRACT's own balance, so a
     # contract-balance seed could unblock it (see ``has_native_payout``).
     native_payout: bool = False
+    # The destination shape static PROVES for every out-flow of F, or ``None``
+    # (see :func:`static_destination_shape`). The recipe uses it only where the
+    # sentinel did not already prove ``caller_arbitrary``.
+    static_shape: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,10 @@ class SupplyPlanInputs:
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
     target_payable: bool | None = None
     native_payout: bool = False
+    # See :class:`ValueOutPlanInputs`. For a mint the destination in question is
+    # where the NEW UNITS land, so the shape is read off the supply-direction
+    # flows rather than the out-flows.
+    static_shape: str | None = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +719,67 @@ def has_native_payout(fn: "FunctionFacts") -> bool:
     return False
 
 
+# Destination kinds that PROVE a fixed destination: the value is baked into the
+# code, or lives in storage the static plane completed a setter scan over and
+# found nothing that could repoint it.
+_FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
+# Redirectable, but only by whoever holds the setter — an admin fact, not a
+# caller one.
+_ADMIN_TARGET_KIND = "storage_setter"
+
+
+def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
+    """The destination kinds one flow asserts. ``one_of`` expands to its members
+    — the fold names them precisely so a consumer can take the worst — and any
+    flow whose kind cannot be read yields ``[""]``, which no rule below accepts."""
+    kind = flow.get("target_kind")
+    name = kind.get("kind") if isinstance(kind, dict) else None
+    if name != "one_of":
+        return [name if isinstance(name, str) else ""]
+    members = [
+        k.get("kind")
+        for k in (flow.get("target_kinds") or [])
+        if isinstance(k, dict) and isinstance(k.get("kind"), str)
+    ]
+    return [str(m) for m in members] or [""]
+
+
+def static_destination_shape(fn: "FunctionFacts", directions: frozenset[str]) -> str | None:
+    """The §4.2 destination shape static PROVES for F, or ``None``.
+
+    A universal, and it has to be earned across EVERY out-flow the function has:
+    one site paying a caller-named address makes the function caller-redirectable
+    no matter how fixed its other sites are. So the rule is a conjunction —
+    every flow fixed ⇒ ``immutable_fixed``; every flow fixed-or-admin-settable
+    with at least one admin ⇒ ``storage_determined``; anything else ⇒ no claim,
+    and the sentinel is left to decide.
+
+    Returning ``None`` is not a failure mode, it is the common case: ``param``,
+    ``msg_sender``, ``self``, ``token_owner`` and ``indeterminate`` all yield it.
+    Over-claiming here is the dangerous direction — calling an attacker-
+    redirectable destination fixed is a false reassurance about the exact bit
+    this stage exists to establish — so the predicate never generalizes from a
+    subset of the sites.
+
+    A landed sentinel still outranks this (see ``_resolve_destination_shape``):
+    an EXISTENTIAL proof that the caller can redirect the funds beats a universal
+    argued from the source, which is the correct precedence when they conflict."""
+    kinds: list[str] = []
+    for flow in fn.effect_info.get("value_flows") or []:
+        if not isinstance(flow, dict) or flow.get("origin") == "guard":
+            continue
+        if str(flow.get("direction")) not in directions:
+            continue
+        kinds.extend(_target_member_kinds(flow))
+    if not kinds:
+        return None
+    if all(k in _FIXED_TARGET_KINDS for k in kinds):
+        return SHAPE_IMMUTABLE_FIXED
+    if all(k in _FIXED_TARGET_KINDS or k == _ADMIN_TARGET_KIND for k in kinds):
+        return SHAPE_STORAGE_DETERMINED
+    return None
+
+
 def function_payable(fn: "FunctionFacts") -> bool | None:
     """ABI payability of F, or ``None`` when the artifact predates the fact.
     Tri-state on purpose: only a recorded ``False`` may suppress a probe attempt —
@@ -962,6 +1033,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
+        static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
     )
 
 
@@ -997,6 +1069,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
+        static_shape=static_destination_shape(fn, frozenset(_SUPPLY_DIRECTIONS)),
     )
 
 

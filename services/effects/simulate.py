@@ -116,7 +116,7 @@ def transfers_out(
 
 
 def transfers_in(
-    result: SimCallResult, dest_address: str, *, exclude_asset: str | None = None
+    result: SimCallResult, dest_address: str, *, exclude_asset: str | None = None, only_asset: str | None = None
 ) -> list[tuple[str, str, str]]:
     """``(from, to, value_hex)`` for every ``Transfer`` log whose recipient is
     ``dest_address`` — i.e. value ARRIVING at that contract. The mirror of
@@ -135,9 +135,16 @@ def transfers_in(
     byte-identical ``inflow_observed: true`` a genuine deposit-backed conversion
     does. Backing means an inflow of some OTHER asset; newly-printed units of the
     token whose supply just rose back nothing.
+
+    ``only_asset`` is the opposite pin, and the §4.5 burn witness needs it: units
+    destroyed are a ``Transfer`` to the zero address emitted BY the token whose
+    ``totalSupply`` moved, and some OTHER token burning inside the same call says
+    nothing about this one's supply. Passing both is contradictory and yields
+    nothing, which is the honest answer to a contradictory question.
     """
     dst = dest_address.lower()
     excluded = exclude_asset.lower() if exclude_asset else None
+    included = only_asset.lower() if only_asset else None
     out: list[tuple[str, str, str]] = []
     for log in result.logs:
         if not log.topics or log.topics[0].lower() != TRANSFER_TOPIC.lower():
@@ -145,6 +152,8 @@ def transfers_in(
         if len(log.topics) < 3:
             continue
         if excluded is not None and log.address.lower() == excluded:
+            continue
+        if included is not None and log.address.lower() != included:
             continue
         frm = _topic_addr(log.topics[1])
         to = _topic_addr(log.topics[2])

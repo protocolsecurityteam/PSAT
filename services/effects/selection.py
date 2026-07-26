@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, literal, or_, select
+from sqlalchemy import and_, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -56,6 +57,18 @@ _NODE_PREFIX = "address:"
 # (``pause.*``, ``upgrade.*``, …) is already explained and is NOT re-simulated.
 _FLOW_CLAIM_PREFIX = "flow."
 _SUPPLY_CLAIM_PREFIX = "supply."
+
+# The claims that admit a PUBLIC function to the candidate set (see
+# :func:`_cascade_rows`). Deliberately these two and no others: they are the
+# claims that say value LEAVES the unit or that units are PRINTED, which is
+# exactly when "anyone may call this" is the security question rather than a
+# footnote.
+#
+# ``flow.in`` is excluded — a permissionless deposit is a wrapper's whole purpose
+# and probing it corroborates nothing — as is ``value_router``, whose entry is
+# neither source nor sink (see §G3 in the round-6 handoff: routed labels are
+# static-only by design).
+_PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
 
 # How many of a deployment's own holdings may stand in for a caller-supplied token
 # parameter. Each one the seeder resolves costs a storage-layout discovery block,
@@ -606,12 +619,53 @@ def _scope_predicate(session: Session, protocol_id: int, scope: JobScope):
     return or_(func.lower(Contract.address) == scope.address.lower(), Contract.id.not_in(owned))
 
 
+def _carries_public_admission_claim():
+    """SQL predicate: the row's ``claims`` JSONB holds a ``claim_id`` in
+    :data:`_PUBLIC_ADMISSION_CLAIM_IDS`.
+
+    In SQL rather than in Python beside the other claim logic because it is a
+    KEEP predicate, not a refinement of an already-selected row: these functions
+    are outside the ``authority_public = false`` set the query returns at all, so
+    Python never sees them to reconsider.
+
+    Containment (``@>``) rather than ``jsonb_array_elements``, and the difference
+    is not stylistic: the set-returning form RAISES ``cannot extract elements
+    from a scalar`` on a JSON-``null`` ``claims`` — a value this column really
+    holds (see :func:`_enrolled_families`, which treats SQL ``NULL``, ``[]`` and
+    JSON-``null`` alike as blank) — and one such row would abort candidate
+    selection for the entire protocol. ``@>`` is total: every non-matching shape,
+    scalar included, is simply ``false``. It also matches on a SUBSET of each
+    object, so the ``tier`` a claim carries alongside its id is irrelevant here.
+    """
+    return or_(
+        *(
+            EffectiveFunction.claims.op("@>")(cast([{"claim_id": claim_id}], JSONB))
+            for claim_id in _PUBLIC_ADMISSION_CLAIM_IDS
+        )
+    )
+
+
 def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = None):
     """The §6 filter cascade as one query.
 
     (a) has a sink   — ``array_length(effect_targets, 1) > 0`` (there is no
         ``sinks`` column; the sink is the state-write target list).
-    (c) gated over public — ``authority_public = false``.
+    (c) gated over public — ``authority_public = false``, EXCEPT a public
+        function carrying ``flow.out`` or ``supply.mint``.
+
+    That exception is the §5c gate lift applied to the permissionless case, and
+    it exists because the original rule read "public means no authority to
+    resolve, so there is nothing to probe as". True of the principal; false of
+    the effect. A permissionless payout or a permissionless mint is the shape
+    where "anyone can call this" is the finding — ``EtherFiRedemptionManager
+    .redeem*`` and the public mints sat outside the candidate set entirely, so
+    the stage produced no verdict for 770 public functions and the gap was
+    invisible. Such a function is probed from :data:`calldata.NEUTRAL_CALLER`,
+    an arbitrary non-zero identity, which is a valid probe precisely BECAUSE no
+    gate has to be satisfied.
+
+    Kept narrow on purpose: admitting every public function would spend fork
+    budget on wrapper in/out and routed-deposit noise that corroborates nothing.
 
     Filter (b) — the blank-claim gate — is applied in PYTHON on the returned
     ``claims`` column (see :func:`_enrolled_families`), because it is no longer a
@@ -630,7 +684,7 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
     where = [
         Contract.protocol_id == protocol_id,
         func.array_length(EffectiveFunction.effect_targets, 1) > 0,
-        EffectiveFunction.authority_public.is_(False),
+        or_(EffectiveFunction.authority_public.is_(False), _carries_public_admission_claim()),
     ]
     if scope is not None:
         # Chain-scoping is part of the fix, not incidental: protocol-wide selection

@@ -289,6 +289,7 @@ _ANCHORS: tuple[tuple[str, int], ...] = (
 )
 
 _DECIMALS_SIG = "decimals()"
+_TOTAL_SUPPLY_SIG = "totalSupply()"
 _DEFAULT_DECIMALS = 18
 # Probe amounts pre-encoded by the synthesizer, one whole unit per common token
 # scale. The recipe picks by the decimals the discovery block read back.
@@ -359,6 +360,10 @@ class TokenLayout:
     token: str
     decimals: int = _DEFAULT_DECIMALS
     anchors: tuple[AnchorSlot, ...] = ()
+    # The token's own ``totalSupply`` at the discovery block, when it answered.
+    # Used to keep a seeded holder balance inside the supply that backs it; see
+    # :func:`balance_seed_amount`.
+    total_supply: int | None = None
 
 
 @dataclass(frozen=True)
@@ -459,6 +464,10 @@ def discover_token_layout(
 
     calls = [SimCall(to=token, data=selector_of(sig) + _anchor_args(arity, holder, spender)) for sig, arity in _ANCHORS]
     calls.append(SimCall(to=token, data=selector_of(_DECIMALS_SIG)))
+    # Rides the discovery block rather than costing a round trip of its own. The
+    # perturbation above writes only keccak-derived MAPPING slots, so a scalar
+    # ``totalSupply`` reads its true value here.
+    calls.append(SimCall(to=token, data=selector_of(_TOTAL_SUPPLY_SIG)))
     try:
         result = simulate(calls, block_tag, {token.lower(): {"stateDiff": overrides}})
     except Exception:  # noqa: BLE001 - a failed discovery only means "do not seed"
@@ -489,13 +498,44 @@ def discover_token_layout(
     if decimals is None or not (0 < decimals <= 36):
         decimals = _DEFAULT_DECIMALS
 
+    supply_call = result.calls[len(_ANCHORS) + 1]
+    total_supply = _to_int(supply_call.return_data) if supply_call.success else None
+
     if not anchors and reverted and not narrow:
         # Every anchor reverted: the wide write probably clobbered a slot the
         # getter itself depends on. Retry with a much smaller perturbation.
         return discover_token_layout(
             simulate, token=token, holder=holder, spender=spender, block_tag=block_tag, narrow=True
         )
-    return TokenLayout(token=token.lower(), decimals=decimals, anchors=tuple(anchors))
+    return TokenLayout(token=token.lower(), decimals=decimals, anchors=tuple(anchors), total_supply=total_supply)
+
+
+def balance_seed_amount(anchor: AnchorSlot, layout: TokenLayout) -> int:
+    """How much to write into one seeded slot.
+
+    A HOLDER BALANCE is capped at the token's own ``totalSupply``, because
+    ``totalSupply >= balanceOf(holder)`` is an invariant every real token
+    maintains and this seed writes storage directly, with nothing to enforce it.
+    Handing a caller more shares than exist makes a burn arithmetically
+    impossible: ``unchecked { totalSupply -= amount }`` wraps past zero, and the
+    supply recipe then reads a burn as an enormous INCREASE. The recipe now
+    survives that on its own, but a fork state no real chain can reach is not a
+    sound thing to derive a verdict from in the first place.
+
+    One whole token unit is the largest amount any probe attaches, so capping at
+    the live supply still clears every balance precondition on a token with a
+    non-trivial supply. A supply of zero, or a token that would not answer
+    ``totalSupply()``, leaves the seed at its full value — there is no invariant
+    to respect and the alternative is seeding nothing at all.
+
+    An ALLOWANCE is not capped: approvals above the supply are ordinary (the
+    ``type(uint256).max`` idiom) and bound nothing that could wrap."""
+    if anchor.arity != 1:
+        return SEED_AMOUNT
+    supply = layout.total_supply
+    if supply is None or supply <= 0:
+        return SEED_AMOUNT
+    return min(SEED_AMOUNT, supply)
 
 
 def _anchor_args(arity: int, holder: str, spender: str) -> str:
@@ -589,11 +629,12 @@ class SimulateSeeder:
                 continue
             diff: dict[str, str] = {}
             for anchor in layout.anchors:
-                diff[anchor.slot(request.principal, request.spender)] = _word(SEED_AMOUNT)
+                amount = balance_seed_amount(anchor, layout)
+                diff[anchor.slot(request.principal, request.spender)] = _word(amount)
                 readback_calls.append(
                     SimCall(to=token, data=anchor.readback_calldata(request.principal, request.spender))
                 )
-                readback_expected.append(_word(SEED_AMOUNT))
+                readback_expected.append(_word(amount))
             overrides[token.lower()] = {"stateDiff": diff}
             if not seeded:
                 # The probe amount follows the FIRST seeded token's scale — the

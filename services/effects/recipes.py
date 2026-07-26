@@ -24,7 +24,14 @@ from services.effects.config import (
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
+    OBSERVATION_EXECUTED,
+    OBSERVATION_NOT_RUN,
+    OBSERVATION_REVERTED,
     SCOPE_KERNEL,
+    SHAPE_CALLER_ARBITRARY,
+    SHAPE_IMMUTABLE_FIXED,
+    SHAPE_STORAGE_DETERMINED,
+    SHAPE_UNKNOWN,
     TIER_CALL,
     TIER_HISTORICAL,
 )
@@ -66,35 +73,9 @@ EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505
 # ERC-20 totalSupply().
 TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 
-# Destination-shape vocabulary (§4.2). Only ``immutable_fixed`` is benign; only
-# static can positively PROVE the two fixed shapes (universals); simulation can
-# only PROVE ``caller_arbitrary`` (an existential, via a sentinel that lands).
-SHAPE_CALLER_ARBITRARY = "caller_arbitrary"
-SHAPE_STORAGE_DETERMINED = "storage_determined"
-SHAPE_IMMUTABLE_FIXED = "immutable_fixed"
-SHAPE_UNKNOWN = "unknown"
-
-# ``details["observation"]`` — the DISCRIMINATOR every row this module emits
-# carries. It is not decoration: ``effect_verdicts.witness`` is written for
-# ``unknown`` rows too (``workers.effects_worker._write_verdicts``), so a payload
-# like ``{"value_moved": false}`` sits on disk with no self-contained way to tell
-# a call that RAN and moved nothing from one that never got past its own
-# precondition.
-#
-# CONTRACT for any consumer of ``witness`` (scorer included), stated the way
-# ``claims_bridge._observed_summary`` states its own:
-#   * ``executed`` — the probe call SUCCEEDED. Every other key in the payload is
-#     then a statement about F.
-#   * ``reverted`` — the probe call REVERTED. The other keys describe a call that
-#     never happened; ``value_moved: false`` here means "not measured", NEVER
-#     "F moves no value". The verdict on such a row is always ``unknown``.
-#   * ``not_run`` — no probe call was issued at all (capability fallback,
-#     malformed response, insufficient inputs). Nothing was measured.
-# An ABSENT key means the row predates this discriminator; treat it as unmeasured
-# unless ``verdict == proven``.
-OBSERVATION_EXECUTED = "executed"
-OBSERVATION_REVERTED = "reverted"
-OBSERVATION_NOT_RUN = "not_run"
+# Re-exported: the discriminator is the whole stage's contract, not this module's
+# (``services.effects.anvil`` emits pause rows under it too), so it lives in the
+# shared vocabulary. See :mod:`services.effects.config` for what each value means.
 
 
 def _sim_to_ethcall(r: SimCallResult) -> EthCallResult:
@@ -1017,7 +998,7 @@ def supply(
                 transcript=tr,
             ),
         )
-    delta = after_ts - before_ts
+    delta = _signed_delta(after_ts, before_ts)
     if delta == 0:
         return emit(
             store,
@@ -1034,6 +1015,24 @@ def supply(
     # ``totalSupply`` moved. Any other token minting inside the same call is a
     # different asset's supply event and must not stand in for this one's.
     minted = transfers_out(mint_c, "0x" + "00" * 20, only_asset=token_address)
+    # The mirror: units destroyed are a Transfer TO the zero address.
+    burned = transfers_in(mint_c, "0x" + "00" * 20, only_asset=token_address)
+    if _sign_contradicted_by_events(sign, minted, burned):
+        # Two independent witnesses of the same event disagree, so we hold none of
+        # it. Publishing the arithmetic anyway is how a burn was once published as
+        # proven dilution — the strongest claim this stage can make, on a call that
+        # destroyed units. An unknown here is not a gap in coverage; it is the only
+        # honest reading of contradictory evidence.
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_SUPPLY,
+                gate_ref=gate_ref,
+                reason="supply_sign_contradicted_by_transfers",
+                details={"observation": OBSERVATION_EXECUTED},
+                transcript=tr,
+            ),
+        )
     _, _, _, disc = _resolve_destination_shape(
         effect_class=EFFECT_CLASS_SUPPLY,
         base_transfers=minted,
@@ -1336,8 +1335,19 @@ def _resolve_destination_shape(
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
             return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
-    if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED) and static_destination:
-        return static_shape, "static", static_destination, None
+    if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED):
+        # The SHAPE is static's to prove and it is a universal — "this destination
+        # cannot be redirected" holds whether or not this particular probe moved
+        # anything. The ADDRESS is the observation's to supply, and it is fine for
+        # it to be absent: a probe that reverted still leaves the shape true and
+        # ``concrete_destination`` simply unfilled.
+        #
+        # Requiring a static ADDRESS here is what made this branch dead code for
+        # the stage's whole life: the static plane classifies destinations by KIND
+        # and never resolves the value behind an immutable, so no caller could
+        # ever satisfy the condition and ``destination_shape`` stayed ~95%
+        # ``unknown`` — the single most security-relevant bit, unproven.
+        return static_shape, "static", static_destination or observed_dest, None
     if taint_param_reaches_sink and sentinel_transfers is not None:
         # Taint says the param reaches the sink, yet the sentinel moved nothing:
         # a §9 discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
@@ -1397,6 +1407,48 @@ def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict
         details={"observation": OBSERVATION_NOT_RUN},
         transcript=transcript,
     )
+
+
+_UINT256_MOD = 1 << 256
+
+
+def _signed_delta(after: int, before: int) -> int:
+    """``after - before`` read as the uint256 word it actually is.
+
+    ``totalSupply`` is a uint256 and the ubiquitous ``_burn`` idiom decrements it
+    inside ``unchecked``. Python subtracts arbitrary-precision integers, so a burn
+    that wrapped past zero on-chain comes back here as a delta of nearly ``2^256``
+    — a positive number, i.e. a MINT, on a call that destroyed units. Reading the
+    difference modulo ``2^256`` and taking the short way round restores the sign
+    the EVM computed.
+
+    The halfway split is sound because both readings cannot be plausible at once:
+    a supply that genuinely moved by more than ``2^255`` units has overflowed any
+    real token's economics, and the burn reading is the only one that corresponds
+    to code that can execute."""
+    raw = (after - before) % _UINT256_MOD
+    return raw - _UINT256_MOD if raw > _UINT256_MOD // 2 else raw
+
+
+def _sign_contradicted_by_events(
+    sign: str, minted: list[tuple[str, str, str]], burned: list[tuple[str, str, str]]
+) -> bool:
+    """True when the zero-address ``Transfer`` logs say the OPPOSITE of what the
+    ``totalSupply`` arithmetic said.
+
+    A mint is ``Transfer(0x0 -> holder)`` and a burn is ``Transfer(holder -> 0x0)``,
+    both emitted by the token whose supply moved. When the events present are
+    exclusively the other direction's, one of the two witnesses is wrong and this
+    stage must publish neither — least of all the §5a "witnessed dilution" output,
+    which asserts that units were printed against no inflow.
+
+    Deliberately requires POSITIVE contradicting evidence rather than mere absence:
+    a token that mints without emitting anything is unhelpful but not lying, and
+    treating its silence as a contradiction would withhold every honest verdict on
+    it. Absence of evidence is not evidence of absence — here as everywhere."""
+    if sign == "mint":
+        return bool(burned) and not minted
+    return bool(minted) and not burned
 
 
 def _to_int(hexval: str | None) -> int | None:

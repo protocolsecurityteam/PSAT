@@ -34,6 +34,7 @@ from services.effects.seeding import (
     AnchorSlot,
     SeedBudget,
     SimulateSeeder,
+    balance_seed_amount,
     discover_token_layout,
 )
 from services.effects.simulate import SimCallResult, SimResult
@@ -82,7 +83,11 @@ class FakeChain:
         vault_needs_asset: bool = True,
         total_supply: int = 10**24,
         readback_liar: bool = False,
+        asset_total_supply: int | None = None,
     ) -> None:
+        # ``None`` = the asset does not answer ``totalSupply()`` at all, which is
+        # the shape every pre-existing test here assumes.
+        self.asset_total_supply = asset_total_supply
         self.balance_base = balance_base
         self.allowance_base = allowance_base
         self.decimals = decimals
@@ -132,6 +137,10 @@ class FakeChain:
     def _asset_call(self, data, overrides) -> SimCallResult:
         if data.startswith(sel("decimals()")):
             return ok(uint_ret(self.decimals))
+        if data.startswith(sel("totalSupply()")):
+            if self.asset_total_supply is None:
+                return SimCallResult(False, "0x", "0x", ())
+            return ok(uint_ret(self.asset_total_supply))
         if data.startswith(sel("balanceOf(address)")):
             stored = self._stored(overrides, _arg(data, 0), VAULT, arity=1)
             if stored is None:
@@ -256,6 +265,42 @@ def test_discovery_identifies_balance_and_allowance_bases():
     assert layout.decimals == 18
     # One block, one RPC: every candidate carries a distinct magic word.
     assert len(chain.blocks) == 1
+
+
+def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
+    """``totalSupply >= balanceOf(holder)`` is an invariant every real token keeps
+    and a direct storage write does not. Handing a caller more shares than exist
+    makes a burn arithmetically impossible — ``unchecked { totalSupply -= amount }``
+    wraps past zero — so the seed is capped at the live supply. The ALLOWANCE slot
+    is not capped: approvals above the supply are ordinary and bound nothing."""
+    supply = 10**20  # well under SEED_AMOUNT (2**128)
+    chain = FakeChain(asset_total_supply=supply)
+    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
+
+    assert layout.total_supply == supply
+    by_sig = {a.signature: a for a in layout.anchors}
+    assert balance_seed_amount(by_sig["balanceOf(address)"], layout) == supply
+    assert balance_seed_amount(by_sig["allowance(address,address)"], layout) == SEED_AMOUNT
+
+
+def test_an_unanswered_total_supply_leaves_the_seed_at_full_value():
+    """No supply to respect, and seeding nothing would simply lose the probe."""
+    chain = FakeChain(asset_total_supply=None)
+    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
+
+    assert layout.total_supply is None
+    for anchor in layout.anchors:
+        assert balance_seed_amount(anchor, layout) == SEED_AMOUNT
+
+
+def test_a_supply_above_the_seed_leaves_the_seed_at_full_value():
+    """The cap is a minimum, not a replacement: a token whose supply dwarfs the
+    seed keeps the seed, which is already far above any probe amount."""
+    chain = FakeChain(asset_total_supply=2**200)
+    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
+
+    for anchor in layout.anchors:
+        assert balance_seed_amount(anchor, layout) == SEED_AMOUNT
 
 
 def test_discovery_reads_back_token_decimals():

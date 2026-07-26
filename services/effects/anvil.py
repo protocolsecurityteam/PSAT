@@ -27,7 +27,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, SCOPE_PROJECTION, TIER_FORK
+from services.effects.config import (
+    EFFECT_CLASS_FREEZE_PAUSE,
+    OBSERVATION_EXECUTED,
+    OBSERVATION_REVERTED,
+    SCOPE_PROJECTION,
+    TIER_FORK,
+)
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 from services.effects.harness import (
     Discrepancy,
@@ -211,6 +217,10 @@ def pause_recipe(
                     gate_ref=gate_ref,
                     reason="pause_ineffective",
                     details={
+                        # The pause call itself REVERTED, so the freeze was never
+                        # tested: the empty blast radius below describes a probe
+                        # that did not happen, not a pause that froze nothing.
+                        "observation": OBSERVATION_REVERTED,
                         "pause_effective": False,
                         "pre_pause_succeeding": sorted(pre_succeeding),
                         "observed_blast_radius": [],
@@ -277,6 +287,10 @@ def pause_recipe(
                 gate_ref=gate_ref,
                 reason="no_blast_radius_observed",
                 details={
+                    # The pause ran. The empty blast radius below is therefore a
+                    # measurement, which is exactly what separates this row from
+                    # the reverted one above.
+                    "observation": OBSERVATION_EXECUTED,
                     # pause_effective True + empty blast = a GENUINE no-blast: the
                     # pause took effect yet froze nothing observable. This is at the
                     # bar (correct to leave unknown), and distinct from the
@@ -298,6 +312,7 @@ def pause_recipe(
         gate_ref=gate_ref,
         reason="pause_froze_entry_points",
         details={
+            "observation": OBSERVATION_EXECUTED,
             # Kernel witness (latch flip caused reverts) + projection witness
             # (which points). The scored denominator stays static's set (§8.8);
             # the observed set is a lower bound recorded alongside it.

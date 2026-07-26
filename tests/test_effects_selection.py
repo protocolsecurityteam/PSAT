@@ -31,6 +31,7 @@ from db.models import (
     JobStatus,
     Protocol,
 )
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
 from services.effects.selection import JobScope, build_authority_graph, select_candidates
 from tests.conftest import ADDR, requires_postgres
 
@@ -154,6 +155,136 @@ def test_cascade_filters_sink_claim_and_public(db_session):
     assert empty_sink.id not in got
     assert claimed.id not in got
     assert public.id not in got
+
+
+def test_a_public_payout_or_mint_is_admitted_to_the_candidate_set(db_session):
+    """The narrow-open, at the seam that actually decides it.
+
+    ``authority_public = false`` used to be an unconditional filter, on the
+    reasoning that a public function has no principal to resolve. That is true of
+    the PRINCIPAL and false of the EFFECT: a permissionless payout or mint is the
+    shape where "anyone can call this" IS the finding. Such a function is probed
+    from an arbitrary non-zero identity, which is valid precisely because no gate
+    has to be satisfied.
+
+    Public functions that merely take money IN, or that route it through another
+    contract, stay out: probing them corroborates nothing and spends fork budget.
+    """
+    p = _protocol(db_session, "public-admission-proto")
+    c = _contract(db_session, p.id, ADDR(0x7000))
+
+    def public(name, selector, claim_id):
+        return _fn(
+            db_session,
+            c.id,
+            name=name,
+            selector=selector,
+            effect_targets=["SLOT"],
+            authority_public=True,
+            claims=[{"claim_id": claim_id, "tier": "standard_exact"}] if claim_id else None,
+        )
+
+    payout = public("redeem", "0xdddd0001", "flow.out")
+    minted = public("mintShares", "0xdddd0002", "supply.mint")
+    deposit = public("deposit", "0xdddd0003", "flow.in")
+    routed = public("bridge", "0xdddd0004", "value_router")
+    blank = public("poke", "0xdddd0005", None)
+    paused = public("pause", "0xdddd0006", "pause.set")
+    db_session.commit()
+
+    got = {cand.function_id: cand for cand in select_candidates(db_session, p.id)}
+
+    assert payout.id in got
+    assert minted.id in got
+    assert deposit.id not in got
+    assert routed.id not in got
+    assert paused.id not in got
+    # A BLANK public function is still dropped: nothing says it moves value, and
+    # the exception is keyed on the claim, never on publicness alone.
+    assert blank.id not in got
+
+    # Admitted for exactly the family its claim names — never the whole class set.
+    assert got[payout.id].restrict_families == frozenset({EFFECT_CLASS_VALUE_OUT})
+    assert got[minted.id].restrict_families == frozenset({EFFECT_CLASS_SUPPLY})
+    # And admitted AS public, which is what routes the synthesizer onto the
+    # neutral caller instead of demanding a resolved principal.
+    assert got[payout.id].authority_public is True
+    assert got[payout.id].principal_addresses == ()
+
+
+def test_the_public_admission_predicate_survives_every_claims_shape(db_session):
+    """``claims`` is not always an array. ``_enrolled_families`` documents that
+    SQL NULL, ``[]`` and JSON-``null`` all occur and all read as blank — and a
+    set-returning ``jsonb_array_elements`` raises "cannot extract elements from a
+    scalar" on the last of those. One such row would abort candidate selection for
+    the WHOLE protocol, so the predicate has to be total over the column."""
+    p = _protocol(db_session, "claims-shape-proto")
+    c = _contract(db_session, p.id, ADDR(0x7200))
+
+    for i, claims in enumerate([None, [], "null", 5, "not-a-list", {"claim_id": "flow.out"}]):
+        _fn(
+            db_session,
+            c.id,
+            name=f"odd{i}",
+            selector=f"0xffff000{i}",
+            effect_targets=["SLOT"],
+            authority_public=True,
+            claims=claims,
+        )
+    admitted = _fn(
+        db_session,
+        c.id,
+        name="redeem",
+        selector="0xffff00ff",
+        effect_targets=["SLOT"],
+        authority_public=True,
+        claims=[{"claim_id": "flow.out", "tier": "standard_exact"}],
+    )
+    db_session.commit()
+
+    # The query must RUN, and must admit exactly the well-formed carrier.
+    got = {cand.function_id for cand in select_candidates(db_session, p.id)}
+    assert got == {admitted.id}
+
+
+def test_a_public_payout_reaches_a_synthesized_probe(db_session):
+    """The claim that matters is not "the filter admits the row" but "a public
+    value-mover gets probed". Asserted end to end across the two seams, because a
+    previous fix satisfied the synthesizer alone and was dead code: selection
+    never handed it a public candidate to act on."""
+    from services.effects.calldata import NEUTRAL_CALLER, FunctionFacts, synthesize_value_out
+
+    p = _protocol(db_session, "public-probe-proto")
+    c = _contract(db_session, p.id, ADDR(0x7100))
+    fn = _fn(
+        db_session,
+        c.id,
+        name="redeem",
+        selector="0xeeee0001",
+        effect_targets=["SLOT"],
+        authority_public=True,
+        claims=[{"claim_id": "flow.out", "tier": "standard_exact"}],
+    )
+    db_session.commit()
+
+    candidate = next(x for x in select_candidates(db_session, p.id) if x.function_id == fn.id)
+    facts = FunctionFacts(
+        full_name="redeem(uint256)",
+        selector="0xeeee0001",
+        canonical_signature="redeem(uint256)",
+        effect_info={
+            "value_flows": [{"direction": "out", "kind": "native_transfer_send", "origin": "body"}],
+            "payable": False,
+        },
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+    plan = synthesize_value_out(candidate, facts)
+
+    assert plan is not None, "a public value-mover must reach a probe plan"
+    assert plan.principal == NEUTRAL_CALLER
+    assert plan.calldata.startswith("0xeeee0001")
 
 
 def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):

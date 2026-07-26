@@ -319,6 +319,7 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
             target_payable=spec.target_payable,
             native_payout=spec.native_payout,
+            static_shape=spec.static_shape,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
@@ -345,6 +346,7 @@ def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> Pr
             seeded_sentinel_calldata=spec.seeded_sentinel_calldata,
             target_payable=spec.target_payable,
             native_payout=spec.native_payout,
+            static_shape=spec.static_shape,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
