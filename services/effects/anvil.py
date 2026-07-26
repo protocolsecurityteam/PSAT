@@ -500,13 +500,19 @@ def timelock_execute_recipe(
             tier=TIER_FORK,
             scope=SCOPE_KERNEL,
             gate_ref=gate_ref,
-            reason="no_value_observed",
+            # Two different facts, and a consumer must be able to tell them apart.
+            # With no witness asset the timelock held NOTHING for the operation to
+            # move, so "moved nothing" would be a statement about our inability to
+            # measure rather than about the contract — the §0.0.4 distinction. With
+            # an asset, the operation really did execute and move none of it.
+            reason="no_value_observed" if witness_token is not None else "timelock_holds_no_witness_asset",
             details={
                 # The delayed operation EXECUTED (the point Tier-1 cannot reach);
                 # it simply moved nothing to the sentinel we could witness.
                 "observation": OBSERVATION_EXECUTED,
                 "value_moved": False,
                 "timelock_executed": True,
+                "witness_asset_held": witness_token is not None,
             },
             transcript=tr,
         )

@@ -529,6 +529,39 @@ def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_executi
     # "moves nothing" negative to a bytecode twin whose op was never scheduled.
     assert eff.state_dependent is True
     assert not _is_cacheable(eff)
+    # It HELD the asset and moved none of it — the other half of the distinction
+    # the next test pins.
+    assert eff.details["witness_asset_held"] is True
+
+
+def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
+    """The measured case on mainnet: a timelock holds authority, not funds, so
+    there is no asset for a scheduled operation to move. Reporting that as
+    "executed, moved nothing" would state a fact about the CONTRACT when the fact
+    is about our inability to witness one (§0.0.4) — the sequence still ran, and
+    the row has to say which of the two it observed."""
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
+    eff = timelock_execute_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=None,
+        witness_calldata=None,
+    )
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "timelock_holds_no_witness_asset"
+    assert eff.details["witness_asset_held"] is False
+    # The delayed execution path itself still ran, which is the thing Tier 1
+    # cannot reach and the thing this row is entitled to claim.
+    assert eff.details["timelock_executed"] is True
+    assert eff.details["observation"] == "executed"
+    assert not _is_cacheable(eff)
 
 
 # ---------------------------------------------------------------------------
