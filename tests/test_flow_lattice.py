@@ -186,12 +186,18 @@ def test_constant_destination_and_msg_value(tmp_path):
     assert flow["amount_kind"] == {"kind": "msg_value", "tier": "dispositive_ast"}
 
 
-def test_cross_branch_mix_is_indeterminate(tmp_path):
+def test_cross_branch_mix_names_both_destinations(tmp_path):
     contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMix(bool,address,uint256)"])
-    # param on one branch, immutable on the other -> never collapse to a member.
-    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    # param on one branch, immutable on the other. The scalar must never collapse
+    # to a MEMBER of the union — but both members are themselves resolved, so it
+    # is a known disjunction rather than an absence of knowledge, and saying
+    # "indeterminate" claimed we had traced nothing on a flow we had traced fully.
+    assert flow["target_kind"]["kind"] == "one_of"
+    assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
+    # Tier stays the weaker of the contributing sites, as for any other fold.
+    assert flow["target_kind"]["tier"] == "static_trace"
 
 
 def test_branch_reassigned_local_is_indeterminate(tmp_path):
@@ -655,12 +661,13 @@ def test_two_resolved_sites_publish_both_destinations(tmp_path):
     contract = _compile(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["twoResolved(address,uint256)"])
-    # The fold keeps today's exact semantics — a MIX is still indeterminate.
-    assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    # Two sites, each resolved: the scalar names the disjunction and the members
+    # ARE the alternatives (a consumer reads them and takes the worst).
+    assert flow["target_kind"]["kind"] == "one_of"
     assert {e["kind"] for e in flow["target_kinds"]} == {"immutable", "param"}
     assert all(e["tier"] in ("dispositive_ast", "static_trace") for e in flow["target_kinds"])
     # The amount lattice gets the same treatment, independently.
-    assert flow["amount_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert flow["amount_kind"]["kind"] == "one_of"
     assert {e["kind"] for e in flow["amount_kinds"]} == {"param", "msg_value"}
 
 
@@ -708,7 +715,7 @@ def test_breakdown_is_bounded_by_the_lattice_not_the_site_count(tmp_path):
     contract = _compile(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["manySites(address,uint256)"])
-    assert flow["target_kind"]["kind"] == "indeterminate"
+    assert flow["target_kind"]["kind"] == "one_of"
     entries = flow["target_kinds"]
     # Seven sends, three meanings — deduplication by (kind, tier) is the cap.
     assert {e["kind"] for e in entries} == {"immutable", "param", "msg_sender"}
@@ -725,7 +732,7 @@ def test_breakdown_reaches_the_claim_witness(tmp_path):
     rows = [c for c in claims["twoResolved(address,uint256)"] if c["claim_id"] == "flow.out"]
     assert rows, "no flow.out claim"
     entry = rows[0]["witness"]["flows"][0]
-    assert entry["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
+    assert entry["target_kind"]["kind"] == "one_of"
     assert {e["kind"] for e in entry["target_kinds"]} == {"immutable", "param"}
     assert {e["kind"] for e in entry["amount_kinds"]} == {"param", "msg_value"}
 

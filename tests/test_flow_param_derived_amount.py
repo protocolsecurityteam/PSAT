@@ -190,9 +190,15 @@ def test_arithmetic_on_a_conversion_is_not_param_derived(flows):
     assert flow["amount_kind"]["kind"] == "indeterminate", flow
 
 
-def test_merge_with_storage_stays_indeterminate(flows):
+def test_merge_with_storage_names_both_amounts(flows):
+    """A conversion result on one branch, a storage bound on the other. Both are
+    resolved, so the fold names them instead of reporting "unknown" — and neither
+    may be promoted to stand for the whole."""
     flow = flows["unwrapUnion(uint256,bool)"]
-    assert flow["amount_kind"]["kind"] == "indeterminate", flow
+    assert flow["amount_kind"]["kind"] == "one_of", flow
+    assert {e["kind"] for e in flow["amount_kinds"]} == {"param_derived", "bounded_by_storage"}, flow
+    # A disjunction is not a slot: neither branch's index may be published.
+    assert "amount_param_index" not in flow, flow
 
 
 def test_param_derived_never_reaches_a_destination(flows):

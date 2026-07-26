@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "description": "Golden effect-labels AND Plane-1 claim (claim_id, tier) tuples for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended label/claim changes.",
+  "schema_version": 2,
+  "description": "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow facts for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended changes — and justify each hunk of the diff, since a diff here is a change in what the pipeline publishes about real contracts.",
   "contracts": [
     {
       "address": "0x0000000000000000000000000000000000000010",
@@ -12,7 +12,8 @@
           "full_name": "allowance(address,address)",
           "selector": "0xdd62ed3e",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "approve(address,uint256)",
@@ -23,13 +24,15 @@
               "claim_id": "erc20.approve",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "balanceOf(address)",
           "selector": "0x70a08231",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "mint(address,uint256)",
@@ -42,7 +45,8 @@
               "claim_id": "supply.mint",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "pause()",
@@ -55,13 +59,15 @@
               "claim_id": "pause.set",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "totalSupply()",
           "selector": "0x18160ddd",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -72,7 +78,8 @@
               "claim_id": "erc20.transfer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -83,7 +90,8 @@
               "claim_id": "erc20.transfer_from",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "unpause()",
@@ -96,7 +104,8 @@
               "claim_id": "pause.unset",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         }
       ]
     },
@@ -110,7 +119,8 @@
           "full_name": "owner()",
           "selector": "0x8da5cb5b",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "renounceOwnership()",
@@ -123,13 +133,15 @@
               "claim_id": "ownership.renounce",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setTokenOut(address)",
           "selector": "0xc158910d",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "transferOwnership(address)",
@@ -142,7 +154,8 @@
               "claim_id": "ownership.transfer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         }
       ]
     },
@@ -156,7 +169,8 @@
           "full_name": "canCall(address,address,bytes4)",
           "selector": "0xb7009613",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "setAuthority(Authority)",
@@ -169,7 +183,8 @@
               "claim_id": "authority.replace",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setPublicCapability(address,bytes4,bool)",
@@ -182,7 +197,8 @@
               "claim_id": "roles.configure",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
@@ -195,7 +211,8 @@
               "claim_id": "roles.configure",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setUserRole(address,uint8,bool)",
@@ -208,7 +225,8 @@
               "claim_id": "roles.configure",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transferOwnership(address)",
@@ -221,7 +239,8 @@
               "claim_id": "ownership.transfer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         }
       ]
     },
@@ -240,7 +259,8 @@
               "claim_id": "erc20.approve",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "enter(address,uint256)",
@@ -253,7 +273,8 @@
               "claim_id": "supply.mint",
               "tier": "idiom_structural"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "exit(address,uint256)",
@@ -266,7 +287,8 @@
               "claim_id": "supply.burn",
               "tier": "idiom_structural"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setBeforeTransferHook(address)",
@@ -279,7 +301,8 @@
               "claim_id": "callee_pointer.rotate",
               "tier": "idiom_structural"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -292,7 +315,8 @@
               "claim_id": "erc20.transfer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -305,7 +329,8 @@
               "claim_id": "erc20.transfer_from",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         }
       ]
     },
@@ -319,7 +344,8 @@
           "full_name": "peers(uint32)",
           "selector": "0xbb0b6a53",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "setDelegate(address)",
@@ -330,13 +356,15 @@
               "claim_id": "lz_oapp.set_delegate",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "setLockBox(address)",
           "selector": "0x2d8c8039",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "setPeer(uint32,bytes32)",
@@ -347,7 +375,8 @@
               "claim_id": "lz_oapp.set_peer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         }
       ]
     },
@@ -361,7 +390,8 @@
           "full_name": "approveSelf(uint256)",
           "selector": "0x9c9457ff",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "pause()",
@@ -374,19 +404,22 @@
               "claim_id": "pause.set",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "paused()",
           "selector": "0x5c975abb",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
-          "claims": []
+          "claims": [],
+          "value_flows": []
         },
         {
           "full_name": "unpause()",
@@ -398,6 +431,295 @@
             {
               "claim_id": "pause.unset",
               "tier": "standard_exact"
+            }
+          ],
+          "value_flows": []
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000070",
+      "chain": "synthetic",
+      "contract": "AssetRecovery",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "pull(IERC20,address,uint256)",
+          "selector": "0x7372c2b5",
+          "effect_labels": [
+            "asset_pull"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.in",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x5beae096",
+              "direction": "in",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "self",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_param_index": 2
+            }
+          ]
+        },
+        {
+          "full_name": "recoverERC721(IERC721,address,uint256)",
+          "selector": "0x2cdf2c35",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x42842e0e",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "token_identity",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1
+            }
+          ]
+        },
+        {
+          "full_name": "setFeeRecipient(address)",
+          "selector": "0xe74b981b",
+          "effect_labels": [],
+          "claims": [],
+          "value_flows": []
+        },
+        {
+          "full_name": "splitPay(IERC20,address,uint256,uint256)",
+          "selector": "0x9e720dca",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xd0c407e1",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "one_of",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_kinds": [
+                {
+                  "kind": "param",
+                  "tier": "dispositive_ast"
+                },
+                {
+                  "kind": "storage_setter",
+                  "tier": "dispositive_ast"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "full_name": "sweep(IERC20)",
+          "selector": "0x01681a62",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xd0c407e1",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "immutable",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "indeterminate",
+                "tier": "static_trace"
+              }
+            }
+          ]
+        },
+        {
+          "full_name": "sweepTo(IERC20,address,uint256)",
+          "selector": "0x0aeef8c8",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xd0c407e1",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1,
+              "amount_param_index": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000080",
+      "chain": "synthetic",
+      "contract": "Teller",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "bridge(uint256)",
+          "selector": "0x90fd50b3",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [],
+          "value_flows": []
+        },
+        {
+          "full_name": "deposit(IERC20,uint256)",
+          "selector": "0x47e7ef24",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "value_router",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x23b872dd",
+              "direction": "value_router",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "self",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "caller_supplied",
+                "tier": "static_trace"
+              }
+            }
+          ]
+        },
+        {
+          "full_name": "depositFor(IERC20,uint256,address)",
+          "selector": "0xc8820f6c",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "value_router",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x23b872dd",
+              "direction": "value_router",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "self",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "static_trace"
+              },
+              "amount_param_index": 1
+            }
+          ]
+        },
+        {
+          "full_name": "redeem(address,IERC20,uint256)",
+          "selector": "0x0e6dfcd5",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "value_router",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "value_router",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param_derived",
+                "tier": "static_trace"
+              },
+              "target_param_index": 0
             }
           ]
         }
@@ -418,7 +740,8 @@
               "claim_id": "erc20.approve",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "deposit()",
@@ -435,7 +758,8 @@
               "claim_id": "weth.deposit",
               "tier": "idiom_structural"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "receive()",
@@ -448,7 +772,8 @@
               "claim_id": "supply.mint",
               "tier": "idiom_structural"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -459,7 +784,8 @@
               "claim_id": "erc20.transfer",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -470,7 +796,8 @@
               "claim_id": "erc20.transfer_from",
               "tier": "standard_exact"
             }
-          ]
+          ],
+          "value_flows": []
         },
         {
           "full_name": "withdraw(uint256)",
@@ -491,6 +818,24 @@
             {
               "claim_id": "weth.withdraw",
               "tier": "idiom_structural"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "native_transfer_send",
+              "selector": null,
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "msg_sender",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_param_index": 0
             }
           ]
         }

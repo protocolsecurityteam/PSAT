@@ -295,18 +295,6 @@ CORPUS_EXEMPT_CLAIM_IDS = {
         "no contract factory in the label corpus; covered by this file's synthetic "
         "factory and test_claims_pipeline_integration (compiled upgrade_factory_uups.sol)."
     ),
-    "flow.in": (
-        "no compiled corpus positive — corpus vault deposits use SafeTransferLib's "
-        "non-standard selector, which the hardened facts do not tag as a "
-        "callee_erc20_selector; covered by "
-        "test_claims_behavior_families::test_flow_in_pull_from_third_party."
-    ),
-    "value_router": (
-        "no cross-contract router in the reduced corpus (the corpus vault uses "
-        "SafeTransferLib in its OWN body, which is a same-contract move, never a "
-        "routed one); covered by test_flow_value_router (compiled Router->Vault "
-        "fixture, positive + directSend/same-contract negative)."
-    ),
     "authorized_caller.rotate": _AUTH_MATCHERS_EXEMPTION,
     "ownership.accept": _AUTH_MATCHERS_EXEMPTION,
     "roles.grant": _AUTH_MATCHERS_EXEMPTION,

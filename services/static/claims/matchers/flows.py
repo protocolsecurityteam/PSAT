@@ -47,10 +47,12 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
     omitted when absent so a consumer never reads a guessed value.
 
     ``target_kinds``/``amount_kinds`` accompany them only where the contributing
-    IR sites disagreed and the fold therefore reads ``indeterminate``: the list
-    names each site's own classification so a reader sees "two destinations, both
-    resolved" instead of just "unknown". The scalar keeps its exact meaning — a
-    consumer reading only it is unaffected."""
+    IR sites disagreed, which is exactly where the scalar stops naming one kind:
+    it reads ``one_of`` when every site is itself resolved (the list IS the set of
+    alternatives — read it and take the WORST) and ``indeterminate`` when some
+    site is not (the list is a partial explanation, not a closed set). The scalar
+    keeps its exact meaning either way — a consumer reading only it never
+    over-reads, it just learns less."""
     entry: dict[str, Any] = {
         "kind": f.get("kind"),
         "selector": f.get("selector"),

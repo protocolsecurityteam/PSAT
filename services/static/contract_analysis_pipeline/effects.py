@@ -44,6 +44,7 @@ claims plane reads):
 
 from __future__ import annotations
 
+import re
 from typing import Any, TypedDict, cast
 from weakref import WeakKeyDictionary
 
@@ -128,11 +129,21 @@ class ValueFlow(TypedDict):
     from_is_self: bool
     origin: str  # body | guard
     # target_kind ∈ {immutable, constant, storage_no_setter, storage_setter,
-    #   param, msg_sender, caller_controlled, self, token_owner, indeterminate}
+    #   param, msg_sender, caller_controlled, self, token_owner, one_of,
+    #   indeterminate}
+    # one_of: the contributing sites resolved to SEVERAL distinct kinds, each
+    #   itself resolved — see ``target_kinds`` for the members, and take the
+    #   worst one. Never a licence to pick the most favourable member.
     target_kind: NotRequired[KindTier]
     # amount_kind ∈ {msg_value, param, whole_balance, bounded_by_storage,
     #   fixed_constant, balance_delta, capped_by_balance, param_derived,
-    #   indeterminate}
+    #   token_identity, caller_supplied, indeterminate}
+    # caller_supplied: every branch of the amount is a quantity the caller chose —
+    #   an ABI argument or the ETH attached to the call. Carries no slot, because
+    #   the msg.value branch has none.
+    # token_identity: the sink's ABI proves this slot names WHICH token moves,
+    #   not how much (ERC-721). Exactly one non-fungible token moves; the slot is
+    #   never published as ``amount_param_index``.
     # capped_by_balance: provably ≤ this contract's own balance — the minimum of
     #   address(this).balance and some other value (a real upper bound / mitigation).
     # param_derived: see :func:`_call_amount_origin` — the amount IS an external
@@ -145,11 +156,14 @@ class ValueFlow(TypedDict):
     # so a consumer reading the fold alone is never contradicted, and a
     # single-site flow carries no redundant copy. A function sending to two
     # separately-resolved destinations therefore publishes both instead of
-    # only the ``indeterminate`` their union folds to.
+    # only the scalar their union folds to.
     #
     # Honesty: a site that is itself ``indeterminate`` appears in the list as
-    # such — the list explains the fold, it never launders it. Consequently the
-    # fold is still ``indeterminate`` whenever this key is present.
+    # such — the list explains the fold, it never launders it. So this key being
+    # present means the fold is either ``one_of`` — every member below is
+    # resolved and they ARE the alternatives — or ``indeterminate``, where at
+    # least one member is not and the list is therefore a partial explanation
+    # rather than a closed set of possibilities.
     target_kinds: NotRequired[list[KindTier]]
     # ``target_kinds`` for the amount lattice, same discipline.
     amount_kinds: NotRequired[list[KindTier]]
@@ -248,6 +262,25 @@ _ERC20_SEND_SELECTORS = frozenset(
         "0x423f6cef",  # safeTransfer(address,uint256)
     }
 )
+
+# Pull selectors ERC-20 does not define at all — they are ERC-721's, so their
+# trailing ``uint256`` is a token IDENTITY and never a quantity. The selector is
+# the whole proof: ERC-20 has no ``safeTransferFrom`` in any form, so no token
+# can answer these with fungible semantics. (``0x23b872dd`` is deliberately NOT
+# here: both standards define ``transferFrom(address,address,uint256)``, and the
+# selector alone cannot say which one a callee implements.)
+_ERC721_IDENTITY_SELECTORS = frozenset(
+    {
+        "0x42842e0e",  # safeTransferFrom(address,address,uint256)
+        "0xb88d4fde",  # safeTransferFrom(address,address,uint256,bytes)
+    }
+)
+
+# The amount classification for those: one non-fungible token moves, and the slot
+# that would carry "how much" carries WHICH instead. Naming it is what stops a
+# consumer reading the id as a quantity — and what keeps the slot out of
+# ``amount_param_index``, which a prober fills with a probe amount.
+_TOKEN_IDENTITY_AMOUNT = ("token_identity", "dispositive_ast")
 
 # The specific labels an ``external_contract_call`` fact defers to.
 _SPECIFIC_EFFECT_LABELS = frozenset(
@@ -1251,6 +1284,87 @@ def _reaches_merged_local(value: Any, ctx: _UnitCtx) -> bool:
     return False
 
 
+# How deep to chase nested merges when deciding whether every branch of a value
+# is caller-supplied. Reassignment chains are a hop or two (`if native: amount =
+# msg.value`); past that the answer is "we did not prove it", which is the safe
+# direction anyway.
+_MERGE_RESOLVE_DEPTH = 4
+
+
+def _phi_of(value: Any, ctx: _UnitCtx) -> Any:
+    """The Phi IR that defines ``value``, or ``None``. Walks copy edges only, so
+    the returned merge IS this value's definition rather than one of its inputs'."""
+    seen: set[int] = set()
+    stack: list[Any] = [value]
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn == "Phi":
+            return ir
+        if tn == "TypeConversion":
+            stack.append(getattr(ir, "variable", None))
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+    return None
+
+
+def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
+    """True when ``value`` IS a caller-chosen quantity at the ABI boundary: a
+    formal parameter of the entry, or the ETH the caller attached to the call.
+
+    A dispositive AST test on the leaf itself, not a provenance inference — which
+    is what lets it stand as one branch of a proof about a merge."""
+    if value is None:
+        return False
+    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+
+    if isinstance(value, SolidityVariable) and str(getattr(value, "name", "")) == "msg.value":
+        return True
+    base = _base_name(getattr(value, "name", None))
+    return bool(base) and base in ctx.param_names
+
+
+def _merged_caller_supplied(value: Any, ctx: _UnitCtx, depth: int = 0) -> bool:
+    """True when EVERY branch of a merged value is caller-supplied.
+
+    ``function deposit(IERC20 asset, uint256 amount) payable`` that does
+    ``if (asset == native) amount = msg.value;`` merges an ABI argument with the
+    attached ETH. Both are the caller's number, so the merge is not the absence of
+    an answer — it is a disjunction whose members agree on the only thing an
+    amount kind claims. Collapsing it to ``indeterminate`` published "we traced
+    nothing" about a quantity the caller picks outright.
+
+    Deliberately NOT a slot claim: one branch has no ABI slot at all, so no
+    ``amount_param_index`` follows from this (see :func:`_fold_param_index`).
+    Anything the walk cannot prove caller-supplied — a storage read, a call
+    result, a nested merge past the depth bound — fails the whole conjunction, so
+    the answer degrades to ``indeterminate`` rather than to a guessed member."""
+    if depth > _MERGE_RESOLVE_DEPTH:
+        return False
+    phi = _phi_of(value, ctx)
+    if phi is None:
+        return False
+    inputs = list(getattr(phi, "rvalues", None) or [])
+    if not inputs:
+        return False
+    for rvalue in inputs:
+        if _is_caller_supplied_leaf(rvalue, ctx):
+            continue
+        resolved, _ir = _resolve_copies(rvalue, ctx.def_by_id)
+        if _is_caller_supplied_leaf(resolved, ctx):
+            continue
+        if _merged_caller_supplied(rvalue, ctx, depth + 1):
+            continue
+        return False
+    return True
+
+
 def _operand_is_direct(value: Any, param_names: set[str]) -> bool:
     """True when the operand is a definitive AST leaf (Tier-1 dispositive): a
     StateVariable, a Solidity built-in (``msg.sender``/``msg.value``), a literal
@@ -1373,8 +1487,23 @@ def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     if elem is not None:
         return elem
     if _reaches_merged_local(operand, ctx):
-        return ("indeterminate",)
-    call = _call_origin(operand, ctx)
+        # A merge whose every branch is caller-supplied is a known disjunction,
+        # not an unknown. It resolves ONLY on the amount side: two caller-chosen
+        # QUANTITIES agree on what an amount kind asserts, whereas two caller-
+        # chosen DESTINATIONS are two different addresses and must stay
+        # indeterminate — which is what ``_origin_to_target_kind`` does with this
+        # tag, having no case for it.
+        return ("caller_supplied",) if _merged_caller_supplied(operand, ctx) else ("indeterminate",)
+    # The AMOUNT vocabulary, deliberately, even though this binding also feeds
+    # destination resolution in the callee. ``param_derived`` is the one tag it
+    # adds, and ``_origin_to_target_kind`` has no case for it, so a destination
+    # resolved through this binding lands on ``indeterminate`` — bit-identical to
+    # what the narrower call had already produced for the same operand. What it
+    # buys is the amount side: ``vault.exit(to, asset, shareAmount.mulDivDown(
+    # rate, ONE), …)`` forwards a scaled caller input, and refusing to name it
+    # here made every ERC-4626-style redemption's amount ``indeterminate`` at the
+    # sink, one hop from a fact we hold.
+    call = _call_origin(operand, ctx, amount=True)
     if call is not None:
         return call
     srcs = ctx.engine._sources_for_value(operand)
@@ -1518,6 +1647,8 @@ def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
         return "bounded_by_storage"
     if tag == "param_derived":
         return "param_derived"
+    if tag == "caller_supplied":
+        return "caller_supplied"
     # An address origin (msg.sender / tx.origin / self) forwarded as an amount is
     # not a meaningful value bound — stay indeterminate rather than invent one.
     return "indeterminate"
@@ -2153,16 +2284,37 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
 
 def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
     """Collapse every contributing IR site's (kind, tier) to one classification.
-    Sites must agree on a single non-indeterminate kind, else the union is
-    ``indeterminate`` (the cross-site MIX rule). Tier is the weaker of the
-    agreeing sites — one traced site makes the whole a ``static_trace``."""
+    Tier is the weaker of the contributing sites — one traced site makes the
+    whole a ``static_trace``.
+
+    Three outcomes, and the middle one is the point:
+
+    * sites AGREE on one resolved kind — that kind.
+    * sites DISAGREE but every member is itself resolved — ``one_of``. The
+      function has several destinations (or several amounts) and we know what
+      each of them is; saying ``indeterminate`` there claimed we had traced
+      nothing, on flows where we had traced everything. A scorer reading the
+      scalar alone would score a function that pays a caller-named address and a
+      fixed one identically to a function nothing is known about.
+    * any member is itself ``indeterminate`` — ``indeterminate``. One unresolved
+      site means the set of destinations is not closed, so the members cannot be
+      published as the alternatives.
+
+    ``one_of`` is a set, not a sequence: the sites may be mutually exclusive
+    branches or may all execute in one call, and nothing here distinguishes those.
+    A consumer must read ``target_kinds``/``amount_kinds`` and take the WORST
+    member — one caller-chosen site in the set means the caller can name a
+    destination on some path, which is the whole question."""
     if not sites:
         return None
     kinds = {kind for kind, _ in sites}
-    if "indeterminate" in kinds or len(kinds) != 1:
-        return {"kind": "indeterminate", "tier": "static_trace"}
     tier = "static_trace" if any(t == "static_trace" for _, t in sites) else "dispositive_ast"
-    return {"kind": next(iter(kinds)), "tier": tier}
+    if len(kinds) == 1:
+        kind = next(iter(kinds))
+        return {"kind": kind, "tier": "static_trace" if kind == "indeterminate" else tier}
+    if "indeterminate" in kinds:
+        return {"kind": "indeterminate", "tier": "static_trace"}
+    return {"kind": "one_of", "tier": tier}
 
 
 def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
@@ -2214,10 +2366,9 @@ _VALUE_WALK_DEPTH_CAP = 128
 # the bare ERC-20 sets, and Slither lowers them to ``LibraryCall`` (or, when the
 # helper is a plain internal, ``InternalCall``), so the value move is invisible to
 # the selector scan. What identifies the shape is the ERC-20 selector the callee
-# BODY provably issues (below), never the callee's identifier. This runs ONLY
-# across a crossed contract boundary (``value_router`` flows); the same-contract
-# classification is left byte-for-byte unchanged, so a contract using
-# ``SafeTransferLib`` in its OWN body keeps its current (empty) flow set.
+# BODY provably issues (below), never the callee's identifier — and only where
+# that body issues it in a form the value-flow walk cannot resolve for itself, so
+# the recognizer covers the walk's blind spot instead of competing with it.
 _ERC20_TRANSFER_SELECTOR = _selector_for("transfer(address,uint256)")
 _ERC20_TRANSFER_FROM_SELECTOR = _selector_for("transferFrom(address,address,uint256)")
 
@@ -2228,6 +2379,14 @@ _ERC20_TRANSFER_FROM_SELECTOR = _selector_for("transferFrom(address,address,uint
 _TOKEN_FIRST_BODY_DEPTH = 1
 
 
+# Fixed-size byte types (``bytes1`` … ``bytes32``). A constant of one of these is
+# a numeric word: the compiler folded a ``.selector`` member or an assembly
+# literal into it. ``string`` and ``bytes`` (dynamic) are excluded — a revert
+# message is also handed back as a Python ``str``, and only the DECLARED type
+# separates the two.
+_FIXED_BYTES_TYPE = re.compile(r"bytes([1-9]|[12][0-9]|3[0-2])$")
+
+
 def _selector_of_constant(operand: Any) -> str | None:
     """The 4-byte selector a constant operand denotes, or ``None``.
 
@@ -2235,8 +2394,20 @@ def _selector_of_constant(operand: Any) -> str | None:
     ``abi.encodeWithSelector(token.transfer.selector, …)`` folds to a ``bytes4``
     constant equal to the selector; the assembly form
     ``mstore(ptr, 0xa9059cbb00…00)`` folds to a 32-byte word carrying the
-    selector left-aligned in its top four bytes and zeros below."""
+    selector left-aligned in its top four bytes and zeros below.
+
+    A ``bytesN`` constant's value arrives as a DECIMAL STRING rather than an
+    ``int``, so the numeric word has to be read back through the declared type —
+    which is also what keeps a revert-message ``string`` (identically a Python
+    ``str``) from being read as a selector. Rejecting the string form outright is
+    what made the OZ ``SafeERC20`` idiom, whose selector comes from exactly this
+    fold, invisible to the recognizer."""
     value = getattr(operand, "value", None)
+    if isinstance(value, str) and _FIXED_BYTES_TYPE.fullmatch(str(getattr(operand, "type", "") or "")):
+        try:
+            value = int(value)
+        except ValueError:
+            return None
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     if value < 1 << 32:
@@ -2279,17 +2450,28 @@ def _ir_operands(ir: Any) -> list[Any]:
     return operands
 
 
-def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> set[str]:
-    """The bare ERC-20 move selectors ``unit``'s body provably issues.
+def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> tuple[set[str], set[str]]:
+    """``(issued, walk_visible)`` — the bare ERC-20 move selectors ``unit``'s body
+    provably issues, and the subset it issues in a form the value-flow walk can
+    resolve on its own.
 
     Evidence is a resolved external call whose canonical signature IS an ERC-20
     move, a selector VALUE the body materializes (assembly literal or
     ``abi.encodeWithSelector`` constant), or a member access the compiler bound
     to an ERC-20 declaration (``abi.encodeCall``). None of it reads an identifier
-    of the unit itself."""
+    of the unit itself.
+
+    Only the FIRST form is walk-visible: a resolved ``HighLevelCall`` to
+    ``transfer``/``transferFrom`` is a site the ordinary recursion already
+    classifies when it descends into this unit. The other two are the whole
+    reason the recognizer exists — a selector built in assembly or handed to a
+    low-level ``.call`` moves tokens with no IR the walk can see. Keeping them
+    apart is what lets the recognizer fire on a same-contract helper without ever
+    displacing, or double-counting, a move the walk already resolves."""
     found: set[str] = set()
+    visible: set[str] = set()
     if unit is None or depth > _TOKEN_FIRST_BODY_DEPTH:
-        return found
+        return found, visible
     wanted = {_ERC20_TRANSFER_SELECTOR, _ERC20_TRANSFER_FROM_SELECTOR}
     for node in getattr(unit, "nodes", []) or []:
         for ir in _node_irs(node):
@@ -2298,6 +2480,7 @@ def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> set[
                 called = _selector_for(_callee_signature(ir))
                 if called in wanted:
                     found.add(str(called))
+                    visible.add(str(called))
             for operand in _ir_operands(ir):
                 selector = _selector_of_constant(operand)
                 if selector in wanted:
@@ -2309,8 +2492,10 @@ def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> set[
                 callee = getattr(ir, "function", None)
                 key = id(callee)
                 if callee is not None and key not in seen and getattr(callee, "nodes", None):
-                    found |= _erc20_selectors_issued(callee, seen | {key}, depth + 1)
-    return found
+                    child_found, child_visible = _erc20_selectors_issued(callee, seen | {key}, depth + 1)
+                    found |= child_found
+                    visible |= child_visible
+    return found, visible
 
 
 def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
@@ -2329,7 +2514,14 @@ def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
     (2 / 3 args) the selector scan already handles, and from ERC-721
     ``safeTransferFrom(...,bytes)`` (a ``bytes`` tail). With the token occupying
     the leading slot, the remaining formals are the only type-consistent
-    carriers of the ABI tail the callee forwards."""
+    carriers of the ABI tail the callee forwards.
+
+    A callee that issues the selector through a RESOLVED call is not recognized
+    here at all: the ordinary recursion descends into it and classifies that site
+    itself, so firing would either double-count the move (two sites on one flow
+    key, folding a resolvable destination to ``indeterminate``) or — with the
+    walk suppressed — replace the callee's own classification with this one. The
+    recognizer is for the moves the walk is BLIND to, and nothing else."""
     callee = getattr(ir, "function", None)
     if callee is None or not getattr(callee, "nodes", None):
         return None
@@ -2339,8 +2531,8 @@ def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
     inner = signature[signature.index("(") + 1 : -1]
     types = [t.strip() for t in inner.split(",")] if inner else []
     args = list(getattr(ir, "arguments", []) or [])
-    issued = _erc20_selectors_issued(callee, frozenset({id(callee)}), 0)
-    if len(issued) != 1:
+    issued, walk_visible = _erc20_selectors_issued(callee, frozenset({id(callee)}), 0)
+    if len(issued) != 1 or walk_visible:
         return None
     selector = next(iter(issued))
     if selector == _ERC20_TRANSFER_SELECTOR and types[1:] == ["address", "uint256"] and len(args) >= 3:
@@ -2447,10 +2639,32 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
             param_index_bindings,
         )
 
-    def add(flow: ValueFlow, target: Any, amount: Any, ctx: _UnitCtx, crossed: bool) -> None:
+    def add(
+        flow: ValueFlow,
+        target: Any,
+        amount: Any,
+        ctx: _UnitCtx,
+        crossed: bool,
+        amount_override: tuple[str, str] | None = None,
+    ) -> None:
+        # A move of a provably-zero amount moves nothing — ``transfer(to, 0)``
+        # transfers no tokens, and a router handing a callee a literal ``0`` (which
+        # the callee then guards with ``if (amount > 0)``) causes no transfer at
+        # all. Publishing one names an outflow that CANNOT execute, and the site
+        # would additionally fold with any real send on the same key and collapse a
+        # resolved destination to ``indeterminate``. Suppressed for every sink kind,
+        # because the fact is about the value and not about the call shape.
+        #
+        # Never applied under ``amount_override``: that slot is a token IDENTITY,
+        # and token id 0 is an ordinary NFT.
+        if amount_override is None and _amount_is_provably_zero(amount, ctx):
+            return
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
-        amount_site = _classify_site(amount, ctx, amount=True)
+        # ``amount_override`` is for a sink whose trailing slot the ABI proves is
+        # not a quantity at all: tracing its provenance would answer a question
+        # nobody asked and publish the answer under the name "amount".
+        amount_site = amount_override or _classify_site(amount, ctx, amount=True)
         amount_sites.setdefault(key, []).append(amount_site)
         target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
         # A ``param_derived`` amount is a call RESULT, so the slot to publish is
@@ -2548,6 +2762,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             arguments[2] if len(arguments) > 2 else None,  # amount
                             context(),
                             crossed,
+                            _TOKEN_IDENTITY_AMOUNT if selector in _ERC721_IDENTITY_SELECTORS else None,
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         add(
@@ -2564,30 +2779,35 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             crossed,
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
-                    call_value = getattr(ir, "call_value", None)
                     # A provably-zero value call (OZ SafeERC20's
-                    # ``functionCallWithValue(token, data, 0)``) moves no ETH — not
-                    # a value-out flow, and must not fold with a real send on the
-                    # same function's flow key.
-                    if not _amount_is_provably_zero(call_value, context()):
-                        add(
-                            {
-                                "kind": "low_level_value_call",
-                                "selector": None,
-                                "direction": direction_of("out"),
-                                "from_is_self": True,
-                                "origin": origin,
-                            },
-                            getattr(ir, "destination", None),
-                            call_value,
-                            context(),
-                            crossed,
-                        )
+                    # ``functionCallWithValue(token, data, 0)``) moves no ETH; it is
+                    # dropped by ``add``'s zero-amount guard along with every other
+                    # sink kind.
+                    add(
+                        {
+                            "kind": "low_level_value_call",
+                            "selector": None,
+                            "direction": direction_of("out"),
+                            "from_is_self": True,
+                            "origin": origin,
+                        },
+                        getattr(ir, "destination", None),
+                        getattr(ir, "call_value", None),
+                        context(),
+                        crossed,
+                    )
                 # A token-first library/internal transfer (SafeTransferLib /
                 # SafeERC20) whose value move is invisible to the selector scan and
-                # to the assembly-only callee body. Recognized ONLY when routing
-                # across a boundary, so same-contract classification is unchanged.
-                token_first = _token_first_transfer(ir) if crossed and op in ("HighLevelCall", "LibraryCall") else None
+                # to the assembly-only callee body. Recognized on the contract's
+                # OWN body as well as across a boundary: a contract that reaches
+                # for one of these libraries instead of calling ``transfer``
+                # directly moves exactly as much value, and publishing nothing for
+                # it said "this function moves no funds" about functions that
+                # provably do. ``direction_of`` gives the same-contract case its
+                # true direction; only a move made across a boundary is routed.
+                token_first = (
+                    _token_first_transfer(ir) if op in ("HighLevelCall", "LibraryCall", "InternalCall") else None
+                )
                 if token_first is not None:
                     selector = _selector_for(_callee_signature(ir))
                     if token_first[0] == "send":
@@ -2596,7 +2816,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             {
                                 "kind": "callee_erc20_selector",
                                 "selector": selector,
-                                "direction": "value_router",
+                                "direction": direction_of("out"),
                                 "from_is_self": True,
                                 "origin": origin,
                             },
@@ -2612,7 +2832,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             {
                                 "kind": "callee_erc20_selector",
                                 "selector": selector,
-                                "direction": "value_router",
+                                "direction": direction_of("out" if from_self else "in"),
                                 "from_is_self": from_self,
                                 "origin": origin,
                             },
@@ -2622,11 +2842,12 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             crossed,
                         )
                 if op in ("InternalCall", "LibraryCall") and token_first is None:
-                    # ``token_first is None`` skips a library call already counted
-                    # as a direct routed move, so its (assembly, or bare-selector)
-                    # body is not walked into a second, duplicate ``value_router``
-                    # flow. Only crossed frames set ``token_first``; the
-                    # same-contract recursion is therefore byte-for-byte unchanged.
+                    # ``token_first is None`` skips a call already counted as a
+                    # direct move, so its body is not walked into a second,
+                    # duplicate flow on the same key. The callee is assembly- or
+                    # encode-only by construction (:func:`_token_first_transfer`
+                    # declines anything the walk can resolve), so descending would
+                    # in any case find nothing this site did not already publish.
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
@@ -2653,7 +2874,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                     is_direct_value = (
                         selector in _ERC20_PULL_SELECTORS
                         or selector in _ERC20_SEND_SELECTORS
-                        or (crossed and _token_first_transfer(ir) is not None)
+                        or _token_first_transfer(ir) is not None
                     )
                     callee = getattr(ir, "function", None)
                     if not is_direct_value and callee is not None and getattr(callee, "nodes", None):
