@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "description": "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow facts for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended changes — and justify each hunk of the diff, since a diff here is a change in what the pipeline publishes about real contracts.",
   "contracts": [
     {
@@ -13,7 +13,9 @@
           "selector": "0xdd62ed3e",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "approve(address,uint256)",
@@ -25,14 +27,18 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "balanceOf(address)",
           "selector": "0x70a08231",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "mint(address,uint256)",
@@ -46,7 +52,9 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "pause()",
@@ -60,14 +68,20 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "paused"
+          ]
         },
         {
           "full_name": "totalSupply()",
           "selector": "0x18160ddd",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -79,7 +93,9 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -91,7 +107,9 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "unpause()",
@@ -105,7 +123,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "paused"
+          ]
         }
       ]
     },
@@ -120,7 +142,11 @@
           "selector": "0x8da5cb5b",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OwnableStorageLocation"
+          ]
         },
         {
           "full_name": "renounceOwnership()",
@@ -134,14 +160,22 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OwnableStorageLocation"
+          ]
         },
         {
           "full_name": "setTokenOut(address)",
           "selector": "0xc158910d",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "tokenOut"
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -155,7 +189,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OwnableStorageLocation"
+          ]
         }
       ]
     },
@@ -170,7 +208,9 @@
           "selector": "0xb7009613",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": []
         },
         {
           "full_name": "setAuthority(Authority)",
@@ -184,7 +224,17 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "authority.canCall",
+              "selector": "0xb7009613",
+              "origin": "guard"
+            }
+          ],
+          "effect_targets": [
+            "authority"
+          ]
         },
         {
           "full_name": "setPublicCapability(address,bytes4,bool)",
@@ -198,7 +248,17 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "authority.canCall",
+              "selector": "0xb7009613",
+              "origin": "guard"
+            }
+          ],
+          "effect_targets": [
+            "isCapabilityPublic"
+          ]
         },
         {
           "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
@@ -212,7 +272,17 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "authority.canCall",
+              "selector": "0xb7009613",
+              "origin": "guard"
+            }
+          ],
+          "effect_targets": [
+            "getRolesWithCapability"
+          ]
         },
         {
           "full_name": "setUserRole(address,uint8,bool)",
@@ -226,7 +296,17 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "authority.canCall",
+              "selector": "0xb7009613",
+              "origin": "guard"
+            }
+          ],
+          "effect_targets": [
+            "getUserRoles"
+          ]
         },
         {
           "full_name": "transferOwnership(address)",
@@ -240,7 +320,17 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "authority.canCall",
+              "selector": "0xb7009613",
+              "origin": "guard"
+            }
+          ],
+          "effect_targets": [
+            "owner"
+          ]
         }
       ]
     },
@@ -260,7 +350,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "allowance"
+          ]
         },
         {
           "full_name": "enter(address,uint256)",
@@ -274,7 +368,12 @@
               "tier": "idiom_structural"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf",
+            "totalSupply"
+          ]
         },
         {
           "full_name": "exit(address,uint256)",
@@ -288,7 +387,12 @@
               "tier": "idiom_structural"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf",
+            "totalSupply"
+          ]
         },
         {
           "full_name": "setBeforeTransferHook(address)",
@@ -302,7 +406,11 @@
               "tier": "idiom_structural"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "hook"
+          ]
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -316,7 +424,18 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "hook.beforeTransfer",
+              "selector": "0xabd626b0",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "balanceOf",
+            "hook.beforeTransfer"
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -330,7 +449,19 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "hook.beforeTransfer",
+              "selector": "0xabd626b0",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "allowance",
+            "balanceOf",
+            "hook.beforeTransfer"
+          ]
         }
       ]
     },
@@ -345,7 +476,11 @@
           "selector": "0xbb0b6a53",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OAppStorageLocation"
+          ]
         },
         {
           "full_name": "setDelegate(address)",
@@ -357,14 +492,22 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OAppStorageLocation"
+          ]
         },
         {
           "full_name": "setLockBox(address)",
           "selector": "0x2d8c8039",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OAppStorageLocation"
+          ]
         },
         {
           "full_name": "setPeer(uint32,bytes32)",
@@ -376,7 +519,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "OAppStorageLocation"
+          ]
         }
       ]
     },
@@ -391,7 +538,11 @@
           "selector": "0x9c9457ff",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf"
+          ]
         },
         {
           "full_name": "pause()",
@@ -405,21 +556,33 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "PAUSABLE_STORAGE_SLOT"
+          ]
         },
         {
           "full_name": "paused()",
           "selector": "0x5c975abb",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "PAUSABLE_STORAGE_SLOT"
+          ]
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf"
+          ]
         },
         {
           "full_name": "unpause()",
@@ -433,7 +596,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "PAUSABLE_STORAGE_SLOT"
+          ]
         }
       ]
     },
@@ -450,7 +617,23 @@
             "external_contract_call"
           ],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.functionCall",
+              "selector": "0xa0b5ffb0",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "target.call",
+            "token.functionCall"
+          ]
         },
         {
           "full_name": "payGateway(IERC20,uint256)",
@@ -481,6 +664,22 @@
               },
               "amount_param_index": 1
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_9.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.safeTransferFrom",
+              "selector": "0x5beae096",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_9.call",
+            "token.safeTransferFrom"
           ]
         },
         {
@@ -512,6 +711,16 @@
               },
               "amount_param_index": 2
             }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transferFrom",
+              "selector": "0x23b872dd",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "token.transferFrom"
           ]
         },
         {
@@ -543,6 +752,22 @@
               },
               "amount_param_index": 2
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_9.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.safeTransferFrom",
+              "selector": "0x5beae096",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_9.call",
+            "token.safeTransferFrom"
           ]
         },
         {
@@ -574,6 +799,16 @@
               },
               "target_param_index": 1
             }
+          ],
+          "external_calls": [
+            {
+              "target": "collection.safeTransferFrom",
+              "selector": "0x42842e0e",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "collection.safeTransferFrom"
           ]
         },
         {
@@ -581,7 +816,11 @@
           "selector": "0xe74b981b",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "feeRecipient"
+          ]
         },
         {
           "full_name": "splitPay(IERC20,address,uint256,uint256)",
@@ -621,6 +860,22 @@
                 }
               ]
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_2.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.safeTransfer",
+              "selector": "0xd0c407e1",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_2.call",
+            "token.safeTransfer"
           ]
         },
         {
@@ -651,6 +906,28 @@
                 "tier": "static_trace"
               }
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_2.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.balanceOf",
+              "selector": "0x70a08231",
+              "origin": "body"
+            },
+            {
+              "target": "token.safeTransfer",
+              "selector": "0xd0c407e1",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_2.call",
+            "token.balanceOf",
+            "token.safeTransfer"
           ]
         },
         {
@@ -683,6 +960,22 @@
               "target_param_index": 1,
               "amount_param_index": 2
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_2.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "token.safeTransfer",
+              "selector": "0xd0c407e1",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_2.call",
+            "token.safeTransfer"
           ]
         }
       ]
@@ -700,7 +993,17 @@
             "external_contract_call"
           ],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "vault.exit",
+              "selector": "0x18457e61",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "vault.exit"
+          ]
         },
         {
           "full_name": "deposit(IERC20,uint256)",
@@ -730,6 +1033,16 @@
                 "tier": "static_trace"
               }
             }
+          ],
+          "external_calls": [
+            {
+              "target": "vault.enter",
+              "selector": "0x39d6ba32",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "vault.enter"
           ]
         },
         {
@@ -761,6 +1074,16 @@
               },
               "amount_param_index": 1
             }
+          ],
+          "external_calls": [
+            {
+              "target": "vault.enter",
+              "selector": "0x39d6ba32",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "vault.enter"
           ]
         },
         {
@@ -792,6 +1115,28 @@
               },
               "target_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "accountant.getRateInQuoteSafe",
+              "selector": "0x820973da",
+              "origin": "body"
+            },
+            {
+              "target": "shareAmount.mulDivDown",
+              "selector": "0xb67bee04",
+              "origin": "body"
+            },
+            {
+              "target": "vault.exit",
+              "selector": "0x18457e61",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "accountant.getRateInQuoteSafe",
+            "shareAmount.mulDivDown",
+            "vault.exit"
           ]
         }
       ]
@@ -831,6 +1176,16 @@
               },
               "target_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -862,6 +1217,16 @@
               },
               "amount_param_index": 1
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -893,6 +1258,16 @@
               },
               "amount_param_index": 1
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -924,6 +1299,16 @@
               },
               "amount_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -955,6 +1340,16 @@
               },
               "amount_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -986,6 +1381,16 @@
               },
               "amount_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -1017,6 +1422,16 @@
               },
               "amount_param_index": 0
             }
+          ],
+          "external_calls": [
+            {
+              "target": "TMP_15.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "TMP_15.call"
           ]
         },
         {
@@ -1024,14 +1439,126 @@
           "selector": "0x47786d37",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "cap"
+          ]
         },
         {
           "full_name": "setGovernor(address)",
           "selector": "0xc42cf535",
           "effect_labels": [],
           "claims": [],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "governor"
+          ]
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000a0",
+      "chain": "synthetic",
+      "contract": "CastWrappedPull",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "deposit(uint256)",
+          "selector": "0xb6b55f25",
+          "effect_labels": [
+            "asset_pull"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.in",
+              "tier": "standard_exact"
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0x23b872dd",
+              "direction": "in",
+              "from_is_self": false,
+              "origin": "body",
+              "target_kind": {
+                "kind": "self",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "static_trace"
+              },
+              "amount_param_index": 0
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "reserveAsset.safeTransferFrom",
+              "selector": "0x5beae096",
+              "origin": "body"
+            },
+            {
+              "target": "token.transferFrom",
+              "selector": "0x23b872dd",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "reserveAsset.safeTransferFrom",
+            "token.transferFrom"
+          ]
+        },
+        {
+          "full_name": "execBatch(address[],bytes[])",
+          "selector": "0xd0cb75fa",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural"
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "REF_5.functionCall",
+              "selector": "0xa0b5ffb0",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "REF_5.functionCall",
+            "target.call"
+          ]
+        },
+        {
+          "full_name": "previewShares(address)",
+          "selector": "0xc950794d",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "reserveAsset.shares",
+              "selector": "0xce7c2ac2",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "reserveAsset.shares"
+          ]
         }
       ]
     },
@@ -1051,7 +1578,11 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "allowance"
+          ]
         },
         {
           "full_name": "deposit()",
@@ -1069,7 +1600,12 @@
               "tier": "idiom_structural"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf",
+            "totalSupply"
+          ]
         },
         {
           "full_name": "receive()",
@@ -1083,7 +1619,12 @@
               "tier": "idiom_structural"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf",
+            "totalSupply"
+          ]
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -1095,7 +1636,12 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "allowance",
+            "balanceOf"
+          ]
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -1107,7 +1653,12 @@
               "tier": "standard_exact"
             }
           ],
-          "value_flows": []
+          "value_flows": [],
+          "external_calls": [],
+          "effect_targets": [
+            "allowance",
+            "balanceOf"
+          ]
         },
         {
           "full_name": "withdraw(uint256)",
@@ -1147,6 +1698,11 @@
               },
               "amount_param_index": 0
             }
+          ],
+          "external_calls": [],
+          "effect_targets": [
+            "balanceOf",
+            "totalSupply"
           ]
         }
       ]

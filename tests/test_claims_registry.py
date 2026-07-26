@@ -315,10 +315,8 @@ CORPUS_EXEMPT_CLAIM_IDS = {
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,
-    "exec.arbitrary": (
-        "no arbitrary-exec forwarder in the reduced corpus; covered by "
-        "test_claims_upgrade_exec_matchers (boring_vault_manage.sol idiom + safe/timelock gates)."
-    ),
+    # exec.arbitrary is no longer exempt: cast_wrapped_pull.sol carries a batch
+    # executor (address[]/bytes[] forwarding loop) that produces it in the golden.
     "transfer_policy.configure": (
         "policy-tier claim: minted only downstream from sibling facts, so the "
         "single-contract static corpus never produces it; covered by "

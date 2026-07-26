@@ -41,7 +41,7 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
-GOLDEN_SCHEMA_VERSION = 2
+GOLDEN_SCHEMA_VERSION = 3
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
 # small synthetic source that reproduces one real-world claim SHAPE — either a
@@ -150,6 +150,18 @@ MANIFEST: list[dict[str, Any]] = [
         "chain": "synthetic",
         "solc_version": "0.8.27",
         "source_path": "tests/fixtures/contracts/label_corpus/wrapped_native",
+    },
+    {
+        # G5: a library-wrapped pull whose token is a STATE VARIABLE behind a
+        # double cast, so the receiver is a Slither temporary that must resolve to
+        # the state var (safe_transfer_lib.sol takes the token as a PARAMETER and
+        # cannot exercise this). Also carries a batch executor so the exec.arbitrary
+        # "one array level up" shape has corpus-golden coverage.
+        "address": "0x00000000000000000000000000000000000000a0",
+        "name": "CastWrappedPull",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/cast_wrapped_pull.sol",
     },
 ]
 
@@ -319,6 +331,28 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
                 # part of the contract (same-contract flows precede routed ones),
                 # so a reordering is a change the gate should show.
                 "value_flows": [_flow_record(f) for f in (info.get("value_flows") or [])],
+                # External-call sinks pinned (target, selector, origin) DIRECTLY
+                # off the artifact — NOT laundered through _selector_for_signature
+                # like the function ``selector`` above — so a change to the resolved
+                # head (a library-wrapped/cast token receiver, G5) or to the
+                # canonical callee selector (the cross-contract join) diffs the
+                # gate. Without this pin those two shapes are invisible here.
+                "external_calls": sorted(
+                    (
+                        {
+                            "target": str(s.get("target") or ""),
+                            "selector": str(s.get("selector") or ""),
+                            "origin": str(s.get("origin") or ""),
+                        }
+                        for s in (info.get("sinks") or [])
+                        if isinstance(s, dict) and s.get("kind") == "external_call"
+                    ),
+                    key=lambda s: (s["target"], s["selector"], s["origin"]),
+                ),
+                # The persisted compatibility display targets
+                # (``EffectiveFunction.effect_targets``): a resolved head changes
+                # this user-visible string, so pin it too.
+                "effect_targets": sorted(str(t) for t in (info.get("effect_targets") or [])),
             }
         )
     functions.sort(key=lambda row: (row["full_name"], row["selector"]))
