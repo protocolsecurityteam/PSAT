@@ -57,7 +57,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # side-effect (port/memory), not a degradation of the stage's verdict
         # output. record_degraded would mislead /monitor into flagging a healthy
         # job's effects stage as degraded.
-        493: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        501: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
 }
 
