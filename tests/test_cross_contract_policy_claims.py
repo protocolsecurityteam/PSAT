@@ -246,3 +246,68 @@ def test_apply_cross_contract_claims_merges_and_dedups():
     assert len(sweep["claims"]) == 1
     assert sweep["claims"][0]["tier"] == "standard_exact"
     assert payload["functions"][1]["claims"] == []
+
+
+# ---------------------------------------------------------------------------
+# The equal-tier hazard both merge sites share, and why it cannot fire
+# ---------------------------------------------------------------------------
+
+
+def test_equal_tier_merge_keeps_the_first_claim():
+    """Both merge sites are ``resolve_claim_precedence([*existing, *additions])``
+    and precedence compares tiers with a strict ``>`` — so at EQUAL tier the
+    incumbent wins and a re-derived claim would lose to the one it replaces.
+
+    This is the mechanism that made the effects bridge unable to repair a damaged
+    row. Pinned here as a fact about the shape, not a defect at these sites: what
+    keeps it harmless is the precondition below."""
+    from services.static.claims.registry import resolve_claim_precedence
+
+    stale: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
+    fresh: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
+    survivor = resolve_claim_precedence([stale, fresh])
+    assert len(survivor) == 1
+    assert survivor[0]["witness"]["sink_id"] == "stale"
+
+
+@requires_postgres
+def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
+    """Why the hazard above cannot fire at ``_enrich_cross_contract``'s EF write.
+
+    ``policy_derived`` is minted in one module (``static.cross_contract``) that
+    one caller imports (``_enrich_cross_contract``), and that write lands on rows
+    the NEXT run replaces wholesale. The replace carries only observed-tier
+    claims forward, so last run's policy_derived claim is gone before the
+    re-derived one arrives and the two can never collide at equal tier.
+
+    That is a precondition held in a different module, which is exactly the
+    coupling that let the effects bridge diverge unnoticed. If the carry is ever
+    widened past observed-tier, this goes red and both merge sites need the same
+    explicit stale-drop the bridge now uses."""
+    from services.policy.effective_permissions_writer import write_effective_function_rows
+
+    company = f"co-{uuid.uuid4()}"
+    job = _make_job(db_session, address=TARGET, company=company)
+    contract = _make_target_functions(db_session, job, ["sweep(address)"])
+
+    row = _ef(db_session, contract, "sweep(address)")
+    row.claims = [
+        {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "last-run"}},
+        {"claim_id": "upgrade.implementation", "tier": "behavioral_observed", "witness": {"effect_verdict_id": 7}},
+    ]
+    db_session.commit()
+
+    write_effective_function_rows(
+        db_session,
+        contract_id=contract.id,
+        function_records=[
+            {"function": "sweep(address)", "abi_signature": "sweep(address)", "selector": _selector("sweep(address)")}
+        ],
+        capability_by_function=None,
+    )
+    db_session.commit()
+
+    tiers = {c["tier"] for c in _ef(db_session, contract, "sweep(address)").claims or []}
+    assert "policy_derived" not in tiers
+    # ...while the observed claim is the thing the carry exists to preserve.
+    assert "behavioral_observed" in tiers
