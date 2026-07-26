@@ -278,14 +278,52 @@ def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:
     return out
 
 
+# Structural keys a STATIC value-flow witness owns and an observed one never
+# measures: which sinks, in which direction, to what kind of destination, for
+# what kind of amount, at which ABI slot.
+_STATIC_FLOW_KEYS = ("kind", "direction", "flows", "sink_ids")
+
+
+def _carry_forward_static_witness(static: Any, observed: dict[str, Any]) -> dict[str, Any]:
+    """Keep the superseded static witness's structural facts on the observed one.
+
+    Precedence is about TIER — how well we know the claim is true — and a fork
+    observation is the strongest evidence that value moved. It is not evidence
+    about WHERE it can go or HOW MUCH: the probe watched one execution, while
+    ``target_kind``/``amount_kind``/``*_param_index`` are universals the static
+    lattice derived from the code. Dropping them because a stronger tier arrived
+    discarded the only answer to the question the stage exists to ask.
+
+    The effect was perverse: the claim survived at ``behavioral_observed`` while
+    its destination and amount vanished, so the functions we learned the MOST
+    about published the LEAST. Of four sibling ``EtherFiRedemptionManager.redeem*``
+    with identical static flow sets, the one whose probe actually executed was the
+    only one to lose its lattice.
+
+    Observed keys always win on a collision — the observation is the newer, better
+    evidence about anything it genuinely measured."""
+    if not isinstance(static, dict):
+        return observed
+    merged = {k: static[k] for k in _STATIC_FLOW_KEYS if k in static}
+    merged.update(observed)
+    return merged
+
+
 def merge_observed_claims(existing: Iterable[Claim], verdicts: Iterable[Any]) -> list[Claim]:
     """Fold this function's proven verdicts into its existing claim list under the
     registry precedence rule. Idempotent: re-merging the same verdicts is a no-op
     because ``resolve_claim_precedence`` keeps one claim per (id, strongest tier)
     and ``behavioral_observed`` outranks every static tier, so a second pass finds
-    nothing stronger to install."""
+    nothing stronger to install — and the carry-forward below is itself
+    idempotent, since re-merging copies the same structural keys back."""
+    prior = list(existing)
     minted = claims_from_verdicts(verdicts)
-    return resolve_claim_precedence([*existing, *minted])
+    strongest_static = {claim["claim_id"]: claim for claim in resolve_claim_precedence(prior)}
+    for claim in minted:
+        superseded = strongest_static.get(claim["claim_id"])
+        if superseded is not None:
+            claim["witness"] = _carry_forward_static_witness(superseded.get("witness"), claim.get("witness") or {})
+    return resolve_claim_precedence([*prior, *minted])
 
 
 def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[Claim]) -> list[str]:

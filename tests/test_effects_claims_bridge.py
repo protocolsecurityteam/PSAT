@@ -562,3 +562,73 @@ def test_row_delete_without_recreate_nulls_function_id(db_session):
     assert verdict is not None
     assert verdict.function_id is None
     _purge_verdicts(db_session)
+
+
+# ---------------------------------------------------------------------------
+# Precedence must not cost the function its static lattice
+# ---------------------------------------------------------------------------
+
+
+def _static_flow_out() -> Claim:
+    return {
+        "claim_id": "flow.out",
+        "tier": "standard_exact",
+        "witness": {
+            "kind": "value_flow",
+            "direction": "out",
+            "sink_ids": ["sink-1"],
+            "flows": [
+                {
+                    "selector": "0xd0c407e1",
+                    "from_is_self": True,
+                    "target_kind": {"kind": "immutable", "tier": "dispositive_ast"},
+                    "amount_kind": {"kind": "param", "tier": "dispositive_ast"},
+                    "amount_param_index": 1,
+                }
+            ],
+        },
+    }
+
+
+def test_an_observed_flow_claim_keeps_the_static_destination_and_amount():
+    """Precedence is about TIER — how well we know the claim is true. A fork
+    observation is the strongest evidence that value MOVED; it is no evidence at
+    all about where it can go or how much, which are universals the static
+    lattice derived from the code and the probe never measured.
+
+    Replacing the witness wholesale made succeeding at the probe COST a function
+    its lattice: of four sibling ``redeem*`` with identical static flows, the one
+    whose probe executed was the only one to lose its destination and amount."""
+    merged = claims_bridge.merge_observed_claims(
+        [_static_flow_out()],
+        [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})],
+    )
+    flow_out = next(c for c in merged if c["claim_id"] == "flow.out")
+    witness = flow_out["witness"]
+
+    # The tier really is upgraded — the observation is the stronger evidence.
+    assert flow_out["tier"] == "behavioral_observed"
+    # ...and the structural facts survive it.
+    assert witness["direction"] == "out"
+    assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
+    assert witness["flows"][0]["amount_param_index"] == 1
+    # ...alongside the observed pointer.
+    assert witness["effect_verdict_id"] == 1
+
+
+def test_carrying_the_static_witness_forward_is_idempotent():
+    """The bridge re-merges on every job, so a second pass must be a no-op."""
+    verdicts = [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})]
+    once = claims_bridge.merge_observed_claims([_static_flow_out()], verdicts)
+    twice = claims_bridge.merge_observed_claims(once, verdicts)
+    assert once == twice
+
+
+def test_an_observed_claim_with_no_static_counterpart_is_unchanged():
+    """Nothing to carry forward, and nothing invented."""
+    merged = claims_bridge.merge_observed_claims(
+        [], [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})]
+    )
+    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
+    assert "flows" not in witness
+    assert witness["effect_verdict_id"] == 1
