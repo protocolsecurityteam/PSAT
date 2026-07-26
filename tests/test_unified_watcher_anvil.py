@@ -2189,6 +2189,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     This is the integration regression for the "custom slots become
     visible to polling once the analyzer surfaces them" claim — proves
     the data flow works without test-helper short-circuits."""
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import Contract, ContractMaterialization, Job, Protocol
     from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -2283,6 +2284,10 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
             contract_name="CustomAdminContract",
             tracking_plan=tracking_plan,
             status="ready",
+            # Enrollment reads via the version-filtered ``find_by_address``; seed
+            # at the current analyzer version so the row is visible after an
+            # ANALYSIS_SCHEMA_VERSION bump, not just at the DB default.
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         )
     )
     test_db.commit()
