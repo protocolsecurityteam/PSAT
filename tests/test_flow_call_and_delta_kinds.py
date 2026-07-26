@@ -677,3 +677,84 @@ def test_a_zero_amount_on_an_unambiguous_erc20_send_still_moves_nothing(_zero_id
     """The exemption is scoped to the ambiguity. ``transfer(to, 0)`` is ERC-20's
     alone and provably moves nothing, so it must still be dropped."""
     assert not _zero_id["sendNothing(address)"]["value_flows"]
+
+
+# ---------------------------------------------------------------------------
+# A zero-value ``.call{value:}`` must not read as an ETH payout.
+#
+# Plane 0 mints ``asset_send`` from any ``.call{value: v}`` it can reach through
+# an internal call, without looking at ``v``. OZ's ``Address`` helper chain — the
+# bottom of every ``SafeERC20`` call — is such a site, and its ``value`` is a
+# PARAMETER whose zero literal lives one frame up, so only an interprocedural
+# read can settle it. Four real etherfi entry points ("record a withdrawal
+# intent", which approve and then call) published "sends assets out of the
+# contract" from nothing but this.
+# ---------------------------------------------------------------------------
+
+ZERO_VALUE_CALL_SRC = """
+pragma solidity ^0.8.20;
+
+interface IERC20 { function approve(address,uint256) external returns (bool); }
+
+library Address {
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0);
+    }
+    function functionCallWithValue(address target, bytes memory data, uint256 value)
+        internal returns (bytes memory)
+    {
+        (bool ok, bytes memory ret) = target.call{value: value}(data);
+        require(ok, "CALL_FAILED");
+        return ret;
+    }
+}
+
+contract Intent {
+    address public immutable spender;
+
+    constructor(address s) { spender = s; }
+
+    // Approval only: the one ETH-bearing call it reaches carries a zero value.
+    function recordIntent(IERC20 token, uint256 amount) external {
+        Address.functionCall(address(token), abi.encodeWithSelector(IERC20.approve.selector, spender, amount));
+    }
+
+    // A real ETH payout, and it must keep saying so.
+    function payOut(address to, uint256 amount) external {
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "PAY_FAILED");
+    }
+
+    // Both in one function: the payment is what the label rests on.
+    function approveAndPay(IERC20 token, address to, uint256 amount) external {
+        Address.functionCall(address(token), abi.encodeWithSelector(IERC20.approve.selector, spender, amount));
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "PAY_FAILED");
+    }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def _zero_value(tmp_path_factory):
+    contract = _compile(tmp_path_factory.mktemp("zero_value"), ZERO_VALUE_CALL_SRC, "Intent")
+    return build_effects(contract)["functions"]
+
+
+def test_an_approval_is_not_an_eth_payout(_zero_value):
+    info = _zero_value["recordIntent(IERC20,uint256)"]
+    assert info["value_flows"] == []
+    assert "asset_send" not in info["effect_labels"]
+
+
+def test_a_real_value_call_still_reads_as_a_payout(_zero_value):
+    info = _zero_value["payOut(address,uint256)"]
+    assert [f["kind"] for f in info["value_flows"]] == ["low_level_value_call"]
+    assert "asset_send" in info["effect_labels"]
+
+
+def test_a_function_that_approves_AND_pays_keeps_the_payout_label(_zero_value):
+    """The retraction is scoped to the absence of any real outflow: one zero-value
+    site alongside a genuine payment must not take the payment's label with it."""
+    info = _zero_value["approveAndPay(IERC20,address,uint256)"]
+    assert "asset_send" in info["effect_labels"]

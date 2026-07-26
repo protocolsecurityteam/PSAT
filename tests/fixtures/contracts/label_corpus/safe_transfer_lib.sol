@@ -29,10 +29,33 @@ pragma solidity ^0.8.27;
 //    independently and both used to read the `from` argument alone, so both
 //    published "value entered this contract" about a contract the funds never
 //    touched.
+//  * approveGateway — an APPROVAL, routed through the OZ `Address` helper chain
+//    the real `SafeERC20` uses. It bottoms out in `target.call{value: value}`
+//    with `value` bound to a literal `0` one frame up, so a scan that reads the
+//    call shape without resolving the binding sees "sends ETH" on a function
+//    that moves nothing. Only the interprocedural walk can tell.
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
+}
+
+// OZ's `Address`, reduced to the two frames that matter: the value a call sends
+// is a parameter, and the literal that makes it zero is at the CALLER.
+library Address {
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0);
+    }
+
+    function functionCallWithValue(address target, bytes memory data, uint256 value)
+        internal
+        returns (bytes memory)
+    {
+        (bool ok, bytes memory ret) = target.call{value: value}(data);
+        require(ok, "CALL_FAILED");
+        return ret;
+    }
 }
 
 interface IERC721 {
@@ -92,6 +115,12 @@ contract AssetRecovery {
     // Token-first pull INTO this contract.
     function pull(IERC20 token, address from, uint256 amount) external onlyOwner {
         token.safeTransferFrom(from, address(this), amount);
+    }
+
+    // An approval, not a payment: the only ETH-bearing call it reaches carries a
+    // provably-zero value.
+    function approveGateway(IERC20 token, uint256 amount) external {
+        Address.functionCall(address(token), abi.encodeWithSelector(IERC20.approve.selector, gateway, amount));
     }
 
     // The caller pays the gateway. This contract is neither the source nor the

@@ -444,6 +444,15 @@
       "solc_version": "0.8.27",
       "functions": [
         {
+          "full_name": "approveGateway(IERC20,uint256)",
+          "selector": "0x5900134f",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [],
+          "value_flows": []
+        },
+        {
           "full_name": "payGateway(IERC20,uint256)",
           "selector": "0x2563c53c",
           "effect_labels": [

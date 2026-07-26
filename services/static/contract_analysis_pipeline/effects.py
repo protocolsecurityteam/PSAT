@@ -2827,10 +2827,16 @@ def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> tuple[dict[str, t
     return bindings, index_bindings
 
 
-def _value_flow_facts(function: Any) -> list[ValueFlow]:
+def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None) -> list[ValueFlow]:
     """Value movement facts, transitively. ``transferFrom`` whose ``from``
     is ``address(this)`` flows *out*; native ``transfer``/``send`` are value
     sinks Slither lowers to their own IR op (not a low-level call).
+
+    ``zero_value_sinks`` collects the flow KINDS this walk reached and dropped
+    because their amount is provably zero. Absence of a flow is otherwise
+    indistinguishable from never having looked, and the label plane needs the
+    difference: only a site the walk saw, resolved through its caller's
+    bindings, and proved moves nothing can retract a claim.
 
     Each flow additionally carries ``target_kind`` (where the funds go) and
     ``amount_kind`` (how much can leave), classified by reusing the SSA
@@ -2938,6 +2944,8 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 # slot we just said the selector cannot disambiguate.
                 amount_override = ("indeterminate", "static_trace")
             else:
+                if zero_value_sinks is not None:
+                    zero_value_sinks.add(str(flow["kind"]))
                 return
         target_site = _classify_site(target, ctx, amount=False)
         # ``in`` says the funds landed HERE, and only a destination resolved to
@@ -3277,7 +3285,9 @@ def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
     return [selector]
 
 
-def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]) -> list[str]:
+def _reconcile_value_flow_labels(
+    labels: list[str], value_flows: list[ValueFlow], zero_value_sinks: set[str] | None = None
+) -> list[str]:
     """Correct asset-direction labels from the value-flow facts. Native
     transfer/send is an outbound value sink Slither's low-level scan misses;
     a ``transferFrom`` whose ``from`` is ``address(this)`` was mis-read as a
@@ -3303,6 +3313,20 @@ def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]
     ):
         labels = [lbl for lbl in labels if lbl != "asset_pull"]
 
+    # Plane 0 mints ``asset_send`` from ANY ``.call{value: v}`` it can reach
+    # through an internal call, without looking at v. OZ's
+    # ``Address.functionCallWithValue(target, data, 0)`` sits at the bottom of
+    # every SafeERC20 call, so a function whose only "value move" is an approval
+    # published "sends assets out of the contract" — with no flow fact under it,
+    # because the walk had already proved the same site moves nothing. That proof
+    # is what retracts the label; it is available precisely because the walk
+    # resolves the callee's ``value`` parameter through the caller's binding,
+    # which the Plane-0 string scan cannot do. Only when no outbound flow
+    # survives: a function that both approves and pays keeps the label from the
+    # payment.
+    if "low_level_value_call" in (zero_value_sinks or ()) and not any(vf["direction"] == "out" for vf in body_flows):
+        labels = [lbl for lbl in labels if lbl != "asset_send"]
+
     if not body_flows:
         return labels
 
@@ -3323,7 +3347,8 @@ def _reconcile_value_flow_labels(labels: list[str], value_flows: list[ValueFlow]
 def _effect_info_for_function(function: Any) -> EffectInfo:
     sinks = _build_sink_records(function)
     state_writes = _state_write_facts(function, sinks)
-    value_flows = _value_flow_facts(function)
+    zero_value_sinks: set[str] = set()
+    value_flows = _value_flow_facts(function, zero_value_sinks=zero_value_sinks)
     effects: list[str] = []
 
     # Guard-origin sinks (a modifier's own auth call, a reentrancy latch) are
@@ -3349,7 +3374,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "sinks": list(body_sinks),
     }
     labels = _effect_labels(function, effect_context)
-    labels = _reconcile_value_flow_labels(labels, value_flows)
+    labels = _reconcile_value_flow_labels(labels, value_flows, zero_value_sinks)
     # Functions with body external_call sinks but no specific (mint/burn/asset/etc)
     # label get ``external_contract_call`` directly from the sink shape. AFTER the
     # reconcile, so a function whose only specific label the flow facts just
