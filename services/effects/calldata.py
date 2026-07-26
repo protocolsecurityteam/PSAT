@@ -162,6 +162,11 @@ class ValueOutPlanInputs:
     # (see :func:`static_destination_shape`). The recipe uses it only where the
     # sentinel did not already prove ``caller_arbitrary``.
     static_shape: str | None = None
+    # An argument the effect depends on was left at the encoder's default (see
+    # :class:`ProbeArgs`). A call that RAN and observed nothing on such inputs is
+    # a fact about the arguments, not about F — so the recipe must name it as one
+    # and it must never enter the code-plane behaviour cache.
+    inputs_vacuous: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,8 @@ class SupplyPlanInputs:
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
     target_payable: bool | None = None
     native_payout: bool = False
+    # See :class:`ValueOutPlanInputs`.
+    inputs_vacuous: bool = False
     # NO ``static_shape``. The supply recipe reads a destination shape only to
     # collect a §9 discrepancy and discards the shape itself, and the supply
     # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
@@ -687,7 +694,7 @@ def _arg_values(
     amount: int,
     integer_roles: Mapping[int, str] | None = None,
     executor: "ExecutorCall | None" = None,
-) -> dict[int, Any]:
+) -> "ProbeArgs":
     """The substitution policy for a value-moving probe: address params get the
     caller identity (so a mint/transfer has a real recipient); an integer param
     takes ``amount`` only where :func:`integer_param_roles` proved it is a
@@ -721,10 +728,15 @@ def _arg_values(
     satisfy none of them. Zero is both the encoder's default and the only value
     that asks the executor to forward the call and nothing else — a quantity there
     would make the vault attach ETH it does not hold and revert the very call this
-    synthesis exists to observe."""
+    synthesis exists to observe.
+
+    Slots the policy could NOT fill are reported as :attr:`ProbeArgs.vacuous` —
+    see that class for why one predicate covers both mechanisms."""
     roles = {} if executor is not None else (integer_roles or {})
     overrides = executor.values if executor is not None else {}
+    executor_slots = set(executor.slots) if executor is not None else set()
     subs: dict[int, Any] = {}
+    vacuous: list[int] = []
     for idx, type_str in enumerate(types):
         shape = _array_shape(type_str)
         value = overrides.get(idx)
@@ -732,6 +744,16 @@ def _arg_values(
             value = _scalar_arg_value(
                 shape[0] if shape else type_str, idx, identity=identity, amount=amount, roles=roles
             )
+        if value is None:
+            # A slot of the forwarded call the synthesis could not build is vacuous
+            # whatever its type: an executor handed empty calldata calls nothing,
+            # and "called nothing, moved nothing" is not a fact about F. The
+            # executor's OTHER zeros are not vacuous — they are the deliberate
+            # "forward this call and nothing else" the synthesis chose.
+            if idx in executor_slots:
+                vacuous.append(idx)
+            elif executor is None and (shape is not None or _INTEGER_TYPE.fullmatch(type_str.strip())):
+                vacuous.append(idx)
         if shape is None:
             if value is not None:
                 subs[idx] = value
@@ -745,7 +767,29 @@ def _arg_values(
                 # leaving the slot to the encoder is the only honest option.
                 continue
         subs[idx] = [value] * (1 if length is None else length)
-    return subs
+    return ProbeArgs(substitutions=subs, vacuous=tuple(vacuous))
+
+
+@dataclass(frozen=True)
+class ProbeArgs:
+    """An encoded argument vector, plus the slots the policy could not fill.
+
+    ``vacuous`` is ONE predicate, not two detectors that would drift apart: *an
+    argument the effect depends on was left at the encoder's default*. It covers
+    an integer whose role never resolved (a zero-amount call that mints nothing
+    and moves nothing), an array whose element is unproven (a loop that runs over
+    filler), and a forwarded-call slot with no inner call to put in it. All three
+    produce the same false statement downstream — the call RAN and observed
+    nothing, which reads as a structural fact about the function while being a
+    fact about the arguments this prober chose.
+
+    It is a FACT rather than a guess: the synthesizer knows the ABI types and
+    which roles it resolved, so it knows exactly which slots it filled. The
+    consumer's job is to keep such a non-observation out of the behaviour cache —
+    a code-plane cache entry travels to bytecode twins that were never probed."""
+
+    substitutions: dict[int, Any]
+    vacuous: tuple[int, ...] = ()
 
 
 def _scalar_arg_value(
@@ -1212,19 +1256,29 @@ def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[
     return None
 
 
+@dataclass(frozen=True)
+class _ProbeInputs:
+    """What §4.2 and §4.5 both need out of one synthesis pass."""
+
+    calldata: str
+    taint_param_reaches_sink: bool
+    sentinel_calldata: str | None
+    token_param_indexes: tuple[int, ...]
+    inputs_vacuous: bool
+
+
 def _value_probe_inputs(
     fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
-) -> tuple[str, bool, str | None, tuple[int, ...]] | None:
-    """``(calldata, taint_flag, sentinel_calldata, token_param_indexes)`` shared by
-    §4.2 and §4.5."""
+) -> _ProbeInputs | None:
+    """The probe inputs shared by §4.2 and §4.5."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
     roles = integer_param_roles(fn, types, directions)
     addr_roles = address_param_roles(fn, types, directions)
     executor = executor_call(fn, types, held_tokens=held_tokens, recipient=principal)
-    base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=executor)
-    calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=base_subs)
+    base = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=executor)
+    calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=base.substitutions)
     if calldata is None:
         return None
     taint_idx = _taint_index(fn, types, directions)
@@ -1239,14 +1293,20 @@ def _value_probe_inputs(
         if sentinel_exec is not None and sentinel_exec.values:
             sentinel_subs = _arg_values(
                 types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=sentinel_exec
-            )
+            ).substitutions
             sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
     elif taint_idx is not None:
-        sentinel_subs = dict(base_subs)
+        sentinel_subs = dict(base.substitutions)
         sentinel_subs[taint_idx] = SENTINEL_ADDRESS
         sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
     tokens = tuple(sorted(idx for idx, role in addr_roles.items() if role == ROLE_TOKEN))
-    return calldata, taint_idx is not None, sentinel_calldata, tokens
+    return _ProbeInputs(
+        calldata=calldata,
+        taint_param_reaches_sink=taint_idx is not None,
+        sentinel_calldata=sentinel_calldata,
+        token_param_indexes=tokens,
+        inputs_vacuous=bool(base.vacuous),
+    )
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
@@ -1265,7 +1325,8 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
     built = _value_probe_inputs(fn, principal, frozenset(_OUT_DIRECTIONS), candidate.input_token_addresses)
     if built is None:
         return None
-    calldata, tainted, sentinel_calldata, token_params = built
+    calldata, sentinel_calldata = built.calldata, built.sentinel_calldata
+    token_params = built.token_param_indexes
     seeded, seeded_sentinel = _seeded_probe_calldata(
         fn, principal, frozenset(_OUT_DIRECTIONS), candidate.input_token_addresses
     )
@@ -1274,7 +1335,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         principal=principal,
         calldata=calldata,
         gate_ref=_gate_ref(fn.tree),
-        taint_param_reaches_sink=tainted,
+        taint_param_reaches_sink=built.taint_param_reaches_sink,
         sentinel_address=SENTINEL_ADDRESS if sentinel_calldata else None,
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
@@ -1286,6 +1347,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
         static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
+        inputs_vacuous=built.inputs_vacuous,
     )
 
 
@@ -1302,7 +1364,8 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
     built = _value_probe_inputs(fn, principal, _SUPPLY_LATTICE_DIRECTIONS, candidate.input_token_addresses)
     if built is None:
         return None
-    calldata, tainted, sentinel_calldata, token_params = built
+    calldata, sentinel_calldata = built.calldata, built.sentinel_calldata
+    token_params = built.token_param_indexes
     seeded, seeded_sentinel = _seeded_probe_calldata(
         fn, principal, _SUPPLY_LATTICE_DIRECTIONS, candidate.input_token_addresses
     )
@@ -1314,7 +1377,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         principal=principal,
         mint_calldata=calldata,
         gate_ref=_gate_ref(fn.tree),
-        taint_param_reaches_sink=tainted,
+        taint_param_reaches_sink=built.taint_param_reaches_sink,
         sentinel_address=SENTINEL_ADDRESS if sentinel_calldata else None,
         sentinel_calldata=sentinel_calldata,
         input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
@@ -1323,6 +1386,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
+        inputs_vacuous=built.inputs_vacuous,
     )
 
 
@@ -1625,7 +1689,9 @@ def _entry_point_for(
     probe_fn = facts_for_name(facts, name)
     roles = integer_param_roles(probe_fn, types) if probe_fn is not None else {}
     calldata = encode_calldata(
-        selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles)
+        selector,
+        sig,
+        substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles).substitutions,
     )
     if calldata is None:
         return None
@@ -1888,7 +1954,11 @@ def seeded_calldata(
     roles = integer_param_roles(fn, types, directions)
     out: dict[int, str] = {}
     for decimals in SEED_UNIT_DECIMALS:
-        subs = _arg_values(types, identity=principal, amount=10**decimals, integer_roles=roles, executor=executor)
+        subs = dict(
+            _arg_values(
+                types, identity=principal, amount=10**decimals, integer_roles=roles, executor=executor
+            ).substitutions
+        )
         if sentinel_index is not None:
             if not (0 <= sentinel_index < len(types)):
                 return {}
@@ -2009,12 +2079,15 @@ __all__ = [
     "AuthorityPlanInputs",
     "CandidatePlanInputs",
     "ContractFacts",
+    "ExecutorCall",
     "FunctionFacts",
+    "ProbeArgs",
     "PausePlanInputs",
     "SupplyPlanInputs",
     "ValueOutPlanInputs",
     "address_param_roles",
     "encode_calldata",
+    "executor_call",
     "facts_for_name",
     "function_payable",
     "guarded_functions",

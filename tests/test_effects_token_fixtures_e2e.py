@@ -157,7 +157,9 @@ def _transfer_from_entry_point(
     )
     roles = integer_param_roles(fn, types)
     calldata = encode_calldata(
-        selector, sig, substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles)
+        selector,
+        sig,
+        substitutions=_arg_values(types, identity=caller, amount=ARG_AMOUNT, integer_roles=roles).substitutions,
     )
     assert calldata is not None
     return EntryPoint(

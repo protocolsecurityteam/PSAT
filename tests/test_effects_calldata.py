@@ -293,6 +293,54 @@ def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
 
 
 # ---------------------------------------------------------------------------
+# G6-A vacuous inputs
+# ---------------------------------------------------------------------------
+
+
+def test_an_unresolved_quantity_makes_the_inputs_vacuous():
+    """``n`` is in no vocabulary and no lattice fact names it, so the probe sends
+    a zero — and a zero-amount call that moves nothing says nothing about the
+    function."""
+    spec = cd.synthesize_value_out(_candidate(UNWRAP), _unwrap_fn())
+    assert spec is not None
+    assert int(spec.calldata[10:74], 16) == 0
+    assert spec.inputs_vacuous is True
+
+
+def test_a_probe_whose_every_slot_is_proven_is_not_vacuous():
+    """The control that keeps the predicate honest: fire on these inputs and the
+    flag would suppress every legitimate negative in the corpus."""
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+def test_an_array_of_proven_elements_is_not_vacuous():
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+def test_an_array_whose_element_is_filler_is_vacuous():
+    """A length-1 array is the honest attempt, not a witness: the loop ran over a
+    value nobody proved, so an empty result is a fact about the filler."""
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn("submit(bytes[])", names=["payloads"]))
+    assert spec is not None
+    assert spec.inputs_vacuous is True
+
+
+def test_the_supply_plan_carries_the_same_fact():
+    """G6-A spans both classes — ``no_supply_delta`` is cached on the same
+    argument."""
+    spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
+    assert spec is not None
+    assert spec.inputs_vacuous is False
+
+
+# ---------------------------------------------------------------------------
 # §16.6-A executor inner-call synthesis
 # ---------------------------------------------------------------------------
 
@@ -384,6 +432,25 @@ def test_the_claim_witness_names_the_executor_slots_directly():
     )
     assert executor is not None
     assert executor.slots == (0, 3)
+
+
+def test_an_executor_with_no_inner_call_reports_vacuous_inputs():
+    """The payload slot kept the encoder's empty bytes, so the call forwarded
+    nothing — and forwarding nothing succeeds. Without this flag that success is
+    published and CACHED as "this function moves no value"."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is True
+
+
+def test_a_synthesized_inner_call_is_not_vacuous():
+    """And the other direction: with the inner call built, the executor's other
+    zeros are deliberate, not unfilled — a negative here IS about the function."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
+    assert spec is not None
+    assert spec.inputs_vacuous is False
 
 
 def test_an_executor_with_nothing_to_move_claims_nothing():
