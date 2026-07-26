@@ -1026,8 +1026,18 @@ class PolicyWorker(BaseWorker):
             ).scalar_one_or_none()
             if contract_row:
                 selector_for = _selector_by_function_key(function_records)
+                # The same impl row can back N proxy deployments, each with its
+                # own set of function rows. These claims were derived against
+                # THIS job's control snapshot, so they belong to the deployment
+                # the writer tagged — mirroring its scope derivation exactly,
+                # not the local ``deployment_address`` below, which falls back to
+                # the job's own address for a different purpose.
+                row_deployment = normalize_deployment(request.get("proxy_address"))
                 for fn_sig, new_claims in enriched.items():
-                    stmt = select(EffectiveFunction).where(EffectiveFunction.contract_id == contract_row.id)
+                    stmt = select(EffectiveFunction).where(
+                        EffectiveFunction.contract_id == contract_row.id,
+                        deployment_scope(EffectiveFunction.deployment_address, row_deployment),
+                    )
                     selector = selector_for.get(fn_sig)
                     if selector:
                         stmt = stmt.where(EffectiveFunction.selector == selector)

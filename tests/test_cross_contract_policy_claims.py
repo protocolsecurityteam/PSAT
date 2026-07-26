@@ -399,3 +399,95 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
     # ...what regressed is whether the claim reaches the row.
     ef = _ef(db_session, contract, canonical)
     assert "flow.out" in {c["claim_id"] for c in (ef.claims or [])}
+
+
+# ---------------------------------------------------------------------------
+# One impl row, N proxy deployments: the claims belong to the one that derived
+# ---------------------------------------------------------------------------
+
+D1 = "0x44cc000000000000000000000000000000000000"
+D2 = "0x55dd000000000000000000000000000000000000"
+
+
+@requires_postgres
+def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_session_local):
+    """A shared implementation backs N proxy deployments, and each holds its own
+    set of function rows under the same ``contract_id``. These claims are derived
+    against THIS job's control snapshot — whose controller values are the proxy's
+    storage — so writing them onto a sibling deployment's row would publish one
+    proxy's wiring as another's.
+
+    Unscoped, the same selector also matches both rows, and the single-row read
+    raises rather than picking wrongly. Either way the enrichment is lost."""
+    company = f"co-{uuid.uuid4()}"
+    target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
+    sibling_job = _make_job(db_session, address=TOKEN, company=company)
+
+    store_artifact(
+        db_session,
+        sibling_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
+        },
+    )
+    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    store_artifact(
+        db_session,
+        target_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {
+                "sweep(address)": {
+                    "selector": _selector("sweep(address)"),
+                    "sinks": [
+                        {
+                            "id": "s0",
+                            "kind": "external_call",
+                            "target": "token.transfer",
+                            "selector": TRANSFER_SELECTOR,
+                            "origin": "body",
+                        }
+                    ],
+                    "claims": [],
+                }
+            },
+        },
+    )
+
+    # One contract row, two deployments' function rows — same selector on both.
+    contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
+    db_session.add(contract)
+    db_session.flush()
+    for deployment in (D1, D2):
+        db_session.add(
+            EffectiveFunction(
+                contract_id=contract.id,
+                deployment_address=deployment,
+                function_name="sweep",
+                selector=_selector("sweep(address)")[:10],
+                abi_signature="sweep(address)",
+                effect_labels=["external_contract_call"],
+                claims=None,
+            )
+        )
+    db_session.commit()
+
+    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+
+    def _claims_for(deployment: str) -> set[str]:
+        row = (
+            db_session.query(EffectiveFunction)
+            .filter(
+                EffectiveFunction.contract_id == contract.id,
+                EffectiveFunction.deployment_address == deployment,
+            )
+            .one()
+        )
+        return {c["claim_id"] for c in (row.claims or [])}
+
+    assert "flow.out" in _claims_for(D1)
+    assert _claims_for(D2) == set()
