@@ -1356,6 +1356,168 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
 
 
 # ---------------------------------------------------------------------------
+# §9.5 Tier-2 timelock synthesis
+# ---------------------------------------------------------------------------
+
+EXECUTE_SIG = "execute(address,uint256,bytes,bytes32,bytes32)"
+SCHEDULE_SIG = "schedule(address,uint256,bytes,bytes32,bytes32,uint256)"
+EXECUTE_BATCH_SIG = "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)"
+SCHEDULE_BATCH_SIG = "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,uint256)"
+
+
+def _timelock_facts(*, signatures: list[str] | None = None) -> cd.ContractFacts:
+    """A delayed executor's own ABI. Nothing here is protocol-specific: the plan
+    finds the scheduling half by SHAPE (the executed tuple plus a trailing
+    delay), so the same facts stand for any timelock."""
+    names = signatures if signatures is not None else [EXECUTE_SIG, SCHEDULE_SIG, "getMinDelay()"]
+    effects = {
+        name: _effect_info(
+            name,
+            cd._selector_of(name) or "0x00000000",
+            value_flows=(
+                [
+                    {
+                        "kind": "low_level_value_call",
+                        "direction": "out",
+                        "origin": "body",
+                        "from_is_self": True,
+                        "target_kind": {"kind": "param", "tier": "static_trace"},
+                    }
+                ]
+                if name.startswith("execute")
+                else []
+            ),
+            parameter_names=(
+                ["target", "value", "payload", "predecessor", "salt"] if name.startswith("execute") else []
+            ),
+        )
+        for name in names
+    }
+    return cd.ContractFacts(
+        address=CONTRACT,
+        job_id="job-1",
+        effects=effects,
+        trees={},
+        canonical_signatures={name: name for name in effects},
+        legacy_value_flows={},
+        by_selector={info["selector"]: name for name, info in effects.items()},
+    )
+
+
+def _timelock_session(schedule_principal: str | None = None) -> Any:
+    session = MagicMock()
+    rows = [(cd._selector_of(SCHEDULE_SIG), schedule_principal)] if schedule_principal else []
+    session.execute.return_value.all.return_value = rows
+    return session
+
+
+def _timelock_spec(*, holdings: tuple[str, ...] = (), signature: str = EXECUTE_SIG, session: Any = None):
+    facts = _timelock_facts()
+    fn = cd.resolve_function(facts, cd._selector_of(signature) or "")
+    assert fn is not None
+    return cd.synthesize_timelock(
+        session or _timelock_session(),
+        _candidate(cd._selector_of(signature) or "", holdings=holdings),
+        facts,
+        fn,
+    )
+
+
+def test_the_timelock_plan_schedules_and_executes_one_operation_tuple():
+    """OZ's ``execute`` recomputes the operation id from its own arguments, so the
+    two calls only have to agree — and if they ever stop agreeing the timelock
+    executes an operation nobody scheduled, which reverts and proves nothing."""
+    spec = _timelock_spec()
+    assert spec is not None
+    executed = _decode(spec.execute_calldata, EXECUTE_SIG)
+    scheduled = _decode(spec.schedule_calldata(864000), SCHEDULE_SIG)
+    assert scheduled[:5] == executed
+    assert scheduled[5] == 864000  # the delay, and only the delay, is added
+
+
+def test_the_timelock_plan_targets_the_sentinel_when_the_contract_holds_nothing():
+    """The normal case: a timelock holds authority, not funds. The operation is
+    still one the proposer chose, and the value question is left to the recipe to
+    answer honestly rather than answered here by an invented asset."""
+    spec = _timelock_spec()
+    assert spec is not None
+    target, value, payload, predecessor, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
+    assert target.lower() == cd.SENTINEL_ADDRESS.lower()
+    assert payload == b""
+    # No native value the timelock does not hold, and no dependency on another op.
+    assert value == 0
+    assert predecessor == b"\x00" * 32
+    assert spec.witness_token is None and spec.witness_calldata is None
+
+
+def test_the_timelock_plan_moves_an_asset_the_contract_provably_holds():
+    spec = _timelock_spec(holdings=(HELD_TOKEN,))
+    assert spec is not None
+    target, _value, payload, _pred, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
+    assert target.lower() == HELD_TOKEN.lower()
+    assert payload.hex().startswith("a9059cbb")
+    assert spec.witness_token == HELD_TOKEN
+    assert spec.witness_calldata is not None and cd.SENTINEL_ADDRESS[2:].lower() in spec.witness_calldata.lower()
+
+
+def test_the_timelock_plan_finds_the_scheduling_half_of_the_batch_arity_too():
+    """Same rule, no second code path: the batch tuple plus a trailing delay."""
+    facts = _timelock_facts(signatures=[EXECUTE_BATCH_SIG, SCHEDULE_BATCH_SIG, "getMinDelay()"])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_BATCH_SIG) or "")
+    assert fn is not None
+    spec = cd.synthesize_timelock(_timelock_session(), _candidate(cd._selector_of(EXECUTE_BATCH_SIG) or ""), facts, fn)
+    assert spec is not None
+    targets, values, payloads, _pred, _salt = _decode(spec.execute_calldata, EXECUTE_BATCH_SIG)
+    assert [t.lower() for t in targets] == [cd.SENTINEL_ADDRESS.lower()]
+    assert values == (0,) and payloads == (b"",)
+
+
+def test_no_timelock_plan_without_the_scheduling_half():
+    """An executor that cannot be scheduled is not a timelock, and probing it as
+    one would schedule nothing and execute an operation that does not exist."""
+    facts = _timelock_facts(signatures=[EXECUTE_SIG, "getMinDelay()"])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
+    assert fn is not None
+    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
+
+
+def test_no_timelock_plan_without_the_contracts_own_delay():
+    """The delay is read, never assumed — so a contract that will not tell us its
+    minimum yields no plan rather than a guessed one."""
+    facts = _timelock_facts(signatures=[EXECUTE_SIG, SCHEDULE_SIG])
+    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
+    assert fn is not None
+    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
+
+
+def test_the_timelock_plan_prefers_a_principal_behind_both_gates():
+    """Scheduling and executing are separately gated. Picking the address the
+    resolution plane put behind BOTH is what keeps the probe from having to grant
+    itself a role — which §9.3 forbids outright."""
+    spec = _timelock_spec(session=_timelock_session(schedule_principal=PRINCIPAL))
+    assert spec is not None
+    assert spec.principal == PRINCIPAL.lower()
+
+
+def test_the_timelock_plan_still_probes_as_the_executor_when_the_roles_diverge():
+    """No intersection is not a reason to invent one: probe as the executor and
+    let the contract reject the schedule, which the recipe records verbatim."""
+    spec = _timelock_spec(session=_timelock_session(schedule_principal="0x" + "99" * 20))
+    assert spec is not None
+    assert spec.principal == PRINCIPAL.lower()
+
+
+def test_the_timelock_plan_reads_the_delay_off_the_contract():
+    delay_selector = cd._selector_of("getMinDelay()")
+    spec = _timelock_spec()
+    assert spec is not None
+    assert spec.delay_calldata == delay_selector
+    # A delay we could not read is not defaulted to something plausible: zero goes
+    # to the contract, whose own minimum rejects it.
+    assert spec.schedule_calldata(0) == spec.schedule_calldata_zero
+
+
+# ---------------------------------------------------------------------------
 # prober wiring
 # ---------------------------------------------------------------------------
 
@@ -1419,6 +1581,52 @@ def test_prober_emits_one_plan_per_synthesized_class(monkeypatch):
         EFFECT_CLASS_AUTHORITY_CHANGE,
         EFFECT_CLASS_FREEZE_PAUSE,
     }
+
+
+def _both_plans_inputs() -> cd.CandidatePlanInputs:
+    """A delayed executor as the synthesizer sees it: Tier-1 has a probe for it,
+    and so does Tier 2. The two gate_refs are what tells the plans apart."""
+    spec = _timelock_spec()
+    assert spec is not None
+    return cd.CandidatePlanInputs(
+        value_out=cd.ValueOutPlanInputs(
+            contract_address=CONTRACT, principal=PRINCIPAL, calldata=TRANSFER, gate_ref="gate:tier1"
+        ),
+        timelock=cd.TimelockPlanInputs(
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            execute_calldata=spec.execute_calldata,
+            schedule_selector=spec.schedule_selector,
+            schedule_signature=spec.schedule_signature,
+            schedule_arguments=spec.schedule_arguments,
+            delay_index=spec.delay_index,
+            schedule_calldata_zero=spec.schedule_calldata_zero,
+            delay_calldata=spec.delay_calldata,
+            gate_ref="gate:tier2",
+        ),
+    )
+
+
+def test_the_timelock_plan_replaces_the_tier1_probe_for_a_delayed_executor(monkeypatch):
+    """Tier 1 cannot satisfy a block.timestamp gate at all, so its row is a revert
+    that says nothing about the function — and both plans carry the same effect
+    class, scope and gate, so they would stage under one cache key."""
+    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: _both_plans_inputs())
+    plans = default_prober(
+        _stub_session(),
+        _candidate(TRANSFER),
+        _ctx(anvil_factory=lambda: StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)),
+    )
+    assert [p.gate_ref for p in plans] == ["gate:tier2"]
+    assert [p.effect_class for p in plans] == [EFFECT_CLASS_VALUE_OUT]
+
+
+def test_without_a_fork_the_tier1_probe_still_stands(monkeypatch):
+    """No fork, no Tier-2 sequence — and dropping the Tier-1 probe as well would
+    lose the row entirely."""
+    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: _both_plans_inputs())
+    plans = default_prober(_stub_session(), _candidate(TRANSFER), _ctx())
+    assert [p.gate_ref for p in plans] == ["gate:tier1"]
 
 
 def test_prober_drops_the_pause_plan_without_a_fork(monkeypatch):

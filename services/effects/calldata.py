@@ -206,6 +206,54 @@ class SupplyPlanInputs:
 
 
 @dataclass(frozen=True)
+class TimelockPlanInputs:
+    """§9.5 Tier-2 inputs: schedule an operation, advance past the delay, execute
+    it — the sequence Tier 1 cannot reach, because ``eth_simulateV1`` issues one
+    block with no ``blockOverrides`` and so can never satisfy a
+    ``block.timestamp`` gate.
+
+    The scheduled operation and the executed one must be the SAME tuple: OZ's
+    ``execute`` recomputes the operation id from its own arguments
+    (``hashOperation(target, value, payload, predecessor, salt)``), so nothing
+    here has to hash anything — it only has to encode the same values twice, once
+    with the delay appended.
+
+    The delay is the only argument not knowable offline. It is the contract's own
+    ``getMinDelay()``, read on the fork (``delay_calldata``) because OZ rejects a
+    schedule below it and the value is per-deployment."""
+
+    contract_address: str
+    principal: str
+    execute_calldata: str
+    schedule_selector: str
+    schedule_signature: str
+    # The shared tuple, by parameter index, with the trailing delay left out.
+    schedule_arguments: Mapping[int, Any]
+    delay_index: int
+    # Validated at synthesis, so a plan always has a call to make. Also the
+    # honest input when the delay cannot be read: the contract's own check
+    # rejects a zero delay, and the recipe records that revert verbatim.
+    schedule_calldata_zero: str
+    # ``getMinDelay()`` — read, never assumed (§0.0.2).
+    delay_calldata: str
+    gate_ref: str
+    sentinel_address: str | None = None
+    # The asset the value witness is read against, or ``None`` when the timelock
+    # provably holds nothing to move. That absence is a FACT about the contract,
+    # and the recipe reports it as its own reason rather than as "moved nothing".
+    witness_token: str | None = None
+    witness_calldata: str | None = None
+    fixtures: tuple[ForkFixture, ...] = ()
+
+    def schedule_calldata(self, delay: int) -> str:
+        subs = dict(self.schedule_arguments)
+        subs[self.delay_index] = int(delay)
+        return encode_calldata(self.schedule_selector, self.schedule_signature, substitutions=subs) or (
+            self.schedule_calldata_zero
+        )
+
+
+@dataclass(frozen=True)
 class AuthorityPlanInputs:
     """§4.4 inputs: ``probe_calldata`` exercises the gate G that F mutates;
     ``mutate_calldata`` is the call to F itself."""
@@ -243,6 +291,7 @@ class CandidatePlanInputs:
     supply: SupplyPlanInputs | None = None
     authority: AuthorityPlanInputs | None = None
     pause: PausePlanInputs | None = None
+    timelock: TimelockPlanInputs | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1402,6 +1451,154 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
     )
 
 
+# The zero-arg getter for a delayed executor's own minimum delay. A canonical
+# signature, not a name guess, and the value is READ rather than assumed: OZ
+# rejects a schedule below it, and it is per-deployment (measured 432000s and
+# 864000s on the two mainnet timelocks this corpus carries).
+_MIN_DELAY_SIGNATURE = "getMinDelay()"
+# ERC-20 balanceOf(address) — the published standard, used to read the witness.
+_ERC20_BALANCE_OF_SIGNATURE = "balanceOf(address)"
+
+
+def _schedule_sibling(facts: ContractFacts, fn: FunctionFacts, types: Sequence[str]) -> tuple[str, str] | None:
+    """``(selector, signature)`` of the function that SCHEDULES what ``fn``
+    executes, or ``None``.
+
+    Found by ABI shape rather than by name: the scheduling half of a delayed
+    executor takes the executed tuple plus a trailing ``uint256`` delay. Both
+    arities fall out of the same rule, and a contract exposing two such siblings
+    yields nothing rather than a pick."""
+    wanted = [t.strip() for t in types] + ["uint256"]
+    found: list[tuple[str, str]] = []
+    for name in facts.effects:
+        signature = facts.canonical_signature(name)
+        if signature == fn.canonical_signature:
+            continue
+        candidate_types = _parse_arg_types(signature)
+        if candidate_types is None or [t.strip() for t in candidate_types] != wanted:
+            continue
+        selector = _selector_of(signature)
+        if selector is not None:
+            found.append((selector, signature))
+    return found[0] if len(found) == 1 else None
+
+
+def _dual_role_principal(session: Session, candidate: Candidate, schedule_selector: str) -> str | None:
+    """The address that can drive BOTH halves of the sequence.
+
+    Scheduling and executing are separately gated (OZ's ``PROPOSER_ROLE`` and
+    ``EXECUTOR_ROLE``), so the probe needs a principal the resolution plane put
+    behind both. Preferring the intersection is what keeps this honest: the
+    alternative — writing the role into storage so the gate passes — is exactly
+    what §9.3 forbids, because such a probe reverts on the gate, not on a missing
+    asset. When the two do not intersect we still probe as the executor and let
+    the contract reject the schedule, which the recipe records verbatim."""
+    principals = [p.lower() for p in candidate.principal_addresses if isinstance(p, str) and p]
+    scheduler = _principals_by_selector(session, candidate.contract_id).get(schedule_selector.lower())
+    if scheduler and scheduler.lower() in principals:
+        return scheduler.lower()
+    return principals[0] if principals else None
+
+
+def _probe_salt(candidate: Candidate) -> bytes:
+    """A deterministic per-(function, contract) operation salt, derived exactly as
+    the differential probe derives its identities so a replay reuses it. Its only
+    job is to keep the probe's operation distinct from one the timelock already
+    has pending — a collision would revert the schedule for a reason that has
+    nothing to do with the capability under test."""
+    return keccak(text=f"timelock-probe:{candidate.selector or ''}:{candidate.contract_address}")
+
+
+def synthesize_timelock(
+    session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
+) -> TimelockPlanInputs | None:
+    """§9.5. Applicable when F is a proven arbitrary-call executor whose contract
+    also exposes the scheduling half and its own minimum delay.
+
+    The operation scheduled is an ERC-20 transfer to the sentinel of an asset the
+    timelock PROVABLY holds. Where it holds nothing — the normal case, since a
+    timelock holds authority rather than funds — the operation is a bare call to
+    the sentinel: still an operation the proposer chose, which proves the delayed
+    execution path runs, while the value question is answered honestly by the
+    recipe as "there was no asset to witness" rather than as "moved nothing"."""
+    types = _parse_arg_types(fn.canonical_signature)
+    if types is None:
+        return None
+    executor = executor_call(fn, types, held_tokens=candidate.input_token_addresses, recipient=SENTINEL_ADDRESS)
+    if executor is None:
+        return None
+    sibling = _schedule_sibling(facts, fn, types)
+    if sibling is None:
+        return None
+    schedule_selector, schedule_signature = sibling
+    if _MIN_DELAY_SIGNATURE not in facts.effects:
+        return None
+    delay_calldata = encode_calldata(_selector_of(_MIN_DELAY_SIGNATURE) or "", _MIN_DELAY_SIGNATURE)
+    if delay_calldata is None:
+        return None
+    principal = _dual_role_principal(session, candidate, schedule_selector)
+    if not principal:
+        # A probe from an address behind neither role only ever proves the gate
+        # rejected it — the same rule the value-out plan applies.
+        return None
+
+    destination, payload = executor.slots
+    witness_token = executor.values.get(destination)
+    target = witness_token if witness_token is not None else SENTINEL_ADDRESS
+    inner = executor.values.get(payload, b"")
+    salt_index = max((i for i, t in enumerate(types) if t.strip() == "bytes32"), default=-1)
+    arguments: dict[int, Any] = {}
+    for idx, type_str in enumerate(types):
+        shape = _array_shape(type_str)
+        if idx == destination:
+            value: Any = target
+        elif idx == payload:
+            value = inner
+        elif idx == salt_index:
+            value = _probe_salt(candidate)
+        else:
+            # Everything else takes the encoder's own zero: the per-call native
+            # value the timelock does not hold, and the predecessor that OZ reads
+            # as "this operation depends on nothing".
+            try:
+                value = _default_value_for_type(shape[0] if shape else type_str)
+            except Exception:
+                return None
+        arguments[idx] = [value] if shape else value
+
+    execute_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=arguments)
+    schedule_zero = encode_calldata(schedule_selector, schedule_signature, substitutions={**arguments, len(types): 0})
+    if execute_calldata is None or schedule_zero is None:
+        return None
+    witness_calldata = (
+        encode_calldata(
+            _selector_of(_ERC20_BALANCE_OF_SIGNATURE) or "",
+            _ERC20_BALANCE_OF_SIGNATURE,
+            substitutions={0: SENTINEL_ADDRESS},
+        )
+        if witness_token is not None
+        else None
+    )
+    return TimelockPlanInputs(
+        contract_address=candidate.probe_target,
+        principal=principal,
+        execute_calldata=execute_calldata,
+        schedule_selector=schedule_selector,
+        schedule_signature=schedule_signature,
+        schedule_arguments=arguments,
+        delay_index=len(types),
+        schedule_calldata_zero=schedule_zero,
+        delay_calldata=delay_calldata,
+        gate_ref=_gate_ref(fn.tree),
+        sentinel_address=SENTINEL_ADDRESS,
+        witness_token=witness_token if isinstance(witness_token, str) else None,
+        witness_calldata=witness_calldata,
+        # Gas only: an impersonated proposer that cannot pay would revert the
+        # schedule for a reason that is the harness's, not the contract's.
+        fixtures=(ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)),),
+    )
+
+
 def _token_arg_candidates(candidate: Candidate, token_params: Sequence[int]) -> tuple[str, ...]:
     """Assets the acting deployment PROVABLY holds, offered only to a function
     that actually has a token parameter.
@@ -2097,6 +2294,8 @@ def synthesize(session: Session, candidate: Candidate) -> CandidatePlanInputs:
         supply=synthesize_supply(candidate, fn) if _allowed(EFFECT_CLASS_SUPPLY) else None,
         authority=synthesize_authority(candidate, facts, fn) if _allowed(EFFECT_CLASS_AUTHORITY_CHANGE) else None,
         pause=synthesize_pause(session, candidate, facts, fn) if _allowed(EFFECT_CLASS_FREEZE_PAUSE) else None,
+        # A delayed executor is a value_out question the Tier-1 seam cannot ask.
+        timelock=synthesize_timelock(session, candidate, facts, fn) if _allowed(EFFECT_CLASS_VALUE_OUT) else None,
     )
 
 
@@ -2119,6 +2318,7 @@ __all__ = [
     "ProbeArgs",
     "PausePlanInputs",
     "SupplyPlanInputs",
+    "TimelockPlanInputs",
     "ValueOutPlanInputs",
     "address_param_roles",
     "encode_calldata",
@@ -2136,5 +2336,6 @@ __all__ = [
     "synthesize_authority",
     "synthesize_pause",
     "synthesize_supply",
+    "synthesize_timelock",
     "synthesize_value_out",
 ]

@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from db.models import Contract, UpgradeEvent
 from services.effects import calldata as calldata_synth
 from services.effects import recipes
-from services.effects.anvil import AnvilTransport, pause_recipe
+from services.effects.anvil import AnvilTransport, pause_recipe, timelock_execute_recipe
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
@@ -283,8 +283,17 @@ def _synthesized_plans(session: Session, candidate: Candidate, ctx: ProbeContext
     facts yields no plan at all rather than a probe on guessed calldata."""
     inputs = calldata_synth.synthesize(session, candidate)
     plans: list[ProbePlan] = []
-    if inputs.value_out is not None:
+    # A delayed executor gets the Tier-2 sequence INSTEAD of the Tier-1 probe, not
+    # alongside it. Tier 1 cannot satisfy a ``block.timestamp`` gate at all, so its
+    # row is a revert that reads as "we called it and it failed" while saying
+    # nothing about the function; and both plans carry the same effect class,
+    # scope and gate, so they would stage under one cache key. With no fork
+    # available the Tier-1 plan stands exactly as it does today.
+    timelocked = inputs.timelock is not None and ctx.anvil_factory is not None
+    if inputs.value_out is not None and not timelocked:
         plans.append(_value_out_plan(ctx, inputs.value_out))
+    if inputs.timelock is not None and ctx.anvil_factory is not None:
+        plans.append(_timelock_plan(ctx, inputs.timelock))
     if inputs.supply is not None:
         plans.append(_supply_plan(ctx, inputs.supply))
     if inputs.authority is not None:
@@ -374,6 +383,52 @@ def _authority_plan(ctx: ProbeContext, candidate: Candidate, spec: calldata_synt
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_AUTHORITY_CHANGE, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _timelock_plan(ctx: ProbeContext, spec: calldata_synth.TimelockPlanInputs) -> ProbePlan:
+    def _run() -> ObservedEffect:
+        factory = ctx.anvil_factory
+        if factory is None:  # pragma: no cover - guarded at plan time
+            raise RuntimeError("timelock plan requires an anvil factory")
+        transport = factory()
+        # The delay belongs to the CONTRACT (§0.0.2): OZ rejects a schedule below
+        # its own ``getMinDelay()``, and the value differs per deployment. An
+        # unreadable delay is not guessed — zero goes to the contract, whose own
+        # check rejects it and whose revert the recipe records verbatim.
+        delay = _uint_call(transport, spec.contract_address, spec.delay_calldata)
+        return timelock_execute_recipe(
+            transport=transport,
+            store=ctx.transcript_store,
+            ctx=ctx.sim_context(),
+            contract_address=spec.contract_address,
+            principal=spec.principal,
+            schedule_calldata=spec.schedule_calldata(delay),
+            execute_calldata=spec.execute_calldata,
+            delay_seconds=delay,
+            gate_ref=spec.gate_ref,
+            fixtures=spec.fixtures,
+            sentinel_address=spec.sentinel_address,
+            witness_token=spec.witness_token,
+            witness_calldata=spec.witness_calldata,
+        )
+
+    return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
+
+
+def _uint_call(transport: AnvilTransport, to: str, data: str) -> int:
+    """A uint read off the fork, or 0 when the call fails or returns nothing.
+    Zero is not a fallback VALUE here — it is an input the contract itself
+    rejects, which is the honest outcome for a delay we could not read."""
+    try:
+        result = transport.call({"to": to, "data": data})
+    except Exception:
+        return 0
+    if not result.success or not result.return_data:
+        return 0
+    try:
+        return int(result.return_data, 16)
+    except ValueError:
+        return 0
 
 
 def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> ProbePlan:
