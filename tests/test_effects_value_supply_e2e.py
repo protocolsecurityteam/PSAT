@@ -331,10 +331,42 @@ def batch_vault(chain):
     return address, owner, simulate, fx, ctx
 
 
+@pytest.fixture(scope="module")
+def held_token(chain, batch_vault):
+    """A SECOND deployment of the same fixture, standing in for an asset the vault
+    under probe holds. Nothing about it is vault-specific — the executor only ever
+    calls ``transfer`` on it, which is the ERC-20 standard.
+
+    Carries its own context for the same reason the vault does: this deployment
+    lands in a LATER block, and simulated before it the token is a codeless
+    address — which a low-level call succeeds against while moving nothing, i.e.
+    it would turn this test green against no token at all."""
+    _address, owner, _simulate, fx, _ctx = batch_vault
+    token = chain.deploy(owner, fx["creation_bytecode"])
+    block = int(chain._rpc("eth_blockNumber", []), 16)
+    assert chain._rpc("eth_getCode", [token, hex(block)]) not in ("0x", "0x0", None)
+    return token, SimContext(chain_id=31337, block=block, hardfork="prague")
+
+
 def _funded_vault(address: str, units: int = 10**18) -> dict[str, Any]:
-    slot = _mapping_entry_slot(_BATCH_BALANCE_BASE, [int(address, 16)])
+    return _funded_holder(address, address, units)
+
+
+def _funded_holder(token: str, holder: str, units: int = 10**18) -> dict[str, Any]:
+    slot = _mapping_entry_slot(_BATCH_BALANCE_BASE, [int(holder, 16)])
     assert slot is not None
-    return _slot_overrides(address, {slot: _word(units)})
+    return _slot_overrides(token, {slot: _word(units)})
+
+
+_EXECUTOR_FLOW = [
+    {
+        "kind": "low_level_value_call",
+        "direction": "out",
+        "origin": "body",
+        "from_is_self": True,
+        "target_kind": {"kind": "param", "tier": "static_trace"},
+    }
+]
 
 
 def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(batch_vault):
@@ -388,6 +420,69 @@ def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
     assert eff.details["value_moved"] is True
     assert eff.details["observation"] == "executed"
     assert eff.concrete["destination"] == owner.lower()
+
+
+# ---------------------------------------------------------------------------
+# §4.2 value-out — an arbitrary-call executor (§16.6-A)
+# ---------------------------------------------------------------------------
+
+
+def _executor_probe(batch_vault, held_token, signature, *, holds_asset: bool):
+    """Synthesize and run the value-out probe for one executor signature, with or
+    without a measured holding to build an inner call from. Returns
+    ``(spec, effect)``."""
+    address, owner, simulate, fx, _vault_ctx = batch_vault
+    token, ctx = held_token
+    holdings = (token,) if holds_asset else ()
+    selector = fx["selectors"][signature]
+    names = ["targets", "data", "values"] if "[]" in signature else ["target", "data", "value"]
+    fn = _fn_facts(signature, selector, names=names, flows=_EXECUTOR_FLOW)
+    spec = cd.synthesize_value_out(_candidate_for(address, owner, selector, input_token_addresses=holdings), fn)
+    assert spec is not None
+    funded = _funded_holder(token, address)
+    eff = recipes.value_out(
+        simulate=lambda calls, tag, ov=None: simulate(calls, tag, _merge(ov, funded)),
+        store=RecordingStore(),
+        ctx=ctx,
+        contract_address=address,
+        principal=owner,
+        calldata=spec.calldata,
+        sentinel_address=spec.sentinel_address,
+        sentinel_calldata=spec.sentinel_calldata,
+        simulate_supported=True,
+    )
+    return spec, eff
+
+
+@pytest.mark.parametrize("signature", ["forward(address,bytes,uint256)", "forward(address[],bytes[],uint256[])"])
+def test_an_executor_probed_without_an_inner_call_witnesses_nothing(batch_vault, held_token, signature):
+    """The control. With no measured holding there is no honest inner call, so
+    the payload slot keeps the encoder's empty bytes — and forwarding empty
+    calldata to an account SUCCEEDS. The row then reads "executed, moved no
+    value" about a function that can move everything the contract holds."""
+    _spec, eff = _executor_probe(batch_vault, held_token, signature, holds_asset=False)
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.details["observation"] == "executed"
+    assert eff.details["value_moved"] is False
+
+
+@pytest.mark.parametrize("signature", ["forward(address,bytes,uint256)", "forward(address[],bytes[],uint256[])"])
+def test_an_executor_moves_a_held_asset_to_a_destination_the_caller_named(batch_vault, held_token, signature):
+    """§16.6-A end to end, both arities. The synthesis forwards an ERC-20
+    transfer of an asset the deployment provably holds, and the sentinel variant
+    puts the attacker identity in the payload's recipient — so the caller
+    redirecting the funds is an OBSERVATION, not an inference."""
+    spec, eff = _executor_probe(batch_vault, held_token, signature, holds_asset=True)
+    # The token came from measured holdings, and it is in the destination slot.
+    assert held_token[0][2:].lower() in spec.calldata.lower()
+    assert eff.verdict == VERDICT_PROVEN, eff.reason
+    assert eff.details["value_moved"] is True
+    assert eff.details["observation"] == "executed"
+    assert eff.details["destination_shape"] == "caller_arbitrary"
+    assert eff.details["shape_proved_by"] == "simulation"
+    # The sentinel is a fabricated address and must never be published as the
+    # place the money went; the BASE probe pays the principal.
+    assert eff.concrete.get("destination") != cd.SENTINEL_ADDRESS.lower()
 
 
 def _merge(base: Any, extra: dict[str, Any]) -> dict[str, Any]:

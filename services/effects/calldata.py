@@ -686,6 +686,7 @@ def _arg_values(
     identity: str | None,
     amount: int,
     integer_roles: Mapping[int, str] | None = None,
+    executor: "ExecutorCall | None" = None,
 ) -> dict[int, Any]:
     """The substitution policy for a value-moving probe: address params get the
     caller identity (so a mint/transfer has a real recipient); an integer param
@@ -711,12 +712,26 @@ def _arg_values(
     batch form of a function then executes, moves nothing, and publishes — and
     CACHES — "this function moves no value" about a body no probe ever entered. A
     length-1 array whose element is itself unproven is not a witness either, but
-    it is an honest attempt that the contract's own check gets to reject."""
-    roles = integer_roles or {}
+    it is an honest attempt that the contract's own check gets to reject.
+
+    An ``executor`` (:func:`executor_call`) overrides its own two slots with the
+    inner call it synthesized, and SUPPRESSES the integer roles: every remaining
+    numeric argument of an arbitrary-call executor is a per-call native value, a
+    gas budget or an operation mode, and the probe can prove the contract can
+    satisfy none of them. Zero is both the encoder's default and the only value
+    that asks the executor to forward the call and nothing else — a quantity there
+    would make the vault attach ETH it does not hold and revert the very call this
+    synthesis exists to observe."""
+    roles = {} if executor is not None else (integer_roles or {})
+    overrides = executor.values if executor is not None else {}
     subs: dict[int, Any] = {}
     for idx, type_str in enumerate(types):
         shape = _array_shape(type_str)
-        value = _scalar_arg_value(shape[0] if shape else type_str, idx, identity=identity, amount=amount, roles=roles)
+        value = overrides.get(idx)
+        if value is None:
+            value = _scalar_arg_value(
+                shape[0] if shape else type_str, idx, identity=identity, amount=amount, roles=roles
+            )
         if shape is None:
             if value is not None:
                 subs[idx] = value
@@ -753,6 +768,142 @@ def _scalar_arg_value(
         if role == ROLE_IDENTIFIER:
             return ARG_IDENTIFIER
     return None
+
+
+# §4.2 executor synthesis. ``exec.arbitrary`` is the static claim for "this
+# function forwards a caller-supplied destination together with a caller-supplied
+# calldata blob", proven off the IR read set of a body call op; its witness names
+# the two PARAMETERS. ``low_level_value_call`` + a ``param`` destination is the
+# flow lattice making the first half of the same statement.
+_EXEC_ARBITRARY_CLAIM = "exec.arbitrary"
+_LOW_LEVEL_CALL_KIND = "low_level_value_call"
+# transfer(address,uint256) — the ERC-20 standard, not a name guess.
+_ERC20_TRANSFER_SELECTOR = "0xa9059cbb"
+
+
+@dataclass(frozen=True)
+class ExecutorCall:
+    """An inner call synthesized for an arbitrary-call executor.
+
+    ``slots`` is ``(destination_index, calldata_index)`` — the two parameters
+    static proved carry the forwarded call. ``values`` holds the scalar value for
+    each of those slots, and is EMPTY when the acting deployment holds no asset to
+    build an inner call from: the shape is still known (so the encoder can say the
+    payload slot was left at its default), but nothing is claimed about it."""
+
+    slots: tuple[int, int]
+    values: Mapping[int, Any] = field(default_factory=dict)
+
+
+def _forwards_param_destination(fn: "FunctionFacts") -> bool:
+    """Does the flow lattice say a low-level call in F's body sends to a
+    destination the CALLER named? The index need not have resolved — a loop over
+    an array of targets leaves the slot unnamed while still proving the kind."""
+    for flow in fn.effect_info.get("value_flows") or []:
+        if not isinstance(flow, dict) or flow.get("origin") == "guard":
+            continue
+        if str(flow.get("kind")) != _LOW_LEVEL_CALL_KIND:
+            continue
+        kind = flow.get("target_kind")
+        if isinstance(kind, dict) and kind.get("kind") == "param":
+            return True
+    return False
+
+
+def _named_executor_slots(fn: "FunctionFacts", types: Sequence[str]) -> tuple[int, int] | None:
+    """The two slots the ``exec.arbitrary`` witness NAMES, when both name a
+    parameter of the right shape. The witness carries entry-parameter names read
+    off the IR, so this is the precise answer where it exists."""
+    names = _declared_param_names(fn, len(types))
+    for claim in fn.effect_info.get("claims") or []:
+        if not isinstance(claim, dict) or claim.get("claim_id") != _EXEC_ARBITRARY_CLAIM:
+            continue
+        witness = claim.get("witness")
+        if not isinstance(witness, dict):
+            continue
+        destination, payload = witness.get("destination_param"), witness.get("calldata_param")
+        if not isinstance(destination, str) or not isinstance(payload, str) or not destination or not payload:
+            continue
+        try:
+            dest_idx, data_idx = names.index(destination), names.index(payload)
+        except ValueError:
+            continue
+        if _executor_slot_shapes_agree(types, dest_idx, data_idx):
+            return dest_idx, data_idx
+    return None
+
+
+def _executor_slot_shapes_agree(types: Sequence[str], destination: int, payload: int) -> bool:
+    """A destination and a payload describe ONE forwarded call only if they have
+    the same arity: two scalars, or two arrays walked in step."""
+    dest_shape, data_shape = _array_shape(types[destination]), _array_shape(types[payload])
+    if (dest_shape is None) != (data_shape is None):
+        return False
+    return _is_address_type(_element_type(types[destination])) and _element_type(types[payload]) == "bytes"
+
+
+def _unique_executor_slots(types: Sequence[str]) -> tuple[int, int] | None:
+    """The only destination/payload pair the ABI admits, or ``None``.
+
+    Read alone this proves nothing — it is used only where static has ALREADY
+    proven the function forwards a caller-named destination, to say WHICH slots
+    carry it. Ambiguity yields nothing rather than a positional guess: an executor
+    whose destination the probe picked wrong simply reverts, but one whose payload
+    slot the probe picked wrong could write a transfer into an argument that is
+    not calldata at all."""
+    scalar_dest = [i for i, t in enumerate(types) if _is_address_type(t)]
+    scalar_data = [i for i, t in enumerate(types) if t.strip() == "bytes"]
+    array_dest = [i for i, t in enumerate(types) if t.strip() == "address[]"]
+    array_data = [i for i, t in enumerate(types) if t.strip() == "bytes[]"]
+    if len(scalar_dest) == 1 and len(scalar_data) == 1 and not array_dest and not array_data:
+        return scalar_dest[0], scalar_data[0]
+    if len(array_dest) == 1 and len(array_data) == 1 and not scalar_dest and not scalar_data:
+        return array_dest[0], array_data[0]
+    return None
+
+
+def executor_call(
+    fn: "FunctionFacts", types: Sequence[str], *, held_tokens: Sequence[str], recipient: str
+) -> ExecutorCall | None:
+    """The inner call to synthesize for an arbitrary-call executor, or ``None``
+    when F is not one.
+
+    An executor forwards caller-supplied calldata to a caller-supplied target, so
+    the encoder's default leaves it calling nothing with nothing: the probe
+    executes, moves no value, and that non-observation gets published — and cached
+    — about a function that is by construction able to move everything the
+    contract holds. What it takes to observe the real behaviour is one honest
+    inner call, and the only honest one is an ERC-20 transfer of an asset the
+    acting deployment PROVABLY holds (``contract_balances``, richest first). The
+    asset never comes from a list of known tokens: on the next protocol that list
+    is empty and the probe would be back to sending nothing.
+
+    Soundness is the argument the stage already makes for token-arg substitution:
+    a probe input is a CANDIDATE, not a claim. Writing an address and a payload
+    into calldata witnesses nothing by itself — the witness is the ``Transfer``
+    the execution actually emitted, and if F does not forward the payload the call
+    simply reverts."""
+    slots = _named_executor_slots(fn, types)
+    if slots is None:
+        slots = _unique_executor_slots(types) if _forwards_param_destination(fn) else None
+    if slots is None:
+        return None
+    destination, payload = slots
+    token = next((t for t in held_tokens if isinstance(t, str) and _RESOLVED_ADDRESS.match(t)), None)
+    inner = _erc20_transfer_calldata(recipient, ARG_AMOUNT)
+    if token is None or inner is None:
+        return ExecutorCall(slots=slots)
+    return ExecutorCall(slots=slots, values={destination: token.lower(), payload: inner})
+
+
+def _erc20_transfer_calldata(recipient: str, amount: int) -> bytes | None:
+    """``transfer(recipient, amount)``, or ``None`` on an unencodable recipient."""
+    try:
+        from eth_abi.abi import encode as abi_encode
+
+        return bytes.fromhex(_ERC20_TRANSFER_SELECTOR[2:]) + abi_encode(["address", "uint256"], [recipient, amount])
+    except Exception:
+        return None
 
 
 # Flow kinds that move NATIVE ETH out of the contract's OWN balance (as opposed
@@ -1062,7 +1213,7 @@ def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[
 
 
 def _value_probe_inputs(
-    fn: FunctionFacts, principal: str, directions: frozenset[str]
+    fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> tuple[str, bool, str | None, tuple[int, ...]] | None:
     """``(calldata, taint_flag, sentinel_calldata, token_param_indexes)`` shared by
     §4.2 and §4.5."""
@@ -1071,13 +1222,26 @@ def _value_probe_inputs(
         return None
     roles = integer_param_roles(fn, types, directions)
     addr_roles = address_param_roles(fn, types, directions)
-    base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles)
+    executor = executor_call(fn, types, held_tokens=held_tokens, recipient=principal)
+    base_subs = _arg_values(types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=executor)
     calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=base_subs)
     if calldata is None:
         return None
     taint_idx = _taint_index(fn, types, directions)
     sentinel_calldata = None
-    if taint_idx is not None:
+    if executor is not None and executor.values:
+        # The executor owns its own sentinel variant, and it supersedes the taint
+        # slot: what the caller redirects here is the DESTINATION INSIDE the
+        # payload, so the sentinel has to be written there. A sentinel in the
+        # target slot would only prove the executor can call the sentinel, which
+        # is not the same claim as the funds landing on it.
+        sentinel_exec = executor_call(fn, types, held_tokens=held_tokens, recipient=SENTINEL_ADDRESS)
+        if sentinel_exec is not None and sentinel_exec.values:
+            sentinel_subs = _arg_values(
+                types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=sentinel_exec
+            )
+            sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
+    elif taint_idx is not None:
         sentinel_subs = dict(base_subs)
         sentinel_subs[taint_idx] = SENTINEL_ADDRESS
         sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
@@ -1098,11 +1262,13 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         if not candidate.authority_public:
             return None
         principal = NEUTRAL_CALLER
-    built = _value_probe_inputs(fn, principal, frozenset(_OUT_DIRECTIONS))
+    built = _value_probe_inputs(fn, principal, frozenset(_OUT_DIRECTIONS), candidate.input_token_addresses)
     if built is None:
         return None
     calldata, tainted, sentinel_calldata, token_params = built
-    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_OUT_DIRECTIONS))
+    seeded, seeded_sentinel = _seeded_probe_calldata(
+        fn, principal, frozenset(_OUT_DIRECTIONS), candidate.input_token_addresses
+    )
     return ValueOutPlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
@@ -1133,11 +1299,13 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         if not candidate.authority_public:
             return None
         principal = NEUTRAL_CALLER
-    built = _value_probe_inputs(fn, principal, _SUPPLY_LATTICE_DIRECTIONS)
+    built = _value_probe_inputs(fn, principal, _SUPPLY_LATTICE_DIRECTIONS, candidate.input_token_addresses)
     if built is None:
         return None
     calldata, tainted, sentinel_calldata, token_params = built
-    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, _SUPPLY_LATTICE_DIRECTIONS)
+    seeded, seeded_sentinel = _seeded_probe_calldata(
+        fn, principal, _SUPPLY_LATTICE_DIRECTIONS, candidate.input_token_addresses
+    )
     return SupplyPlanInputs(
         # The candidate's own probe target. A candidate that is not an ERC-20
         # simply fails the pre-read and lands ``unknown`` — that is the honest
@@ -1176,7 +1344,7 @@ def _token_arg_candidates(candidate: Candidate, token_params: Sequence[int]) -> 
 
 
 def _seeded_probe_calldata(
-    fn: FunctionFacts, principal: str, directions: frozenset[str]
+    fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> tuple[dict[int, str], dict[int, str]]:
     """``(base, sentinel)`` whole-unit calldata for the seeded retry, keyed by
     token decimals. Empty dicts when the signature will not encode — the probe
@@ -1184,7 +1352,14 @@ def _seeded_probe_calldata(
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return {}, {}
-    base = seeded_calldata(fn, principal, directions=directions)
+    executor = executor_call(fn, types, held_tokens=held_tokens, recipient=principal)
+    base = seeded_calldata(fn, principal, directions=directions, executor=executor)
+    if executor is not None and executor.values:
+        # The retry has to keep the synthesized inner call. Falling back to the
+        # plain vector here would re-send the empty payload whenever the first
+        # probe reverted, and the verdict is read off whichever call executed.
+        sentinel_exec = executor_call(fn, types, held_tokens=held_tokens, recipient=SENTINEL_ADDRESS)
+        return base, seeded_calldata(fn, principal, directions=directions, executor=sentinel_exec)
     taint_idx = _taint_index(fn, types, directions)
     sentinel = (
         seeded_calldata(fn, principal, sentinel_index=taint_idx, directions=directions) if taint_idx is not None else {}
@@ -1692,6 +1867,7 @@ def seeded_calldata(
     *,
     sentinel_index: int | None = None,
     directions: frozenset[str] | None = None,
+    executor: "ExecutorCall | None" = None,
 ) -> dict[int, str]:
     """``token decimals -> calldata`` for the SEEDED retry of a value/supply probe.
 
@@ -1712,7 +1888,7 @@ def seeded_calldata(
     roles = integer_param_roles(fn, types, directions)
     out: dict[int, str] = {}
     for decimals in SEED_UNIT_DECIMALS:
-        subs = _arg_values(types, identity=principal, amount=10**decimals, integer_roles=roles)
+        subs = _arg_values(types, identity=principal, amount=10**decimals, integer_roles=roles, executor=executor)
         if sentinel_index is not None:
             if not (0 <= sentinel_index < len(types)):
                 return {}

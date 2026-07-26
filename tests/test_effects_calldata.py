@@ -162,6 +162,7 @@ def _candidate(
     principals: tuple[str, ...] = (PRINCIPAL,),
     function_id: int = 1,
     authority_public: bool = False,
+    holdings: tuple[str, ...] = (),
 ) -> Candidate:
     return Candidate(
         function_id=function_id,
@@ -172,6 +173,7 @@ def _candidate(
         authority_public=authority_public,
         effect_targets=("slot0",),
         principal_addresses=principals,
+        input_token_addresses=holdings,
     )
 
 
@@ -288,6 +290,120 @@ def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
     assert spec is not None
     (payloads,) = _decode(spec.calldata, sig)
     assert payloads == (b"",)
+
+
+# ---------------------------------------------------------------------------
+# §16.6-A executor inner-call synthesis
+# ---------------------------------------------------------------------------
+
+HELD_TOKEN = "0x" + "ab" * 20
+_FORWARDS_PARAM = {
+    "kind": "low_level_value_call",
+    "direction": "out",
+    "origin": "body",
+    "from_is_self": True,
+    "target_kind": {"kind": "param", "tier": "static_trace"},
+}
+
+
+def _exec_fn(signature: str, names: list[str], *, flows: list[dict[str, Any]], claims: Any = None) -> cd.FunctionFacts:
+    info = _effect_info(signature, BATCH_SEL, value_flows=flows, parameter_names=names)
+    if claims is not None:
+        info["claims"] = claims
+    return cd.FunctionFacts(
+        full_name=signature,
+        selector=BATCH_SEL,
+        canonical_signature=signature,
+        effect_info=info,
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def _executor_for(signature: str, names: list[str], **kw: Any) -> Any:
+    fn = _exec_fn(signature, names, **kw)
+    types = cd._parse_arg_types(signature)
+    assert types is not None
+    return cd.executor_call(fn, types, held_tokens=(HELD_TOKEN,), recipient=PRINCIPAL)
+
+
+def test_an_upgrade_hook_is_not_an_executor():
+    """The over-claim this recognizer has to refuse. ``upgradeToAndCall`` has the
+    same ABI shape as an executor, but nothing proves it forwards a call — and
+    writing a token into a proxy's implementation slot would run that token's code
+    in the proxy's own storage, manufacturing a transfer out of the contract under
+    probe."""
+    assert _executor_for("upgradeToAndCall(address,bytes)", ["newImplementation", "data"], flows=[]) is None
+
+
+def test_an_executor_with_two_payload_slots_synthesizes_nothing():
+    """Fail closed on ambiguity: static proved the destination is caller-supplied
+    but not WHICH argument is the forwarded calldata, and a transfer written into
+    an argument that is not calldata is a probe input nobody can justify."""
+    assert (
+        _executor_for(
+            "execTransaction(address,bytes,bytes)",
+            ["to", "data", "signatures"],
+            flows=[_FORWARDS_PARAM],
+        )
+        is None
+    )
+
+
+def test_the_lattice_names_the_executor_slots_when_the_claim_does_not():
+    """OZ ``TimelockController.execute`` — non-etherfi, and its ``exec.arbitrary``
+    claim carries no parameter names, so the slots come from the lattice's proof
+    plus the only pair the ABI admits."""
+    executor = _executor_for(
+        "execute(address,uint256,bytes,bytes32,bytes32)",
+        ["target", "value", "payload", "predecessor", "salt"],
+        flows=[_FORWARDS_PARAM],
+    )
+    assert executor is not None
+    assert executor.slots == (0, 2)
+    assert executor.values[0] == HELD_TOKEN
+    # An ERC-20 transfer to the probe's own identity — the standard selector, and
+    # a recipient that is never the sentinel on the BASE probe.
+    assert executor.values[2].hex().startswith("a9059cbb")
+    assert PRINCIPAL[2:].lower() in executor.values[2].hex()
+
+
+def test_the_claim_witness_names_the_executor_slots_directly():
+    """Where static named the two parameters, they are used verbatim rather than
+    inferred from the ABI."""
+    executor = _executor_for(
+        "rebalance(address,address,uint256,bytes)",
+        ["fromAsset", "toAsset", "amount", "swapData"],
+        flows=[],
+        claims=[
+            {
+                "claim_id": "exec.arbitrary",
+                "witness": {"kind": "param_taint", "destination_param": "fromAsset", "calldata_param": "swapData"},
+            }
+        ],
+    )
+    assert executor is not None
+    assert executor.slots == (0, 3)
+
+
+def test_an_executor_with_nothing_to_move_claims_nothing():
+    """No measured holding, no honest inner call — the shape is still known, but
+    the payload slot keeps the encoder's default."""
+    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
+    types = cd._parse_arg_types(fn.canonical_signature)
+    assert types is not None
+    executor = cd.executor_call(fn, types, held_tokens=(), recipient=PRINCIPAL)
+    assert executor is not None and not executor.values
+
+
+def test_the_executor_probe_attaches_no_native_value_it_cannot_prove():
+    """The quantity vocabulary would put one wei in ``values``, and a vault that
+    does not hold it reverts on the very call this synthesis exists to observe."""
+    fn = _exec_fn("forward(address[],bytes[],uint256[])", ["targets", "data", "values"], flows=[_FORWARDS_PARAM])
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
+    assert spec is not None
+    _targets, _data, values = _decode(spec.calldata, "forward(address[],bytes[],uint256[])")
+    assert values == (0,)
 
 
 def test_value_out_none_without_a_value_flow():
