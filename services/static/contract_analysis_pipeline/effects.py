@@ -282,6 +282,12 @@ _ERC721_IDENTITY_SELECTORS = frozenset(
 # ``amount_param_index``, which a prober fills with a probe amount.
 _TOKEN_IDENTITY_AMOUNT = ("token_identity", "dispositive_ast")
 
+# The pull selector BOTH standards define. Its trailing ``uint256`` is a quantity
+# under ERC-20 and a token id under ERC-721, and the selector cannot say which —
+# so it earns neither the identity kind above nor the zero-amount suppression a
+# proven quantity earns.
+_AMBIGUOUS_PULL_SELECTOR = "0x23b872dd"
+
 # The specific labels an ``external_contract_call`` fact defers to.
 _SPECIFIC_EFFECT_LABELS = frozenset(
     {
@@ -2896,6 +2902,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         ctx: _UnitCtx,
         crossed: bool,
         amount_override: tuple[str, str] | None = None,
+        identity_possible: bool = False,
     ) -> None:
         # A move of a provably-zero amount moves nothing — ``transfer(to, 0)``
         # transfers no tokens, and a router handing a callee a literal ``0`` (which
@@ -2906,9 +2913,23 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
         # because the fact is about the value and not about the call shape.
         #
         # Never applied under ``amount_override``: that slot is a token IDENTITY,
-        # and token id 0 is an ordinary NFT.
-        if amount_override is None and _amount_is_provably_zero(amount, ctx):
-            return
+        # and token id 0 is an ordinary NFT. The same reasoning has to reach the
+        # AMBIGUOUS selector, which is where the ambiguity actually lives — both
+        # ERC-20 and ERC-721 define ``transferFrom(address,address,uint256)``, so
+        # a literal ``0`` there is either a zero quantity (moves nothing) or token
+        # id 0 (moves an NFT) and nothing in the selector says which. Dropping the
+        # site deleted a real transfer, and worse, silently shrank the member set
+        # a ``one_of`` fold then asserts is the COMPLETE list of alternatives.
+        if _amount_is_provably_zero(amount, ctx):
+            if amount_override is not None:
+                pass
+            elif identity_possible:
+                # The move stands, but the amount does NOT: calling a literal
+                # zero here ``fixed_constant`` asserts the ERC-20 reading of a
+                # slot we just said the selector cannot disambiguate.
+                amount_override = ("indeterminate", "static_trace")
+            else:
+                return
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
         target_sites.setdefault(key, []).append(_classify_site(target, ctx, amount=False))
         # ``amount_override`` is for a sink whose trailing slot the ABI proves is
@@ -3013,6 +3034,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             context(),
                             crossed,
                             _TOKEN_IDENTITY_AMOUNT if selector in _ERC721_IDENTITY_SELECTORS else None,
+                            identity_possible=selector == _AMBIGUOUS_PULL_SELECTOR,
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         add(

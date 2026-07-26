@@ -628,3 +628,52 @@ def test_mentioning_a_selector_is_not_issuing_it(_recognizer):
     assert not (_recognizer["enqueue(bytes4,address,uint256)"]["value_flows"]), _recognizer[
         "enqueue(bytes4,address,uint256)"
     ]["value_flows"]
+
+
+ZERO_ID_SRC = """
+pragma solidity ^0.8.20;
+
+interface IERC721 {
+    function transferFrom(address,address,uint256) external;
+    function safeTransferFrom(address,address,uint256) external;
+}
+interface IERC20 { function transfer(address,uint256) external returns (bool); }
+
+contract ZeroId {
+    IERC721 public genesis;
+    IERC20 public coin;
+    function sendPlain(address to) external { genesis.transferFrom(address(this), to, 0); }
+    function sendSafe(address to) external { genesis.safeTransferFrom(address(this), to, 0); }
+    function sendNothing(address to) external { coin.transfer(to, 0); }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def _zero_id(tmp_path_factory):
+    contract = _compile(tmp_path_factory.mktemp("zeroid"), ZERO_ID_SRC, "ZeroId")
+    return build_effects(contract)["functions"]
+
+
+def test_a_zero_trailing_arg_on_the_ambiguous_pull_selector_still_moves(_zero_id):
+    """Both standards define ``transferFrom(address,address,uint256)``, so a
+    literal 0 is a zero QUANTITY under ERC-20 and token id 0 — an ordinary NFT —
+    under ERC-721. Suppressing the site deleted a real transfer, and shrank the
+    member set a ``one_of`` fold asserts is the complete list of alternatives.
+    The move stands; the amount stays unresolved, because naming it
+    ``fixed_constant`` would assert the reading the selector cannot support."""
+    flows = _zero_id["sendPlain(address)"]["value_flows"]
+    assert len(flows) == 1, flows
+    assert flows[0]["selector"] == "0x23b872dd"
+    assert flows[0]["amount_kind"]["kind"] == "indeterminate", flows
+
+
+def test_a_zero_token_id_on_the_erc721_only_selector_keeps_its_identity_kind(_zero_id):
+    flows = _zero_id["sendSafe(address)"]["value_flows"]
+    assert [f["amount_kind"]["kind"] for f in flows] == ["token_identity"], flows
+
+
+def test_a_zero_amount_on_an_unambiguous_erc20_send_still_moves_nothing(_zero_id):
+    """The exemption is scoped to the ambiguity. ``transfer(to, 0)`` is ERC-20's
+    alone and provably moves nothing, so it must still be dropped."""
+    assert not _zero_id["sendNothing(address)"]["value_flows"]
