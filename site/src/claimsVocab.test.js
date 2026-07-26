@@ -303,6 +303,58 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
   });
 
+  it("reads a one_of fold through its members, worst case first", () => {
+    // splitPay(): one send to a caller argument, one to an admin-settable
+    // storage slot. Both members are resolved, so the fold is one_of — and the
+    // caller-chosen member has to dominate. Reading only the scalar would
+    // suppress the theft signal on a function that provably pays a caller-named
+    // address.
+    const oneOf = flowOut(
+      { kind: "one_of", tier: "dispositive_ast" },
+      {
+        targetKinds: [
+          { kind: "param", tier: "dispositive_ast" },
+          { kind: "storage_setter", tier: "dispositive_ast" },
+        ],
+      },
+    );
+    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(caller-chosen destination)");
+  });
+
+  it("reads a one_of of admin-settable and fixed members as admin-settable", () => {
+    const oneOf = flowOut(
+      { kind: "one_of", tier: "dispositive_ast" },
+      {
+        targetKinds: [
+          { kind: "immutable", tier: "dispositive_ast" },
+          { kind: "storage_setter", tier: "dispositive_ast" },
+        ],
+      },
+    );
+    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(admin-settable destination)");
+  });
+
+  it("never reads a one_of as fixed when its members are not readable", () => {
+    // A one_of with no member list is an artifact we cannot interpret; it must
+    // block a "fixed" claim rather than disappear from the tally.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [
+            { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+            { kind: "y", target_kind: { kind: "one_of", tier: "dispositive_ast" } },
+          ],
+          sink_ids: [],
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBeNull();
+  });
+
   it("treats storage_setter as admin-redirectable, NOT fixed", () => {
     expect(qualifierForClaims({ claims: [flowOut({ kind: "storage_setter", tier: "static_trace" })] }))
       .toBe("(admin-settable destination)");
