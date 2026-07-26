@@ -632,3 +632,134 @@ def test_an_observed_claim_with_no_static_counterpart_is_unchanged():
     witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
     assert "flows" not in witness
     assert witness["effect_verdict_id"] == 1
+
+
+# ---------------------------------------------------------------------------
+# ...and the repair must reach the seam the effects worker actually calls,
+# on rows that are ALREADY damaged.
+# ---------------------------------------------------------------------------
+
+
+def _damaged_observed_flow_out() -> Claim:
+    """A ``flow.out`` claim as the bug left it on disk: the observed pointer, and
+    nothing else. 19 rows in the preview DB look exactly like this."""
+    return {
+        "claim_id": "flow.out",
+        "tier": "behavioral_observed",
+        "witness": {
+            "effect_class": EFFECT_CLASS_VALUE_OUT,
+            "effect_verdict_id": 1,
+            "verdict_tier": TIER_CALL,
+            "behavior_hash": "bh",
+        },
+    }
+
+
+def _executed() -> Any:
+    return _verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})
+
+
+def test_merge_into_function_keeps_the_static_lattice():
+    """``effects_worker`` merges through ``merge_into_function``, and that is the
+    only path that MINTS observed claims — so a carry-forward the other seam does
+    and this one does not is a carry-forward that never runs in production."""
+    result = claims_bridge.merge_into_function([_static_flow_out()], [], [_executed()])
+    assert result is not None
+    claims, _labels = result
+    flow_out = next(c for c in claims if c["claim_id"] == "flow.out")
+    assert flow_out["tier"] == "behavioral_observed"
+    assert flow_out["witness"]["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
+    assert flow_out["witness"]["direction"] == "out"
+
+
+def test_a_damaged_row_is_repaired_by_the_next_policy_rerun():
+    """The stage order is policy → effects: policy re-creates the row with a fresh
+    static claim and carries the old observed one back. That only heals the row if
+    the stripped observed claim neither becomes its own donor nor outranks its own
+    replacement — which is why a fix that only repairs pristine rows leaves every
+    row already on disk damaged forever."""
+    prior = [_static_flow_out(), _damaged_observed_flow_out()]
+    result = claims_bridge.merge_into_function(prior, [], [_executed()])
+    assert result is not None
+    claims, _labels = result
+    flow_out = [c for c in claims if c["claim_id"] == "flow.out"]
+    assert len(flow_out) == 1
+    witness = flow_out[0]["witness"]
+    assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
+    assert witness["sink_ids"] == ["sink-1"]
+    assert witness["effect_verdict_id"] == 1
+
+
+def test_repairing_a_damaged_row_is_idempotent():
+    """Three passes, because the second is where a naive donor rule starts
+    re-stamping ``static_tier`` with the merged claim's own observed tier."""
+    verdicts = [_executed()]
+    once = claims_bridge.merge_observed_claims([_static_flow_out(), _damaged_observed_flow_out()], verdicts)
+    twice = claims_bridge.merge_observed_claims(once, verdicts)
+    thrice = claims_bridge.merge_observed_claims(twice, verdicts)
+    assert once == twice == thrice
+    assert next(c for c in once if c["claim_id"] == "flow.out")["witness"]["static_tier"] == "standard_exact"
+
+
+def test_a_pause_claim_keeps_its_flags_and_polarity():
+    """The erasure was never flow-specific. ``pause.set`` witnesses carry
+    ``flags``/``polarity`` — which flags, and whether this is the set or the unset
+    direction — and a per-family allowlist named for flows carried neither."""
+    static: Claim = {
+        "claim_id": "pause.set",
+        "tier": "idiom_structural",
+        "witness": {"kind": "pause", "flags": ["deposit", "withdraw"], "polarity": "set"},
+    }
+    merged = claims_bridge.merge_observed_claims([static], [_verdict(EFFECT_CLASS_FREEZE_PAUSE)])
+    witness = next(c for c in merged if c["claim_id"] == "pause.set")["witness"]
+    assert witness["flags"] == ["deposit", "withdraw"]
+    assert witness["polarity"] == "set"
+    assert witness["static_tier"] == "idiom_structural"
+
+
+def test_a_supply_claim_keeps_its_supply_and_selector():
+    static: Claim = {
+        "claim_id": "supply.mint",
+        "tier": "standard_exact",
+        "witness": {"kind": "supply", "supply": "increase", "selector": "0x40c10f19"},
+    }
+    merged = claims_bridge.merge_observed_claims(
+        [static], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
+    )
+    witness = next(c for c in merged if c["claim_id"] == "supply.mint")["witness"]
+    assert witness["supply"] == "increase"
+    assert witness["selector"] == "0x40c10f19"
+    assert witness["static_tier"] == "standard_exact"
+
+
+def test_a_policy_derived_donor_is_stamped_as_such():
+    """The carry's real risk is tier laundering: a ``policy_derived`` destination
+    riding on a ``behavioral_observed`` claim reads as observed-quality unless the
+    witness says where it came from. The scorer discounts on ``static_tier``, so
+    the stamp has to be the donor's tier and not the claim's."""
+    static: Claim = {
+        "claim_id": "flow.out",
+        "tier": "policy_derived",
+        "witness": {
+            "kind": "value_flow",
+            "callee": "0x" + "cd" * 20,
+            "sink_id": "sink-9",
+            "source_tier": "standard_exact",
+        },
+    }
+    merged = claims_bridge.merge_observed_claims([static], [_executed()])
+    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
+    assert witness["static_tier"] == "policy_derived"
+    # ``sink_id`` singular: the allowlist this replaced only knew ``sink_ids``.
+    assert witness["sink_id"] == "sink-9"
+    assert witness["callee"] == "0x" + "cd" * 20
+    # ``source_tier`` already means something else and must survive untouched.
+    assert witness["source_tier"] == "standard_exact"
+
+
+def test_no_static_donor_stamps_no_provenance():
+    """No fabrication, and no stamp implying a static witness that never existed."""
+    merged = claims_bridge.merge_observed_claims([], [_executed()])
+    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
+    assert "flows" not in witness
+    assert "static_tier" not in witness
