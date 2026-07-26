@@ -500,6 +500,7 @@ def value_out(
     seeded_sentinel_calldata: Mapping[int, str] | None = None,
     target_payable: bool | None = None,
     native_payout: bool = False,
+    inputs_vacuous: bool = False,
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination? (§4.2)
 
@@ -631,12 +632,26 @@ def value_out(
         # must re-probe. ``value_probe_reverted`` is deliberately absent from
         # ``effects_worker._CACHEABLE_UNKNOWN_REASONS`` for exactly that reason
         # (§7); ``no_supply_delta``/``mint_call_reverted`` already split this way.
+        #
+        # A THIRD split (§3): a call that RAN but did so with an effect-relevant
+        # argument left at the encoder default (an empty dynamic array, an integer
+        # role that never resolved) observed nothing about F — it observed a fact
+        # about the vacuous argument. That is input-dependent by the same criterion
+        # a revert is, so its reason must ALSO stay out of the behaviour cache; a
+        # twin must not inherit "moves no value" from an empty-array probe.
+        if executed and inputs_vacuous:
+            reason = "no_value_observed_vacuous_input"
+            details["vacuous_input"] = True
+        elif executed:
+            reason = "no_value_observed"
+        else:
+            reason = "value_probe_reverted"
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_VALUE_OUT,
                 gate_ref=gate_ref,
-                reason="no_value_observed" if executed else "value_probe_reverted",
+                reason=reason,
                 details=details,
                 transcript=tr,
                 discrepancy=disc,

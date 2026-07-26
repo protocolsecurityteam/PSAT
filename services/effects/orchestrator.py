@@ -320,6 +320,7 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             target_payable=spec.target_payable,
             native_payout=spec.native_payout,
             static_shape=spec.static_shape,
+            inputs_vacuous=spec.inputs_vacuous,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)
