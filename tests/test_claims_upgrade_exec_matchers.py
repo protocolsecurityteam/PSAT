@@ -162,7 +162,25 @@ def test_batch_manage_idiom_positive(tmp_path):
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     idiom = ("exec.arbitrary", "idiom_structural")
     assert _find(claims, "manageBatch") == {idiom}
-    assert _find(claims, "manageBatchViaLibrary") == {idiom}
+
+
+def test_library_mediated_batch_executor_is_a_deliberate_under_claim(tmp_path):
+    """A real arbitrary-call executor that this matcher knowingly stays silent on.
+
+    ``using Address for address`` puts the LIBRARY in the destination and the
+    target in argument position, so the only handle left is "an address
+    parameter appears in the call's read set" — which is exactly what a fixed
+    destination forwarder also looks like. For a scalar parameter that ambiguity
+    is tolerated (the shape is common and the sibling positive covers it); for an
+    array it is not, because the same allowance put a false arbitrary-call badge
+    on published output.
+
+    Separating the two needs the library body, i.e. interprocedural work. Until
+    then this is an under-claim, which is the safe direction — and a proven
+    effects verdict still catches this function if it moves value. Delete this
+    test the day the destination can be traced through a library call."""
+    claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
+    assert _find(claims, "manageBatchViaLibrary") == set()
 
 
 def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
@@ -257,3 +275,17 @@ def test_facts_all_new_claim_ids_are_registered():
         "exec.arbitrary",
     ):
         assert claim_id in registered, claim_id
+
+
+def test_fixed_destination_batch_forwarder_is_a_near_miss_negative(tmp_path):
+    """The address array is an ARGUMENT to a fixed sink, not the thing being
+    called: no caller chooses a destination here, so this is not arbitrary
+    execution. It minted anyway because the array sits in the call's read set,
+    and the claim reaches published output ungated as an "arbitrary-call"
+    capability chip and a "manager" principal tag.
+
+    The direct test is what proves a real batch executor — its destination
+    resolves to the array itself — so argument position buys nothing for an
+    array and costs a false badge on every forwarder of this shape."""
+    claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
+    assert _find(claims, "notifyBatch") == set()

@@ -17,8 +17,14 @@ library Address {
     }
 }
 
+interface IFixedSink {
+    function notify(address who, bytes calldata payload) external;
+}
+
 contract BoringVault {
     using Address for address;
+
+    IFixedSink public fixedSink;
 
     address public owner;
 
@@ -67,6 +73,16 @@ contract BoringVault {
         for (uint256 i = 0; i < targets.length; i++) {
             (bool ok,) = targets[i].call(abi.encode(digests[i]));
             require(ok, "commit failed");
+        }
+    }
+
+    // Near miss: the destination is a FIXED sink, and the address array is only
+    // an argument being forwarded to it. Nothing here lets a caller choose who
+    // gets called, so this is not arbitrary execution -- but the address array
+    // does sit in the call's read set, which is how it earned a false badge.
+    function notifyBatch(address[] calldata users, bytes[] calldata payloads) external requiresAuth {
+        for (uint256 i = 0; i < users.length; i++) {
+            fixedSink.notify(users[i], payloads[i]);
         }
     }
 }

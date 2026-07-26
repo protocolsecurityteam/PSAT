@@ -315,8 +315,16 @@ CORPUS_EXEMPT_CLAIM_IDS = {
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,
-    # exec.arbitrary is no longer exempt: cast_wrapped_pull.sol carries a batch
-    # executor (address[]/bytes[] forwarding loop) that produces it in the golden.
+    "exec.arbitrary": (
+        "the corpus batch executor forwards through a library, which puts the library "
+        "in the destination and the target in argument position -- deliberately no longer "
+        "claimed, because allowing argument position for an ARRAY put a false arbitrary-call "
+        "badge on every fixed-destination batch forwarder. Covered by "
+        "test_claims_upgrade_exec_matchers::test_batch_manage_idiom_positive (compiled "
+        "boring_vault_manage.sol, direct batch executor) plus its two near-miss negatives. "
+        "Restore corpus coverage by making cast_wrapped_pull.sol's execBatch a DIRECT "
+        "targets[i].call(data[i]) executor."
+    ),
     "transfer_policy.configure": (
         "policy-tier claim: minted only downstream from sibling facts, so the "
         "single-contract static corpus never produces it; covered by "

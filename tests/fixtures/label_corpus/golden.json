@@ -1515,14 +1515,9 @@
           "full_name": "execBatch(address[],bytes[])",
           "selector": "0xd0cb75fa",
           "effect_labels": [
-            "arbitrary_external_call"
+            "external_contract_call"
           ],
-          "claims": [
-            {
-              "claim_id": "exec.arbitrary",
-              "tier": "idiom_structural"
-            }
-          ],
+          "claims": [],
           "value_flows": [],
           "external_calls": [
             {

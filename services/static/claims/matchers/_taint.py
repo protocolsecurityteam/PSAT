@@ -62,6 +62,10 @@ def _is_address(variable: Any) -> bool:
     return _element_type(variable) == "address"
 
 
+def _is_array(variable: Any) -> bool:
+    return str(getattr(variable, "type", "")).strip() != _element_type(variable)
+
+
 def _origin(variable: Any) -> Any:
     """The variable a read ultimately refers to.
 
@@ -85,6 +89,18 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, str] | 
     bytes_params = {p for p in parameters if _is_dynamic_bytes(p)}
     if not address_params or not bytes_params:
         return None
+    # An address in the call's READ set is only in argument position, which is
+    # not the same as being the destination — ``fixedSink.execute(users[i],
+    # payloads[i])`` reads an address parameter while calling a fixed contract.
+    # For a SCALAR parameter that conflation is load-bearing: the library-mediated
+    # ``target.functionCallWithValue(data, value)`` puts the library in the
+    # destination and the real target in argument position, and separating the two
+    # needs the library's body. An ARRAY parameter has no such excuse — a genuine
+    # batch executor calls the element, so its destination resolves to the array
+    # itself and the direct test below already proves it. Admitting arrays here
+    # bought one library-mediated batch shape and a false arbitrary-call badge on
+    # every fixed-destination batch forwarder.
+    argument_address_params = {p for p in address_params if not _is_array(p)}
 
     # Import locally so a missing slither install degrades the matcher (isolated
     # by build_claims) instead of breaking package import.
@@ -96,11 +112,11 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, str] | 
                 continue
             reads = {_origin(v) for v in getattr(ir, "read", None) or []}
             destination = _origin(getattr(ir, "destination", None))
-            dest_tainted = destination in address_params or bool(reads & address_params)
+            dest_tainted = destination in address_params or bool(reads & argument_address_params)
             data_tainted = bool(reads & bytes_params)
             if dest_tainted and data_tainted:
                 dest_param = next((p for p in address_params if p is destination), None) or next(
-                    iter(reads & address_params), None
+                    iter(reads & argument_address_params), None
                 )
                 data_param = next(iter(reads & bytes_params), None)
                 return {
