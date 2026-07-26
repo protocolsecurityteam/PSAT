@@ -118,7 +118,7 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         PolicyWorker,
         "_enrich_cross_contract",
-        lambda self, session, job, contract_analysis, control_snapshot: {},
+        lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
     )
 
     worker.process(session, cast(Any, job))

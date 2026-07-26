@@ -379,6 +379,29 @@ def _semantic_controller_context_address(
     return sorted(addresses)[0] if addresses else None
 
 
+def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, str]:
+    """``{function key -> selector}`` from the effective-permissions payload, so a
+    consumer holding either signature can find the row that payload produced.
+
+    Both keys are indexed because the two planes name a function differently: the
+    effects artifact and the predicate trees use Slither's ``full_name``, while
+    the row stores the canonical ABI signature — the same function under two
+    strings whenever a parameter is a contract, struct or enum. The selector is
+    the one value both sides agree on, and it is taken from the payload rather
+    than re-derived so it is byte-identical to what the writer stored."""
+    out: dict[str, str] = {}
+    for record in function_records or []:
+        if not isinstance(record, dict):
+            continue
+        selector = record.get("selector")
+        if not isinstance(selector, str) or not selector:
+            continue
+        for key in (record.get("function"), record.get("abi_signature")):
+            if isinstance(key, str) and key:
+                out.setdefault(key, selector.lower())
+    return out
+
+
 class PolicyWorker(BaseWorker):
     stage = JobStage.policy
 
@@ -737,7 +760,13 @@ class PolicyWorker(BaseWorker):
 
         # Cross-contract enrichment: mint policy-derived claims from sibling facts.
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(session, job, contract_analysis, control_snapshot)
+            enriched = self._enrich_cross_contract(
+                session,
+                job,
+                contract_analysis,
+                control_snapshot,
+                function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
+            )
             if enriched and ep_data is not None:
                 self._apply_cross_contract_claims(ep_data, enriched)
                 store_artifact(session, job.id, "effective_permissions", data=ep_data)
@@ -876,7 +905,12 @@ class PolicyWorker(BaseWorker):
             fn["claims"] = resolve_claim_precedence([*existing, *additions])
 
     def _enrich_cross_contract(
-        self, session, job: Job, contract_analysis: dict, control_snapshot: dict
+        self,
+        session,
+        job: Job,
+        contract_analysis: dict,
+        control_snapshot: dict,
+        function_records: list[dict] | None = None,
     ) -> dict[str, list[Claim]]:
         """Mint policy-derived claims from sibling facts.
 
@@ -884,6 +918,12 @@ class PolicyWorker(BaseWorker):
         ``services.static.cross_contract``: value-flow propagation, transfer-policy
         configuration, beacon upgrade, and proxy-verified upgrade provenance. The
         returned claims merge onto each function's existing claim list.
+
+        ``function_records`` is the effective-permissions payload the rows were
+        just written from. The derivations key on the Slither full_name the
+        effects artifact uses, while the row stores the canonical ABI signature,
+        so the two only meet through a key both sides derive identically — the
+        selector, taken from that same payload rather than re-derived here.
         """
         del contract_analysis
         from services.static.cross_contract import (
@@ -985,15 +1025,24 @@ class PolicyWorker(BaseWorker):
                 select(Contract).where(Contract.job_id == job.id).limit(1)
             ).scalar_one_or_none()
             if contract_row:
+                selector_for = _selector_by_function_key(function_records)
                 for fn_sig, new_claims in enriched.items():
-                    ef = session.execute(
-                        select(EffectiveFunction).where(
-                            EffectiveFunction.contract_id == contract_row.id,
-                            EffectiveFunction.abi_signature == fn_sig,
-                        )
-                    ).scalar_one_or_none()
+                    stmt = select(EffectiveFunction).where(EffectiveFunction.contract_id == contract_row.id)
+                    selector = selector_for.get(fn_sig)
+                    if selector:
+                        stmt = stmt.where(EffectiveFunction.selector == selector)
+                    else:
+                        stmt = stmt.where(EffectiveFunction.abi_signature == fn_sig)
+                    ef = session.execute(stmt).scalar_one_or_none()
                     if ef:
                         ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
+                    else:
+                        logger.warning(
+                            "Job %s: cross-contract claims for %s matched no effective_function row",
+                            job.id,
+                            fn_sig,
+                            extra={"phase": "cross_contract_enrichment", "function": fn_sig},
+                        )
                 session.commit()
         return enriched
 

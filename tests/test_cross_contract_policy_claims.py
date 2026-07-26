@@ -311,3 +311,91 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
     assert "policy_derived" not in tiers
     # ...while the observed claim is the thing the carry exists to preserve.
     assert "behavioral_observed" in tiers
+
+
+# ---------------------------------------------------------------------------
+# The two planes name a struct-param function differently; the join must not
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_struct_param_function_still_matches_its_row(db_session, _repoint_session_local):
+    """The derivations key on the Slither full_name the effects artifact uses;
+    the row stores the canonical ABI signature. For a struct parameter those are
+    two different strings for one function, so a join on the signature drops the
+    enrichment silently — the claims are derived, and then land nowhere.
+
+    The selector is the value both planes agree on, and it comes from the same
+    payload the row was written from."""
+    company = f"co-{uuid.uuid4()}"
+    target_job = _make_job(db_session, address=TARGET, company=company)
+    sibling_job = _make_job(db_session, address=TOKEN, company=company)
+
+    full_name = "sweepWithPermit(address,IAdapter.PermitInput)"
+    canonical = "sweepWithPermit(address,(uint256,uint8,bytes32))"
+    selector = _selector(canonical)
+
+    store_artifact(
+        db_session,
+        sibling_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
+        },
+    )
+    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    store_artifact(
+        db_session,
+        target_job.id,
+        "effects",
+        data={
+            "schema_version": "semantic-2",
+            "functions": {
+                full_name: {
+                    "selector": selector,
+                    "sinks": [
+                        {
+                            "id": "s0",
+                            "kind": "external_call",
+                            "target": "token.transfer",
+                            "selector": TRANSFER_SELECTOR,
+                            "origin": "body",
+                        }
+                    ],
+                    "claims": [],
+                }
+            },
+        },
+    )
+
+    # The row as the writer leaves it: canonical signature, canonical selector.
+    contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
+    db_session.add(contract)
+    db_session.flush()
+    db_session.add(
+        EffectiveFunction(
+            contract_id=contract.id,
+            function_name="sweepWithPermit",
+            selector=selector,
+            abi_signature=canonical,
+            effect_labels=["external_contract_call"],
+            claims=None,
+        )
+    )
+    db_session.commit()
+
+    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    enriched = PolicyWorker()._enrich_cross_contract(
+        db_session,
+        target_job,
+        {},
+        control_snapshot,
+        function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
+    )
+
+    # The derivation itself keys on the full_name and always worked...
+    assert full_name in enriched
+    # ...what regressed is whether the claim reaches the row.
+    ef = _ef(db_session, contract, canonical)
+    assert "flow.out" in {c["claim_id"] for c in (ef.claims or [])}
