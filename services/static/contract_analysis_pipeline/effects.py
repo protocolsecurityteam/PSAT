@@ -1314,12 +1314,25 @@ def _phi_of(value: Any, ctx: _UnitCtx) -> Any:
     return None
 
 
-def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
-    """True when ``value`` IS a caller-chosen quantity at the ABI boundary: a
-    formal parameter of the entry, or the ETH the caller attached to the call.
+# Neutral-origin tags that ARE a caller-chosen quantity, for the merge proof
+# below. ``param`` is an entry parameter; ``caller_supplied`` is an already-proven
+# merge of them, so a two-hop forward composes.
+_CALLER_SUPPLIED_TAGS = ("param", "caller_supplied")
 
-    A dispositive AST test on the leaf itself, not a provenance inference — which
-    is what lets it stand as one branch of a proof about a merge."""
+
+def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
+    """True when ``value`` IS a caller-chosen quantity: the ETH attached to the
+    call, or a formal parameter that the caller-directed origin actually reaches.
+
+    The parameter half is NOT the bare AST test it looks like. On the entry, a
+    formal IS the caller's argument. In a NESTED unit it is only whatever the
+    caller bound to it, and the caller may well have forwarded a state variable —
+    so the formal is resolved through ``param_bindings`` exactly as
+    :func:`_single_param_origin` resolves it. Reading a nested formal as
+    self-evidently caller-supplied published ``caller_supplied`` for
+    ``_helper(feeAmount)`` merged with ``msg.value``: an assertion that the caller
+    picks the magnitude, on a branch where the magnitude is storage they cannot
+    influence. A missing binding fails closed."""
     if value is None:
         return False
     from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
@@ -1327,7 +1340,13 @@ def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
     if isinstance(value, SolidityVariable) and str(getattr(value, "name", "")) == "msg.value":
         return True
     base = _base_name(getattr(value, "name", None))
-    return bool(base) and base in ctx.param_names
+    if not base or base not in ctx.param_names:
+        return False
+    if not ctx.nested:
+        return True
+    if ctx.param_bindings is None:
+        return False
+    return ctx.param_bindings.get(base, ("indeterminate",))[0] in _CALLER_SUPPLIED_TAGS
 
 
 def _merged_caller_supplied(value: Any, ctx: _UnitCtx, depth: int = 0) -> bool:

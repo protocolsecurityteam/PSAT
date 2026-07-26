@@ -473,3 +473,63 @@ def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
     all is the worst over-claim available here."""
     target = _out_flow(_returns["payBeneficiary(uint256,uint256)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
+
+
+# ---------------------------------------------------------------------------
+# `caller_supplied`: a merge is only caller-chosen if EVERY branch is, and a
+# nested formal is only caller-chosen if the caller bound it to something that is.
+# ---------------------------------------------------------------------------
+
+MERGE_SRC = """
+pragma solidity ^0.8.20;
+
+contract Merge {
+    uint256 public feeAmount;   // storage: NOT caller-chosen
+    address public sink;
+    bool public cond;
+
+    // Genuine: the merge is between an ENTRY parameter and msg.value, both of
+    // which the caller picks outright.
+    function payEntry(uint256 amt) external payable {
+        if (cond) { amt = msg.value; }
+        _send(sink, amt);
+    }
+
+    // The trap: the entry forwards a STATE VARIABLE, and the merge happens one
+    // frame down where the formal LOOKS like a parameter.
+    function payForwardedStorage() external payable { _helper(feeAmount); }
+
+    function _helper(uint256 amt) internal {
+        if (cond) { amt = msg.value; }
+        _send(sink, amt);
+    }
+
+    function _send(address to, uint256 a) internal {
+        (bool ok,) = payable(to).call{value: a}("");
+        require(ok);
+    }
+    receive() external payable {}
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def _merge(tmp_path_factory):
+    contract = _compile(tmp_path_factory.mktemp("merge"), MERGE_SRC, "Merge")
+    return build_effects(contract)["functions"]
+
+
+def test_a_merge_of_entry_param_and_msg_value_is_caller_supplied(_merge):
+    """Both branches are the caller's number, so the disjunction says something
+    an amount kind can assert — and it is stronger than ``indeterminate``."""
+    assert _out_flow(_merge["payEntry(uint256)"])["amount_kind"]["kind"] == "caller_supplied"
+
+
+def test_a_merge_reached_through_a_forwarded_state_variable_is_not(_merge):
+    """The formal in ``_helper`` is a parameter of that UNIT, but the caller bound
+    it to storage. Reading it as self-evidently caller-supplied asserts that the
+    caller picks the magnitude on a branch where the magnitude is a state
+    variable they cannot influence — an over-claim in the direction that matters,
+    since a consumer reads ``caller_supplied`` as attacker-chosen."""
+    flow = _out_flow(_merge["payForwardedStorage()"])
+    assert flow["amount_kind"]["kind"] == "indeterminate", flow
