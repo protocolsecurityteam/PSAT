@@ -529,3 +529,66 @@ def test_composequeue_is_not_role_management():
     assert _auth(functions, "sendCompose(address,bytes32,uint16,bytes)") == set()
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert _auth(functions, "renounceOwnership()") == {"ownership.renounce"}
+
+
+# ---------------------------------------------------------------------------
+# Solady EnumerableRoles behind OZ-named wrappers
+# ---------------------------------------------------------------------------
+
+
+def _solady_roles_surface():
+    """The Solady ``EnumerableRoles`` ABI, plus the OZ-named wrappers a registry
+    layers over it. Deliberately NO ``getRoleAdmin``: a flat ``uint256`` role set
+    has no per-role admin to publish, which is why the OZ gate refuses."""
+    return {
+        "setRole(address,uint256,bool)": (_fn("setRole(address,uint256,bool)"), None),
+        "hasRole(address,uint256)": (_fn("hasRole(address,uint256)", view=True), None),
+        "roleHolders(uint256)": (_fn("roleHolders(uint256)", view=True), None),
+        "grantRole(bytes32,address)": (_fn("grantRole(bytes32,address)"), None),
+        "revokeRole(bytes32,address)": (_fn("revokeRole(bytes32,address)"), None),
+    }
+
+
+def test_solady_enumerable_roles_wrappers_are_claimed():
+    """A registry can wear OZ's grantRole/revokeRole names over Solady's role set
+    and publish no getRoleAdmin. The OZ gate is right to refuse it, and refusing
+    left a live authority-mutation surface with no claim at all."""
+    functions = _run("SoladyRegistry", _solady_roles_surface())
+    assert _auth(functions, "grantRole(bytes32,address)") == {"roles.grant"}
+    assert _auth(functions, "revokeRole(bytes32,address)") == {"roles.revoke"}
+    assert _tiers(functions, "grantRole(bytes32,address)", "roles.grant") == {"standard_exact"}
+
+
+def test_solady_roles_witness_names_the_standard_that_proved_it():
+    """The witness records which standard the gate matched, so it must not say
+    ``oz_access_control`` for a contract that publishes no OZ role ABI."""
+    functions = _run("SoladyRegistry", _solady_roles_surface())
+    grant = next(c for c in functions["grantRole(bytes32,address)"] if c["claim_id"] == "roles.grant")
+    assert grant["witness"]["standard"] == "solady_enumerable_roles"
+
+
+def test_solady_gate_needs_the_enumerable_surface_not_the_wrappers():
+    """The wrappers are what the claim is ABOUT, so they cannot also be its gate.
+    Without the library's own surface there is nothing proving these selectors
+    touch a role set rather than a caller-keyed data map."""
+    surface = _solady_roles_surface()
+    del surface["roleHolders(uint256)"]
+    functions = _run("HalfSurface", surface)
+    assert _auth(functions, "grantRole(bytes32,address)") == set()
+    assert _auth(functions, "revokeRole(bytes32,address)") == set()
+
+
+def test_oz_registry_still_reports_oz_provenance():
+    """A registry publishing the full OZ ABI keeps its OZ witness — the new arm
+    must not shadow the existing one."""
+    functions = _run(
+        "OZRegistry",
+        {
+            "grantRole(bytes32,address)": (_fn("grantRole(bytes32,address)"), None),
+            "revokeRole(bytes32,address)": (_fn("revokeRole(bytes32,address)"), None),
+            "hasRole(bytes32,address)": (_fn("hasRole(bytes32,address)", view=True), None),
+            "getRoleAdmin(bytes32)": (_fn("getRoleAdmin(bytes32)", view=True), None),
+        },
+    )
+    grant = next(c for c in functions["grantRole(bytes32,address)"] if c["claim_id"] == "roles.grant")
+    assert grant["witness"]["standard"] == "oz_access_control"

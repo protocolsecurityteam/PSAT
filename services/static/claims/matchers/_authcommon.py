@@ -34,6 +34,9 @@ GRANT_ROLE = abi_selector("grantRole(bytes32,address)")  # OZ AccessControl
 REVOKE_ROLE = abi_selector("revokeRole(bytes32,address)")  # OZ AccessControl
 HAS_ROLE = abi_selector("hasRole(bytes32,address)")  # OZ AccessControl
 GET_ROLE_ADMIN = abi_selector("getRoleAdmin(bytes32)")  # OZ AccessControl
+SET_ROLE = abi_selector("setRole(address,uint256,bool)")  # Solady EnumerableRoles
+HAS_ROLE_ENUMERABLE = abi_selector("hasRole(address,uint256)")  # Solady EnumerableRoles
+ROLE_HOLDERS = abi_selector("roleHolders(uint256)")  # Solady EnumerableRoles
 SET_USER_ROLE = abi_selector("setUserRole(address,uint8,bool)")  # Solmate
 SET_ROLE_CAPABILITY = abi_selector("setRoleCapability(uint8,address,bytes4,bool)")
 SET_PUBLIC_CAPABILITY = abi_selector("setPublicCapability(address,bytes4,bool)")
@@ -202,6 +205,25 @@ def default_admin_rules_gate(ctx: ClaimContext) -> bool:
 
 def oz_access_control_gate(ctx: ClaimContext) -> bool:
     return ctx.has_selectors(HAS_ROLE, GET_ROLE_ADMIN)
+
+
+def solady_enumerable_roles_gate(ctx: ClaimContext) -> bool:
+    """Solady ``EnumerableRoles``: the role-keyed setter, view and enumeration
+    that library publishes.
+
+    A registry can wear OZ's ``grantRole``/``revokeRole`` names over this scheme
+    while publishing no ``getRoleAdmin`` — a role here is a flat ``uint256`` in a
+    set, so there IS no per-role admin to expose and ``oz_access_control_gate``
+    is right to refuse. This gate proves what OZ's pair proves: that the mutators
+    touch a role-membership scheme and not a caller-keyed data map.
+
+    Keyed on the library's surface rather than on ``grantRole``/``revokeRole``,
+    which are the selectors being claimed — a gate that admits the thing it is
+    meant to qualify proves nothing. ``roleHolders`` is the enumerable half and
+    is what separates the standard from any contract that merely owns a
+    ``setRole``; note ``hasRole`` alone cannot serve, since the OZ and Solady
+    signatures differ and a registry may publish both."""
+    return ctx.has_selectors(SET_ROLE, HAS_ROLE_ENUMERABLE, ROLE_HOLDERS)
 
 
 def solmate_roles_gate(ctx: ClaimContext) -> bool:

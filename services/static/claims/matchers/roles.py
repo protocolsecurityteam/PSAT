@@ -11,6 +11,10 @@ gate is what keeps those out.
 Standards covered:
   * OZ AccessControl ``grantRole`` / ``revokeRole`` (gate: ``hasRole`` +
     ``getRoleAdmin`` siblings);
+  * Solady ``EnumerableRoles`` behind OZ-named ``grantRole`` / ``revokeRole``
+    wrappers (gate: ``setRole`` + ``hasRole(address,uint256)`` + ``roleHolders``)
+    — a flat ``uint256`` role set publishes no per-role admin, so the OZ gate
+    alone leaves these registries unlabelled;
   * Maker ``wards`` ``rely`` / ``deny`` (gate: ``rely`` + ``deny`` + a ``wards``
     write) — today mislabeled ``hook_update``;
   * Solmate RolesAuthority ``setUserRole`` / ``setRoleCapability`` /
@@ -31,7 +35,12 @@ from . import _authcommon as ac
 
 
 def _roles_present(ctx: ClaimContext) -> bool:
-    return ac.oz_access_control_gate(ctx) or ac.maker_wards_gate(ctx) or ac.solmate_roles_gate(ctx)
+    return (
+        ac.oz_access_control_gate(ctx)
+        or ac.solady_enumerable_roles_gate(ctx)
+        or ac.maker_wards_gate(ctx)
+        or ac.solmate_roles_gate(ctx)
+    )
 
 
 def _evidence(standard: str, selector: str) -> ClaimEvidence:
@@ -61,6 +70,8 @@ def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         return None
     if selector == ac.GRANT_ROLE and ac.oz_access_control_gate(ctx):
         return _evidence("oz_access_control", selector)
+    if selector == ac.GRANT_ROLE and ac.solady_enumerable_roles_gate(ctx):
+        return _evidence("solady_enumerable_roles", selector)
     if selector == ac.RELY and ac.maker_wards_gate(ctx):
         return _wards_evidence(selector)
     return None
@@ -79,6 +90,8 @@ def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         return None
     if selector == ac.REVOKE_ROLE and ac.oz_access_control_gate(ctx):
         return _evidence("oz_access_control", selector)
+    if selector == ac.REVOKE_ROLE and ac.solady_enumerable_roles_gate(ctx):
+        return _evidence("solady_enumerable_roles", selector)
     if selector == ac.DENY and ac.maker_wards_gate(ctx):
         return _wards_evidence(selector)
     return None
