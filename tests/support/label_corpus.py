@@ -134,6 +134,16 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/value_router.sol",
     },
     {
+        # Destinations and amounts that reach a sink as an internal helper's
+        # RETURN value (a getter-read storage address, a ``_calculate*`` result),
+        # plus the branch/echo/disagree negatives that must stay unresolved.
+        "address": "0x0000000000000000000000000000000000000090",
+        "name": "HelperReturns",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/helper_returns.sol",
+    },
+    {
         # WETH-shaped wrapped-native token: weth.* / erc20.* / supply.* / flow.out.
         "address": "0x000000000000000000000000000000000000dead",
         "name": "WrappedNative",

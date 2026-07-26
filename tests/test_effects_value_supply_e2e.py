@@ -20,9 +20,12 @@ against it through ``eth_simulateV1`` — anvil's own, no scripting anywhere.
 Gated behind ``anvil_available`` (the fixture ships pre-compiled bytecode, so no
 solc is needed here). No live marker, no RPC, no forking anvil.
 
-NOTE: anvil binds port 8556 here. ``tests/test_effects_token_fixtures_e2e.py``
-uses 8546 and any ad-hoc anvil must stay clear of both, or the offline suite
-fails spuriously on a port collision.
+NOTE ON PORTS. Every anvil in the offline suite binds a fixed localhost port, so
+a duplicate is a spurious failure in whichever test loses the race — and it only
+shows up when the files run together, never in isolation. Currently taken:
+8547-8548 (``test_effects_anvil.py``) and 8551-8556
+(``test_effects_token_fixtures_e2e.py``). This file takes 8560; an ad-hoc anvil
+should start above that.
 """
 
 from __future__ import annotations
@@ -42,8 +45,8 @@ from services.effects.simulate import SimCall, eth_simulate_v1
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "effects" / "vault_value_supply.json"
 
-# Clear of the 8546 the token-fixtures e2e uses.
-_PORT = 8556
+# Clear of every other anvil in the suite — see the module docstring.
+_PORT = 8560
 
 CTX = SimContext(chain_id=31337, block=1, hardfork="prague")
 

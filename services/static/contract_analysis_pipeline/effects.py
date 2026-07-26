@@ -1465,7 +1465,7 @@ def _source_neutral_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     return ("indeterminate",)
 
 
-def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
+def _arg_origin(operand: Any, ctx: _UnitCtx, depth: int = 0) -> tuple[str, ...]:
     """The neutral origin a single call-site argument forwards, resolved in the
     caller's entry-rooted context. Every meaningful source resolves to a neutral
     origin and they must AGREE; any merge / unresolvable / multi-origin shape →
@@ -1503,7 +1503,7 @@ def _arg_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     # rate, ONE), …)`` forwards a scaled caller input, and refusing to name it
     # here made every ERC-4626-style redemption's amount ``indeterminate`` at the
     # sink, one hop from a fact we hold.
-    call = _call_origin(operand, ctx, amount=True)
+    call = _call_origin(operand, ctx, amount=True, depth=depth)
     if call is not None:
         return call
     srcs = ctx.engine._sources_for_value(operand)
@@ -1838,6 +1838,125 @@ def _call_amount_origin(ir: Any, ctx: _UnitCtx) -> tuple[str, ...]:
     return ("param_derived",) if _call_param_argument_indexes(ir, ctx) else ("indeterminate",)
 
 
+# Call ops whose callee runs against the CALLER's own contract storage, so the
+# caller's state-variable context classifies the callee's body correctly. An
+# ``InternalCall`` is the same contract by definition; a library's functions are
+# inlined (internal) or delegatecalled (external), and both read the caller's
+# storage. A ``HighLevelCall`` is deliberately absent — its callee's state
+# variables belong to a DIFFERENT contract, and reusing this context there would
+# classify one contract's mutability as another's.
+_SAME_CONTEXT_CALL_OPS = ("InternalCall", "LibraryCall")
+
+# Depth bound on chasing helper returns through helpers. Real getter chains are a
+# hop or two (``_governorIndirect`` -> ``_governor`` -> the state var); past that
+# the answer degrades to "not proven", which is the safe direction.
+_RETURN_ORIGIN_DEPTH = 4
+
+# Re-entrancy guard for :func:`_callee_return_origin`. Resolving a helper's
+# return value re-enters the general origin machinery, which can reach the same
+# helper again (directly recursive, or mutually so through a second helper), and
+# the recursion has no natural base case. A module-level set is sound here
+# because the whole static build pass is single-threaded, and it is always
+# cleared in a ``finally``.
+_RETURN_ORIGIN_ACTIVE: set[int] = set()
+
+
+def _return_values(callee: Any) -> list[Any] | None:
+    """The single value each of ``callee``'s ``return`` statements yields, or
+    ``None`` when the shape is not one this can reason about.
+
+    ``None`` for a callee with no explicit return at all (it yields the type's
+    zero value, which is not an origin), and for any return carrying a number of
+    values other than one — a tuple return gives no way to say WHICH member
+    reached the sink, and guessing a member is the failure mode this whole
+    module is built to avoid."""
+    values: list[Any] = []
+    for node in getattr(callee, "nodes", []) or []:
+        # ``irs_ssa``, NOT ``irs``: every lookup the returned operand then feeds
+        # (the def-use index, the provenance engine) is keyed on the SSA objects,
+        # so a non-SSA twin of the same variable resolves to nothing. It fails
+        # quietly, and only for values whose SSA identity carries the answer — a
+        # returned state variable resolves by name either way, a returned call
+        # result does not.
+        for ir in getattr(node, "irs_ssa", ()) or ():
+            if type(ir).__name__ != "Return":
+                continue
+            operands = list(getattr(ir, "values", None) or [])
+            if len(operands) != 1:
+                return None
+            values.append(operands[0])
+    return values or None
+
+
+def _callee_return_origin(ir: Any, ctx: _UnitCtx, depth: int) -> tuple[str, ...] | None:
+    """The neutral origin of the value an in-contract helper RETURNS, or ``None``.
+
+    The lattice already threads a caller's arguments INTO a helper, so a
+    destination or amount passed down resolves interprocedurally. Nothing carried
+    the answer back OUT, so ``_send(_governor(), amount)`` published
+    ``indeterminate`` for a destination the contract states plainly — an
+    admin-settable state variable, which is exactly the redirectable-vs-fixed
+    distinction a scorer reads. The shape recurs on every diamond-storage getter
+    and ``_calculate*`` helper.
+
+    The callee is classified in its OWN context, with the call site's arguments
+    bound exactly as ``walk`` binds them, so a helper that returns one of its
+    parameters resolves to whatever the caller passed — including ``param``, when
+    the caller passed a caller-chosen address. That is a finding, not a leak: the
+    destination really is caller-named.
+
+    Every ``return`` must agree on one resolved origin. Two returns naming
+    different origins is a genuine disagreement the caller cannot see through
+    (``if (flag) return governor; return treasury;``), and picking either member
+    would assert a destination the code does not commit to.
+
+    An ELEMENT read is refused outright, and that refusal is the whole safety
+    argument. ``function beneficiaryOf(uint256 id) { return _owners[id]; }``
+    resolves, by the element rule, to the mutability of the BASE variable — and
+    ``_owners`` has no setter function, so the base reads ``storage_no_setter``,
+    i.e. *provably fixed*. The destination is nothing of the sort: the caller
+    picks the key, and a different key is a different address. Publishing it as
+    fixed is the worst over-claim this module can make — it is the benign end of
+    the redirectability axis, and §4.2 promotes it to ``immutable_fixed`` on the
+    verdict. The base's mutability is simply not a statement about any one entry,
+    which is exactly why a keyed lookup earns a named kind only where a published
+    standard says what it means (``ownerOf`` -> ``token_owner``) and is otherwise
+    left unresolved."""
+    if depth > _RETURN_ORIGIN_DEPTH or type(ir).__name__ not in _SAME_CONTEXT_CALL_OPS:
+        return None
+    callee = getattr(ir, "function", None)
+    if callee is None or not getattr(callee, "nodes", None):
+        return None
+    key = id(callee)
+    if key in _RETURN_ORIGIN_ACTIVE:
+        return None
+    values = _return_values(callee)
+    if values is None:
+        return None
+    bindings, index_bindings = _bindings_for_call(ir, callee, ctx)
+    callee_ctx = _build_unit_ctx(
+        callee,
+        False,
+        ctx.state_vars_by_name,
+        ctx.setters,
+        ctx.alias_indeterminate,
+        ctx.setter_scan_complete,
+        bindings,
+        index_bindings,
+    )
+    _RETURN_ORIGIN_ACTIVE.add(key)
+    try:
+        if any(_element_origin(value, callee_ctx) is not None for value in values):
+            return None
+        origins = {_arg_origin(value, callee_ctx, depth + 1) for value in values}
+    finally:
+        _RETURN_ORIGIN_ACTIVE.discard(key)
+    if len(origins) != 1:
+        return None
+    origin = next(iter(origins))
+    return None if origin[0] == "indeterminate" else origin
+
+
 def _call_irs(operand: Any, ctx: _UnitCtx) -> list[Any]:
     """Every call IR ``operand`` IS the return value of, walking casts/copies
     only — the def-chain edges that preserve that identity."""
@@ -1879,7 +1998,29 @@ def _param_derived_index(operand: Any, ctx: _UnitCtx) -> int | None:
     return next(iter(indexes)) if len(indexes) == 1 else None
 
 
-def _call_origin(operand: Any, ctx: _UnitCtx, *, amount: bool = False) -> tuple[str, ...] | None:
+def _one_call_origin(ir: Any, ctx: _UnitCtx, *, amount: bool, depth: int) -> tuple[str, ...]:
+    """The neutral origin of ONE call's return value, best evidence first.
+
+    1. A recognized STANDARD callee (``ownerOf``) — a published contract, so it
+       beats anything read off a body.
+    2. What an in-contract helper's body actually RETURNS
+       (:func:`_callee_return_origin`). A traced origin outranks
+       ``param_derived`` below, which only says a caller input went in somewhere.
+    3. The amount-only ``param_derived`` fallback, then ``indeterminate``.
+
+    The order matters in one direction only: step 2 can never turn an
+    ``indeterminate`` into a wrong answer, because it declines unless every
+    ``return`` agrees on one resolved origin."""
+    standard = _call_standard_origin(ir)
+    if standard[0] != "indeterminate":
+        return standard
+    traced = _callee_return_origin(ir, ctx, depth)
+    if traced is not None:
+        return traced
+    return _call_amount_origin(ir, ctx) if amount else standard
+
+
+def _call_origin(operand: Any, ctx: _UnitCtx, *, amount: bool = False, depth: int = 0) -> tuple[str, ...] | None:
     """The neutral origin of an operand that IS a call's return value. ``None``
     only when the operand does not resolve — through casts/copies alone — to
     exactly one call, in which case the caller falls through to the source set.
@@ -1903,7 +2044,7 @@ def _call_origin(operand: Any, ctx: _UnitCtx, *, amount: bool = False) -> tuple[
     lets the drop-the-rest shortcut pick ``param`` out of a real union and report
     a token-owner payout as a caller-chosen destination."""
     origins: set[tuple[str, ...] | None] = {
-        _call_amount_origin(ir, ctx) if amount else _call_standard_origin(ir) for ir in _call_irs(operand, ctx)
+        _one_call_origin(ir, ctx, amount=amount, depth=depth) for ir in _call_irs(operand, ctx)
     }
     # Two calls reaching one operand require a Phi between them, so >1 origin is
     # a merge and must not resolve to either member.
@@ -2262,8 +2403,9 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
         return ("capped_by_balance", "static_trace")
     if _reaches_merged_local(operand, ctx):
         return ("indeterminate", "static_trace")
-    # A recognized call's return value classifies from the callee's STANDARD
-    # identity — a trace through the call, never a dispositive AST read.
+    # A call's return value classifies from the callee's standard identity, or
+    # from what an in-contract helper's body provably returns — a trace through
+    # the call either way, never a dispositive AST read.
     call = _call_origin(operand, ctx, amount=amount)
     if call is not None:
         kind = _origin_to_amount_kind(call) if amount else _origin_to_target_kind(call, ctx)

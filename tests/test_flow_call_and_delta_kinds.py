@@ -375,3 +375,101 @@ def test_param_index_reaches_the_claims_witness(tmp_path):
     assert out, claims["half(address)"]
     indexes = [f.get("target_param_index") for f in out[0]["witness"]["flows"]]
     assert 0 in indexes, out[0]["witness"]["flows"]
+
+
+# ---------------------------------------------------------------------------
+# Helper RETURN values: the lattice threads arguments INTO a helper, so this is
+# the way back out. A getter-read destination and a computed amount are facts the
+# contract states plainly, and both used to publish "we traced nothing".
+# ---------------------------------------------------------------------------
+
+HELPER_RETURN_SRC = """
+pragma solidity ^0.8.20;
+
+contract Returns {
+    mapping(uint256 => address) private _owners;
+    address public immutable treasury;
+    address public governor;
+    uint256 public cap;
+    bool public flag;
+
+    constructor(address t) { treasury = t; governor = msg.sender; }
+    function setGovernor(address g) external { governor = g; }
+
+    function _governor() internal view returns (address) { return governor; }
+    function _treasury() internal view returns (address) { return treasury; }
+    function _claimable() internal view returns (uint256) { return cap; }
+    function _indirect() internal view returns (address) { return _governor(); }
+    function _echo(address a) internal pure returns (address) { return a; }
+    function _either() internal view returns (address) {
+        if (flag) return governor;
+        return treasury;
+    }
+    // A keyed lookup: the BASE has no setter, but the caller picks the entry.
+    function _beneficiary(uint256 id) internal view returns (address) { return _owners[id]; }
+
+    function payGovernor(uint256 a) external { _send(_governor(), a); }
+    function payTreasury(uint256 a) external { _send(_treasury(), a); }
+    function payIndirect(uint256 a) external { _send(_indirect(), a); }
+    function payEcho(address to, uint256 a) external { _send(_echo(to), a); }
+    function payEither(uint256 a) external { _send(_either(), a); }
+    function payBeneficiary(uint256 id, uint256 a) external { _send(_beneficiary(id), a); }
+    function drainToCap(address to) external { _send(to, _claimable()); }
+
+    function _send(address to, uint256 amount) internal {
+        (bool ok,) = payable(to).call{value: amount}("");
+        require(ok);
+    }
+    receive() external payable {}
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def _returns(tmp_path_factory):
+    contract = _compile(tmp_path_factory.mktemp("returns"), HELPER_RETURN_SRC, "Returns")
+    return build_effects(contract)["functions"]
+
+
+def test_a_getter_helper_return_resolves_to_the_variables_mutability(_returns):
+    """``_send(_governor(), amount)``. The destination is an admin-settable state
+    variable — the redirectable-vs-fixed distinction a scorer reads — and saying
+    ``indeterminate`` claimed the contract had not told us."""
+    assert _out_flow(_returns["payGovernor(uint256)"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_an_immutable_helper_return_resolves_to_immutable(_returns):
+    """The benign end of the same axis, through the same edge."""
+    assert _out_flow(_returns["payTreasury(uint256)"])["target_kind"]["kind"] == "immutable"
+
+
+def test_a_helper_returning_a_helper_resolves_through_both_hops(_returns):
+    assert _out_flow(_returns["payIndirect(uint256)"])["target_kind"]["kind"] == "storage_setter"
+
+
+def test_a_helper_returning_its_argument_resolves_to_the_caller_value(_returns):
+    """Not a leak — a finding. The helper hands back what the caller passed, so
+    the destination really is caller-named, and that is the theft-shaped case."""
+    assert _out_flow(_returns["payEcho(address,uint256)"])["target_kind"]["kind"] == "param"
+
+
+def test_a_calculating_helper_return_resolves_the_amount(_returns):
+    assert _out_flow(_returns["drainToCap(address)"])["amount_kind"]["kind"] == "bounded_by_storage"
+
+
+def test_a_helper_whose_returns_disagree_stays_indeterminate(_returns):
+    """``if (flag) return governor; return treasury;`` — the answer genuinely
+    depends on state, and picking either member asserts what the code does not."""
+    assert _out_flow(_returns["payEither(uint256)"])["target_kind"]["kind"] == "indeterminate"
+
+
+def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
+    """The safety case, and the reason element reads are refused outright.
+
+    ``_owners`` has no setter function, so the element rule would classify the
+    BASE as ``storage_no_setter`` — i.e. provably FIXED, the benign end of the
+    axis, which §4.2 promotes to ``immutable_fixed`` on the verdict. The caller
+    picks the key, and a different key is a different address. Resolving this at
+    all is the worst over-claim available here."""
+    target = _out_flow(_returns["payBeneficiary(uint256,uint256)"])["target_kind"]
+    assert target["kind"] == "indeterminate", target
