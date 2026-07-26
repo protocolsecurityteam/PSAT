@@ -65,7 +65,7 @@ from services.effects.config import (
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.discrepancies import file_new_idiom_candidate, route_discrepancy
+from services.effects.discrepancies import authority_contradiction, file_new_idiom_candidate, route_discrepancy
 from services.effects.harness import Discrepancy, ObservedEffect
 from services.effects.orchestrator import (
     HashResolver,
@@ -1108,6 +1108,21 @@ class EffectsWorker(BaseWorker):
                 discrepancy.transcript_ptr = transcript_ptr
             route_discrepancy(discrepancy, contract_address=cand.probe_target, selector=cand.selector, tier=tier)
             counters.discrepancies_filed += 1
+        # Direction 3 (§7): an exact-finite_set principal rejected by a canonical
+        # gate error falsifies the resolver's enumeration. Only on a FRESH probe
+        # (miss) that actually executed the call — a cache hit ran nothing.
+        if getattr(cand, "membership_exact", False) and it.cached is None and it.probed is not None:
+            filed = authority_contradiction(
+                effect_class=it.effect_class,
+                transcript=it.probed.transcript,
+                membership_exact=True,
+                contract_address=cand.probe_target,
+                selector=cand.selector,
+                tier=tier,
+                transcript_ptr=transcript_ptr,
+            )
+            if filed:
+                counters.discrepancies_filed += 1
         # Direction 2 (§9): a freshly-witnessed effect on a static-silent (blank)
         # function is a candidate new static idiom — an INFORMATIONAL vocabulary-
         # growth signal, NOT a degradation (every proven verdict is one, so it

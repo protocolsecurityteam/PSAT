@@ -44,8 +44,97 @@ logger = logging.getLogger("services.effects.discrepancies")
 # i.e. a candidate new static idiom.
 NEW_IDIOM_KIND = "static_silent_sim_positive_new_idiom"
 
+# Direction-3 discrepancy kind (§7): the AUTHORITY plane. Effects is the only
+# stage that executes a call AS a resolved principal, so it alone can falsify
+# authority resolution — and until now it discarded that signal.
+AUTHORITY_CONTRADICTION_KIND = "authority_exact_member_gate_rejected"
+
+# Canonical, PUBLISHED gate-rejection error selectors (OpenZeppelin v5). Both name
+# the REJECTED CALLER in their ABI payload, so a revert carrying one is
+# unambiguously "this caller is not authorized" — never a state precondition
+# (§9.2b's "operation is not ready" is a state error, not one of these). SELECTORS
+# ONLY: an ``Error(string)`` "...is missing role..." decoded as text, or a
+# protocol-local ``Unauthorized()`` matched by name, is the substring heuristic
+# that produced two false positives in this investigation (§0.0.1/§7) and stays
+# out. A published standard selector is a proven fact; a revert-string is not.
+_GATE_REJECTION_SELECTORS = frozenset(
+    {
+        "0xe2517d3f",  # AccessControlUnauthorizedAccount(address,bytes32)
+        "0x118cdaa7",  # OwnableUnauthorizedAccount(address)
+    }
+)
+
 # The only three ways a §9 discrepancy is ever closed (never auto-dropped).
 _CLOSING_RULE = "matcher_fix | probe_soundness_fix | higher_tier_witness"
+
+
+def _gate_rejection_selector(revert_data: Any) -> str | None:
+    """The canonical gate-rejection selector a revert carries, or ``None``. Keys on
+    the 4-byte selector ALONE — never on a decoded revert string."""
+    if not isinstance(revert_data, str) or len(revert_data) < 10:
+        return None
+    sel = revert_data[:10].lower()
+    return sel if sel in _GATE_REJECTION_SELECTORS else None
+
+
+def authority_contradiction(
+    *,
+    effect_class: str,
+    transcript: dict[str, Any] | None,
+    membership_exact: bool,
+    contract_address: str,
+    selector: str | None,
+    tier: str | None,
+    transcript_ptr: str | None,
+) -> bool:
+    """§7 — the third §9 direction, on the AUTHORITY plane. Files a degraded
+    ``StageError`` (direction-1 severity, D3) when ALL hold:
+
+    1. the resolved principal came from a ``capability_expr`` the resolver marked
+       an EXACT ``finite_set`` — it claims to have enumerated exactly who may call
+       F, and it named this principal;
+    2. the probe — run AS that principal — was rejected with a CANONICAL, published
+       gate-rejection selector (:data:`_GATE_REJECTION_SELECTORS`, selectors only);
+    3. no override could account for it — always true here: seeding writes token
+       balances only, never roles or gate flags (§7), so the rejection is not an
+       artefact of the probe's own state manipulation.
+
+    Then the enumeration named the WRONG holder — a resolution defect effects is
+    uniquely placed to catch, filed rather than discarded. Restricted to the
+    value/supply classes, whose every probe call is issued as the acting principal;
+    ``authority_change`` deliberately rejects RANDOM identities at the same gate, so
+    a gate-rejection revert there is the expected behaviour, not a contradiction.
+
+    Returns whether a discrepancy was filed."""
+    if not membership_exact:
+        return False
+    if effect_class not in ("value_out", "supply"):
+        return False
+    matched: str | None = None
+    for result in (transcript or {}).get("results") or ():
+        if not isinstance(result, dict) or result.get("success"):
+            continue
+        sel = _gate_rejection_selector(result.get("return_or_revert"))
+        if sel is not None:
+            matched = sel
+            break
+    if matched is None:
+        return False
+    record_degraded(
+        phase="effects_authority_contradiction",
+        exc=PlaneDisagreement(f"exact-member gate rejection ({matched}) on {effect_class}"),
+        context={
+            "discrepancy_kind": AUTHORITY_CONTRADICTION_KIND,
+            "effect_class": effect_class,
+            "contract_address": contract_address.lower(),
+            "selector": selector or "",
+            "tier": tier,
+            "transcript_ptr": transcript_ptr,
+            "gate_rejection_selector": matched,
+            "closing_rule": _CLOSING_RULE,
+        },
+    )
+    return True
 
 
 class PlaneDisagreement(RuntimeError):

@@ -127,6 +127,11 @@ class Candidate:
     # identity for a caller-supplied token PARAMETER, which has no getter behind it
     # to resolve. Priced entries only (see :func:`_token_holdings_by_contract`).
     input_token_addresses: tuple[str, ...] = ()
+    # §7: the resolver marked this function's caller set an EXACT ``finite_set`` —
+    # it claims to have enumerated exactly who may call F. If the probe, run as that
+    # sole/named member, is then rejected by a canonical gate error, the
+    # enumeration named the wrong holder (an authority-plane §9 discrepancy).
+    membership_exact: bool = False
 
     @property
     def probe_target(self) -> str:
@@ -703,10 +708,24 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
             EffectiveFunction.effect_targets,
             EffectiveFunction.deployment_address,
             EffectiveFunction.claims,
+            EffectiveFunction.capability_expr,
         )
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .where(*where)
     ).all()
+
+
+def _membership_exact(capability_expr: Any) -> bool:
+    """Whether the resolver claims an EXACT enumeration of F's caller set (§7). An
+    ``unsupported`` / ``conditional_universal`` capability also carries
+    ``membership_quality: exact``, so both the ``finite_set`` kind AND the exact
+    quality are required — this is "the resolver named a finite, complete set of
+    holders", the only shape a canonical gate rejection can contradict."""
+    return (
+        isinstance(capability_expr, dict)
+        and capability_expr.get("kind") == "finite_set"
+        and capability_expr.get("membership_quality") == "exact"
+    )
 
 
 def _enrolled_families(claims: Any) -> frozenset[str] | None:
@@ -788,7 +807,7 @@ def select_candidates(
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
 
     candidates: list[Candidate] = []
-    for fid, contract_id, address, selector, name, public, targets, deployment, claims in rows:
+    for fid, contract_id, address, selector, name, public, targets, deployment, claims, capability_expr in rows:
         families = _enrolled_families(claims)
         # Claim-carrying but no flow/supply family to re-probe → already explained.
         if families is not None and not families:
@@ -814,6 +833,7 @@ def select_candidates(
                 value_holders=value_holders,
                 acting_balance_usd=graph.deployment_balance.get(acting, 0.0),
                 input_token_addresses=holdings.get(contract_id, ()),
+                membership_exact=_membership_exact(capability_expr),
             )
         )
 
