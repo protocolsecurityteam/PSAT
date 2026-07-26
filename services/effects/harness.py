@@ -109,6 +109,22 @@ class ObservedEffect:
     def is_proven(self) -> bool:
         return self.verdict == VERDICT_PROVEN
 
+    @property
+    def witness_payload(self) -> dict[str, Any]:
+        """What gets PERSISTED as the witness — ``details`` plus the reason.
+
+        ``details`` alone does not identify the verdict: every unknown supply
+        verdict carries ``{"observation": "executed"}``, so a sign WITHHELD
+        because the arithmetic and the zero-address ``Transfer`` logs contradicted
+        each other is byte-identical on the row to "supply did not move". The
+        reason is code-plane (it is what ``_is_cacheable`` already keys the
+        transfer decision on), so it travels with the verdict into the behavioral
+        cache too and a twin that free-hits can still say why.
+        """
+        if not self.reason:
+            return dict(self.details)
+        return {**self.details, "reason": self.reason}
+
 
 # ---------------------------------------------------------------------------
 # Identity selection + authorization discipline (§8.2 / §8.3)

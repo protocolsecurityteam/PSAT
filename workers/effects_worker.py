@@ -949,6 +949,12 @@ class EffectsWorker(BaseWorker):
                 # "unmeasured", never "F does not do this". A consumer that reads
                 # ``witness`` without joining on ``verdict`` must at minimum join on
                 # this key. See ``services.effects.recipes.OBSERVATION_*``.
+                # ``witness["reason"]`` sub-divides it: several verdicts share one
+                # ``observation`` and differ only there (a withheld contradictory
+                # supply sign vs a plain non-observation), so a consumer counting
+                # a specific outcome must read the reason, and must treat its
+                # ABSENCE as "not recorded" — rows written before it existed, and
+                # cache hits served from such a row, simply lack the key.
                 witness=details or None,
                 transcript_ptr=transcript_ptr,
             )
@@ -1001,7 +1007,14 @@ class EffectsWorker(BaseWorker):
             counters.cache_misses += 1
             if _is_cacheable(eff):
                 self._cache_miss_write(session, it, eff, audit_status=None)
-            return eff.verdict, eff.tier, eff.transcript_ptr, eff.details, eff.concrete, eff.discrepancy
+            return (
+                eff.verdict,
+                eff.tier,
+                eff.transcript_ptr,
+                eff.witness_payload or None,
+                eff.concrete,
+                eff.discrepancy,
+            )
 
         cached = it.cached
         if it.needs_audit:
@@ -1057,7 +1070,7 @@ class EffectsWorker(BaseWorker):
             verdict=eff.verdict,
             tier=eff.tier,
             transcript_ptr=eff.transcript_ptr,
-            details=eff.details or None,
+            details=eff.witness_payload or None,
             audit_status=audit_status,
         )
 

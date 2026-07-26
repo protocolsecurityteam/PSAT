@@ -311,6 +311,14 @@ def bump_hit(session: Session, row: EffectBehaviorCache) -> None:
 # collided two distinct behaviors (a hashing bug) and the cache must NOT be
 # trusted. Concrete/state-plane keys (destination, impl) are deliberately absent —
 # they are per-deployment and are EXPECTED to differ.
+#
+# ``reason`` also rides ``details`` (``ObservedEffect.witness_payload``) and is
+# deliberately NOT here: it is a strictly finer partition of the same verdict, and
+# an unknown's reason can legitimately differ between two sightings of one
+# behavior (a precondition revert here, a clean non-observation there) without any
+# hash having collided. Comparing it would stamp AUDIT_FAILED — which poisons the
+# key permanently — on a transient disagreement. An allowlist, not a diff, is also
+# why a new witness key never needs a schema-version bump.
 _KERNEL_SIGNATURE_KEYS = (
     "latch_flip",
     "gate_mutation",
