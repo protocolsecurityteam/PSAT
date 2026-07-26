@@ -455,6 +455,51 @@ def test_supply_from_mint_label():
     assert spec.gate_ref == "gate:caller_authority"
 
 
+BURN_SIG = "redeem(uint256,address)"
+BURN_SEL = "0x33334444"
+
+
+def _redeem_fn() -> cd.FunctionFacts:
+    """A burn whose quantity and recipient slots carry no vocabulary name, so the
+    only evidence about either is the static flow lattice — and the lattice
+    records the burn's own movement under the direction the artifact actually
+    emits (an outbound payout), never under ``burn``."""
+    flow = {
+        "kind": "callee_erc20_selector",
+        "direction": "out",
+        "origin": "body",
+        "amount_kind": {"kind": "param", "tier": "static_trace"},
+        "amount_param_index": 0,
+        "target_kind": {"kind": "param", "tier": "static_trace"},
+        "target_param_index": 1,
+    }
+    return cd.FunctionFacts(
+        full_name=BURN_SIG,
+        selector=BURN_SEL,
+        canonical_signature=BURN_SIG,
+        effect_info=_effect_info(
+            BURN_SIG, BURN_SEL, effect_labels=["burn"], value_flows=[flow], parameter_names=["n", "dst"]
+        ),
+        tree=None,
+        legacy_value_flows=(),
+    )
+
+
+def test_supply_reads_its_lattice_through_the_directions_flows_actually_carry():
+    """S1. Filtering the supply plan's lattice reads by ``mint``/``burn`` rejected
+    every flow an artifact emits, so the class got no quantity and no recipient."""
+    spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
+    assert spec is not None
+    # Nothing but the lattice can put the amount in slot 0: ``n`` is in no word
+    # vocabulary, so a zero here means the plan never read the lattice.
+    assert int(spec.mint_calldata[10:74], 16) == cd.ARG_AMOUNT
+    # And the recipient the lattice named earns the sentinel probe the supply
+    # class could never synthesize.
+    assert spec.sentinel_calldata is not None
+    assert spec.sentinel_calldata[74:138].endswith("ee" * 20)
+    assert spec.taint_param_reaches_sink is True
+
+
 def test_supply_none_for_a_non_supply_function():
     facts = _token_facts()
     fn = cd.resolve_function(facts, TRANSFER)

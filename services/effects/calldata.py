@@ -934,6 +934,19 @@ def _gate_ref(tree: Any) -> str:
 
 _OUT_DIRECTIONS = frozenset({"out", "eth_out"})
 _SUPPLY_DIRECTIONS = frozenset({"mint", "burn"})
+# Directions the SUPPLY plan reads its lattice facts through, which are not the
+# directions that make the class applicable. ``mint``/``burn`` is a legacy
+# ``semantic_control`` vocabulary the effects artifact never emits as a flow
+# DIRECTION — measured over the 80 frozen artifacts, every non-guard flow is
+# ``out`` (97), ``value_router`` (38) or ``in`` (33), and none is mint/burn — so
+# filtering the lattice by it rejected every flow and left the whole class with no
+# amount index, no taint index and no lattice recipient, running on the name
+# vocabulary alone. A mint/burn function's own value movement is recorded by the
+# lattice as the inbound pull it takes (``in``) or the outbound payout it makes
+# (``out``); that is where its quantity and its recipient live. Applicability is
+# still decided by :data:`_SUPPLY_DIRECTIONS`, which is read off ``effect_labels``
+# — those DO carry mint/burn.
+_SUPPLY_LATTICE_DIRECTIONS = frozenset({"in", "out"})
 
 
 def _flow_directions(fn: FunctionFacts) -> set[str]:
@@ -1064,11 +1077,11 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         if not candidate.authority_public:
             return None
         principal = NEUTRAL_CALLER
-    built = _value_probe_inputs(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
+    built = _value_probe_inputs(fn, principal, _SUPPLY_LATTICE_DIRECTIONS)
     if built is None:
         return None
     calldata, tainted, sentinel_calldata, token_params = built
-    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, frozenset(_SUPPLY_DIRECTIONS))
+    seeded, seeded_sentinel = _seeded_probe_calldata(fn, principal, _SUPPLY_LATTICE_DIRECTIONS)
     return SupplyPlanInputs(
         # The candidate's own probe target. A candidate that is not an ERC-20
         # simply fails the pre-read and lands ``unknown`` — that is the honest
