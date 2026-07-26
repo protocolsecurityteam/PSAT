@@ -69,6 +69,7 @@ def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error():
     assert len(errors) == 1
     err = errors[0]
     assert err.severity == "degraded"
+    assert err.context is not None
     assert err.context["discrepancy_kind"] == discrepancies.AUTHORITY_CONTRADICTION_KIND
     assert err.context["gate_rejection_selector"] == ACCESS_CONTROL_UNAUTHORIZED
 
@@ -76,7 +77,9 @@ def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error():
 def test_ownable_unauthorized_also_files():
     filed, errors = _run(_transcript(OWNABLE_UNAUTHORIZED, success_first=True))
     assert filed is True
-    assert errors[0].context["gate_rejection_selector"] == OWNABLE_UNAUTHORIZED
+    err = errors[0]
+    assert err.context is not None
+    assert err.context["gate_rejection_selector"] == OWNABLE_UNAUTHORIZED
 
 
 def test_a_state_precondition_revert_files_nothing():
@@ -159,4 +162,6 @@ def test_route_section9_files_the_authority_contradiction_on_a_fresh_probe():
         degraded_errors_var.reset(token)
     assert counters.discrepancies_filed == 1
     assert len(errors) == 1
-    assert errors[0].context["discrepancy_kind"] == discrepancies.AUTHORITY_CONTRADICTION_KIND
+    err = errors[0]
+    assert err.context is not None
+    assert err.context["discrepancy_kind"] == discrepancies.AUTHORITY_CONTRADICTION_KIND

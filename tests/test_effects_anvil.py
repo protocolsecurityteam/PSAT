@@ -379,7 +379,7 @@ class TimelockAnvil:
     def hardfork(self) -> str:
         return self._hf
 
-    def versions(self) -> dict:
+    def versions(self) -> dict[str, str]:
         return {"anvil": "anvil 1.5.1-stable", "foundry": "anvil 1.5.1-stable"}
 
     def snapshot(self) -> str:
@@ -388,8 +388,8 @@ class TimelockAnvil:
         self._snaps[sid] = (self.time, self.ready, self.sentinel_balance)
         return sid
 
-    def revert(self, sid: str) -> bool:
-        self.time, self.ready, self.sentinel_balance = self._snaps[sid]
+    def revert(self, snapshot_id: str) -> bool:
+        self.time, self.ready, self.sentinel_balance = self._snaps[snapshot_id]
         return True
 
     def impersonate(self, address: str) -> None:

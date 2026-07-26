@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from types import SimpleNamespace
+from typing import cast
 
 from eth_utils.crypto import keccak
 
@@ -454,17 +455,21 @@ def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
     assert eff.details["input_seeded"] is True
 
     claim = claims_bridge.verdict_to_claim(
-        SimpleNamespace(
-            id=1,
-            effect_class=EFFECT_CLASS_SUPPLY,
-            verdict=VERDICT_PROVEN,
-            tier=TIER_CALL,
-            behavior_hash="bh",
-            current_check_passed=None,
-            witness=eff.witness_payload,
-            observed_residue=None,
+        cast(
+            claims_bridge.VerdictLike,
+            SimpleNamespace(
+                id=1,
+                effect_class=EFFECT_CLASS_SUPPLY,
+                verdict=VERDICT_PROVEN,
+                tier=TIER_CALL,
+                behavior_hash="bh",
+                current_check_passed=None,
+                witness=eff.witness_payload,
+                observed_residue=None,
+            ),
         )
     )
+    assert claim is not None
     assert claim["witness"]["observed"]["input_seeded"] is True
 
 
@@ -474,17 +479,21 @@ def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
     (There was no burn equivalent of the value_out top-level assertion, which is
     why the gap shipped green.)"""
     claim = claims_bridge.verdict_to_claim(
-        SimpleNamespace(
-            id=1,
-            effect_class=EFFECT_CLASS_SUPPLY,
-            verdict=VERDICT_PROVEN,
-            tier=TIER_CALL,
-            behavior_hash="bh",
-            current_check_passed=None,
-            witness={"supply_delta_sign": "burn", "input_seeded": True, "contract_balance_seeded": True},
-            observed_residue=None,
+        cast(
+            claims_bridge.VerdictLike,
+            SimpleNamespace(
+                id=1,
+                effect_class=EFFECT_CLASS_SUPPLY,
+                verdict=VERDICT_PROVEN,
+                tier=TIER_CALL,
+                behavior_hash="bh",
+                current_check_passed=None,
+                witness={"supply_delta_sign": "burn", "input_seeded": True, "contract_balance_seeded": True},
+                observed_residue=None,
+            ),
         )
     )
+    assert claim is not None
     observed = claim["witness"]["observed"]
     assert observed["input_seeded"] is True
     assert observed["contract_balance_seeded"] is True

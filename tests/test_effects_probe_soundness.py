@@ -383,6 +383,7 @@ def test_authority_change_records_the_decoded_mutation_revert():
     assert eff.reason == "mutation_call_reverted"
     # The decoded reason names the selector (here an undecodable custom error),
     # and the same string reaches both the witness and the transcript.
+    assert eff.transcript is not None
     assert err in eff.details["revert_reason"]
     assert eff.details["revert_reason"] == eff.transcript["mutate_revert"]
 
