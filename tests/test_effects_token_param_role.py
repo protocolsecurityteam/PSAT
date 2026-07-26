@@ -213,6 +213,32 @@ def test_a_state_var_called_through_becomes_a_getter_hint_but_a_parameter_never_
     assert "depositAsset()" not in hints
 
 
+def _read_sink(sig: str, target: str, selector: str) -> dict[str, Any]:
+    """A body view call (``shares``/``balanceOf``) whose head names the token
+    without pulling anything."""
+    return {
+        "id": f"{sig}:sink0:external_call:{target}.read",
+        "function": sig,
+        "kind": "external_call",
+        "target": f"{target}.read",
+        "selector": selector,
+        "origin": "body",
+    }
+
+
+def test_a_token_read_selector_names_the_token_getter():
+    # A share-accounted wrap reads ``eETH.shares(caller)`` before it moves the
+    # asset; that read is the only NAMED head when the transfer is library-wrapped
+    # behind a temporary. ``_TOKEN_READ_SELECTORS`` surfaces the getter from it.
+    sig = "wrap(uint256)"
+    for selector in ("0xce7c2ac2", "0xf5eb42dc", "0x70a08231"):
+        facts = _facts(sig, parameter_names=["amount"], sinks=[_read_sink(sig, "underlying", selector)])
+        fn = cd.resolve_function(facts, _sel(sig))
+        assert fn is not None
+        assert "underlying()" in cd.input_token_hints(fn), selector
+
+
+
 def test_substitute_address_arg_fails_closed_on_a_slot_that_is_not_there():
     data = "0x" + "aa" * 4 + "00" * 32
     assert cd.substitute_address_arg(data, 1, TOKEN_A) is None

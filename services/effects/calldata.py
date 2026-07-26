@@ -1876,6 +1876,22 @@ _PULL_SELECTORS = frozenset(
     }
 )
 
+# View selectors that only ever READ a per-holder token balance, so a body sink
+# bearing one names the input asset in its dotted head just as a PULL selector
+# does — a share-accounted wrap reads ``eETH.shares(caller)`` before it moves the
+# asset, and that read is the only NAMED head when the transfer itself is
+# library-wrapped behind a temporary. Selector-keyed, not name-keyed:
+# ``shares(address)`` shares its selector with ``PaymentSplitter.shares``, so this
+# is a hint source only, never a token-role assertion (see ``_TOKEN_METHOD_WORDS``
+# which deliberately excludes ``shares`` for that reason).
+_TOKEN_READ_SELECTORS = frozenset(
+    {
+        "0xce7c2ac2",  # shares(address)
+        "0xf5eb42dc",  # sharesOf(address)
+        "0x70a08231",  # balanceOf(address)
+    }
+)
+
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # A token hint that is already an address needs no getter call to resolve.
 _RESOLVED_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -1922,7 +1938,7 @@ def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ())
     for sink in fn.effect_info.get("sinks") or []:
         if not isinstance(sink, dict) or sink.get("kind") != "external_call" or sink.get("origin") != "body":
             continue
-        if str(sink.get("selector") or "").lower() not in _PULL_SELECTORS:
+        if str(sink.get("selector") or "").lower() not in (_PULL_SELECTORS | _TOKEN_READ_SELECTORS):
             continue
         _add(str(sink.get("target") or "").split(".")[0])
     for head in sorted(_token_method_targets(fn)):
