@@ -726,3 +726,55 @@ def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
     rows = _principals(db_session)
     assert len(rows) == 1
     assert rows[0].resolved_type == "safe"
+
+
+# ---------------------------------------------------------------------------
+# The row's abi_signature must be the one its own selector was computed from
+# ---------------------------------------------------------------------------
+
+
+def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
+    """``build_effective_permissions`` computes the canonical signature and the
+    selector together and emits both; writing the Slither full_name instead left
+    a row whose ``abi_signature`` does not hash to its own ``selector``.
+
+    That column is what the API publishes as the function's signature, and for a
+    struct param the full_name has no tuple layout at all — you cannot encode a
+    call or recompute a selector from ``f(A.PermitInput)``."""
+    from eth_utils.crypto import keccak
+
+    canonical = "requestWithdrawWithPermit(uint256,address,(uint256,uint256,uint8,bytes32,bytes32))"
+    selector = "0x" + keccak(text=canonical).hex()[:8]
+
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[
+            _fn_record(
+                "requestWithdrawWithPermit(uint256,address,IWeETHWithdrawAdapter.PermitInput)",
+                abi_signature=canonical,
+                selector=selector,
+            )
+        ],
+        capability_by_function=None,
+    )
+    db_session.commit()
+
+    ef = _ef_row(db_session)
+    assert ef.abi_signature == canonical
+    assert "0x" + keccak(text=ef.abi_signature).hex()[:8] == ef.selector
+    # The full_name still names the function for display.
+    assert ef.function_name == "requestWithdrawWithPermit"
+
+
+def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
+    """Older test metadata and degraded records carry no ``abi_signature``; the
+    row must still name the function rather than going empty."""
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[{"function": "doThing()", "selector": "0xdeadbeef"}],
+        capability_by_function=None,
+    )
+    db_session.commit()
+    assert _ef_row(db_session).abi_signature == "doThing()"

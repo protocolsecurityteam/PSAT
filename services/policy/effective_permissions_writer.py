@@ -285,7 +285,13 @@ def write_effective_function_rows(
             "deployment_address": deployment_address,
             "function_name": function_name,
             "selector": fn.get("selector"),
-            "abi_signature": fn_signature,
+            # The canonical signature, not the Slither full_name it was derived
+            # from: ``selector`` on the line above already comes from the same
+            # dict, and taking the two from different sources put a signature in
+            # the row whose keccak is not that row's own selector. For a struct
+            # param the full_name has lost the tuple layout entirely, so nothing
+            # downstream can encode a call or recompute the selector from it.
+            "abi_signature": fn.get("abi_signature") or fn_signature,
             "effect_labels": fn.get("effect_labels", []),
             "effect_targets": fn.get("effect_targets", []),
             "action_summary": fn.get("action_summary"),
