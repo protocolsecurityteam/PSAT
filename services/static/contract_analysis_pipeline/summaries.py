@@ -458,6 +458,64 @@ def _effect_labels(function, graph_entry: dict | None) -> list[str]:
     return _dedupe_strings(list(labels))
 
 
+def _resolve_cast_head(head: Any, def_by_id: dict[int, Any]) -> Any:
+    """Follow ``TypeConversion`` casts from a Slither temporary back to the named
+    variable it aliases.
+
+    A library-wrapped pull binds its token to a temporary — the real line is
+    ``IERC20(address(eETH)).safeTransferFrom(...)``, a DOUBLE cast — so the call
+    head is ``TMP_n`` whose own name (``"TMP_1127"``) carries no signal a consumer
+    can act on. When ``head`` is a temporary defined by a cast, walk the cast chain
+    to the operand underneath and return it. Scope is deliberately narrow:
+
+    * TypeConversion edges only. Following an ``Assignment`` from a reassigned
+      local would, in the non-SSA IR (no Phi), pick an arbitrary branch's value.
+    * temporary-rooted only. The loop consults the def map only while the current
+      value IS a temporary, so a state variable or parameter is returned unchanged
+      — an assigned state var is never walked PAST to its rvalue.
+
+    A mapping element (``ReferenceVariable``, e.g. ``tokens[id]``) or a computed
+    value is not temporary-rooted, so it is returned unchanged and names no getter.
+    Reads typed IR attributes only; never ``str(ir)``."""
+    from slither.slithir.variables.temporary import TemporaryVariable  # type: ignore[import]
+
+    seen: set[int] = set()
+    value = head
+    while isinstance(value, TemporaryVariable) and id(value) not in seen:
+        seen.add(id(value))
+        ir = def_by_id.get(id(value))
+        if ir is None or type(ir).__name__ != "TypeConversion":
+            break
+        value = getattr(ir, "variable", None)
+    return value
+
+
+def _function_ir_def_map(function: Any) -> dict[int, Any]:
+    """A non-SSA ``{id(lvalue) -> defining IR}`` over ``function`` and every
+    internal/library callee reachable from it.
+
+    The sink emitter and this value-flow walk read ``node.irs`` (not
+    ``irs_ssa``), so the SSA def maps built elsewhere in the pipeline point at
+    different operand objects and cannot serve a cast resolution over ``irs``."""
+    out: dict[int, Any] = {}
+    seen: set[int] = set()
+
+    def visit(fn: Any) -> None:
+        if fn is None or id(fn) in seen:
+            return
+        seen.add(id(fn))
+        for node in getattr(fn, "nodes", []) or []:
+            for ir in getattr(node, "irs", []) or []:
+                lvalue = getattr(ir, "lvalue", None)
+                if lvalue is not None:
+                    out[id(lvalue)] = ir
+                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    visit(getattr(ir, "function", None))
+
+    visit(function)
+    return out
+
+
 def _extract_value_flows(function) -> list[dict]:
     """Extract detailed value flow info from standard selectors.
 
@@ -480,11 +538,16 @@ def _extract_value_flows(function) -> list[dict]:
     reformatted upstream without any signal that this stopped working."""
     flows: list[dict] = []
     parameters = {id(p) for p in function.parameters}
+    def_by_id = _function_ir_def_map(function)
 
     for _ct, call_ir in function.all_high_level_calls():
         destination = getattr(call_ir, "destination", None)
         if destination is None:
             continue
+        # A library-wrapped or double-cast receiver arrives as a temporary; resolve
+        # it to the state var it aliases so ``token_var`` names a real getter rather
+        # than ``TMP_n`` (which fabricates a hint that seeds nothing downstream).
+        destination = _resolve_cast_head(destination, def_by_id)
         var_name = getattr(destination, "name", None)
         if not isinstance(var_name, str) or not var_name:
             continue

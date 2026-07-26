@@ -1931,6 +1931,13 @@ def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ())
 
     def _add(raw: Any) -> None:
         name = str(raw or "").strip()
+        # A Slither synthetic (``TMP_1127``/``REF_5``/``TUPLE_2``) is not a getter:
+        # it is an unresolved cast/index temporary, and calling it as ``TMP_1127()``
+        # seeds nothing. Static resolution now recovers the state var behind most
+        # of these; whatever survives here (a mapping element, a computed value) has
+        # no getter to name and is dropped rather than emitted as junk.
+        if name.startswith(("TMP_", "REF_", "TUPLE_")):
+            return
         # A parameter is not a getter: the value lives in calldata, not storage.
         if name and name not in params and _IDENTIFIER.match(name) and name not in names:
             names.append(name)

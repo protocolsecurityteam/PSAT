@@ -238,6 +238,17 @@ def test_a_token_read_selector_names_the_token_getter():
         assert "underlying()" in cd.input_token_hints(fn), selector
 
 
+def test_a_slither_temporary_head_never_becomes_a_getter_hint():
+    # An unresolved cast/index temporary carries no getter; calling ``TMP_7()``
+    # seeds nothing, so it must be dropped rather than emitted.
+    sig = "wrap(uint256)"
+    for junk in ("TMP_7", "REF_5", "TUPLE_2"):
+        facts = _facts(sig, parameter_names=["amount"], sinks=[_pull_sink(sig, junk)])
+        fn = cd.resolve_function(facts, _sel(sig))
+        assert fn is not None
+        hints = cd.input_token_hints(fn)
+        assert not any(h.startswith(("TMP_", "REF_", "TUPLE_")) for h in hints), (junk, hints)
+
 
 def test_substitute_address_arg_fails_closed_on_a_slot_that_is_not_there():
     data = "0x" + "aa" * 4 + "00" * 32

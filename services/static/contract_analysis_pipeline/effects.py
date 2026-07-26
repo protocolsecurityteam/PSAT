@@ -56,6 +56,7 @@ from .shared import _all_state_variables
 from .summaries import (
     _action_summary,
     _effect_labels,
+    _resolve_cast_head,
 )
 from .token_slots import derive_token_slots
 
@@ -427,22 +428,27 @@ def _classify_node_irs(node: Any) -> list[tuple[str, str, str | None]]:
     ``node.state_variables_written`` is more reliable than walking IR
     assignments by hand."""
     out: list[tuple[str, str, str | None]] = []
+    # Non-SSA def map, node-local: the cast IRs defining an inline-cast receiver
+    # (``IERC20(address(eETH)).safeTransferFrom`` emits both TypeConversions and
+    # the call in one node) live here, letting the head resolve past the temporary.
+    def_by_id = {id(lv): ir for ir in _node_irs(node) if (lv := getattr(ir, "lvalue", None)) is not None}
     for ir in _node_irs(node):
         op = type(ir).__name__
         if op == "NewContract":
             target = getattr(ir, "contract_name", None) or str(getattr(ir, "contract_created", "")) or "unknown"
             out.append(("contract_creation", str(target), None))
         elif op in ("HighLevelCall", "LibraryCall"):
-            destination = getattr(ir, "destination", None)
-            destination_name = getattr(destination, "name", None) or str(destination) or "unknown"
             function_name = getattr(ir, "function_name", None) or "call"
             selector = _selector_for(_callee_signature(ir))
-            # LibraryCall's "destination" is in its first argument.
+            # A LibraryCall's real receiver is its first argument; ``destination``
+            # is the library contract itself.
             if op == "LibraryCall":
                 arguments = list(getattr(ir, "arguments", []) or [])
-                if arguments:
-                    arg = arguments[0]
-                    destination_name = getattr(arg, "name", None) or str(arg) or destination_name
+                head = arguments[0] if arguments else getattr(ir, "destination", None)
+            else:
+                head = getattr(ir, "destination", None)
+            resolved = _resolve_cast_head(head, def_by_id)
+            destination_name = getattr(resolved, "name", None) or str(resolved) or "unknown"
             out.append(("external_call", f"{destination_name}.{function_name}", selector))
         elif op == "LowLevelCall":
             target = getattr(getattr(ir, "destination", None), "name", None) or str(
