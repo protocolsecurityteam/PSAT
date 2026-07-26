@@ -25,6 +25,7 @@ from services.effects.anvil import (
 from services.effects.config import SCOPE_PROJECTION, TIER_FORK, VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
 from utils.rpc import EthCallResult
+from workers.effects_worker import _is_cacheable
 
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
@@ -240,6 +241,63 @@ def test_pause_recipe_proven_records_pause_effective():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["pause_effective"] is True
     assert eff.details["observation"] == "executed"
+
+
+class DeadSurfaceAnvil(StubAnvil):
+    """Every entry point already reverts on its OWN precondition — an unfunded
+    caller, an unmet business rule — pause or no pause. The pause itself enacts
+    fine. Nothing was live to freeze."""
+
+    def call(self, tx: dict) -> EthCallResult:
+        if tx.get("data") == self._pause_calldata:
+            return EthCallResult(True, "0x", None, None)
+        return EthCallResult(False, "0x", "0x" + "precondition".encode().hex(), "precondition")
+
+
+def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
+    """``observed_blast = pre - post``, so an empty PRE set makes the empty radius
+    true by construction: it measures the probe set, not the latch. Sharing the
+    ``no_blast_radius_observed`` reason let that transfer on the behavioral hash,
+    publishing "this pause froze nothing" to every bytecode twin on the strength
+    of a surface that happened to be dead at this block."""
+    eff = pause_recipe(
+        transport=DeadSurfaceAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "no_live_entry_points_to_freeze"
+    assert eff.details["pre_pause_succeeding"] == []
+    assert not _is_cacheable(eff)
+    # The scored denominator is still static's set, as on every other pause row.
+    assert eff.details["scored_denominator"] == ["foo"]
+
+
+def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
+    """The control the split exists for: points WERE live and the pause froze
+    none of them. That IS an observation about the latch, and a twin inherits it."""
+    eff = pause_recipe(
+        transport=StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+
+    assert eff.reason == "no_blast_radius_observed"
+    assert eff.details["pre_pause_succeeding"]
+    assert _is_cacheable(eff)
 
 
 def test_every_pause_row_carries_an_observation_discriminator():

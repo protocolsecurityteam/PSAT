@@ -277,6 +277,39 @@ def pause_recipe(
         else None
     )
 
+    if not pre_succeeding:
+        # NOTHING WAS LIVE TO FREEZE. Every entry point we could synthesize was
+        # already reverting on its own precondition before the pause, so
+        # ``observed_blast = pre - post`` is empty by construction and measures
+        # the probe set, not the pause. Distinct from the branch below, where
+        # points WERE live and the pause left them alone — that is a real
+        # observation about the latch; this is the absence of one.
+        #
+        # Deliberately its own reason so it stays OUT of
+        # ``_CACHEABLE_UNKNOWN_REASONS``: the emptiness is a property of this
+        # deployment's state at this block (an unfunded caller, an unmet
+        # business precondition), not of the bytecode, so transferring it would
+        # publish "this pause froze nothing" to every twin on the strength of a
+        # surface that happened to be dead here.
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_FREEZE_PAUSE,
+                tier=TIER_FORK,
+                scope=SCOPE_PROJECTION,
+                gate_ref=gate_ref,
+                reason="no_live_entry_points_to_freeze",
+                details={
+                    "observation": OBSERVATION_EXECUTED,
+                    "pause_effective": True,
+                    "pre_pause_succeeding": [],
+                    "observed_blast_radius": [],
+                    "scored_denominator": sorted(predicted),
+                },
+                transcript=tr,
+                discrepancy=disc,
+            ),
+        )
     if not observed_blast:
         return emit(
             store,
