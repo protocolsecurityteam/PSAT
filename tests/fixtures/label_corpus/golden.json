@@ -1515,25 +1515,24 @@
           "full_name": "execBatch(address[],bytes[])",
           "selector": "0xd0cb75fa",
           "effect_labels": [
-            "external_contract_call"
+            "arbitrary_external_call"
           ],
-          "claims": [],
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural"
+            }
+          ],
           "value_flows": [],
           "external_calls": [
             {
-              "target": "REF_5.functionCall",
-              "selector": "0xa0b5ffb0",
-              "origin": "body"
-            },
-            {
-              "target": "target.call",
+              "target": "REF_4.call",
               "selector": "",
               "origin": "body"
             }
           ],
           "effect_targets": [
-            "REF_5.functionCall",
-            "target.call"
+            "REF_4.call"
           ]
         },
         {

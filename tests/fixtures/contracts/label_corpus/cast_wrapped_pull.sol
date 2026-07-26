@@ -18,17 +18,8 @@ library SafeERC20 {
     }
 }
 
-library Address {
-    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
-        (bool ok, bytes memory ret) = target.call(data);
-        require(ok, "call failed");
-        return ret;
-    }
-}
-
 contract CastWrappedPull {
     using SafeERC20 for IERC20;
-    using Address for address;
 
     address public owner;
     address public reserveAsset;   // a token the vault holds, stored as address
@@ -49,11 +40,14 @@ contract CastWrappedPull {
         return IERC20(address(reserveAsset)).shares(account);
     }
 
-    // exec.arbitrary, one array level up: destination and calldata both trace to
-    // the array parameters, and the call op reads an element reference.
+    // exec.arbitrary, one array level up: a DIRECT low-level call whose
+    // destination and calldata both trace to the array parameters, and the call
+    // op reads an element reference. A true executor, not a fixed-destination
+    // forwarder — so it legitimately mints the claim.
     function execBatch(address[] calldata targets, bytes[] calldata data) external requiresAuth {
         for (uint256 i = 0; i < targets.length; i++) {
-            targets[i].functionCall(data[i]);
+            (bool ok, ) = targets[i].call(data[i]);
+            require(ok, "call failed");
         }
     }
 }
