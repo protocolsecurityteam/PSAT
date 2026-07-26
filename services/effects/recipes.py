@@ -876,14 +876,20 @@ def authority_change(
     after = [_sim_to_ethcall(c) for c in res.calls[len(rlist) + 1 :]]
     if not mutate.success:
         # The principal could not even execute F — a precondition revert, not a
-        # proven absence of effect (§8.4).
+        # proven absence of effect (§8.4). This class takes NO seeder (§9.3): its
+        # reverts are on the gate, not a missing asset, so there is nothing to
+        # seed away. But the decoded revert IS worth keeping — without it the next
+        # census cannot name why the mutation reverted. Record it the way
+        # ``value_out`` records a seeded attempt's revert, via ``_revert_detail``.
+        revert_reason = _revert_detail(mutate)
+        tr["mutate_revert"] = revert_reason
         return emit(
             store,
             unknown(
                 EFFECT_CLASS_AUTHORITY_CHANGE,
                 gate_ref=gate_ref,
                 reason="mutation_call_reverted",
-                details={"observation": OBSERVATION_REVERTED},
+                details={"observation": OBSERVATION_REVERTED, "revert_reason": revert_reason},
                 transcript=tr,
             ),
         )

@@ -352,6 +352,41 @@ def test_every_row_carries_an_observation_discriminator():
             assert row.details["observation"] in ("reverted", "executed")
 
 
+def test_authority_change_records_the_decoded_mutation_revert():
+    """§9.3, seam ``recipes.authority_change``. The class is unrecoverable by
+    construction (no seeder — it reverts on the gate, not a missing asset), but
+    the decoded revert must be kept or the next census cannot name why the 31
+    mutation_call_reverted rows reverted. Recorded the way ``value_out`` records a
+    seeded attempt's revert (``_revert_detail``)."""
+    err = _sel("Unauthorized()")  # a bare custom-error selector, no decodable payload
+    sim = _Recorder(
+        SimResult(
+            calls=(
+                SimCallResult(False, "0x", "0x", ()),  # before r1
+                SimCallResult(False, "0x", "0x", ()),  # before r2
+                SimCallResult(False, "0x", err, ()),  # mutate reverted with the selector
+                SimCallResult(False, "0x", "0x", ()),  # after r1
+                SimCallResult(False, "0x", "0x", ()),  # after r2
+            )
+        )
+    )
+    eff = recipes.authority_change(
+        simulate=sim,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        mutate_calldata="0x11111111",
+        probe_calldata="0x22222222",
+        randoms=["0x" + "33" * 20, "0x" + "44" * 20],
+    )
+    assert eff.reason == "mutation_call_reverted"
+    # The decoded reason names the selector (here an undecodable custom error),
+    # and the same string reaches both the witness and the transcript.
+    assert err in eff.details["revert_reason"]
+    assert eff.details["revert_reason"] == eff.transcript["mutate_revert"]
+
+
 # ---------------------------------------------------------------------------
 # A burn must never be published as a mint
 # ---------------------------------------------------------------------------
