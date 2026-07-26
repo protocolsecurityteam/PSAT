@@ -295,6 +295,13 @@ _DEFAULT_DECIMALS = 18
 # scale. The recipe picks by the decimals the discovery block read back.
 SEED_UNIT_DECIMALS: tuple[int, ...] = (18, 8, 6)
 
+# Floor for a capped holder-balance seed: one whole unit at the LARGEST scale any
+# probe encodes (:data:`SEED_UNIT_DECIMALS`). The probe amount follows the first
+# seeded token's decimals while the cap follows each token's own supply, so
+# without this a low-supply or low-decimal token is seeded below what the call
+# then spends. See :func:`balance_seed_amount`.
+MIN_BALANCE_SEED = 10 ** max(SEED_UNIT_DECIMALS)
+
 
 def selector_of(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
@@ -529,13 +536,25 @@ def balance_seed_amount(anchor: AnchorSlot, layout: TokenLayout) -> int:
     to respect and the alternative is seeding nothing at all.
 
     An ALLOWANCE is not capped: approvals above the supply are ordinary (the
-    ``type(uint256).max`` idiom) and bound nothing that could wrap."""
+    ``type(uint256).max`` idiom) and bound nothing that could wrap.
+
+    The cap never falls below :data:`MIN_BALANCE_SEED`, and that floor is load
+    bearing. The probe AMOUNT is one whole unit of the FIRST seeded token's
+    decimals, while the cap is each token's OWN supply — different tokens, so
+    they can disagree. A job that discovers an 18-decimal token first calls with
+    ``1e18``; capping USDC (6 decimals, supply ~2.5e16) at its supply then seeds
+    less than the call spends and ``transferFrom`` reverts on a probe that used
+    to clear. That is pure recall loss rather than a false claim, but it is loss
+    the cap was never meant to buy. Above the floor the invariant still holds for
+    every token whose supply exceeds one unit — which is every live token — and
+    below it the wrap is caught downstream by the signed-delta read and the
+    zero-address ``Transfer`` cross-check."""
     if anchor.arity != 1:
         return SEED_AMOUNT
     supply = layout.total_supply
     if supply is None or supply <= 0:
         return SEED_AMOUNT
-    return min(SEED_AMOUNT, supply)
+    return max(min(SEED_AMOUNT, supply), MIN_BALANCE_SEED)
 
 
 def _anchor_args(arity: int, holder: str, spender: str) -> str:

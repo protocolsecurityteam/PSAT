@@ -56,7 +56,18 @@ logger = logging.getLogger(__name__)
 # (read-back verified). Every deposit-backed conversion previously cached an
 # ``unknown`` from a precondition revert; those rows would otherwise hit forever
 # and keep the whole ``supply.mint`` backing witness empty.
-EFFECT_CACHE_SCHEMA_VERSION = 3
+# v4: the verdict OUTPUT SHAPE changed in four ways that make a v3 row unsafe to
+# serve. (a) A burn whose ``totalSupply`` wrapped was published as
+# ``supply_delta_sign: mint`` with the §5a witnessed-dilution payload — the
+# strongest claim this stage makes, on a call that destroyed units — and those
+# rows were written under v3, so without a bump the poisoned verdict is returned
+# verbatim and never rewritten (a disagreeing re-probe only marks it
+# AUDIT_FAILED, and a failed row is still served). (b) ``destination_shape`` was
+# ~95% ``unknown`` because its proof branch was unreachable; it now resolves.
+# (c) ``freeze_pause`` rows carry the ``observation`` discriminator every other
+# class already carried. (d) Seeded holder balances are capped at the token's own
+# supply, so a seeded verdict was reached from different fork state.
+EFFECT_CACHE_SCHEMA_VERSION = 4
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

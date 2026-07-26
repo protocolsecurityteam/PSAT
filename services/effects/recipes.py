@@ -1335,6 +1335,21 @@ def _resolve_destination_shape(
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
             return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
+    # Rule 8.1, evaluated BEFORE the static branch returns. Taint saying the param
+    # reaches the sink while the sentinel moved nothing is a matcher/probe
+    # soundness problem (§9) whatever static believes — and it is most interesting
+    # precisely when static claims a fixed shape, because then the two planes
+    # contradict each other. Returning early on the static branch filed no
+    # discrepancy in exactly that case.
+    disc = (
+        Discrepancy(
+            kind="taint_param_sentinel_negative",
+            effect_class=effect_class,
+            detail={"sentinel_address": sentinel_address},
+        )
+        if taint_param_reaches_sink and sentinel_transfers is not None
+        else None
+    )
     if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED):
         # The SHAPE is static's to prove and it is a universal — "this destination
         # cannot be redirected" holds whether or not this particular probe moved
@@ -1347,17 +1362,10 @@ def _resolve_destination_shape(
         # and never resolves the value behind an immutable, so no caller could
         # ever satisfy the condition and ``destination_shape`` stayed ~95%
         # ``unknown`` — the single most security-relevant bit, unproven.
-        return static_shape, "static", static_destination or observed_dest, None
-    if taint_param_reaches_sink and sentinel_transfers is not None:
-        # Taint says the param reaches the sink, yet the sentinel moved nothing:
-        # a §9 discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
-        disc = Discrepancy(
-            kind="taint_param_sentinel_negative",
-            effect_class=effect_class,
-            detail={"sentinel_address": sentinel_address},
-        )
-        return SHAPE_UNKNOWN, "none", observed_dest, disc
-    return SHAPE_UNKNOWN, "none", observed_dest, None
+        return static_shape, "static", static_destination or observed_dest, disc
+    # Taint says the param reaches the sink, yet the sentinel moved nothing: a §9
+    # discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
+    return SHAPE_UNKNOWN, "none", observed_dest, disc
 
 
 def _add_reach(

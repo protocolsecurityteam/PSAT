@@ -2611,10 +2611,59 @@ def _ir_operands(ir: Any) -> list[Any]:
     return operands
 
 
+# The EVM call opcodes, as Slither names them on a ``SolidityCall``. These are
+# language builtins, not user identifiers, so keying on them is a published-spec
+# fact of the same kind as a selector. Solmate/Solady build their calldata in
+# assembly and dispatch it with a raw ``call``, which reaches the IR as one of
+# these rather than as a Low/HighLevelCall.
+_EVM_CALL_OPCODES = ("call", "staticcall", "delegatecall", "callcode")
+
+
+# How deep to look for the DISPATCH, as opposed to the selector. Deliberately
+# deeper than ``_TOKEN_FIRST_BODY_DEPTH``: that cap bounds selector ATTRIBUTION,
+# where reaching further would start crediting a nested helper's transfer to an
+# unrelated caller. "Does this call tree ever dispatch a call at all" carries no
+# such risk — it only ever REFUSES evidence — and OZ's SafeERC20 puts three hops
+# between the two (``safeTransfer`` builds the calldata, ``_callOptionalReturn``
+# forwards it, ``Address.functionCall`` makes the call).
+_DISPATCH_SEARCH_DEPTH = 5
+
+
+def _dispatches_a_call(unit: Any, seen: frozenset[int], depth: int) -> bool:
+    """Whether ``unit`` or a helper it calls ever dispatches an actual call."""
+    if unit is None or depth > _DISPATCH_SEARCH_DEPTH:
+        return False
+    for node in getattr(unit, "nodes", []) or []:
+        for ir in _node_irs(node):
+            op = type(ir).__name__
+            if op in ("HighLevelCall", "LowLevelCall") or _is_evm_call_opcode(ir):
+                return True
+            if op in ("InternalCall", "LibraryCall"):
+                callee = getattr(ir, "function", None)
+                key = id(callee)
+                if callee is not None and key not in seen and getattr(callee, "nodes", None):
+                    if _dispatches_a_call(callee, seen | {key}, depth + 1):
+                        return True
+    return False
+
+
+def _is_evm_call_opcode(ir: Any) -> bool:
+    if type(ir).__name__ != "SolidityCall":
+        return False
+    name = str(getattr(getattr(ir, "function", None), "name", "") or "")
+    return name.split("(", 1)[0] in _EVM_CALL_OPCODES
+
+
 def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> tuple[set[str], set[str]]:
     """``(issued, walk_visible)`` — the bare ERC-20 move selectors ``unit``'s body
     provably issues, and the subset it issues in a form the value-flow walk can
-    resolve on its own.
+    resolve on its own."""
+    found, visible, _ = _erc20_selector_evidence(unit, seen, depth)
+    return found, visible
+
+
+def _erc20_selector_evidence(unit: Any, seen: frozenset[int], depth: int) -> tuple[set[str], set[str], bool]:
+    """``(issued, walk_visible, dispatches)`` for one unit and the helpers it calls.
 
     Evidence is a resolved external call whose canonical signature IS an ERC-20
     move, a selector VALUE the body materializes (assembly literal or
@@ -2628,12 +2677,26 @@ def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> tupl
     reason the recognizer exists — a selector built in assembly or handed to a
     low-level ``.call`` moves tokens with no IR the walk can see. Keeping them
     apart is what lets the recognizer fire on a same-contract helper without ever
-    displacing, or double-counting, a move the walk already resolves."""
+    displacing, or double-counting, a move the walk already resolves.
+
+    A MATERIALIZED selector counts only if the body actually DISPATCHES a call —
+    mentioning a selector is not issuing one. A deny-list
+    (``require(sel != IERC20.transfer.selector)``) and a timelock that builds
+    calldata to store for later both materialize the constant while moving
+    nothing, and both would otherwise publish a fabricated ``flow.out``.
+
+    ``dispatches`` is TRANSITIVE, and it has to be: OZ's ``SafeERC20.safeTransfer``
+    materializes the selector in its own frame (``abi.encodeCall``) and hands it
+    to ``_callOptionalReturn``, which is where the ``.call`` actually happens.
+    Judging each frame alone therefore threw the evidence away exactly on the
+    most common safe-transfer library in existence."""
     found: set[str] = set()
     visible: set[str] = set()
     if unit is None or depth > _TOKEN_FIRST_BODY_DEPTH:
-        return found, visible
+        return found, visible, False
     wanted = {_ERC20_TRANSFER_SELECTOR, _ERC20_TRANSFER_FROM_SELECTOR}
+    materialized: set[str] = set()
+    dispatches = False
     for node in getattr(unit, "nodes", []) or []:
         for ir in _node_irs(node):
             op = type(ir).__name__
@@ -2645,18 +2708,24 @@ def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> tupl
             for operand in _ir_operands(ir):
                 selector = _selector_of_constant(operand)
                 if selector in wanted:
-                    found.add(str(selector))
+                    materialized.add(str(selector))
             member = _selector_of_member_access(ir)
             if member in wanted:
-                found.add(str(member))
+                materialized.add(str(member))
             if op in ("InternalCall", "LibraryCall"):
                 callee = getattr(ir, "function", None)
                 key = id(callee)
                 if callee is not None and key not in seen and getattr(callee, "nodes", None):
-                    child_found, child_visible = _erc20_selectors_issued(callee, seen | {key}, depth + 1)
+                    child_found, child_visible, child_dispatches = _erc20_selector_evidence(
+                        callee, seen | {key}, depth + 1
+                    )
                     found |= child_found
                     visible |= child_visible
-    return found, visible
+                    dispatches = dispatches or child_dispatches
+    if materialized and (dispatches or _dispatches_a_call(unit, frozenset({id(unit)}), 0)):
+        found |= materialized
+        dispatches = True
+    return found, visible, dispatches
 
 
 def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
@@ -2679,10 +2748,30 @@ def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
 
     A callee that issues the selector through a RESOLVED call is not recognized
     here at all: the ordinary recursion descends into it and classifies that site
-    itself, so firing would either double-count the move (two sites on one flow
-    key, folding a resolvable destination to ``indeterminate``) or — with the
-    walk suppressed — replace the callee's own classification with this one. The
-    recognizer is for the moves the walk is BLIND to, and nothing else."""
+    itself, so firing would double-count the move — two sites on one flow key,
+    folding a resolvable destination to ``indeterminate``. The recognizer is for
+    the moves the walk is BLIND to, and nothing else.
+
+    NOT applied to an ``InternalCall``, and the reason is the argument this whole
+    function does NOT make: it reads ``to``/``amount`` off the CALL SITE without
+    proving the callee forwards them into the selector's slots. For a library
+    that assumption is close to definitional — a library holds no mutable storage
+    to redirect through, and the token-first wrappers exist precisely to forward.
+    An arbitrary same-contract helper matching ``f(T, address, uint256)`` is a
+    different animal:
+
+        function _settle(IERC20 token, address to, uint256 amount) internal {
+            address dest = payoutOverride[to];      // anyone may set this
+            if (dest == address(0)) dest = to;
+            SafeTransferLib.safeTransfer(token, dest, amount);
+        }
+
+    Reading ``_settle(token, treasury, amount)`` at the call site published
+    ``target_kind: immutable`` at ``dispositive_ast`` — and §4.2 promoted it to
+    ``immutable_fixed``, a PROVABLY-UNREDIRECTABLE destination — for a payout any
+    caller can repoint. The walk reaches the library call inside ``_settle``
+    anyway and classifies ``dest`` honestly, so nothing is lost by declining
+    here."""
     callee = getattr(ir, "function", None)
     if callee is None or not getattr(callee, "nodes", None):
         return None
@@ -2966,9 +3055,7 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                 # it said "this function moves no funds" about functions that
                 # provably do. ``direction_of`` gives the same-contract case its
                 # true direction; only a move made across a boundary is routed.
-                token_first = (
-                    _token_first_transfer(ir) if op in ("HighLevelCall", "LibraryCall", "InternalCall") else None
-                )
+                token_first = _token_first_transfer(ir) if op in ("HighLevelCall", "LibraryCall") else None
                 if token_first is not None:
                     selector = _selector_for(_callee_signature(ir))
                     if token_first[0] == "send":
@@ -3002,13 +3089,19 @@ def _value_flow_facts(function: Any) -> list[ValueFlow]:
                             context(),
                             crossed,
                         )
-                if op in ("InternalCall", "LibraryCall") and token_first is None:
-                    # ``token_first is None`` skips a call already counted as a
-                    # direct move, so its body is not walked into a second,
-                    # duplicate flow on the same key. The callee is assembly- or
-                    # encode-only by construction (:func:`_token_first_transfer`
-                    # declines anything the walk can resolve), so descending would
-                    # in any case find nothing this site did not already publish.
+                if op in ("InternalCall", "LibraryCall"):
+                    # Descend even into a callee the recognizer just classified.
+                    # It cannot double-count: the recognizer only fires when the
+                    # callee issues its ERC-20 selector in a form the walk CANNOT
+                    # resolve (assembly / ``abi.encodeCall``), which reaches the
+                    # walk as a value-less ``LowLevelCall`` and produces no flow.
+                    # Skipping the descent instead deleted every OTHER move in
+                    # that body — a native ``transfer``, an ERC-721 send, a second
+                    # token — from a helper the recognizer happened to match. The
+                    # dual-asset payout helper (``if (token == 0) to.call{value:}``
+                    # else ``safeTransfer``) lost its whole ETH branch, taking
+                    # ``has_native_payout`` with it and silently disabling the
+                    # prober's contract-balance seeding.
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
                         child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"

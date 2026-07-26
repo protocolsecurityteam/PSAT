@@ -533,3 +533,98 @@ def test_a_merge_reached_through_a_forwarded_state_variable_is_not(_merge):
     since a consumer reads ``caller_supplied`` as attacker-chosen."""
     flow = _out_flow(_merge["payForwardedStorage()"])
     assert flow["amount_kind"]["kind"] == "indeterminate", flow
+
+
+# ---------------------------------------------------------------------------
+# The token-first recognizer's limits. It reads `to`/`amount` off the CALL SITE
+# without proving the callee forwards them, so where it may fire is the whole of
+# its soundness argument.
+# ---------------------------------------------------------------------------
+
+RECOGNIZER_SRC = """
+pragma solidity ^0.8.20;
+
+interface IERC20 { function transfer(address,uint256) external returns (bool); }
+
+library SafeTransferLib {
+    function safeTransfer(IERC20 token, address to, uint256 amount) internal {
+        (bool ok, bytes memory d) = address(token).call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        require(ok && (d.length == 0 || abi.decode(d,(bool))), "FAIL");
+    }
+}
+
+contract Recognizer {
+    address public owner;
+    address public immutable treasury;
+    mapping(address => address) public payoutOverride;
+    mapping(bytes32 => bytes) public queued;
+
+    constructor(address t) { owner = msg.sender; treasury = t; }
+
+    // Anyone may repoint their own payout.
+    function setPayoutOverride(address dest) external { payoutOverride[msg.sender] = dest; }
+
+    // The call site says `treasury`; the helper says otherwise.
+    function sweep(IERC20 token, uint256 amount) external {
+        _settle(token, treasury, amount);
+    }
+    function _settle(IERC20 token, address to, uint256 amount) internal {
+        address dest = payoutOverride[to];
+        if (dest == address(0)) dest = to;
+        SafeTransferLib.safeTransfer(token, dest, amount);
+    }
+
+    // The dual-asset payout helper: ETH on one branch, ERC-20 on the other.
+    function claim(IERC20 t, address to, uint256 amount) external { _payout(t, to, amount); }
+    function _payout(IERC20 t, address to, uint256 amount) internal {
+        if (address(t) == address(0)) { (bool ok,) = to.call{value: amount}(""); require(ok); }
+        else { SafeTransferLib.safeTransfer(t, to, amount); }
+    }
+
+    // Mentions the selector to REFUSE it, and moves nothing.
+    function enqueue(bytes4 sel, address to, uint256 amount) external { _check(sel, to, amount); }
+    function _check(bytes4 sel, address to, uint256 amount) internal {
+        require(sel != IERC20.transfer.selector, "blocked");
+        queued[keccak256(abi.encode(to, amount))] = abi.encode(to, amount);
+    }
+
+    receive() external payable {}
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def _recognizer(tmp_path_factory):
+    contract = _compile(tmp_path_factory.mktemp("recog"), RECOGNIZER_SRC, "Recognizer")
+    return build_effects(contract)["functions"]
+
+
+def test_an_internal_helper_that_redirects_is_not_read_off_the_call_site(_recognizer):
+    """`_settle(token, treasury, amount)` looks like a token-first transfer, but
+    the helper repoints the destination through a permissionless mapping. Reading
+    the call site published `immutable` at `dispositive_ast`, which §4.2 promotes
+    to a PROVABLY-unredirectable destination — for a payout anyone can capture."""
+    target = _out_flow(_recognizer["sweep(IERC20,uint256)"])["target_kind"]
+    assert target["kind"] == "indeterminate", target
+
+
+def test_descending_into_a_recognized_helper_keeps_its_other_moves(_recognizer):
+    """The recognizer matching one move in a helper must not delete the rest of
+    that helper's body. The ETH branch here is a real payout, and losing it also
+    flipped `has_native_payout`, silently disabling the prober's
+    contract-balance seeding for a function that provably sends ETH."""
+    flows = _recognizer["claim(IERC20,address,uint256)"]["value_flows"]
+    kinds = {f["kind"] for f in flows}
+    assert "low_level_value_call" in kinds, flows
+    assert "callee_erc20_selector" in kinds, flows
+
+
+def test_mentioning_a_selector_is_not_issuing_it(_recognizer):
+    """A deny-list checks the selector and moves nothing. Treating the constant's
+    presence as evidence published a fabricated `flow.out` with resolved
+    destination and amount slots."""
+    assert not (_recognizer["enqueue(bytes4,address,uint256)"]["value_flows"]), _recognizer[
+        "enqueue(bytes4,address,uint256)"
+    ]["value_flows"]

@@ -183,10 +183,11 @@ class SupplyPlanInputs:
     seeded_sentinel_calldata: Mapping[int, str] = field(default_factory=dict)
     target_payable: bool | None = None
     native_payout: bool = False
-    # See :class:`ValueOutPlanInputs`. For a mint the destination in question is
-    # where the NEW UNITS land, so the shape is read off the supply-direction
-    # flows rather than the out-flows.
-    static_shape: str | None = None
+    # NO ``static_shape``. The supply recipe reads a destination shape only to
+    # collect a §9 discrepancy and discards the shape itself, and the supply
+    # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
+    # the effects artifact never emits — so threading one here computed nothing
+    # and then dropped it.
 
 
 @dataclass(frozen=True)
@@ -736,12 +737,13 @@ def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
     name = kind.get("kind") if isinstance(kind, dict) else None
     if name != "one_of":
         return [name if isinstance(name, str) else ""]
-    members = [
-        k.get("kind")
-        for k in (flow.get("target_kinds") or [])
-        if isinstance(k, dict) and isinstance(k.get("kind"), str)
-    ]
-    return [str(m) for m in members] or [""]
+    entries = flow.get("target_kinds") or []
+    members = [k.get("kind") if isinstance(k, dict) else None for k in entries]
+    # An entry we cannot read contributes ``""``, which no rule accepts, rather
+    # than being dropped. Silently skipping it would let a partly-unreadable
+    # disjunction be judged on the members that happened to parse — the one place
+    # in this predicate that could fail OPEN.
+    return [str(m) if isinstance(m, str) else "" for m in members] or [""]
 
 
 def static_destination_shape(fn: "FunctionFacts", directions: frozenset[str]) -> str | None:
@@ -764,11 +766,21 @@ def static_destination_shape(fn: "FunctionFacts", directions: frozenset[str]) ->
     A landed sentinel still outranks this (see ``_resolve_destination_shape``):
     an EXISTENTIAL proof that the caller can redirect the funds beats a universal
     argued from the source, which is the correct precedence when they conflict."""
+    # ROUTED flows count toward the conjunction even though the probe does not
+    # measure them. The claim being made is "this function cannot send funds to a
+    # destination the caller names", and a routed payout does exactly that — the
+    # money leaves a contract this entry calls, at an address the caller chose.
+    # Quantifying only over ``out``/``eth_out`` let a router publish
+    # ``immutable_fixed`` off a fee transfer to a treasury while forwarding the
+    # principal to ``vault.exit(to, …)``. The sentinel cannot catch it either: it
+    # reads transfers out of THIS contract, and a routed payout is emitted by the
+    # callee.
+    considered = set(directions) | {"value_router"}
     kinds: list[str] = []
     for flow in fn.effect_info.get("value_flows") or []:
         if not isinstance(flow, dict) or flow.get("origin") == "guard":
             continue
-        if str(flow.get("direction")) not in directions:
+        if str(flow.get("direction")) not in considered:
             continue
         kinds.extend(_target_member_kinds(flow))
     if not kinds:
@@ -1069,7 +1081,6 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         seeded_sentinel_calldata=seeded_sentinel if sentinel_calldata else {},
         target_payable=function_payable(fn),
         native_payout=has_native_payout(fn),
-        static_shape=static_destination_shape(fn, frozenset(_SUPPLY_DIRECTIONS)),
     )
 
 
