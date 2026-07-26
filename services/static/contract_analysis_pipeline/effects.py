@@ -410,6 +410,21 @@ def _node_kind_state_writes(node: Any) -> list[str]:
 
 def _callee_signature(ir: Any) -> str | None:
     fn = getattr(ir, "function", None)
+    # A direct high-level call to a resolved sibling joins on selector against
+    # that sibling's OWN canonical selector (``cross_contract`` derivation 1), so
+    # lower user-defined parameter types here too — contract/interface → address,
+    # enum → uint<N>, struct → tuple. The string ``full_name`` keeps names like
+    # ``addAsset(ERC20)`` or ``send(MessagingParams,address)`` whose keccak is not
+    # the real EVM selector, and once the callee side is canonical the join would
+    # silently drop such a call. A LibraryCall's callee is a library internal with
+    # no external selector and nothing joins against it, so it keeps the string
+    # form (its selector is notional and ubiquitous — not worth churning).
+    if type(ir).__name__ == "HighLevelCall" and fn is not None:
+        from .predicate_artifacts import _canonical_signature
+
+        canonical = _canonical_signature(fn)
+        if canonical:
+            return canonical
     for attr in ("full_name", "signature_str"):
         value = getattr(fn, attr, None)
         if isinstance(value, str) and "(" in value and value.endswith(")"):
