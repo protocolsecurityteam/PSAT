@@ -67,7 +67,11 @@ logger = logging.getLogger(__name__)
 # (c) ``freeze_pause`` rows carry the ``observation`` discriminator every other
 # class already carried. (d) Seeded holder balances are capped at the token's own
 # supply, so a seeded verdict was reached from different fork state.
-EFFECT_CACHE_SCHEMA_VERSION = 4
+# v5: the input-token hints feeding the seeded retry now resolve a library-wrapped
+# token receiver to its real getter (was a Slither temporary that seeded the wrong
+# token or nothing), so a v4 row was reached from a different seeded fork state and
+# must not be served to the new probe.
+EFFECT_CACHE_SCHEMA_VERSION = 5
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
