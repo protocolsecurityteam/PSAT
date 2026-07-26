@@ -21,8 +21,16 @@ from services.effects.anvil import (
     anvil_available,
     assert_post_cancun,
     pause_recipe,
+    timelock_execute_recipe,
 )
-from services.effects.config import SCOPE_PROJECTION, TIER_FORK, VERDICT_PROVEN, VERDICT_UNKNOWN
+from services.effects.config import (
+    SCOPE_KERNEL,
+    SCOPE_PROJECTION,
+    SHAPE_CALLER_ARBITRARY,
+    TIER_FORK,
+    VERDICT_PROVEN,
+    VERDICT_UNKNOWN,
+)
 from services.effects.harness import SimContext
 from utils.rpc import EthCallResult
 from workers.effects_worker import _is_cacheable
@@ -334,6 +342,183 @@ def test_every_pause_row_carries_an_observation_discriminator():
             assert row.details["observation"] in ("executed", "reverted")
         if row.details["observation"] == "reverted":
             assert row.verdict == VERDICT_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# §9.5 Tier-2 timelock — schedule → advance time → execute
+# ---------------------------------------------------------------------------
+
+SCHEDULE = "0x01d5062a"  # schedule(...)
+EXECUTE = "0x134008d3"  # execute(...)
+SENTINEL = "0x" + "ee" * 20
+TOKEN = "0x" + "44" * 20
+WITNESS = "0x70a08231" + SENTINEL[2:].rjust(64, "0")  # balanceOf(sentinel)
+TIMELOCK_DELAY = 172800  # 2 days
+NOT_READY = "0x5ead8eb5"  # TimelockUnexpectedOperationState(bytes32,bytes32)
+UNAUTHORIZED = "0xe2517d3f"  # AccessControlUnauthorizedAccount(address,bytes32)
+
+
+class TimelockAnvil:
+    """Models an OZ TimelockController on a fork: ``schedule`` records a pending
+    operation whose ``execute`` reverts ``TimelockUnexpectedOperationState`` until
+    ``delay`` seconds pass; a ready ``execute`` runs the inner op (a transfer that
+    credits the sentinel). snapshot/revert restore the whole state machine."""
+
+    def __init__(self, *, delay: int, proposer_ok: bool = True, moves_value: bool = True, hardfork: str = "prague"):
+        self.delay = delay
+        self.proposer_ok = proposer_ok
+        self.moves_value = moves_value
+        self._hf = hardfork
+        self.time = 0
+        self.ready: int | None = None
+        self.sentinel_balance = 0
+        self._snaps: dict[str, tuple] = {}
+        self._n = 0
+        self.impersonated: list[str] = []
+
+    def hardfork(self) -> str:
+        return self._hf
+
+    def versions(self) -> dict:
+        return {"anvil": "anvil 1.5.1-stable", "foundry": "anvil 1.5.1-stable"}
+
+    def snapshot(self) -> str:
+        self._n += 1
+        sid = f"0x{self._n}"
+        self._snaps[sid] = (self.time, self.ready, self.sentinel_balance)
+        return sid
+
+    def revert(self, sid: str) -> bool:
+        self.time, self.ready, self.sentinel_balance = self._snaps[sid]
+        return True
+
+    def impersonate(self, address: str) -> None:
+        self.impersonated.append(address)
+
+    def stop_impersonate(self, address: str) -> None:
+        pass
+
+    def increase_time(self, seconds: int) -> None:
+        self.time += seconds
+
+    def mine(self) -> None:
+        pass
+
+    def set_balance(self, address: str, value: str) -> None:
+        pass
+
+    def set_storage_at(self, address: str, slot: str, value: str) -> None:
+        pass
+
+    def call(self, tx: dict) -> EthCallResult:
+        data = tx.get("data", "")
+        if data == WITNESS:
+            return EthCallResult(True, "0x" + self.sentinel_balance.to_bytes(32, "big").hex(), None, None)
+        if data == SCHEDULE:
+            if not self.proposer_ok:
+                return EthCallResult(False, "0x", UNAUTHORIZED + "00" * 32, "unauthorized")
+            return EthCallResult(True, "0x", None, None)
+        if data == EXECUTE:
+            if self.ready is None or self.time < self.ready:
+                return EthCallResult(False, "0x", NOT_READY + "00" * 32, "not ready")
+            return EthCallResult(True, "0x", None, None)
+        return EthCallResult(True, "0x", None, None)
+
+    def send(self, tx: dict) -> str:
+        data = tx.get("data", "")
+        if data == SCHEDULE and self.proposer_ok:
+            self.ready = self.time + self.delay
+        elif data == EXECUTE and self.ready is not None and self.time >= self.ready and self.moves_value:
+            self.sentinel_balance += 1000
+        return "0xhash"
+
+
+def _timelock(transport, **kw):
+    return timelock_execute_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+        **kw,
+    )
+
+
+def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY)
+    store = RecordingStore()
+    eff = timelock_execute_recipe(
+        transport=transport,
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        sentinel_address=SENTINEL,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.tier == TIER_FORK
+    assert eff.scope == SCOPE_KERNEL
+    assert eff.details["value_moved"] is True
+    assert eff.details["destination_shape"] == SHAPE_CALLER_ARBITRARY
+    assert eff.details["shape_proved_by"] == "simulation"
+    # The premature execute (before the warp) must have reverted on the not-ready
+    # gate — that is what proves the recipe ADVANCED time rather than side-stepping.
+    labels = {r["label"]: r for r in store.stored[-1]["results"]}
+    assert labels["execute_premature"]["success"] is False
+    assert labels["execute"]["success"] is True
+    assert transport.impersonated == [PRINCIPAL]
+
+
+def test_timelock_premature_execute_reverts_not_ready_proving_the_delay_gate():
+    """The Tier-1 impossibility made explicit: before the warp the operation is not
+    ready, so ``execute`` reverts with the not-ready selector. Observing that revert
+    and its later success is what proves the recipe advanced time."""
+    store = RecordingStore()
+    timelock_execute_recipe(
+        transport=TimelockAnvil(delay=TIMELOCK_DELAY),
+        store=store,
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        schedule_calldata=SCHEDULE,
+        execute_calldata=EXECUTE,
+        delay_seconds=TIMELOCK_DELAY,
+        witness_token=TOKEN,
+        witness_calldata=WITNESS,
+    )
+    prem = {r["label"]: r for r in store.stored[-1]["results"]}["execute_premature"]
+    assert prem["success"] is False
+    assert prem["revert"].startswith(NOT_READY)
+
+
+def test_timelock_schedule_rejection_is_its_own_unknown():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, proposer_ok=False)
+    eff = _timelock(transport)
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "timelock_schedule_reverted"
+    assert eff.details["schedule_revert"].startswith(UNAUTHORIZED)
+    # Never cacheable — a Tier-2 fork verdict is state-plane.
+    assert not _is_cacheable(eff)
+
+
+def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_execution():
+    transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
+    eff = _timelock(transport)
+    assert eff.verdict == VERDICT_UNKNOWN
+    assert eff.reason == "no_value_observed"
+    assert eff.details["timelock_executed"] is True
+    assert eff.details["observation"] == "executed"
 
 
 # ---------------------------------------------------------------------------

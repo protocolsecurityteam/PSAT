@@ -29,9 +29,12 @@ from typing import Any, Protocol
 
 from services.effects.config import (
     EFFECT_CLASS_FREEZE_PAUSE,
+    EFFECT_CLASS_VALUE_OUT,
     OBSERVATION_EXECUTED,
     OBSERVATION_REVERTED,
+    SCOPE_KERNEL,
     SCOPE_PROJECTION,
+    SHAPE_CALLER_ARBITRARY,
     TIER_FORK,
 )
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
@@ -361,6 +364,170 @@ def pause_recipe(
     )
     eff.discrepancy = disc
     return emit(store, eff)
+
+
+def _uint_return(result: EthCallResult) -> int | None:
+    if not result.success or not result.return_data:
+        return None
+    try:
+        return int(result.return_data, 16)
+    except ValueError:
+        return None
+
+
+def timelock_execute_recipe(
+    *,
+    transport: AnvilTransport,
+    store: TranscriptStore,
+    ctx: SimContext,
+    contract_address: str,
+    principal: str,
+    schedule_calldata: str,
+    execute_calldata: str,
+    delay_seconds: int,
+    gate_ref: str = "",
+    fixtures: Sequence[ForkFixture] = (),
+    sentinel_address: str | None = None,
+    witness_token: str | None = None,
+    witness_calldata: str | None = None,
+) -> ObservedEffect:
+    """§9.5 Tier-2 timelock: schedule → advance time → execute, the sequence Tier-1
+    cannot reach (``eth_simulateV1`` issues ONE block with no ``blockOverrides``, so
+    it can never satisfy a delayed operation's ``block.timestamp`` gate — every
+    ``execute`` reverts ``TimelockUnexpectedOperationState`` there).
+
+    Reuses ``pause_recipe``'s fork machinery: snapshot/revert isolation (inv. 16),
+    an impersonated principal, and ``increase_time`` to advance past the operation
+    delay. The scheduled inner operation is an ERC-20 ``transfer`` to a sentinel on
+    a token the timelock provably holds (synthesised upstream from measured
+    holdings, §0.0.2), so a positive sentinel-balance delta after ``execute`` proves
+    the timelock forwards value to a PROPOSER-CHOSEN destination — a
+    ``caller_arbitrary`` outflow, the exact shape an arbitrary-call executor has.
+
+    Fail-closed at every step: a ``schedule`` or ``execute`` revert is its own
+    unknown carrying the raw revert, never conflated with "executes nothing"; an
+    execution that moves no value to the sentinel stays ``no_value_observed``. Never
+    caches (Tier-2 fork verdicts are state-plane, inv. 13)."""
+    hardfork = assert_post_cancun(transport)
+    ctx = SimContext(
+        chain_id=ctx.chain_id,
+        block=ctx.block,
+        hardfork=hardfork,
+        anvil_version=transport.versions().get("anvil"),
+        foundry_version=transport.versions().get("foundry"),
+    )
+    tr = new_transcript(ctx, feature="timelock", tier=TIER_FORK, effect_class=EFFECT_CLASS_VALUE_OUT)
+    tr["contract_address"] = contract_address.lower()
+    tr["delay_seconds"] = delay_seconds
+
+    def _unknown(reason: str, **details: Any) -> ObservedEffect:
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_VALUE_OUT,
+                tier=TIER_FORK,
+                scope=SCOPE_KERNEL,
+                gate_ref=gate_ref,
+                reason=reason,
+                details={"observation": OBSERVATION_REVERTED, **details},
+                transcript=tr,
+            ),
+        )
+
+    def _witness() -> int | None:
+        if witness_token is None or witness_calldata is None:
+            return None
+        return _uint_return(transport.call({"to": witness_token, "data": witness_calldata}))
+
+    snap = transport.snapshot()
+    try:
+        _apply_fixtures(transport, fixtures, tr)
+        witness_before = _witness()
+
+        transport.impersonate(principal)
+        try:
+            # An ``eth_call`` runs the same EVM logic ``send`` would, so a revert here
+            # is the resolved proposer being unable to schedule on this forked state
+            # (missing PROPOSER_ROLE, an operation already pending) — the sequence was
+            # never testable, recorded with its raw revert.
+            schedule_probe = transport.call({"from": principal, "to": contract_address, "data": schedule_calldata})
+            tr["results"].append(
+                {"label": "schedule", "success": schedule_probe.success, "revert": schedule_probe.revert_data}
+            )
+            if not schedule_probe.success:
+                return _unknown("timelock_schedule_reverted", schedule_revert=schedule_probe.revert_data)
+            transport.send({"from": principal, "to": contract_address, "data": schedule_calldata})
+            transport.mine()
+
+            # THE Tier-1 impossibility: before the delay elapses ``execute`` must
+            # revert on the operation-not-ready gate. Observing that revert here, then
+            # its success after the warp, is what proves the recipe advanced time
+            # rather than side-stepped the gate.
+            premature = transport.call({"from": principal, "to": contract_address, "data": execute_calldata})
+            tr["results"].append(
+                {"label": "execute_premature", "success": premature.success, "revert": premature.revert_data}
+            )
+
+            transport.increase_time(delay_seconds + 1)
+            transport.mine()
+
+            execute_probe = transport.call({"from": principal, "to": contract_address, "data": execute_calldata})
+            tr["results"].append(
+                {"label": "execute", "success": execute_probe.success, "revert": execute_probe.revert_data}
+            )
+            if not execute_probe.success:
+                return _unknown("timelock_execute_reverted", execute_revert=execute_probe.revert_data)
+            transport.send({"from": principal, "to": contract_address, "data": execute_calldata})
+            transport.mine()
+        finally:
+            transport.stop_impersonate(principal)
+
+        witness_after = _witness()
+    finally:
+        transport.revert(snap)
+
+    moved = witness_before is not None and witness_after is not None and witness_after > witness_before
+    if not moved:
+        return emit(
+            store,
+            unknown(
+                EFFECT_CLASS_VALUE_OUT,
+                tier=TIER_FORK,
+                scope=SCOPE_KERNEL,
+                gate_ref=gate_ref,
+                reason="no_value_observed",
+                details={
+                    # The delayed operation EXECUTED (the point Tier-1 cannot reach);
+                    # it simply moved nothing to the sentinel we could witness.
+                    "observation": OBSERVATION_EXECUTED,
+                    "value_moved": False,
+                    "timelock_executed": True,
+                },
+                transcript=tr,
+            ),
+        )
+    return emit(
+        store,
+        proven(
+            EFFECT_CLASS_VALUE_OUT,
+            tier=TIER_FORK,
+            scope=SCOPE_KERNEL,
+            gate_ref=gate_ref,
+            reason="value_moved",
+            details={
+                "observation": OBSERVATION_EXECUTED,
+                "value_moved": True,
+                "timelock_executed": True,
+                # The scheduled operation targeted a sentinel the PROPOSER chose, and
+                # the timelock forwarded value to it — a caller/proposer-arbitrary
+                # destination, proved by the sentinel balance delta (simulation).
+                "destination_shape": SHAPE_CALLER_ARBITRARY,
+                "shape_proved_by": "simulation",
+            },
+            concrete={"destination": sentinel_address} if sentinel_address else {},
+            transcript=tr,
+        ),
+    )
 
 
 def _has_verify_spec(fx: ForkFixture) -> bool:
