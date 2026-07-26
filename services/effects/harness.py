@@ -104,6 +104,13 @@ class ObservedEffect:
     transcript: dict[str, Any] | None = None
     transcript_ptr: str | None = None
     discrepancy: Discrepancy | None = None
+    # A verdict whose truth depends on per-probe STATE MANIPULATION this recipe
+    # performed on the fork — a scheduled operation landing, time advancing — is
+    # not a code-plane structural fact and must never transfer to a bytecode twin
+    # on the behavioural hash (the same reason ``TIER_HISTORICAL`` never caches,
+    # inv. 13 / §0.0.4). ``_is_cacheable`` refuses any verdict carrying this flag,
+    # whatever its tier, scope, verdict or reason.
+    state_dependent: bool = False
 
     @property
     def is_proven(self) -> bool:

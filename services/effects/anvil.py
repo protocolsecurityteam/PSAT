@@ -406,8 +406,16 @@ def timelock_execute_recipe(
 
     Fail-closed at every step: a ``schedule`` or ``execute`` revert is its own
     unknown carrying the raw revert, never conflated with "executes nothing"; an
-    execution that moves no value to the sentinel stays ``no_value_observed``. Never
-    caches (Tier-2 fork verdicts are state-plane, inv. 13)."""
+    execution that moves no value to the sentinel stays ``no_value_observed``.
+
+    NONE of this recipe's verdicts may be cached or transferred on the behavioural
+    hash — not because of their tier (``_is_cacheable`` excludes only
+    ``TIER_HISTORICAL``, and a proven verdict / a ``no_value_observed`` are
+    otherwise cacheable), but because EVERY one of them is STATE-DEPENDENT: it
+    rests on state this probe manufactured on the fork (the scheduled operation
+    landing, ``block.timestamp`` advancing past the delay), which is not a
+    code-plane structural fact a bytecode twin inherits. So each verdict carries
+    ``state_dependent=True``, which ``_is_cacheable`` refuses outright (§0.0.4)."""
     hardfork = assert_post_cancun(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
@@ -421,18 +429,17 @@ def timelock_execute_recipe(
     tr["delay_seconds"] = delay_seconds
 
     def _unknown(reason: str, **details: Any) -> ObservedEffect:
-        return emit(
-            store,
-            unknown(
-                EFFECT_CLASS_VALUE_OUT,
-                tier=TIER_FORK,
-                scope=SCOPE_KERNEL,
-                gate_ref=gate_ref,
-                reason=reason,
-                details={"observation": OBSERVATION_REVERTED, **details},
-                transcript=tr,
-            ),
+        eff = unknown(
+            EFFECT_CLASS_VALUE_OUT,
+            tier=TIER_FORK,
+            scope=SCOPE_KERNEL,
+            gate_ref=gate_ref,
+            reason=reason,
+            details={"observation": OBSERVATION_REVERTED, **details},
+            transcript=tr,
         )
+        eff.state_dependent = True
+        return emit(store, eff)
 
     def _witness() -> int | None:
         if witness_token is None or witness_calldata is None:
@@ -488,46 +495,48 @@ def timelock_execute_recipe(
 
     moved = witness_before is not None and witness_after is not None and witness_after > witness_before
     if not moved:
-        return emit(
-            store,
-            unknown(
-                EFFECT_CLASS_VALUE_OUT,
-                tier=TIER_FORK,
-                scope=SCOPE_KERNEL,
-                gate_ref=gate_ref,
-                reason="no_value_observed",
-                details={
-                    # The delayed operation EXECUTED (the point Tier-1 cannot reach);
-                    # it simply moved nothing to the sentinel we could witness.
-                    "observation": OBSERVATION_EXECUTED,
-                    "value_moved": False,
-                    "timelock_executed": True,
-                },
-                transcript=tr,
-            ),
-        )
-    return emit(
-        store,
-        proven(
+        eff = unknown(
             EFFECT_CLASS_VALUE_OUT,
             tier=TIER_FORK,
             scope=SCOPE_KERNEL,
             gate_ref=gate_ref,
-            reason="value_moved",
+            reason="no_value_observed",
             details={
+                # The delayed operation EXECUTED (the point Tier-1 cannot reach);
+                # it simply moved nothing to the sentinel we could witness.
                 "observation": OBSERVATION_EXECUTED,
-                "value_moved": True,
+                "value_moved": False,
                 "timelock_executed": True,
-                # The scheduled operation targeted a sentinel the PROPOSER chose, and
-                # the timelock forwarded value to it — a caller/proposer-arbitrary
-                # destination, proved by the sentinel balance delta (simulation).
-                "destination_shape": SHAPE_CALLER_ARBITRARY,
-                "shape_proved_by": "simulation",
             },
-            concrete={"destination": sentinel_address} if sentinel_address else {},
             transcript=tr,
-        ),
+        )
+        # State-dependent (schedule landed + time advanced): must not transfer on
+        # the kernel hash, even though ``no_value_observed`` is otherwise cacheable.
+        eff.state_dependent = True
+        return emit(store, eff)
+    eff = proven(
+        EFFECT_CLASS_VALUE_OUT,
+        tier=TIER_FORK,
+        scope=SCOPE_KERNEL,
+        gate_ref=gate_ref,
+        reason="value_moved",
+        details={
+            "observation": OBSERVATION_EXECUTED,
+            "value_moved": True,
+            "timelock_executed": True,
+            # The scheduled operation targeted a sentinel the PROPOSER chose, and
+            # the timelock forwarded value to it — a caller/proposer-arbitrary
+            # destination, proved by the sentinel balance delta (simulation).
+            "destination_shape": SHAPE_CALLER_ARBITRARY,
+            "shape_proved_by": "simulation",
+        },
+        concrete={"destination": sentinel_address} if sentinel_address else {},
+        transcript=tr,
     )
+    # State-dependent: a proven value_moved from schedule→warp→execute is as
+    # untransferable as its reverts — it rests on state THIS probe manufactured.
+    eff.state_dependent = True
+    return emit(store, eff)
 
 
 def _has_verify_spec(fx: ForkFixture) -> bool:

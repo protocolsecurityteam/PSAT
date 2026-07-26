@@ -472,6 +472,10 @@ def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
     assert eff.details["value_moved"] is True
     assert eff.details["destination_shape"] == SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
+    # STATE-DEPENDENT (schedule landed + time advanced), so it must NEVER transfer
+    # on the kernel hash — even though a proven verdict is otherwise cacheable.
+    assert eff.state_dependent is True
+    assert not _is_cacheable(eff)
     # The premature execute (before the warp) must have reverted on the not-ready
     # gate — that is what proves the recipe ADVANCED time rather than side-stepping.
     labels = {r["label"]: r for r in store.stored[-1]["results"]}
@@ -519,6 +523,12 @@ def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_executi
     assert eff.reason == "no_value_observed"
     assert eff.details["timelock_executed"] is True
     assert eff.details["observation"] == "executed"
+    # The soundness invariant: no_value_observed is in _CACHEABLE_UNKNOWN_REASONS,
+    # but a TIMELOCK no_value_observed is state-dependent (it required schedule +
+    # time advance), so it must NOT be cacheable — else it transfers a
+    # "moves nothing" negative to a bytecode twin whose op was never scheduled.
+    assert eff.state_dependent is True
+    assert not _is_cacheable(eff)
 
 
 # ---------------------------------------------------------------------------

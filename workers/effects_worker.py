@@ -127,6 +127,14 @@ def _is_cacheable(eff: ObservedEffect) -> bool:
     kernel hash collides across many real twins."""
     if eff.tier == TIER_HISTORICAL:
         return False
+    if eff.state_dependent:
+        # The verdict depended on state THIS probe manufactured on the fork (a
+        # timelock's scheduled operation landing, time advancing past its delay),
+        # so it is state-plane exactly as a Tier-0 historical verdict is — not a
+        # code-plane structural fact a twin inherits. Refused whatever the reason
+        # or verdict: a proven ``value_moved`` from a schedule→warp→execute is as
+        # untransferable as its reverts (§0.0.4).
+        return False
     if eff.verdict == VERDICT_PROVEN:
         return True
     return eff.reason in _CACHEABLE_UNKNOWN_REASONS
