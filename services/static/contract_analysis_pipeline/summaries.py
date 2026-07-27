@@ -672,9 +672,24 @@ def _detect_contract_classification(
     functions_by_signature = {
         getattr(function, "full_name", function.name): function for function in _entry_points(contract)
     }
+    # ``is_factory`` is the only field here that is NOT derived from the IR: it
+    # is read off the effects artifact's ``contract_creation`` sinks. When that
+    # artifact is degraded (``core`` substitutes ``{"schema_version", "error"}``
+    # if ``build_effects`` raises) there is no sink list to be empty, and
+    # ``false`` would assert that a contract deploys nothing on the strength of
+    # never having looked.
+    #
+    # The other fields ARE IR-derived -- ``contract.ercs()` plus a
+    # signature/event match -- and run on every parse regardless of the Slither
+    # DETECTOR pass, which has never run in this pipeline. So ``standards: []``
+    # is a measured absence, not a silent one: it is non-empty on 31 of the 88
+    # local contracts and covers every real token among them (EETH, WeETH,
+    # Lido, FiatTokenV2_2, WithdrawRequestNFT...). Nulling it would suppress a
+    # true negative, so it stays a list.
+    effects_available = isinstance(effects, Mapping) and isinstance(effects.get("functions"), Mapping)
     factory_functions = []
     evidence = []
-    if isinstance(effects, dict):
+    if effects_available and effects is not None:
         for signature, info in (effects.get("functions") or {}).items():
             if not isinstance(signature, str) or not isinstance(info, dict):
                 continue
@@ -695,8 +710,8 @@ def _detect_contract_classification(
         "is_erc721": "ERC721" in standards,
         "is_erc1155": "ERC1155" in standards,
         "is_nft": "ERC721" in standards or "ERC1155" in standards,
-        "is_factory": bool(factory_functions),
-        "factory_functions": sorted(factory_functions),
+        "is_factory": bool(factory_functions) if effects_available else None,
+        "factory_functions": sorted(factory_functions) if effects_available else None,
         "evidence": evidence,
     }
 
@@ -1386,7 +1401,28 @@ def _detect_timelock(
     }
 
 
+def _slither_detector_output_present(slither_output: Any) -> bool:
+    """Did the detector pass produce a result document at all?
+
+    ``slither_results.json`` is read with a ``{}`` default, and ``{}`` used to
+    flow straight into ``detector_counts = {High: 0, Medium: 0, ...}`` -- a
+    positive assertion of zero findings for a pass that never ran. It has never
+    run: the writer (``StaticWorker._run_slither_phase``) was removed when
+    vulnerability-detector triage was split out, and the file is absent on
+    75/75 production artifacts."""
+    return isinstance(slither_output, Mapping) and isinstance(slither_output.get("results"), Mapping)
+
+
 def _summarize_slither(slither_output: dict) -> SlitherSummary:
+    if not _slither_detector_output_present(slither_output):
+        # NOT ``{impact: 0}``. Absent counts and zero counts are different
+        # facts and only one of them is a clean bill of health.
+        return {
+            "detector_output": "absent",
+            "detector_counts": None,
+            "key_findings": None,
+        }
+
     detectors = slither_output.get("results", {}).get("detectors", [])
     counts = {impact: 0 for impact in SEVERITY_ORDER}
     for detector in detectors:
@@ -1407,19 +1443,26 @@ def _summarize_slither(slither_output: dict) -> SlitherSummary:
         )
 
     return {
+        "detector_output": "present",
         "detector_counts": counts,
         "key_findings": key_findings,
     }
 
 
-def _derive_static_risk_level(detector_counts: dict[str, int]) -> RiskLevel:
+def _derive_static_risk_level(detector_counts: dict[str, int] | None) -> RiskLevel | None:
+    """``None`` = the detector pass did not run. ``"clean"`` = it ran and found
+    nothing. The old code answered ``"unknown"`` for both, which is why
+    ``risk_level`` reads ``unknown`` on 92/92 local rows -- indistinguishable
+    from a contract Slither had cleared."""
+    if detector_counts is None:
+        return None
     if detector_counts.get("High", 0) > 0:
         return "high"
     if detector_counts.get("Medium", 0) > 0:
         return "medium"
     if sum(detector_counts.values()) > 0:
         return "low"
-    return "unknown"
+    return "clean"
 
 
 def _determine_control_model(

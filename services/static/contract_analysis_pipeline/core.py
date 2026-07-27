@@ -293,6 +293,31 @@ def collect_contract_analysis_with_artifacts(
             secondary_impl_pointers = []
     record_stage_metric("secondary_impl_pointers", len(secondary_impl_pointers))
     slither_summary = _summarize_slither(slither_output)
+    detector_output = slither_summary["detector_output"]
+    analysis_errors: list[str] = []
+    if detector_output == "absent":
+        # LOUD. This was `errors: []` on 75/75 artifacts, published next to
+        # `static_analysis_completed: true` and a zero-filled `detector_counts`
+        # -- a reader has every reason to take that as "analysed, nothing
+        # found". The detector pass has in fact never run in this pipeline
+        # since its writer was removed, and a total outage that reports no
+        # errors is its own defect.
+        message = (
+            "slither detector pass produced no output (no slither_results.json in the project "
+            "directory): detector_counts and static_risk_level are NOT DETERMINED, not clean. "
+            "The IR-derived analysis (predicates, effects, claims, classification) is unaffected."
+        )
+        analysis_errors.append(message)
+        logger.error(
+            "slither detector output absent for %s",
+            project_dir,
+            extra={"phase": "slither_detectors", "project_dir": str(project_dir)},
+        )
+        record_degraded(
+            phase="slither_detectors",
+            exc=RuntimeError(message),
+            context={"project_dir": str(project_dir), "contract_name": subject_name},
+        )
     audit_alignment: AuditAlignment = {
         "status": "not_checked",
         "bytecode_match": "not_checked",
@@ -320,8 +345,9 @@ def collect_contract_analysis_with_artifacts(
         },
         "analysis_status": {
             "static_analysis_completed": True,
-            "slither_completed": bool(slither_output),
-            "errors": [],
+            "slither_completed": detector_output == "present",
+            "detector_output": detector_output,
+            "errors": analysis_errors,
         },
         "summary": summary,
         "contract_classification": classification,

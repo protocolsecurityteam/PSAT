@@ -7,7 +7,10 @@ from typing import Literal, TypedDict
 from typing_extensions import NotRequired
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
-RiskLevel = Literal["low", "medium", "high", "unknown"]
+# ``clean`` = the detector pass ran and reported nothing. ``unknown`` is
+# retained only for rows written before the split; the producer no longer emits
+# it, and ``None`` (SQL NULL) is what "the pass did not run" now means.
+RiskLevel = Literal["low", "medium", "high", "clean", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
 TimelockPattern = Literal["oz_timelock", "governor_timelock", "custom", "none", "unknown"]
 CurrentHoldersStatus = Literal["unknown_static_only"]
@@ -51,6 +54,11 @@ class Subject(TypedDict):
 class AnalysisStatus(TypedDict):
     static_analysis_completed: bool
     slither_completed: bool
+    # ``absent`` means the Slither DETECTOR pass produced no result document.
+    # ``static_analysis_completed`` stays true because the IR-derived analysis
+    # (predicates, effects, claims, classification) did complete -- the two are
+    # different passes and were being reported as one.
+    detector_output: Literal["present", "absent"]
     errors: list[str]
 
 
@@ -71,13 +79,18 @@ class Summary(TypedDict):
 
 
 class ContractClassification(TypedDict):
+    # ``standards`` / ``is_erc*`` / ``is_nft`` are IR-derived (``contract.ercs()``
+    # plus a signature+event match) and run on every parse, so ``[]`` / ``False``
+    # here are MEASURED absences, independent of the Slither detector pass.
     standards: list[str]
     is_erc20: bool
     is_erc721: bool
     is_erc1155: bool
     is_nft: bool
-    is_factory: bool
-    factory_functions: list[str]
+    # ``is_factory`` alone reads the effects artifact's ``contract_creation``
+    # sinks: ``None`` when that artifact is degraded, i.e. not determined.
+    is_factory: bool | None
+    factory_functions: list[str] | None
     evidence: list[Evidence]
 
 
@@ -173,8 +186,11 @@ class SlitherFinding(TypedDict):
 
 
 class SlitherSummary(TypedDict):
-    detector_counts: dict[str, int]
-    key_findings: list[SlitherFinding]
+    # ``None`` on both when ``detector_output`` is ``absent``. A zero-filled
+    # count map is a clean bill of health; a pass that never ran is not.
+    detector_output: Literal["present", "absent"]
+    detector_counts: dict[str, int] | None
+    key_findings: list[SlitherFinding] | None
 
 
 class TrackingHint(TypedDict):
