@@ -391,6 +391,55 @@ AUDIT_FAILED = "failed"
 # every job forever, so they survive the flip that clears the observations.
 RESIDUE_BOOKKEEPING_KEYS = ("destination_probe_attempts",)
 
+# ---------------------------------------------------------------------------
+# Replay identity: what a re-run is allowed to change (G6-C6)
+# ---------------------------------------------------------------------------
+# THE VIOLATION, stated rather than hidden. inv. 11 is byte-identical recomputation and
+# inv. 12 is "re-analysis without on-chain change is a no-op", and this cache MUTATES ON
+# READ: ``bump_hit`` and ``mark_audited`` are called from the read path
+# (``workers/effects_worker.py`` — the plain-hit, audit and floor branches), so two
+# identical pipeline runs over an unchanged chain leave the DB in DIFFERENT states.
+# W0-2/W0-8 close the float and string-hash determinism classes and neither can see
+# this one: both pin the PROCESS, and this is a difference in what the process WROTE.
+#
+# DECISION (the item's second permitted shape): the mutation is ACCEPTED and the columns
+# it touches are declared non-identity here, in the module that owns the schema, instead
+# of being split into a side table. Reasons, so a later reader can reverse it knowingly:
+#   * every one of these columns is bookkeeping ABOUT PROBING — how many times this row
+#     was served, whether a peer corroborated it, when — and none is an observation of a
+#     contract. Nothing published to a user, a claim or a score reads any of them.
+#   * ``audit_status`` is deliberately durable: it exists so a caught collision is not
+#     re-tested (and not re-trusted) forever. Moving it to a stats table would either
+#     lose that or duplicate the identity key to carry it.
+#   * a stats table would add a write to the hot read path for a value only operational
+#     metrics consume.
+# CONSEQUENCE, not to be softened: a replay-identity check over this table must compare
+# rows MODULO these columns. A checker that diffs whole rows will report a difference on
+# every second run, and it will be right — the invariant as stated is not what the code
+# does, and this constant is the exact size of the gap.
+#
+# ``hit_count`` semantics, since G6-C6 flags them: it counts times this row was SERVED as
+# a trusted hit, so ``0`` means "never served" (134 rows). It cannot mean "looked up and
+# missed" — a lookup that misses matches NO row, so the miss is a property of the
+# QUERY and is recorded where queries are: ``record_stage_metric("cache_misses", …)``
+# per job in the effects worker. The two facts live in two places because they are facts
+# about two different things.
+REPLAY_IDENTITY_EXCLUDED_COLUMNS = (
+    "hit_count",
+    "audit_status",
+    "audit_peer_hash",
+    "audited_at",
+    "updated_at",
+)
+
+# The same statement for ``effect_verdicts.observed_residue``: these keys are probe
+# bookkeeping (how many hit-path re-observations this deployment has spent), and
+# ``_mark_residue_gaps`` reads them to decide run N+1's probe set — so run N+1's WORK is
+# a function of what run N persisted. Bounded and deliberate (without it an
+# unreproducible deployment re-probes forever), and excluded from replay identity for
+# the same reason as the columns above: it describes probing, never the chain.
+REPLAY_IDENTITY_EXCLUDED_RESIDUE_KEYS = RESIDUE_BOOKKEEPING_KEYS
+
 
 def _lock_key(behavior_hash: str, effect_class: str, scope: str, surface: str, gate_ref: str) -> str:
     return f"effect:{behavior_hash}:{effect_class}:{scope}:{surface}:{gate_ref}"

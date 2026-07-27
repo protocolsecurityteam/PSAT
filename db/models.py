@@ -1521,6 +1521,17 @@ class EffectBehaviorCache(Base):
     are simulated once and the *kernel* verdicts asserted equal before the cache
     is trusted; ``audit_status`` / ``audit_peer_hash`` / ``audited_at`` record
     that, and ``hit_count`` supports the optional every-Nth re-audit.
+
+    **This table is written on READ, and five of its columns are therefore NOT part of
+    its replay identity**: ``hit_count``, ``audit_status``, ``audit_peer_hash``,
+    ``audited_at``, ``updated_at`` (the authoritative list is
+    ``db.effect_cache.REPLAY_IDENTITY_EXCLUDED_COLUMNS``, which explains why each is
+    excluded). ``bump_hit`` / ``mark_audited`` run from the hit path, so two identical
+    pipeline runs over an unchanged chain leave DIFFERENT values in them — inv. 11's
+    "byte-identical recomputation" and inv. 12's "re-analysis without on-chain change is
+    a no-op" hold for this table only modulo those five. ``hit_count`` counts times the
+    row was SERVED (``0`` = never served); a lookup that MISSED matches no row at all and
+    is counted per job as the ``cache_misses`` stage metric instead.
     """
 
     __tablename__ = "effect_behavior_cache"

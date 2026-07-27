@@ -28,6 +28,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from db import effect_cache  # noqa: E402
 from db.models import (  # noqa: E402
     Contract,
     EffectBehaviorCache,
@@ -818,3 +819,52 @@ def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, 
     # B published ITS OWN reason, not A's.
     assert witnesses[fns[CONTRACT_B]]["reason"] == "no_value_observed"
     assert witnesses[fns[CONTRACT_A]]["reason"] == "no_supply_delta"
+
+
+def test_two_identical_runs_differ_only_in_the_declared_non_identity_columns(clean_effects, monkeypatch):
+    """G6-C6, pinned rather than papered over. This cache is written on READ
+    (``bump_hit`` / ``mark_audited``), so two identical runs over an unchanged chain do
+    NOT leave the DB byte-identical — inv. 11/12 hold for this table only MODULO
+    ``REPLAY_IDENTITY_EXCLUDED_COLUMNS``.
+
+    The test states the exact size of that gap: every other column is unchanged across a
+    second run, and the mutation is confined to the declared set. A new mutating column
+    added without declaring it turns this red."""
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
+    hashes = {fns[a]: ("KIDENT", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}
+
+    def factory(c, ctx):
+        return proven(
+            EFFECT_CLASS_SUPPLY,
+            reason="supply_delta",
+            details={"observation": "executed", "supply_delta_sign": "mint"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+    session.expire_all()
+
+    tracked = [
+        c.name
+        for c in EffectBehaviorCache.__table__.columns
+        if c.name not in effect_cache.REPLAY_IDENTITY_EXCLUDED_COLUMNS
+    ]
+    row = session.query(EffectBehaviorCache).one()
+    before = {name: getattr(row, name) for name in tracked}
+    before_hits = row.hit_count
+
+    # Re-run the SAME job set over the SAME state: the "no-op re-analysis" case.
+    for job in jobs:
+        _run(worker, session, job)
+    session.expire_all()
+    row = session.query(EffectBehaviorCache).one()
+    after = {name: getattr(row, name) for name in tracked}
+
+    assert after == before, "a re-run changed a column that is NOT declared non-identity"
+    # ...and the mutation really happens, so the exclusion is not vacuous.
+    assert row.hit_count > before_hits
