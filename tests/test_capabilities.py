@@ -75,12 +75,32 @@ def test_intersect_finite_exact_with_lower_yields_lower():
     assert out.membership_quality == "lower_bound"
 
 
-def test_intersect_finite_disjoint_yields_empty():
+def test_intersect_finite_disjoint_yields_structural_and_not_empty():
+    """INVERTED (was ``test_intersect_finite_disjoint_yields_empty``, which
+    pinned the G2 HIT 3 defect): two independently-resolved NON-empty caller
+    sets that do not overlap are self-refuting evidence on a deployed function
+    ({liquidityPool} ∩ {upgradeTimelock} = ∅ on requestWithdraw), never a
+    witnessed exact-empty "provably nobody". The AND keeps both conjuncts
+    visible; the policy layer reads it as not-determined."""
     a = CapabilityExpr.finite_set([ADDR_A])
     b = CapabilityExpr.finite_set([ADDR_B])
     out = intersect(a, b)
-    assert out.kind == "finite_set"
-    assert out.members == []
+    assert out.kind == "AND"
+    assert [c.members for c in out.children] == [[ADDR_A], [ADDR_B]]
+    assert out.members is None
+
+
+def test_intersect_inherited_empty_stays_exact_empty():
+    """Emptiness INHERITED from an already-witnessed-empty input (all-revoked
+    role store, empty-by-design ceiling) keeps resolving: the witness lives in
+    the input, not in the intersection."""
+    empty = CapabilityExpr.finite_set([], quality="exact")
+    other = CapabilityExpr.finite_set([ADDR_A])
+    for a, b in ((empty, other), (other, empty), (empty, empty)):
+        out = intersect(a, b)
+        assert out.kind == "finite_set"
+        assert out.members == []
+        assert out.membership_quality == "exact"
 
 
 def test_intersect_idempotent():

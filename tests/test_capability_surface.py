@@ -81,3 +81,23 @@ def test_external_check_only_still_falls_to_residual():
     assert surface.authority_public is False
     assert surface.residual
     assert capability_surface_status(cap, surface) is None
+
+
+def test_disjoint_intersection_and_never_reads_resolved_empty():
+    """The end-to-end pin for G2 HIT 3: intersect({A}, {B}) now stays a
+    structural AND, and the projected status is None (not-determined), never
+    'resolved_empty' — while a genuinely witnessed empty conjunct still
+    resolves the AND empty."""
+    from services.resolution.capabilities import CapabilityExpr, intersect
+    from services.resolution.capability_resolver import capability_to_dict
+
+    disjoint = capability_to_dict(intersect(CapabilityExpr.finite_set([ADDR_A]), CapabilityExpr.finite_set([ADDR_B])))
+    assert disjoint["kind"] == "AND"
+    surface = project_capability_surface(disjoint)
+    assert capability_surface_status(disjoint, surface) is None
+
+    inherited = capability_to_dict(
+        intersect(CapabilityExpr.finite_set([], quality="exact"), CapabilityExpr.finite_set([ADDR_B]))
+    )
+    surface = project_capability_surface(inherited)
+    assert capability_surface_status(inherited, surface) == "resolved_empty"
