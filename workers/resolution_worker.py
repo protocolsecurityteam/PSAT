@@ -201,6 +201,8 @@ class ResolutionWorker(BaseWorker):
                         block_number=snapshot.get("block_number"),
                         details=cv.get("details"),
                         observed_via=cv.get("observed_via"),
+                        # Absent in the snapshot => NULL, not a guessed value.
+                        authority_provenance=cv.get("authority_provenance"),
                     )
                 )
             session.commit()

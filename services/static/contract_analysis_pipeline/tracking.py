@@ -17,6 +17,7 @@ from eth_utils.crypto import keccak
 from schemas.contract_analysis import (
     AssociatedEvent,
     AssociatedEventInput,
+    ControllerProvenance,
     ControllerReadSpec,
     ControllerTrackingTarget,
     ControllerTypeComponent,
@@ -848,7 +849,27 @@ def build_controller_tracking(
     # Union of two sources for "this state-var is an external contract":
     #   1. predicate_trees flagged it as authority_contract.address_source
     #   2. effects records an external_call from a function on it
-    authority_state_vars = _collect_authority_state_vars(predicate_trees) | external_contract_vars_from_effects
+    # This union answers ONLY "does this slot hold another contract's address",
+    # which is what ``kind`` means. It is NOT an authority claim: (2) is
+    # satisfied by any callee (``eETH``, ``lido``, ``liquidityPool``).
+    delegated_authority_vars = _collect_authority_state_vars(predicate_trees)
+    authority_state_vars = delegated_authority_vars | external_contract_vars_from_effects
+    # "Gates the caller" — the separate question. A leaf either delegates its
+    # authority check to the address (1) or names it directly in a
+    # caller_authority / delegated_authority operand. Kept apart from the union
+    # above so a persisted row can say which provenance it came from; see
+    # ``ControllerProvenance``.
+    caller_gate_vars = delegated_authority_vars | {
+        name for name, roles in authority_roles_by_var.items() if roles & _AUTHORITY_LEAF_ROLES
+    }
+
+    def _provenance_for(name: str) -> ControllerProvenance | None:
+        if name in caller_gate_vars:
+            return "caller_gate"
+        if name in external_contract_vars_from_effects:
+            return "call_target"
+        return None
+
     # Effects-discovered external-contract vars get added to the
     # referenced set so Pass 2 emits a tracking target for them even if
     # they don't appear as a leaf operand (e.g. ``hook`` written by
@@ -1029,21 +1050,25 @@ def build_controller_tracking(
                     "on implementation changes."
                 )
 
-        tracking_targets.append(
-            {
-                "controller_id": controller_id,
-                "label": name,
-                "source": name,
-                "kind": kind,  # type: ignore[typeddict-item]
-                "read_spec": read_spec_var,
-                "confidence": None,
-                "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
-                "writer_functions": writer_functions,
-                "associated_events": associated_events,
-                "polling_sources": [name],
-                "notes": notes,
-            }
-        )
+        target: ControllerTrackingTarget = {
+            "controller_id": controller_id,
+            "label": name,
+            "source": name,
+            "kind": kind,  # type: ignore[typeddict-item]
+            "read_spec": read_spec_var,
+            "confidence": None,
+            "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+            "writer_functions": writer_functions,
+            "associated_events": associated_events,
+            "polling_sources": [name],
+            "notes": notes,
+        }
+        provenance = _provenance_for(name)
+        # Key omitted (not set to None) when neither question was answered:
+        # absent is the not-determined state all the way to the DB column.
+        if provenance is not None:
+            target["authority_provenance"] = provenance
+        tracking_targets.append(target)
         seen_ids.add(controller_id)
 
     for name, member_path in sorted(referenced_member_paths):

@@ -733,6 +733,13 @@ class ControllerValue(Base):
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     observed_via: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 'caller_gate' | 'call_target' | NULL. NULL is a third state — the static
+    # stage did not determine why this address is attached — and is NOT a
+    # synonym for either value. Before this column the analyzer unioned "the
+    # caller is checked against this address" with "this address gets called",
+    # so a callee (eETH, lido, liquidityPool) was indistinguishable from an
+    # authority registry on the persisted row. See ``ControllerProvenance``.
+    authority_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="controller_values")
 
