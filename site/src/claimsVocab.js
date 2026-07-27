@@ -530,11 +530,14 @@ export function toneForClaims(fn) {
   const claims = claimsOf(fn);
   if (primary.claim_id === "flow.out" || primary.claim_id === "value_router") {
     const s = flowOutTargetSummary(claims);
-    // The hazard tint covers the proven caller-chosen case AND the guard whose
-    // pinning is not proven: dropping the tint there would read absence of a
-    // pinning proof as the proof itself (round-2 R3 — all four real
-    // "constrained" rows are blacklists and had lost the tint).
-    if (s.sawCaller || s.sawUnprovenPin) return TONE_FLOW_OUT_CALLER;
+    // The hazard tint covers the proven caller-chosen case, the guard whose
+    // pinning is not proven, AND the param whose constraint was never analysed
+    // (absent field / not_determined): dropping the tint on any of them would
+    // read absence of a proof as the proof itself (round-2 R3: all four real
+    // "constrained" rows are blacklists and had lost the tint; round-4 R1:
+    // every legacy payload and every `several`-fold param member has NO
+    // verdict, and had lost it too).
+    if (s.sawCaller || s.sawUnprovenPin || s.sawUnknownParam) return TONE_FLOW_OUT_CALLER;
     // Calm-tint only a purely-fixed out-flow (mirrors flowOutQualifier's "fixed"
     // gate): any admin-settable, indeterminate, self or unclassified path blocks it.
     if (s.sawFixed && !s.sawOther && !s.sawSetter) return TONE_FLOW_OUT_FIXED;
@@ -684,10 +687,16 @@ function memberKinds(kinds) {
 // are not determined (another contract's revert surface can be a blacklist as
 // easily as an allowlist — on the local artifacts all four such rows ARE
 // blacklists), so it keeps the hazard reading with its own wording.
-// `not_determined` and an ABSENT field stay their own bucket — a payload
-// minted before the producer answered the question is not evidence that no
-// gate exists. Nothing here launders a constraint into reassurance, and no
-// absence of proof-of-pinning ever suppresses the theft-shaped signal.
+// `not_determined` and an ABSENT field KEEP the caller-chosen hazard reading
+// (same tone as the unconstrained case), with wording that notes the gate was
+// not analysed. The `param` destination is the PROVEN fact here — the caller
+// names the address — and the missing verdict is only the answer to a
+// secondary question; reading strictly-less-knowledge as strictly-safer would
+// demote every payload minted before the producer answered (82/82 persisted
+// param flow destinations carry no verdict) and every fold member, for which
+// the producer never mints a verdict at all. Only a PRESENT `constrained`
+// verdict may soften. Nothing here launders a constraint into reassurance, and
+// no absence of proof ever suppresses the theft-shaped signal.
 //
 // msg_sender / caller_controlled carry no such question: the destination IS the
 // caller, provably, so they stay unconditional.
@@ -764,10 +773,10 @@ function flowOutTargetSummary(claims) {
       }
     }
   }
-  // A param destination that is not proven-free is neither fixed nor caller
-  // chosen, so it must block the "fixed" reading exactly like an indeterminate
-  // one — otherwise a function with one guarded param and one immutable path
-  // would read "(fixed destination)".
+  // A param destination without a proven-free verdict still blocks the "fixed"
+  // reading exactly like an indeterminate one — otherwise a function with one
+  // guarded (or unanalysed) param and one immutable path would read
+  // "(fixed destination)".
   if (sawGuardedParam || sawUnprovenPin || sawUnknownParam) sawOther = true;
   return {
     sawCaller,
@@ -788,17 +797,23 @@ function flowOutQualifier(claims) {
   const s = flowOutTargetSummary(claims);
   if (!s.total) return null;
   if (s.sawCaller) return "(caller-chosen destination)";
+  // An UNANALYSED param ranks directly under the proven-free case and ABOVE
+  // every softer reading: the caller provably names the destination, and with
+  // no verdict at all — legacy payload, `several`-fold member, producer not yet
+  // run — nothing is known that the unconstrained case doesn't also satisfy.
+  // Knowing strictly less must never read strictly safer (round-4 R1); the
+  // wording keeps the caller-chosen claim and notes the unanswered question.
+  if (s.sawUnknownParam) return "(caller-chosen destination; gate not analysed)";
   // A real guard whose pinning is NOT proven sits at the hazard end with the
   // caller-chosen case (it may well be a blacklist — all four local rows are),
   // but under wording that claims exactly what was proven and no more.
   if (s.sawUnprovenPin) return "(destination checked; pinning not proven)";
   if (s.sawSetter) return "(admin-settable destination)";
-  // Both of these sit BELOW admin-settable in the worst case and above "fixed":
-  // a gate an authority wrote is weaker evidence than an unwritable address, and
-  // an unanswered question is weaker still. Neither is reassurance — the wording
-  // states what was proven and nothing more.
+  // Below admin-settable in the worst case and above "fixed": a gate an
+  // authority wrote is weaker evidence than an unwritable address. This is the
+  // ONLY param state that softens — it takes a PRESENT constrained verdict
+  // with a proven pin to get here.
   if (s.sawGuardedParam) return "(destination gated by a guard)";
-  if (s.sawUnknownParam) return "(destination constraint not determined)";
   if (s.sawFixed && !s.sawOther) return "(fixed destination)";
   return null;
 }

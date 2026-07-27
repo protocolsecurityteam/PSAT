@@ -292,14 +292,19 @@ const FREE = { state: "unconstrained_proven" };
 
 function flowOut(
   targetKind,
-  { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null, constraint = FREE } = {},
+  { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null, constraint } = {},
 ) {
   const flow = { kind: "low_level_value_call", selector: null, from_is_self: true };
   if (targetKind) flow.target_kind = targetKind;
-  const paramSomewhere =
-    targetKind?.kind === "param" ||
-    (Array.isArray(targetKinds) && targetKinds.some((k) => k?.kind === "param"));
-  if (paramSomewhere && constraint) flow.target_constraint = constraint;
+  // The producer (`flows.py:_flow_entry`) attaches a verdict only to a SCALAR
+  // `param` destination — a `several` fold NEVER carries one. The helper
+  // mirrors that: the proven-free default applies to scalar params only, so a
+  // fold payload is the mintable no-verdict shape unless a test explicitly
+  // injects a verdict (the defensive fold arms below say so when they do).
+  const scalarParam = targetKind?.kind === "param";
+  const foldParam = Array.isArray(targetKinds) && targetKinds.some((k) => k?.kind === "param");
+  const verdict = constraint === undefined ? (scalarParam ? FREE : null) : constraint;
+  if ((scalarParam || foldParam) && verdict) flow.target_constraint = verdict;
   if (amountKind) flow.amount_kind = amountKind;
   if (targetKinds) flow.target_kinds = targetKinds;
   if (amountKinds) flow.amount_kinds = amountKinds;
@@ -359,11 +364,13 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("reads a several fold through its members, worst case first", () => {
-    // splitPay(): one send to a caller argument, one to an admin-settable
-    // storage slot. Both members are resolved, so the fold is several — and the
-    // caller-chosen member has to dominate. Reading only the scalar would
-    // suppress the theft signal on a function that provably pays a caller-named
-    // address.
+    // splitPay() (AssetRecovery, corpus golden): one send to a caller argument,
+    // one to an admin-settable storage slot. Both members are resolved, so the
+    // fold is several — and the caller-chosen member has to dominate over the
+    // setter. This is the MINTABLE shape: the producer never attaches
+    // `target_constraint` to a fold, so the param member reads as
+    // caller-chosen with the gate question noted, never demoted below the
+    // admin-settable member (round-4 R1).
     const oneOf = flowOut(
       { kind: "several", tier: "dispositive_ast" },
       {
@@ -373,7 +380,33 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
         ],
       },
     );
-    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(caller-chosen destination)");
+    expect(oneOf.witness.flows[0].target_constraint).toBeUndefined();
+    expect(qualifierForClaims({ claims: [oneOf] }))
+      .toBe("(caller-chosen destination; gate not analysed)");
+    expect(toneForClaims({ claims: [oneOf] })).toBe("#a8746a");
+  });
+
+  it("keeps the hazard tint and reading for a param member of a several fold (the persisted shape)", () => {
+    // PriorityWithdrawalQueue.claimWithdraw / batchClaimWithdraw: real local
+    // rows, `target_kinds=[param, immutable]`, `target_param_index=None`, NO
+    // `target_constraint` — the producer cannot mint one for a fold. The param
+    // member is a PROVEN fact (the caller names one of the destinations); the
+    // missing verdict answers only a secondary question, so it must render the
+    // same tone chip as before the verdict field existed, never slide below
+    // the tint threshold (round-4 R1: knowing strictly less must not read
+    // strictly safer).
+    const fold = flowOut(
+      { kind: "several", tier: "static_trace" },
+      {
+        targetKinds: [
+          { kind: "param", tier: "static_trace" },
+          { kind: "immutable", tier: "static_trace" },
+        ],
+      },
+    );
+    expect(qualifierForClaims({ claims: [fold] }))
+      .toBe("(caller-chosen destination; gate not analysed)");
+    expect(toneForClaims({ claims: [fold] })).toBe("#a8746a");
   });
 
   it("stops calling a GATED param destination caller-chosen, and names the guard", () => {
@@ -389,21 +422,33 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     expect(qualifierForClaims({ claims: [gated] })).toBe("(destination gated by a guard)");
   });
 
-  it("says so when the destination constraint was not determined", () => {
+  it("keeps the caller-chosen reading when the constraint was not determined, noting the open gate", () => {
+    // Only a PRESENT `constrained` verdict may soften the reading. An explicit
+    // `not_determined` proves nothing in either direction, and the param fact —
+    // the caller names the destination — is already proven, so the hazard
+    // reading stays, with the unanswered question spelled out.
     const open = flowOut(
       { kind: "param", tier: "dispositive_ast" },
       { constraint: { state: "not_determined" } },
     );
     expect(qualifierForClaims({ claims: [open] }))
-      .toBe("(destination constraint not determined)");
+      .toBe("(caller-chosen destination; gate not analysed)");
+    expect(toneForClaims({ claims: [open] })).toBe("#a8746a");
   });
 
-  it("treats an ABSENT constraint field as not-determined, never as caller-chosen", () => {
-    // A payload minted before the producer answered the question is not evidence
-    // that no gate exists (the field-level form of the three-state rule).
+  it("renders a legacy claim (no target_constraint key) with the pre-verdict tone chip", () => {
+    // Round-4 R1 regression pin. 82/82 persisted param flow destinations carry
+    // no `target_constraint` today; before the verdict field existed (bf240fe9)
+    // every one of them read "(caller-chosen destination)" with the hazard tint
+    // #a8746a. The absent field must keep exactly that tone path — a payload
+    // minted before the producer answered the question must not read SAFER than
+    // it did before the question existed. Wording may note the open gate;
+    // the tone chip may not move.
     const legacy = flowOut({ kind: "param", tier: "dispositive_ast" }, { constraint: null });
+    expect(legacy.witness.flows[0].target_constraint).toBeUndefined();
+    expect(toneForClaims({ claims: [legacy] })).toBe("#a8746a");
     expect(qualifierForClaims({ claims: [legacy] }))
-      .toBe("(destination constraint not determined)");
+      .toBe("(caller-chosen destination; gate not analysed)");
   });
 
   it("keeps msg_sender / caller_controlled unconditional — they ask no such question", () => {
@@ -436,7 +481,11 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     }
   });
 
-  it("drops the hazard tint for a gated or undetermined param destination", () => {
+  it("drops the hazard tint only for a PROVEN pinning guard — an undetermined one keeps it", () => {
+    // The one state that softens: a present `constrained` verdict whose guard
+    // provably pins. `not_determined` proves nothing and keeps the hazard tint
+    // (round-4 R1) — the calm tint stays off in both cases: neither is
+    // proven-fixed.
     const base = CLAIM_VOCAB["flow.out"].tone;
     const gated = flowOut(
       { kind: "param", tier: "dispositive_ast" },
@@ -444,8 +493,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     );
     const open = flowOut({ kind: "param", tier: "dispositive_ast" }, { constraint: { state: "not_determined" } });
     expect(toneForClaims({ claims: [gated] })).toBe(base);
-    expect(toneForClaims({ claims: [open] })).toBe(base);
-    // ...and the calm tint stays off too: neither is proven-fixed.
+    expect(toneForClaims({ claims: [open] })).toBe("#a8746a");
     expect(toneForClaims({ claims: [gated] })).not.toBe("#8f947a");
     expect(toneForClaims({ claims: [open] })).not.toBe("#8f947a");
   });
@@ -504,6 +552,9 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     // mandatory gate. The admin-settable member is then the worst thing left,
     // and it must win — reading the param member as caller-chosen would restate
     // the exact over-claim the constraint verdict exists to remove.
+    // DEFENSIVE ARM: the verdict is injected explicitly — today's producer
+    // never mints one on a fold (the mintable no-verdict fold is pinned
+    // above); this pins the softening path should a fold ever carry one.
     const oneOf = flowOut(
       { kind: "several", tier: "dispositive_ast" },
       {
