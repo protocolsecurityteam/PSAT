@@ -66,6 +66,15 @@ class EffectiveFunctionPermission(TypedDict):
     conditions: NotRequired[list[dict[str, Any]]]
     status: NotRequired[EffectiveFunctionStatus]
     signature_witnesses: NotRequired[list[ResolvedPrincipal]]
+    # State-mutability witness carried from the effects stage. Always present,
+    # and ``None`` on any of the four means NOT DETERMINED — a state the reader
+    # must keep distinct from ``false`` / ``[]`` ("the stage looked and proved
+    # none"). See ``services.policy.effective_permissions._mutability_fields``
+    # for which record shapes yield which state.
+    state_changing: NotRequired[bool | None]
+    state_writes: NotRequired[list[dict[str, Any]] | None]
+    sinks: NotRequired[list[dict[str, Any]] | None]
+    writer_selectors: NotRequired[list[str] | None]
 
 
 class EffectivePermissions(TypedDict):

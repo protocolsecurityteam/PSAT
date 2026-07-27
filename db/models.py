@@ -814,6 +814,27 @@ class EffectiveFunction(Base):
     # the legacy effect_labels. NULL/[] on rows written before the claims plane.
     claims: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
+    # State-mutability witness, carried from the effects stage's ``EffectInfo``.
+    # Before these columns the only way to ask "does this function write state"
+    # was ``effect_targets``, which concatenates state-write variable names with
+    # dotted external-call heads: 501 of its 1642 populated rows carry only call
+    # heads, so a populated value asserted a write that was never proven.
+    #
+    # All four are nullable BECAUSE SQL NULL is a distinct fact here — "not
+    # determined", i.e. no effects record covered this signature, or the record
+    # contradicted itself (see ``_mutability_fields``). ``[]`` / ``false`` mean
+    # the effects stage looked and proved none. A consumer that cannot tell those
+    # apart re-creates the defect these columns exist to remove.
+    #
+    # ``none_as_null=True`` on the JSONB pair is load-bearing: SQLAlchemy's
+    # default renders a Python ``None`` as the jsonb scalar ``null``, which is a
+    # DIFFERENT state from SQL NULL and is why ``conditions`` above is unusable
+    # in a null test on 780 of its 1773 rows (see ``db/jsonb.py``).
+    state_changing: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    state_writes: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    sinks: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    writer_selectors: Mapped[list[str] | None] = mapped_column(ARRAY(String(10)), nullable=True)
+
     contract: Mapped[Contract] = relationship("Contract", back_populates="effective_functions")
     principals: Mapped[list["FunctionPrincipal"]] = relationship(
         "FunctionPrincipal", back_populates="function", cascade="all, delete-orphan"

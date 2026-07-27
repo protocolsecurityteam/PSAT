@@ -40,6 +40,7 @@ from db.deployment import deployment_scope
 from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
 from services.effects import claims_bridge
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.effective_permissions import MUTABILITY_FIELDS
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 
@@ -302,6 +303,15 @@ def write_effective_function_rows(
         for col_name in ("capability_expr", "conditions", "status"):
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = cap_columns.get(col_name)
+        # State-mutability witness. ``fn.get`` with no default on purpose: a
+        # record that never carried the key is not-determined, which is the same
+        # answer ``_mutability_fields`` gives for an uncovered signature — and it
+        # is NOT ``[]``/``False``, which would assert that the effects stage
+        # looked. Every caller that does carry the keys already passed them
+        # through ``_mutability_fields``.
+        for col_name in MUTABILITY_FIELDS:
+            if hasattr(EffectiveFunction, col_name):
+                ef_kwargs[col_name] = fn.get(col_name)
         # Plane-1 claims ride through unchanged alongside the legacy effect_labels.
         if hasattr(EffectiveFunction, "claims"):
             ef_kwargs["claims"] = fn.get("claims", [])

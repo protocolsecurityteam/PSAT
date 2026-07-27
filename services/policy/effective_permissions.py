@@ -448,6 +448,83 @@ def _effect_record_is_state_changing_entry_point(record: Mapping[str, Any]) -> b
     return record.get("state_changing") is True
 
 
+#: The four ``EffectInfo`` mutability facts, in the order they are documented.
+MUTABILITY_FIELDS = ("state_changing", "state_writes", "sinks", "writer_selectors")
+
+_NOT_DETERMINED: dict[str, Any] = dict.fromkeys(MUTABILITY_FIELDS)
+
+
+def _is_unselectored_entry_point(signature: str) -> bool:
+    """``fallback`` / ``receive`` — externally observable, but not selector-bearing."""
+    return signature.split("(")[0] in ("fallback", "receive")
+
+
+def _mutability_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Project an effects ``EffectInfo`` onto the four persisted mutability columns.
+
+    ``None`` on any field means NOT DETERMINED and is a different fact from
+    ``false`` / ``[]``. Three record shapes produce it, all measured against the
+    107 production ``effects`` artifacts (2415 function records):
+
+    * **No record, or a malformed field.** A missing effects artifact is a live
+      production branch — ``policy_worker`` passes ``effects=None`` whenever the
+      artifact is not a dict and the stage continues — and a present-but-wrongly-
+      typed value is not evidence of emptiness, so it does not collapse to ``[]``.
+
+    * **``fallback`` / ``receive`` → ``state_changing`` is not determined** (36
+      records; 15 of them carry a proven state write). ``_is_state_changing_entry_point``
+      returns ``False`` for these because they have no selector, NOT because it
+      proved them non-mutating: WETH9's ``fallback()`` writes ``balanceOf``.
+      Copying that ``False`` into a column read as evidence would publish a proven
+      absence over a proven presence. Their sinks and writes are real and are
+      published.
+
+    * **A view/pure entry point whose derived writes contradict it → the derived
+      effect facts are not determined** (100 records). Records exist only for
+      external/public/fallback/receive functions, so ``state_changing is False``
+      on a named one means the compiler typed it ``view``/``pure`` — and the
+      compiler forbids ``SSTORE`` there. The writes are OZ-v5 namespaced-storage
+      getters (``paused()`` "writing" ``PausableStorageLocation``) and struct
+      copies (``previewUpdateExchangeRate``); ``assembly_state_access`` is
+      ``false`` on all 100, so nothing existing catches them. The contradiction is
+      resolved in favour of the compiler for ``state_changing`` and withheld for
+      everything derived from the same lowering — including ``sinks``, which
+      carries the identical claim under a ``state_write`` kind tag.
+
+    ``state_writes`` empty on a view is NOT a contradiction and stays ``[]``.
+    """
+    if not isinstance(record, Mapping) or not record:
+        return dict(_NOT_DETERMINED)
+
+    signature = str(record.get("function") or "")
+    raw_state_changing = record.get("state_changing")
+    state_changing = raw_state_changing if isinstance(raw_state_changing, bool) else None
+
+    out: dict[str, Any] = {
+        "state_changing": None if _is_unselectored_entry_point(signature) else state_changing,
+        "state_writes": record.get("state_writes"),
+        "sinks": record.get("sinks"),
+        "writer_selectors": record.get("writer_selectors"),
+    }
+    if not isinstance(out["state_writes"], list):
+        out["state_writes"] = None
+    if not isinstance(out["sinks"], list):
+        out["sinks"] = None
+    if not isinstance(out["writer_selectors"], list) or not all(
+        isinstance(sel, str) for sel in out["writer_selectors"]
+    ):
+        out["writer_selectors"] = None
+
+    contradicts_view = (
+        state_changing is False and not _is_unselectored_entry_point(signature) and bool(out["state_writes"])
+    )
+    if contradicts_view:
+        out["state_writes"] = None
+        out["sinks"] = None
+        out["writer_selectors"] = None
+    return out
+
+
 def _function_records_from_semantic_artifacts(
     *,
     capability_dicts: Mapping[str, dict[str, Any]],
@@ -518,6 +595,7 @@ def _function_records_from_semantic_artifacts(
             "effect_labels": list(effect_info.get("effect_labels") or []),
             "claims": list(effect_info.get("claims") or []),
             "action_summary": effect_info.get("action_summary") or "Performs a contract action.",
+            **_mutability_fields(effect_info),
         }
         if signature not in capability_dicts:
             if signature in predicate_trees_by_function:
@@ -651,6 +729,14 @@ def build_effective_permissions(
             "action_summary": action_summary_out,
             "notes": notes,
         }
+        # The artifact is what ``policy_worker`` hands the row writer, so the
+        # mutability witness has to survive this hop or the columns are NULL in
+        # production while every record-layer test passes.
+        mutability = _mutability_fields(effects_record)
+        function_permission["state_changing"] = mutability["state_changing"]
+        function_permission["state_writes"] = mutability["state_writes"]
+        function_permission["sinks"] = mutability["sinks"]
+        function_permission["writer_selectors"] = mutability["writer_selectors"]
 
         # Semantic capability columns: when a CapabilityExpr is supplied for this
         # function, it dictates capability_expr / conditions / status /
