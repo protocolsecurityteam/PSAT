@@ -1472,7 +1472,14 @@ def _detect_timelock(
         "delay_variables": sorted(_timelock_delay_variables(contract, registries, queue_functions))
         if has_timelock
         else [],
-        "queue_execute_functions": sorted(queue_functions | execute_functions),
+        # Gated on the verdict like every sibling below. These sets are the
+        # bare structural pair, which fires on 19 of the 88 local contracts of
+        # which 3 are timelocks; publishing them next to
+        # ``has_timelock: false, pattern: "none"`` restates as a quotable list
+        # exactly the over-claim the ``exec.arbitrary`` requirement removed from
+        # the verdict (a Teller's ``deposit``/``beforeTransfer`` share-lock
+        # cooldown, EigenLayer's withdrawal-delay VIEW getters).
+        "queue_execute_functions": sorted(queue_functions | execute_functions) if has_timelock else [],
         "authorized_roles": sorted({role["role"] for role in role_definitions}) if has_timelock else [],
         "evidence": evidence,
     }

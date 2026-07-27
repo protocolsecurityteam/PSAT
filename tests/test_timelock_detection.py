@@ -32,7 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from schemas.contract_analysis import SemanticControlAnalysis, TimelockAnalysis  # noqa: E402
+from schemas.contract_analysis import (  # noqa: E402
+    RoleDefinition,
+    SemanticControlAnalysis,
+    TimelockAnalysis,
+)
 from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -136,6 +140,11 @@ TIMESTAMP_LOG_ONLY = """
 """
 
 
+# A non-empty role list on every call, so the ``authorized_roles`` gate is
+# discriminating: an ungated field would echo these back on a negative.
+_ROLES = cast("list[RoleDefinition]", [{"role": "ADMIN_ROLE", "declared_in": "C", "evidence": []}])
+
+
 def _timelock(tmp_path: Path, source: str, name: str = "C"):
     path = tmp_path / "C.sol"
     path.write_text(textwrap.dedent(source).strip() + "\n")
@@ -144,7 +153,7 @@ def _timelock(tmp_path: Path, source: str, name: str = "C"):
     effects = build_effects(contract)
     attach_claims_to_effects(effects, build_claims(contract, effects, trees))
     project_effect_labels(effects)
-    return _detect_timelock(contract, tmp_path, [], effects)
+    return _detect_timelock(contract, tmp_path, _ROLES, effects)
 
 
 def test_custom_queue_execute_timelock_is_detected(tmp_path):
@@ -156,6 +165,10 @@ def test_custom_queue_execute_timelock_is_detected(tmp_path):
     assert "queue(bytes32)" in result["queue_execute_functions"]
     assert "run(address,bytes,bytes32)" in result["queue_execute_functions"]
     assert "delay" in result["delay_variables"], result["delay_variables"]
+    # R4 positive arm for the three verdict-gated evidence fields, so the
+    # negative's ``== []`` cannot be satisfied by a field that is always empty.
+    assert result["authorized_roles"] == ["ADMIN_ROLE"]
+    assert result["evidence"]
 
 
 def test_share_lock_cooldown_is_not_a_timelock(tmp_path):
@@ -170,6 +183,16 @@ def test_share_lock_cooldown_is_not_a_timelock(tmp_path):
     assert result["has_timelock"] is False, result
     assert result["pattern"] == "none"
     assert result["delay_variables"] == []
+    # EVERY output field, not only the verdict. The bare structural pair DOES
+    # fire on this shape -- that is the whole reason the negative exists -- so
+    # an ungated evidence list republishes the excluded claim as a quotable
+    # list next to ``has_timelock: false``. Measured on the real corpus this
+    # shipped ``deposit(ERC20,uint256,uint256)`` / ``beforeTransfer(...)`` on
+    # TellerWithMultiAssetSupport and the ``getQueuedWithdrawal`` VIEW getters
+    # on DelegationManager.
+    assert result["queue_execute_functions"] == [], result["queue_execute_functions"]
+    assert result["authorized_roles"] == []
+    assert result["evidence"] == []
 
 
 def test_immediate_executor_is_not_a_timelock(tmp_path):
@@ -243,7 +266,7 @@ def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degra
     else:
         effects = None
 
-    result = _detect_timelock(contract, tmp_path, [{"role": "ADMIN"}], effects)  # type: ignore[list-item]
+    result = _detect_timelock(contract, tmp_path, _ROLES, effects)
     assert result["has_timelock"] is None, result
     assert result["pattern"] == "unknown"
     assert result["delay"] is None
