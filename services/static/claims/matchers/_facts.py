@@ -10,6 +10,7 @@ instance so a full ``build_claims`` pass computes them once.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -112,15 +113,51 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 # Answers, per ABI parameter: *does a mandatory revert gate reference this
 # parameter between entry and sink?* — three states (R1):
 #
-#   ``constrained``           a mandatory leaf pins the parameter against
+#   ``constrained``           a mandatory leaf references the parameter against
 #                             something outside the caller's control, and the
 #                             verdict names which guard and where.
-#   ``unconstrained_proven``  the predicate tree is present and NO mandatory
-#                             leaf pins or opaquely touches the parameter.
+#   ``unconstrained_proven``  the predicate tree is present, NO mandatory leaf
+#                             pins or opaquely touches the parameter, AND the
+#                             projection was checkable: every mandatory leaf's
+#                             operand account is complete as far as this walk
+#                             can verify. A leaf's SILENCE about a parameter is
+#                             only evidence when the account of what it reads is
+#                             itself trustworthy — the governing rule cuts here
+#                             hardest, because this state is a published proof
+#                             of absence.
 #   ``not_determined``        the analysis did not settle it: no tree, an
-#                             unsupported/opaque mandatory leaf, or a
+#                             unsupported/opaque mandatory leaf, a
 #                             parameter-referencing leaf whose semantics this
-#                             walk cannot classify.
+#                             walk cannot classify, or a leaf whose operand
+#                             projection is demonstrably or possibly incomplete.
+#
+# Three projection-completeness checks guard the ``unconstrained_proven`` state
+# (each one is a real, measured lossiness of the leaf projection — reading its
+# silence as proof was rejected in review round 1 on production rows):
+#
+#   * A leaf whose ``expression`` names a declared parameter the leaf's operands
+#     do not account for (CumulativeMerkleDrop.claim's ``! verify(account, …)``
+#     projected only ``expectedMerkleRoot``) blocks that parameter.
+#   * A non-membership leaf reading a keyed collection (mapping/array state var)
+#     with no account of the KEY (EtherFiTimelock's ``isOperationReady(id)``
+#     folds ``_timestamps[id]`` to the bare mapping — ``id`` is parameter-derived
+#     and invisible) blocks every parameter: the dropped key can be any of them.
+#   * A function record with no ``parameter_names`` list cannot be
+#     expression-checked at all, so nothing about it may be called proven.
+#
+# ``confidence`` on the leaf is deliberately NOT consulted: it grades the
+# authority classification, not the operand account — the same lossy
+# ``isOperationReady(id)`` fold carries ``low`` on its business half and
+# ``high`` on its time half, so it cannot discriminate a complete projection
+# from a lossy one in either direction.
+#
+# Standard-gate pre-pass: on a proven OZ TimelockController execute entry every
+# ABI parameter is re-hashed into the operation id a mandatory gate requires
+# scheduled, and on a proven Safe exec entry every parameter rides under the
+# owners' signature threshold. Those commitments come from the STANDARD's shape
+# (the same gates ``exec.arbitrary`` uses), not from the tree walk — and routing
+# them through here means the flow witness and the exec witness publish the SAME
+# verdict for the same parameter instead of contradicting each other.
 #
 # The tightened rule (handoff §5 Leg C): a mandatory leaf constrains a
 # parameter only if it is NOT the function's own effect sink. The sink's own
@@ -197,6 +234,113 @@ def _unsupported_leaf_is_parametric(leaf: dict[str, Any]) -> bool:
 _PARAM_CONSTRAINTS: WeakKeyDictionary[ClaimContext, dict[tuple[str, str], dict[int, dict[str, Any]]]] = (
     WeakKeyDictionary()
 )
+_KEYED_COLLECTIONS: WeakKeyDictionary[ClaimContext, frozenset[str]] = WeakKeyDictionary()
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _declared_param_indices(ctx: ClaimContext, function: str) -> dict[str, int] | None:
+    """``{parameter_name: abi_index}`` from the effect record's
+    ``parameter_names``, or ``None`` when the record does not carry the list
+    (every function in the local corpus does — 2,415/2,415 — so ``None`` is the
+    stale-artifact shape). Without it the expression cross-check below cannot
+    run, and an uncheckable projection never supports a proof of absence."""
+    record = ctx.effect_record(function)
+    names = record.get("parameter_names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        return None
+    return {name: index for index, name in enumerate(names) if name}
+
+
+def _unaccounted_param_mentions(leaf: dict[str, Any], name_indices: dict[str, int], accounted: set[int]) -> set[int]:
+    """Parameter indices the leaf's rendered ``expression`` names but its
+    operand account does not carry. The expression is the builder's own record
+    of what the gate textually touches; a parameter present there and absent
+    from the operands is the projection dropping a reference
+    (``! verify(account, …)`` carrying only ``expectedMerkleRoot``), and that
+    silence must not become a proof. Free text in revert strings can collide
+    with a parameter name — that costs an under-claim (``not_determined``),
+    never an over-claim."""
+    expression = leaf.get("expression")
+    if not isinstance(expression, str) or not expression or not name_indices:
+        return set()
+    out: set[int] = set()
+    for token in _IDENTIFIER_RE.findall(expression):
+        index = name_indices.get(token)
+        if index is not None and index not in accounted:
+            out.add(index)
+    return out
+
+
+def keyed_collection_vars(ctx: ClaimContext) -> frozenset[str]:
+    """State variables declared as keyed collections (mappings / arrays),
+    learned from the ``declared_type`` the state-write facts record anywhere in
+    the contract (cached per contract). Used to spot a leaf that folded an
+    ELEMENT read down to the bare collection variable — the key is gone, and
+    with it any account of which parameter selects the gating cell."""
+    cached = _KEYED_COLLECTIONS.get(ctx)
+    if cached is not None:
+        return cached
+    out: set[str] = set()
+    for signature in ctx.function_signatures():
+        for write in state_writes(ctx, signature, body_only=False):
+            var = write.get("var")
+            declared = write.get("declared_type")
+            if (
+                isinstance(var, str)
+                and isinstance(declared, str)
+                and (declared.startswith("mapping(") or declared.endswith("]"))
+            ):
+                out.add(var)
+    frozen = frozenset(out)
+    _KEYED_COLLECTIONS[ctx] = frozen
+    return frozen
+
+
+def _reads_keyed_collection_without_key(leaf: dict[str, Any], collections: frozenset[str]) -> bool:
+    """True when a non-membership leaf carries a mapping/array state variable as
+    a bare operand. Solidity cannot compare a collection itself, so the operand
+    is an element read whose key the projection dropped
+    (``_timestamps[id] > _DONE_TIMESTAMP`` recorded as ``_timestamps`` vs
+    ``_DONE_TIMESTAMP``); the dropped key may be derived from any parameter. A
+    membership leaf accounts its keys in ``set_descriptor.key_sources`` and an
+    array ``length`` read has no element key, so both pass."""
+    if not collections:
+        return False
+    if leaf.get("kind") == "membership" and isinstance(leaf.get("set_descriptor"), dict):
+        return False
+    for operand in leaf.get("operands") or []:
+        if not isinstance(operand, dict) or operand.get("source") != "state_variable":
+            continue
+        if operand.get("state_variable_name") not in collections:
+            continue
+        member_path = operand.get("member_path") or []
+        if member_path and member_path[-1] == "length":
+            continue
+        return True
+    return False
+
+
+def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[str, Any] | None:
+    """The standard-gate constraint verdict covering EVERY ABI parameter of a
+    proven standard exec entry, or ``None`` where the function is not one.
+
+    OZ TimelockController ``execute``/``executeBatch`` re-derive
+    ``hashOperation(target, value, payload, predecessor, salt)`` and require the
+    operation scheduled-and-ready — a hash commitment over the full parameter
+    list. Safe ``execTransaction``/module-exec check the owners' signatures over
+    the transaction — a signature witness over the full parameter list. These
+    are the same contract-shape gates ``exec.arbitrary`` proves its standard
+    tier with; publishing the flow verdict from the same source keeps the two
+    witnesses on one function from ever contradicting each other."""
+    from ._gates import SAFE_EXEC_SELECTORS, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
+
+    selector = ctx.canonical_selector(function)
+    if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
+        return {"state": "constrained", "guard": "hash_commitment", "binding": "standard_gate"}
+    if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
+        return {"state": "constrained", "guard": "signature_witness", "binding": "standard_gate"}
+    return None
 
 
 def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
@@ -415,6 +559,15 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
         return cached
 
     verdicts: dict[int, dict[str, Any]] = {}
+
+    standard = standard_destination_commitment(ctx, function)
+    if standard is not None:
+        # The standard's own gate commits every parameter; the tree walk below
+        # could only re-derive a weaker answer from a lossier projection.
+        verdicts[-1] = standard
+        memo[(function, mode)] = verdicts
+        return verdicts
+
     tree = ctx.predicate_tree(function)
     if tree is None:
         # No tree at all (G3 classes F/R): nothing is settled for any
@@ -426,11 +579,18 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
         return verdicts
 
     effect_selectors, effect_names = effect_sink_identities(ctx, function, mode=mode)
+    name_indices = _declared_param_indices(ctx, function)
+    collections = keyed_collection_vars(ctx)
 
     blocked: set[int] = set()
-    blocked_all = False
+    # A record with no parameter_names list (a pre-enrichment artifact) cannot
+    # be expression-checked, so the completeness of no leaf's account is
+    # verifiable: positives below still mint, but no silence becomes a proof.
+    blocked_all = name_indices is None
     for leaf, path in _mandatory_leaves_with_paths(tree):
         direct, derived, opaque = _leaf_param_refs(leaf)
+        mentioned = _unaccounted_param_mentions(leaf, name_indices or {}, direct | derived)
+        keyed_read = _reads_keyed_collection_without_key(leaf, collections)
         if _is_external_callee_leaf(leaf):
             mutability = leaf.get("callee_state_mutability")
             if mutability not in ("view", "pure"):
@@ -448,16 +608,22 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
                 # referenced parameters, and nothing here can say which. Same
                 # answer whether the mutability was stamped ``nonview`` or not
                 # stamped at all (an older tree) — neither is evaluable.
-                blocked |= direct | derived
-                if opaque:
+                blocked |= direct | derived | mentioned
+                if opaque or keyed_read:
                     blocked_all = True
                 continue
             # view/pure callee: it moves nothing, so its revert surface is a
             # genuine precondition — falls through to classification below.
-        if opaque:
-            # An unsupported leaf / undetermined computed provenance may
-            # reference any parameter without saying so: it can never prove a
-            # constraint, and it blocks the unconstrained proof for everyone.
+        # Projection-completeness blocks (see the module comment above): a
+        # parameter the expression names without an operand, and a keyed
+        # collection read whose key the fold dropped, are both the leaf
+        # touching something its account does not carry.
+        blocked |= mentioned
+        if opaque or keyed_read:
+            # An unsupported leaf / undetermined computed provenance / dropped
+            # collection key may reference any parameter without saying so: it
+            # can never prove a constraint, and it blocks the unconstrained
+            # proof for everyone.
             blocked_all = True
         for index in sorted(direct | derived):
             guard = _classify_constraining_leaf(leaf, via_derived=index in derived and index not in direct)

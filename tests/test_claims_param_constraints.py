@@ -27,10 +27,26 @@ from services.static.claims.context import ClaimContext
 from services.static.claims.matchers import _facts
 
 
-def _ctx(tree: Any, *, sinks: list[dict] | None = None, flows: list[dict] | None = None) -> ClaimContext:
+def _ctx(
+    tree: Any,
+    *,
+    sinks: list[dict] | None = None,
+    flows: list[dict] | None = None,
+    parameter_names: list[str] | None = None,
+    extra_functions: dict[str, dict] | None = None,
+) -> ClaimContext:
     effects = {
         "contract_name": "Subject",
-        "functions": {"f(address,uint256)": {"sinks": sinks or [], "value_flows": flows or []}},
+        "functions": {
+            "f(address,uint256)": {
+                "sinks": sinks or [],
+                "value_flows": flows or [],
+                # The projection-completeness cross-check needs the declared
+                # names; a record without them can never mint the proof state.
+                "parameter_names": ["to", "amount"] if parameter_names is None else parameter_names,
+            },
+            **(extra_functions or {}),
+        },
     }
     trees = {"trees": {"f(address,uint256)": tree}}
     return ClaimContext(None, effects, trees)
@@ -443,3 +459,282 @@ def test_a_guard_origin_sink_is_never_part_of_the_transparency_set():
         sinks=[{"kind": "external_call", "target": "registry.onlyRole", "selector": "0x71645909", "origin": "guard"}],
     )
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0, mode="external_call") == {"state": "not_determined"}
+
+
+# ---------------------------------------------------------------------------
+# Projection completeness — the round-2 rules (a leaf's silence is only
+# evidence when its account of what it reads is checkable and complete)
+# ---------------------------------------------------------------------------
+
+
+def test_a_parameter_named_in_the_expression_but_absent_from_the_operands_is_not_determined():
+    """The CumulativeMerkleDrop.claim shape: ``! verify(account, cumulativeAmount,
+    expectedMerkleRoot, merkleProof)`` projected ONLY ``expectedMerkleRoot``. The
+    leaf demonstrably touches ``account``; reading the projection's silence as
+    proof published ``unconstrained_proven`` — "freely chosen" — on the audit's
+    own named-constrained destination. The expression cross-check lands it on
+    ``not_determined``."""
+    ctx = _ctx(
+        _leaf(
+            operator="truthy",
+            operands=[_param(2, "expectedMerkleRoot")],
+            parameter_indices=[2],
+            expression="! verify(account,cumulativeAmount,expectedMerkleRoot,merkleProof)",
+        ),
+        parameter_names=["account", "cumulativeAmount", "expectedMerkleRoot", "merkleProof"],
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 1) == {"state": "not_determined"}
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 3) == {"state": "not_determined"}
+
+
+def test_an_expression_mention_blocks_only_the_dropped_parameter_not_the_accounted_one():
+    """The block is exact: a parameter the operands DO account for keeps its
+    earned verdict, and an untouched parameter keeps the proof state."""
+    tree = {
+        "op": "AND",
+        "children": [
+            _leaf(operands=[_param(0, "to"), STATE_VAR], parameter_indices=[0]),
+            _leaf(
+                operator="truthy",
+                operands=[_param(0, "to")],
+                parameter_indices=[0],
+                expression="check(to,amount)",
+            ),
+        ],
+    }
+    ctx = _ctx(tree)
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "constrained"
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 1) == {"state": "not_determined"}
+
+
+def test_a_positive_verdict_from_another_leaf_survives_an_expression_block():
+    """``blocked`` fills gaps; it never overwrites a constraint some other
+    mandatory leaf proved for the same parameter."""
+    tree = {
+        "op": "AND",
+        "children": [
+            _leaf(operands=[_param(1, "amount"), STATE_VAR], parameter_indices=[1]),
+            _leaf(operator="truthy", operands=[], expression="helper(amount)"),
+        ],
+    }
+    assert _facts.param_constraint(_ctx(tree), "f(address,uint256)", 1)["state"] == "constrained"
+
+
+def test_a_bare_mapping_operand_in_a_comparison_blocks_every_unconstrained_proof():
+    """The EtherFiTimelock shape: ``isOperationReady(id)`` folds to
+    ``_timestamps > _DONE_TIMESTAMP`` — the mapping ELEMENT read lost its key
+    (``id``, a keccak over every parameter). A comparison cannot read a mapping
+    itself, so the bare operand proves the projection dropped the key, and the
+    dropped key can be derived from any parameter."""
+    writer = {
+        "state_writes": [{"var": "_timestamps", "declared_type": "mapping(bytes32 => uint256)", "origin": "body"}],
+        "parameter_names": ["id", "delay"],
+    }
+    ctx = _ctx(
+        _leaf(
+            kind="comparison",
+            operator="gt",
+            operands=[
+                {"source": "state_variable", "state_variable_name": "_timestamps"},
+                {"source": "state_variable", "state_variable_name": "_DONE_TIMESTAMP"},
+            ],
+            expression="require(bool,string)(isOperationReady(id),operation is not ready)",
+        ),
+        extra_functions={"schedule(bytes32,uint256)": writer},
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 1) == {"state": "not_determined"}
+
+
+def test_a_scalar_state_variable_comparison_does_not_trip_the_keyed_collection_block():
+    """The same leaf over a SCALAR variable keeps the proof reachable — the
+    block is keyed to the declared type, not to state reads in general."""
+    writer = {
+        "state_writes": [{"var": "cap", "declared_type": "uint256", "origin": "body"}],
+        "parameter_names": [],
+    }
+    ctx = _ctx(
+        _leaf(
+            kind="comparison",
+            operator="gt",
+            operands=[{"source": "state_variable", "state_variable_name": "cap"}, CONSTANT],
+        ),
+        extra_functions={"setCap(uint256)": writer},
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+
+
+def test_a_membership_leaf_with_a_descriptor_accounts_its_keys_and_does_not_trip_the_block():
+    """A mapping MEMBERSHIP leaf carries its keys in ``set_descriptor.key_sources``
+    — the read is fully accounted, and the allowlist verdict (not a block) is
+    the answer."""
+    writer = {
+        "state_writes": [{"var": "allowed", "declared_type": "mapping(address => bool)", "origin": "body"}],
+        "parameter_names": ["who", "ok"],
+    }
+    ctx = _ctx(
+        _leaf(
+            kind="membership",
+            operator="truthy",
+            operands=[_param(0, "to")],
+            parameter_indices=[0],
+            set_descriptor={"kind": "mapping_membership", "storage_var": "allowed", "key_sources": [_param(0, "to")]},
+        ),
+        extra_functions={"setAllowed(address,bool)": writer},
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["guard"] == "mapping_allowlist"
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 1)["state"] == "unconstrained_proven"
+
+
+def test_an_array_length_read_is_not_an_element_read():
+    writer = {
+        "state_writes": [{"var": "holders", "declared_type": "address[]", "origin": "body"}],
+        "parameter_names": ["who"],
+    }
+    ctx = _ctx(
+        _leaf(
+            kind="comparison",
+            operator="gt",
+            operands=[
+                {"source": "state_variable", "state_variable_name": "holders", "member_path": ["length"]},
+                CONSTANT,
+            ],
+        ),
+        extra_functions={"addHolder(address)": writer},
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+
+
+def test_a_record_without_parameter_names_can_never_mint_the_proof_state():
+    """A pre-enrichment artifact carries no ``parameter_names``, so the
+    expression cross-check cannot run and no leaf's silence is verifiable.
+    Positives still mint; the proof of absence does not. Reachable by
+    construction only — the local corpus carries the list on 2,415/2,415
+    functions, so this branch has zero realised rows today (a lower bound, not
+    a population claim)."""
+    tree = {
+        "op": "AND",
+        "children": [
+            _leaf(operands=[_param(0), STATE_VAR], parameter_indices=[0]),
+            _leaf(operator="ne", operands=[_param(1), CONSTANT], parameter_indices=[1]),
+        ],
+    }
+    ctx = _ctx(tree, parameter_names=None)  # helper default is a REAL list
+    effects = {
+        "contract_name": "Subject",
+        "functions": {"f(address,uint256)": {"sinks": [], "value_flows": []}},
+    }
+    bare = ClaimContext(None, effects, {"trees": {"f(address,uint256)": tree}})
+    assert _facts.param_constraint(bare, "f(address,uint256)", 0)["state"] == "constrained"
+    assert _facts.param_constraint(bare, "f(address,uint256)", 1) == {"state": "not_determined"}
+    # The same tree WITH the list keeps the earned proof for the ne-checked param.
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 1)["state"] == "unconstrained_proven"
+
+
+# ---------------------------------------------------------------------------
+# Standard-gate pre-pass — one verdict source for flow and exec witnesses
+# ---------------------------------------------------------------------------
+
+
+def _timelock_ctx() -> ClaimContext:
+    execute = "execute(address,uint256,bytes,bytes32,bytes32)"
+    functions = {
+        execute: {
+            "abi_signature": execute,
+            "parameter_names": ["target", "value", "payload", "predecessor", "salt"],
+            "sinks": [{"kind": "external_call", "target": "target.call", "selector": None, "origin": "body"}],
+            "value_flows": [
+                {
+                    "kind": "low_level_value_call",
+                    "selector": None,
+                    "direction": "out",
+                    "origin": "body",
+                    "target_kind": {"kind": "param", "tier": "dispositive_ast"},
+                    "target_param_index": 0,
+                }
+            ],
+        },
+        "getMinDelay()": {"abi_signature": "getMinDelay()"},
+        "hashOperation(address,uint256,bytes,bytes32,bytes32)": {
+            "abi_signature": "hashOperation(address,uint256,bytes,bytes32,bytes32)"
+        },
+        "schedule(address,uint256,bytes,bytes32,bytes32,uint256)": {
+            "abi_signature": "schedule(address,uint256,bytes,bytes32,bytes32,uint256)"
+        },
+    }
+    # The tree deliberately carries the LOSSY isOperationReady fold — the walk
+    # alone would answer not_determined; the standard's shape answers for it.
+    tree = _leaf(
+        kind="comparison",
+        operator="gt",
+        operands=[
+            {"source": "state_variable", "state_variable_name": "_timestamps"},
+            {"source": "state_variable", "state_variable_name": "_DONE_TIMESTAMP"},
+        ],
+        expression="require(bool,string)(isOperationReady(id),operation is not ready)",
+    )
+    return ClaimContext(None, {"contract_name": "Timelock", "functions": functions}, {"trees": {execute: tree}})
+
+
+def test_the_timelock_standard_gate_commits_every_parameter_of_execute():
+    """EtherFiTimelock.execute, review round 2 case (a): the generic walk saw no
+    parameter operand in the ``isOperationReady(id)`` fold and minted
+    ``unconstrained_proven`` — a proof of absence — for the very parameter the
+    exec witness proved hash-committed, and one claims list carried both. The
+    standard's own gate is the verdict source now, for every parameter."""
+    ctx = _timelock_ctx()
+    execute = "execute(address,uint256,bytes,bytes32,bytes32)"
+    for index in range(5):
+        verdict = _facts.param_constraint(ctx, execute, index)
+        assert verdict["state"] == "constrained"
+        assert verdict["guard"] == "hash_commitment"
+        assert verdict["binding"] == "standard_gate"
+    # An unresolved index is still not a proof of anything.
+    assert _facts.param_constraint(ctx, execute, None) == {"state": "not_determined"}
+
+
+def test_flow_and_exec_witnesses_publish_the_same_standard_verdict():
+    """The self-contradiction regression: both consumers read
+    ``standard_destination_commitment`` (directly or through the pre-pass), so
+    the flow's ``target_constraint`` and the exec witness's
+    ``destination_constraint`` are equal by construction."""
+    ctx = _timelock_ctx()
+    execute = "execute(address,uint256,bytes,bytes32,bytes32)"
+    standard = _facts.standard_destination_commitment(ctx, execute)
+    assert standard is not None
+    assert _facts.param_constraint(ctx, execute, 0) == standard
+
+
+def test_a_timelock_shaped_tree_without_the_standard_gate_is_not_committed():
+    """The pre-pass needs the STANDARD's sibling set, not a lookalike selector:
+    without ``getMinDelay``/``hashOperation``/``schedule`` the lossy fold blocks
+    and the answer stays open — never a commitment, never a proof of freedom."""
+    execute = "execute(address,uint256,bytes,bytes32,bytes32)"
+    functions = {
+        execute: {
+            "abi_signature": execute,
+            "parameter_names": ["target", "value", "payload", "predecessor", "salt"],
+            "sinks": [],
+            "value_flows": [],
+        },
+        # The mapping's declared type is visible the way it is on a real
+        # artifact: some sibling writes it and records the type.
+        "record(bytes32)": {
+            "state_writes": [{"var": "_timestamps", "declared_type": "mapping(bytes32 => uint256)", "origin": "body"}],
+            "parameter_names": ["id"],
+        },
+    }
+    tree = _leaf(
+        kind="comparison",
+        operator="gt",
+        operands=[
+            {"source": "state_variable", "state_variable_name": "_timestamps"},
+            {"source": "state_variable", "state_variable_name": "_DONE_TIMESTAMP"},
+        ],
+        expression="require(bool,string)(isOperationReady(id),operation is not ready)",
+    )
+    ctx = ClaimContext(None, {"contract_name": "NotATimelock", "functions": functions}, {"trees": {execute: tree}})
+    assert _facts.standard_destination_commitment(ctx, execute) is None
+    # The mapping-element fold (key dropped) blocks the proof for every index.
+    assert _facts.param_constraint(ctx, execute, 0) == {"state": "not_determined"}

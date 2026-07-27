@@ -143,7 +143,18 @@ logger = logging.getLogger(__name__)
 # (``storage_setter`` with its writer, ``indeterminate`` for a caller-keyed
 # mapping element). The probe's candidate selection and its synthesized call both
 # read the claim set, so a v12 row was reached with this class absent from it.
-EFFECT_CACHE_SCHEMA_VERSION = 13
+# v14: ``unconstrained_proven`` in the destination-constraint verdict now
+# requires the leaf projection to be checkably complete (expression/parameter
+# cross-check, keyed-collection reads, parameter_names presence), a computed
+# operand always blocks the negative proof (L-24), and a proven OZ-timelock /
+# Safe exec entry publishes the standard's own commitment for every parameter.
+# A v13 row can carry a positive proof of absence minted from a lossy
+# projection's silence — measured on the local artifacts: 4 of 32 such proofs
+# were false (two timelock ``execute`` destinations that are hash-committed,
+# a merkle-drop ``account`` the ``verify`` leaf touches, a Teller ``to`` gated
+# by ``beforeTransferData[to].denyTo``) — and the probe shapes its call from
+# that verdict, so those rows must not be served to the new probe.
+EFFECT_CACHE_SCHEMA_VERSION = 14
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

@@ -82,11 +82,9 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
                 "sink_ids": sink_ids,
                 # The standard itself is the constraint proof: execTransaction's
                 # target is committed under the owners' threshold signatures.
-                "destination_constraint": {
-                    "state": "constrained",
-                    "guard": "signature_witness",
-                    "binding": "standard_gate",
-                },
+                # Published from the same helper the flow witness reads, so the
+                # two verdicts on one function cannot contradict each other.
+                "destination_constraint": _facts.standard_destination_commitment(ctx, function),
             },
         )
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
@@ -100,11 +98,9 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
                 # The gate proved the OZ TimelockController shape, whose execute
                 # path re-derives ``hashOperation(target, …)`` and requires the
                 # operation ready: the target is hash-committed by the standard.
-                "destination_constraint": {
-                    "state": "constrained",
-                    "guard": "hash_commitment",
-                    "binding": "standard_gate",
-                },
+                # Published from the same helper the flow witness reads, so the
+                # two verdicts on one function cannot contradict each other.
+                "destination_constraint": _facts.standard_destination_commitment(ctx, function),
             },
         )
 
