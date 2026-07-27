@@ -220,7 +220,23 @@ logger = logging.getLogger(__name__)
 # no longer mint. Measured: 0 of the local DB's recomputable exec/delegatecall
 # rows flip (none carries a swallowed nonview guard leaf — a lower bound, not
 # a population claim); the two corpus guard-idiom rows are the realised flips.
-EFFECT_CACHE_SCHEMA_VERSION = 18
+# v19: the v18 rule now reaches the VALUE-FLOW side. A routed move carries the
+# identity of the call that crossed the boundary (``ValueFlow.router_ops``,
+# recorded by the producer at the crossing site), and value_flow-mode
+# destination-constraint transparency is granted to exactly that op — no
+# longer to every body external call of a routed function. A v18 row on a
+# routed body with a mandatory nonview destination guard beside the router
+# (``guard.checkDestination(to)`` before ``vault.exit(to, …)``) carries
+# ``target_constraint: unconstrained_proven`` minted from the swallowed guard
+# leaf, byte-identical to the guard-free control; the same walk now answers
+# ``not_determined``. The probe selects and shapes its inner call from the
+# destination witness (the v11 argument), so such a row was reached from a
+# proof of absence the walk can no longer mint. Measured: on the persisted
+# (pre-``router_ops``) artifacts the two ``bulkWithdraw`` param destinations
+# fall to ``not_determined`` until re-analysis records the op; on recomputed
+# source the corpus router rows keep their verdicts (0 flips) and the
+# guard-idiom fixture pair is the realised discrimination.
+EFFECT_CACHE_SCHEMA_VERSION = 19
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

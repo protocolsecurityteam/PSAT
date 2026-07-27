@@ -1199,7 +1199,13 @@
                 "kind": "param",
                 "tier": "dispositive_ast"
               },
-              "amount_param_index": 1
+              "amount_param_index": 1,
+              "router_ops": [
+                {
+                  "selector": "0x5beae096",
+                  "callee": "safeTransferFrom"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1284,7 +1290,13 @@
                 "kind": "param",
                 "tier": "dispositive_ast"
               },
-              "amount_param_index": 2
+              "amount_param_index": 2,
+              "router_ops": [
+                {
+                  "selector": "0x23b872dd",
+                  "callee": "transferFrom"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1869,7 +1881,13 @@
               "amount_kind": {
                 "kind": "caller_supplied",
                 "tier": "static_trace"
-              }
+              },
+              "router_ops": [
+                {
+                  "selector": "0x39d6ba32",
+                  "callee": "enter"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1944,7 +1962,13 @@
                 "kind": "param",
                 "tier": "static_trace"
               },
-              "amount_param_index": 1
+              "amount_param_index": 1,
+              "router_ops": [
+                {
+                  "selector": "0x39d6ba32",
+                  "callee": "enter"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -2022,7 +2046,13 @@
                 "kind": "param_derived",
                 "tier": "static_trace"
               },
-              "target_param_index": 0
+              "target_param_index": 0,
+              "router_ops": [
+                {
+                  "selector": "0x18457e61",
+                  "callee": "exit"
+                }
+              ]
             }
           ],
           "external_calls": [

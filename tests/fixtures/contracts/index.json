@@ -262,6 +262,19 @@
       "contract_name": "PayableToken",
       "description": "Adversarial taint near-miss NEGATIVE: address-tainted destination but no dynamic-bytes calldata parameter, so the value send earns no exec.arbitrary claim.",
       "detection_patterns": ["near_miss", "address_taint_only", "claim_negative"]
+    },
+    {
+      "path": "claims_flows/router_guard.sol",
+      "category": "claims_flows",
+      "contract_name": "GuardedTeller",
+      "description": "The transaction-guard idiom on the value-routing side, beside its open control: a mandatory nonview guard call vets the caller-supplied destination before the routed vault.exit, so the guarded entry's target_constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that value_flow-mode transparency belongs to the recorded router op, never to every body call.",
+      "detection_patterns": [
+        "router_guard",
+        "value_router",
+        "target_constraint",
+        "router_ops",
+        "external_call_revert"
+      ]
     }
   ]
 }

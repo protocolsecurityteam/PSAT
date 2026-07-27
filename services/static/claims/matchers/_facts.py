@@ -483,33 +483,23 @@ def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
     return bool(leaf.get("callee_signature"))
 
 
-def _body_call_identities(ctx: ClaimContext, function: str) -> tuple[set[str], set[str]]:
-    """``(selectors, bare callee names)`` of this function's body-origin
-    external-call sinks."""
-    selectors: set[str] = set()
-    names: set[str] = set()
-    for sink in body_sinks(ctx, function):
-        if sink.get("kind") != "external_call":
-            continue
-        selector = sink.get("selector")
-        if isinstance(selector, str) and selector:
-            selectors.add(selector)
-        target = sink.get("target")
-        if isinstance(target, str) and "." in target:
-            names.add(target.rsplit(".", 1)[1])
-    return selectors, names
-
-
 def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tuple[set[str], set[str]]:
     """``(selectors, bare callee names)`` of the calls that CARRY the effect a
     claim is describing — the transparency set for the tightened rule.
 
-    ``mode="value_flow"`` names the moves in ``value_flows``. A ``value_router``
-    flow's recorded selector belongs to the CALLEE's inner transfer, not to the
-    router call this function makes, so the router call has no name of its own
-    here and the set widens to every body external call. Stated as an
-    over-exclusion: on a routed function an unrelated effectful precondition
-    call can be made transparent too, which under-claims ``constrained``.
+    ``mode="value_flow"`` names the moves in ``value_flows`` plus, on a
+    ``value_router`` flow, its recorded ``router_ops`` — the specific call(s)
+    the producer's walk crossed to find the move. The routed flow's own
+    selector belongs to the CALLEE's inner transfer, so the router call's
+    identity must be carried explicitly; transparency is earned per op, never
+    granted to every body call (a nonview destination guard beside the router —
+    ``guard.checkDestination(to)`` before ``vault.exit(to, …)`` — is NOT the
+    op carrying the move, and its leaf must block the negative proof instead
+    of being swallowed). A routed flow with no recorded ``router_ops`` (an
+    artifact produced before the field existed) makes nothing extra
+    transparent: its router leaf then blocks, i.e. the function falls to
+    ``not_determined`` — the failure direction over-claims nothing and can
+    never mint ``unconstrained_proven``.
 
     ``mode="external_call"`` names only the body calls whose destination is
     PROVEN parameter-rooted in IR (:func:`_taint.proven_param_destination_call_identities`).
@@ -532,17 +522,19 @@ def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tu
         return identities
     selectors: set[str] = set()
     names: set[str] = set()
-    routed = False
     for flow in value_flows(ctx, function):
-        if flow.get("direction") == "value_router":
-            routed = True
         selector = flow.get("selector")
         if isinstance(selector, str) and selector:
             selectors.add(selector)
-    if routed:
-        body_selectors, body_names = _body_call_identities(ctx, function)
-        selectors |= body_selectors
-        names |= body_names
+        for op in flow.get("router_ops") or []:
+            if not isinstance(op, dict):
+                continue
+            op_selector = op.get("selector")
+            if isinstance(op_selector, str) and op_selector:
+                selectors.add(op_selector)
+            op_name = op.get("callee")
+            if isinstance(op_name, str) and op_name:
+                names.add(op_name)
     return selectors, names
 
 

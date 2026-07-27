@@ -382,6 +382,10 @@ _FLOW_KEYS = (
     "amount_kinds",
     "target_param_index",
     "amount_param_index",
+    # Routed flows only: the identity of the op(s) carrying the move — the
+    # mandatory-gate transparency join reads exactly this, so the gate must
+    # show a change to it (the corpus is blind to fields it does not pin).
+    "router_ops",
 )
 
 

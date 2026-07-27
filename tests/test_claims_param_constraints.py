@@ -275,28 +275,98 @@ def test_an_effectful_callee_that_is_not_the_effect_sink_leaves_the_answer_open(
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
 
 
-def test_a_routed_flow_widens_the_transparency_set_to_the_router_call():
+_ROUTER_LEAF = dict(
+    kind="external_bool",
+    operator="truthy",
+    gate_kind="external_call_revert",
+    callee_state_mutability="nonview",
+    callee_signature="exit(address,IERC20,uint256,address,uint256)",
+    operands=[_param(0)],
+    parameter_indices=[0],
+)
+
+
+def test_a_routed_flows_recorded_router_op_is_transparent():
     """A ``value_router`` flow records the CALLEE's inner transfer selector, so
-    the router call this function makes has no name of its own to join on — and
-    the router's revert surface is exactly the effect's. Joined by the callee's
-    bare name, because the declared signature (``exit(address,IERC20,…)``) does
-    not hash to the selector the sink recorded."""
+    the router call this function makes joins only through the flow's
+    ``router_ops`` — the identity the producer recorded at the crossing site.
+    Joined here by the callee's bare name, because the declared signature
+    (``exit(address,IERC20,…)``) does not hash to the selector the sink
+    recorded. The router's revert surface is exactly the effect's, so it must
+    not block the negative proof."""
     ctx = _ctx(
-        _leaf(
-            kind="external_bool",
-            operator="truthy",
-            gate_kind="external_call_revert",
-            callee_state_mutability="nonview",
-            callee_signature="exit(address,IERC20,uint256,address,uint256)",
-            operands=[_param(0)],
-            parameter_indices=[0],
-        ),
+        _leaf(**_ROUTER_LEAF),
+        sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
+        flows=[
+            {
+                "kind": "callee_erc20_selector",
+                "selector": "0xa9059cbb",
+                "direction": "value_router",
+                "origin": "body",
+                "router_ops": [{"selector": None, "callee": "exit"}],
+            }
+        ],
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+
+
+def test_a_non_router_leaf_on_a_routed_function_blocks():
+    """The R4 sibling of the transparency positive above: a nonview body-call
+    leaf that is NOT the recorded router op (``guard.checkDestination(to)``
+    beside ``vault.exit(to, …)``) is unevaluable, and the function must fall to
+    ``not_determined`` — not fall THROUGH to the ``unconstrained_proven``
+    default. Before router_ops, every body call on a routed function was
+    transparent and this guard's leaf was swallowed: the guarded function and
+    its guard-free twin published byte-identical negative proofs."""
+    ctx = _ctx(
+        {
+            "op": "AND",
+            "children": [
+                _leaf(
+                    kind="external_bool",
+                    operator="truthy",
+                    gate_kind="external_call_revert",
+                    callee_state_mutability="nonview",
+                    callee_signature="checkDestination(address)",
+                    operands=[_param(0)],
+                    parameter_indices=[0],
+                ),
+                _leaf(**_ROUTER_LEAF),
+            ],
+        },
+        sinks=[
+            {"kind": "external_call", "target": "guard.checkDestination", "selector": "0x691260e0", "origin": "body"},
+            {"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"},
+        ],
+        flows=[
+            {
+                "kind": "callee_erc20_selector",
+                "selector": "0xa9059cbb",
+                "direction": "value_router",
+                "origin": "body",
+                "router_ops": [{"selector": None, "callee": "exit"}],
+            }
+        ],
+    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+
+
+def test_a_routed_flow_without_recorded_router_ops_makes_nothing_transparent():
+    """An artifact produced before ``router_ops`` existed carries a routed flow
+    with no router identity. Absence of the record is not a licence to widen:
+    the router's own leaf then blocks and the answer stays ``not_determined`` —
+    an under-claim, never a minted proof. (Realised on the local DB: both
+    persisted ``bulkWithdraw`` param destinations fall from the pre-fix
+    ``unconstrained_proven`` to ``not_determined`` until re-analysis records
+    the op.)"""
+    ctx = _ctx(
+        _leaf(**_ROUTER_LEAF),
         sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
         flows=[
             {"kind": "callee_erc20_selector", "selector": "0xa9059cbb", "direction": "value_router", "origin": "body"}
         ],
     )
-    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
 
 
 # ---------------------------------------------------------------------------
