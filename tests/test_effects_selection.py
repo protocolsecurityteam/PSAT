@@ -344,6 +344,90 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
     assert upgraded.id not in by_id
 
 
+def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session):
+    """A zero-weight FACT must never remove a function from evidence-gathering.
+
+    ``rate_limit.consume`` records a fact at zero severity weight and
+    ``delegatecall.execute`` names where foreign code comes from — neither
+    EXPLAINS the function's value/supply behaviour, so neither may flip a blank
+    row from ``None`` (full §6 synthesis) to the empty frozenset (dropped as
+    "already explained").
+
+    This pins the 13 measured local-DB rows that would silently leave the
+    candidate set the moment the claims plane mints the new ids (all gated,
+    ``effect_targets`` non-empty, zero other claims — i.e. exactly the
+    ``rate_only`` shape below): LRTSquaredAdmin.depositToStrategy 0xaf76d4bd
+    (delegatecall.execute) and the 12 EtherFiNodesManager rate-limited rows —
+    queueETHWithdrawal 0x03f49be8/0xc3a9e20e, queueWithdrawals
+    0x0031e778/0xeea43aba, requestConsolidation 0x6691954e,
+    requestExecutionLayerTriggeredWithdrawal 0xc390d8f5 among them.
+    """
+    p = _protocol(db_session, "fact-transparency-proto")
+    c = _contract(db_session, p.id, ADDR(0x7300))
+
+    rate_only = _fn(
+        db_session,
+        c.id,
+        name="queueETHWithdrawal",
+        selector="0xab110001",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "rate_limit.consume", "tier": "idiom_structural"}],
+    )
+    dc_only = _fn(
+        db_session,
+        c.id,
+        name="depositToStrategy",
+        selector="0xab110002",
+        effect_targets=["SLOT"],
+        claims=[{"claim_id": "delegatecall.execute", "tier": "idiom_structural"}],
+    )
+    both_facts = _fn(
+        db_session,
+        c.id,
+        name="requestConsolidation",
+        selector="0xab110003",
+        effect_targets=["SLOT"],
+        claims=[
+            {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
+            {"claim_id": "delegatecall.execute", "tier": "idiom_structural"},
+        ],
+    )
+    # Transparency must not LAUNDER either: alongside a flow claim the §5c
+    # scoping still applies, and alongside an explanatory claim the row is
+    # still explained and dropped.
+    fact_and_flow = _fn(
+        db_session,
+        c.id,
+        name="withdraw",
+        selector="0xab110004",
+        effect_targets=["SLOT"],
+        claims=[
+            {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
+            {"claim_id": "flow.out", "tier": "idiom_structural"},
+        ],
+    )
+    fact_and_pause = _fn(
+        db_session,
+        c.id,
+        name="pauseAll",
+        selector="0xab110005",
+        effect_targets=["SLOT"],
+        claims=[
+            {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
+            {"claim_id": "pause.set", "tier": "standard_exact"},
+        ],
+    )
+    db_session.commit()
+
+    by_id = {cand.function_id: cand for cand in select_candidates(db_session, p.id)}
+    # The 13-row shape: fact-only claims read as BLANK → full synthesis.
+    assert by_id[rate_only.id].restrict_families is None
+    assert by_id[dc_only.id].restrict_families is None
+    assert by_id[both_facts.id].restrict_families is None
+    assert by_id[fact_and_flow.id].restrict_families == frozenset({EFFECT_CLASS_VALUE_OUT})
+    assert fact_and_pause.id not in by_id
+
+
 def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     """§5b: candidates carry the protocol's witnessed value-holder set (positive
     on-chain balances) and the acting deployment's own balance floor — the inputs

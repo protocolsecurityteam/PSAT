@@ -181,6 +181,19 @@ logger = logging.getLogger(__name__)
 # answer — an ungated second writer invisible behind a gated first — and the
 # probe reads the claim witness, so such a row was reached from a witness that
 # understates who can replace the executing code.
+#
+# Still v17 — enrollment transparency (a restoration, not a new analysis):
+# ``rate_limit.consume`` and ``delegatecall.execute`` are now TRANSPARENT to the
+# probe's candidate selection (``services/effects/selection.py:
+# _enrolled_families``): a function whose only claims are these fact classes
+# stays the §6 blank full-synthesis candidate it is today, instead of silently
+# leaving the candidate set the moment the claims plane mints the new ids (13
+# local rows: LRTSquaredAdmin.depositToStrategy and the 12 EtherFiNodesManager
+# rate-limited queue/consolidation functions). No bump: for those rows the
+# candidate shape the probe sees — full synthesis, ``restrict_families=None`` —
+# is byte-identical before and after the fact claims are minted, so a cached
+# verdict remains an answer to the same probe; every other row's claim set and
+# probe input are untouched.
 EFFECT_CACHE_SCHEMA_VERSION = 17
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
