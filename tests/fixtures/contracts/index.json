@@ -235,7 +235,7 @@
       "path": "claims_upgrade_exec/exec_arbitrary_binding.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "ExecBinding",
-      "description": "Discriminating corpus for the exec.arbitrary parameter BINDING: two address params with the destination second, a state-variable destination no param reaches, three resolvable library forwarders (low-level, reversed operand order, inline assembly), a two-step forwarder that resolves to not_determined, five destinations reaching the call through a name the body defines twice (branch, reassignment, write-after-call on a param and on storage) and the singly-assigned sibling that must still bind.",
+      "description": "Discriminating corpus for the exec.arbitrary parameter BINDING: two address params with the destination second, a state-variable destination no param reaches, three resolvable library forwarders (low-level, reversed operand order, inline assembly), a two-step forwarder that resolves to not_determined, five destinations reaching the call through a name the body defines twice (branch, reassignment, write-after-call on a param and on storage), the singly-assigned sibling that must still bind, and four multi-op bodies pinning the fragment's over-all-ops quantifier (guard-then-exec in both statement orders, an all-state-var body where the suppression still fires, and a state-var op beside a branched not_determined one).",
       "detection_patterns": [
         "param_taint",
         "claim_exec_arbitrary",
