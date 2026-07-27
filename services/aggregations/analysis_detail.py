@@ -11,7 +11,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from db.models import (
@@ -26,6 +26,7 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from services.policy.capability_surface import capability_currency
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +253,8 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
         ).scalars()
     )
 
-    ef_list = _serialize_effective_functions(ef_rows)
+    index_head = _index_frontier(session, contract_row)
+    ef_list = _serialize_effective_functions(ef_rows, index_head=index_head)
     if ef_list:
         payload["effective_permissions"] = {
             "functions": ef_list,
@@ -313,7 +315,27 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
             payload["resolved_control_graph"] = _build_control_graph(contract_row.address, cgn_rows, cge_rows)
 
 
-def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dict[str, Any]]:
+def _index_frontier(session: Session, contract_row: Contract) -> int | None:
+    """The durable event index's own frontier for this contract's chain — the
+    yardstick ``capability_currency`` measures a capability's fold height
+    against. A local read; ``None`` when the chain has no cursors at all, which
+    keeps the currency verdict ``not_determined`` rather than inventing a head.
+    """
+    from db.models import IndexedEventCursor
+    from utils.chains import UnknownChainError, chain_by_name
+
+    try:
+        chain_id = chain_by_name(contract_row.chain or "ethereum").chain_id
+    except (UnknownChainError, AttributeError):
+        return None
+    return session.execute(
+        select(func.max(IndexedEventCursor.last_indexed_block)).where(IndexedEventCursor.chain_id == chain_id)
+    ).scalar()
+
+
+def _serialize_effective_functions(
+    ef_rows: list[EffectiveFunction], *, index_head: int | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for ef in ef_rows:
         direct_owner = None
@@ -358,6 +380,7 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
         capability_expr = getattr(ef, "capability_expr", None)
         if capability_expr is not None:
             entry["capability_expr"] = capability_expr
+            entry["capability_currency"] = capability_currency(capability_expr, index_head=index_head)
         conditions = getattr(ef, "conditions", None)
         if conditions is not None:
             entry["conditions"] = conditions
@@ -463,7 +486,7 @@ def _inherit_from_impl(
             )
             if impl_efs:
                 payload["effective_permissions"] = {
-                    "functions": _serialize_effective_functions(impl_efs),
+                    "functions": _serialize_effective_functions(impl_efs, index_head=_index_frontier(session, impl_c)),
                     "contract_name": impl_c.contract_name,
                     "contract_address": impl_c.address,
                 }

@@ -24,16 +24,24 @@ ADDR_B = "0x" + "b" * 40
 
 
 def test_cofinite_projects_to_public_path_with_denylist_condition():
-    cap = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A, ADDR_B], "membership_quality": "exact"}
+    cap = {
+        "kind": "cofinite_blacklist",
+        "blacklist": [ADDR_A, ADDR_B],
+        "membership_quality": "exact",
+        # The producer now ALWAYS states this on a cofinite (W2-B item 10a); a
+        # dict without it is a pre-fix persisted row, covered by its own case in
+        # ``test_cofinite_denylist_quality_is_stated_never_inferred_from_absence``.
+        "blacklist_quality": "exact",
+    }
     surface = project_capability_surface(cap)
     assert surface.principal_rows == []
     assert surface.residual == []
     assert surface.authority_public is True
     assert len(surface.public_paths) == 1
     path = surface.public_paths[0]
-    assert any(c["kind"] == "denylist" and "denylist exclusion (2 known excluded)" in c["description"] for c in path), (
-        path
-    )
+    # The count AND the completeness verdict (W2-B item 10a): an exhaustive
+    # exclusion and an un-enumerated one are different filters.
+    assert any(c["kind"] == "denylist" and "2 excluded, exhaustive" in c["description"] for c in path), path
 
 
 def test_cofinite_status_is_public():
@@ -54,7 +62,7 @@ def test_cofinite_carries_its_own_conditions_into_the_public_path():
     assert capability_surface_status(cap, surface) == "public"
     descriptions = {c.get("description") for path in surface.public_paths for c in path}
     assert "whenNotPaused" in descriptions
-    assert any("denylist exclusion (0 known excluded)" in (d or "") for d in descriptions)
+    assert any("denylist exclusion (0 known excluded" in (d or "") for d in descriptions)
 
 
 def test_cofinite_openness_does_not_branch_on_quality():
@@ -237,3 +245,70 @@ def test_role_grants_walk_composites_and_fail_closed_on_roleless_node():
     # role to anyone — not-determined, never an empty grant.
     orphan = {"kind": "external_check_only", "trace": _solmate_cap([8], [])["trace"]}
     assert capability_role_grants(orphan) is None
+
+
+# ---------------------------------------------------------------------------
+# W2-B item 10: the two capability_expr keys nobody could read correctly.
+# ---------------------------------------------------------------------------
+
+
+def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
+    """10a: the DEFECT was the default. Emit-when-non-default meant absence =>
+    'exact', so a consumer that never heard of ``blacklist_quality`` read every
+    cofinite denylist as a COMPLETE exclusion — the strong claim by default."""
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A]))
+    partial = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
+    assert exact["blacklist_quality"] == "exact"
+    assert partial["blacklist_quality"] == "lower_bound"
+    # Absence now means "not a denylist", so denylist completeness cannot be
+    # misread off a capability that never had a denylist.
+    assert "blacklist_quality" not in capability_to_dict(CapabilityExpr.finite_set([ADDR_A]))
+
+    # The projected side-condition text distinguishes the three readings.
+    assert "exhaustive" in project_capability_surface(exact).public_paths[0][-1]["description"]
+    assert "not exhaustive" in project_capability_surface(partial).public_paths[0][-1]["description"]
+    legacy = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"}
+    assert "completeness not recorded" in project_capability_surface(legacy).public_paths[0][-1]["description"]
+
+
+def test_capability_currency_three_states():
+    """10b: ``last_indexed_block`` was present on 240 rows and read by nothing.
+    inv 11/12 need exactly "is this statement current?"."""
+    from services.policy.capability_surface import CAPABILITY_INDEX_STALE_BLOCKS, capability_currency
+
+    fresh = {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235}
+    assert capability_currency(fresh, index_head=25_619_300)["verdict"] == "current"
+    assert capability_currency(fresh, index_head=25_619_300)["lag_blocks"] == 65
+
+    stale = capability_currency(fresh, index_head=25_619_235 + CAPABILITY_INDEX_STALE_BLOCKS)
+    assert stale["verdict"] == "stale"
+
+    # ABSENT fact -> not_determined, and lag is None (never 0: a zero lag is the
+    # strongest currency claim available and has to be earned).
+    absent = capability_currency({"kind": "finite_set", "members": [ADDR_A]}, index_head=25_619_300)
+    assert absent == {
+        "verdict": "not_determined",
+        "last_indexed_block": None,
+        "index_head": 25_619_300,
+        "lag_blocks": None,
+    }
+    # No frontier to compare against is equally not-determined.
+    assert capability_currency(fresh, index_head=None)["verdict"] == "not_determined"
+
+
+def test_capability_currency_composite_takes_the_least_current_conjunct():
+    from services.policy.capability_surface import capability_currency
+
+    composite = {
+        "kind": "AND",
+        "children": [
+            {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235},
+            {"kind": "finite_set", "members": [ADDR_B], "last_indexed_block": 25_000_000},
+        ],
+    }
+    verdict = capability_currency(composite, index_head=25_619_300)
+    assert verdict["last_indexed_block"] == 25_000_000
+    assert verdict["verdict"] == "stale"

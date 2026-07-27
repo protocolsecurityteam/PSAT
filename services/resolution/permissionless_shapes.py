@@ -87,35 +87,53 @@ def _leaf_has_direct_caller_source(leaf: LeafPredicate) -> bool:
 
 
 def leaf_caller_taint_is_collapsed(leaf: LeafPredicate) -> bool:
-    """True iff the ONLY evidence of caller-dependence is an origin recorded
-    under a collapsing operand's ``derived_from`` (A1 Part B).
+    """True iff this leaf is an UN-LOWERED BARE-BOOL GATE whose only evidence of
+    caller-dependence is an origin recorded under its collapsing operand's
+    ``derived_from`` (A1 Part B).
 
     A ``view_call`` / ``computed`` operand collapses its inputs;
     ``derived_from`` is the readable record of what reached it (the digest
-    beside it is an opaque hash). A caller consumed as an ARGUMENT of the read
-    the gate tests is caller-dependence just as a direct operand is — this is
-    the taint an assembly-backed role read (Solady
-    ``hasRole(address,uint256)``) hashed away, letting the earned-public arm
-    publish ``RoleRegistry.upgradeTo`` as public over a real timelock gate.
+    beside it is an opaque hash). This is the taint an assembly-backed role read
+    (Solady ``hasRole(address,uint256)``) hashed away, letting the
+    earned-public arm publish ``RoleRegistry.upgradeTo`` as public over a real
+    10-day-timelock gate.
 
-    ``None``/absent ``derived_from`` stays not-determined (no taint claim).
-    ``external_call`` operands are deliberately excluded: their mutability is
-    unknown at the operand level and the value-movement canary rule ("absent
-    mutability stays permissionless") already governs that shape, so a
-    ``require(target.pull(msg.sender, …))`` result must not become a
-    manufactured gate. An inlined bound frame yields ``subject="bound"``
-    downstream and never blocks a root public path, so this cannot over-gate
-    an intermediate's side condition.
+    **The shape gate is the whole safety argument, and it is narrow on purpose.**
+    ``derived_from`` is transitive: any value computed from a
+    caller-parameterized call carries the caller's origin, so a bare
+    "an operand's derived_from mentions msg.sender" rule fires on values that
+    are not gates at all. Measured over the 88-contract corpus, that broad form
+    tainted 25 leaves of which 23 were false — ``sharesBridged >
+    type(uint96).max`` and ``shares < minimumMint`` (value bounds),
+    ``require(addr != address(0), "Create2: Failed on deploy")`` (a deploy
+    success check), ``require(signer.isValidSignatureNow(…))`` (self-auth), and
+    the Veda ``enter(...)`` vault call (value movement). So the rule requires
+    the leaf to BE the un-lowered predicate rather than merely contain a tainted
+    value:
+
+    * exactly ONE operand, of source ``view_call`` / ``computed`` — the whole
+      condition collapsed into one opaque value (a bare-bool gate);
+    * operator ``truthy`` / ``falsy`` — a comparison (``comparison`` kind, or
+      ``eq``/``ne`` equality) states its own readable shape and is classified on
+      that shape, never here;
+    * kind ``equality`` — the bare-bool leaf kind. ``external_bool`` carries its
+      callee's mutability, which the value-movement canary rule already governs.
+
+    ``None``/absent ``derived_from`` stays not-determined (no taint claim). An
+    inlined bound frame yields ``subject="bound"`` downstream and never blocks a
+    root public path, so this cannot over-gate an intermediate's side condition.
     """
     if _leaf_has_direct_caller_source(leaf):
         return False
-    for op in leaf.get("operands") or []:
-        if (op or {}).get("source") not in ("view_call", "computed"):
-            continue
-        for origin in (op or {}).get("derived_from") or []:
-            if (origin or {}).get("source") in _CALLER_TAINT_SOURCES:
-                return True
-    return False
+    if leaf.get("kind") != "equality" or leaf.get("operator") not in ("truthy", "falsy"):
+        return False
+    operands = leaf.get("operands") or []
+    if len(operands) != 1:
+        return False
+    operand = operands[0] or {}
+    if operand.get("source") not in ("view_call", "computed"):
+        return False
+    return any((origin or {}).get("source") in _CALLER_TAINT_SOURCES for origin in operand.get("derived_from") or [])
 
 
 def is_permissionless_caller_shape(leaf: LeafPredicate) -> bool:

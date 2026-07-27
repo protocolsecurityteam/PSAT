@@ -523,16 +523,6 @@ def _build_subtree_from_value(
 
     leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
     if leaf is None:
-        # A1 Part A: before collapsing to the bare-bool fallback, check
-        # whether the gate lives in a probe-able single-address-param public
-        # view on the analyzed contract whose argument is the caller — the
-        # self-gate shape (RoleRegistry.onlyUpgradeTimelock). Emitting the
-        # external_set descriptor hands the un-lowerable gate to the same
-        # role-store adapter that already answers it correctly when the
-        # identical gate is an EXTERNAL call (weETH's modifier).
-        self_gate = _build_self_gate_leaf(prov, gate, function)
-        if self_gate is not None:
-            return make_leaf_node(self_gate)
         # Defining IR isn't one we have a typed builder for (Assignment,
         # TypeConversion, Phi, etc.). The condition still gates an
         # if-revert / require, so it MUST be bool-typed. Fall back to
@@ -543,7 +533,7 @@ def _build_subtree_from_value(
         # the operand reads a recognized guard var. The cross-function
         # pause shape (``_requireNotPaused`` calling
         # ``if (_paused) revert``) hits this path.
-        return make_leaf_node(_build_truthy_leaf(cond_value, prov, gate))
+        return make_leaf_node(_self_gate_or_truthy_leaf(cond_value, prov, gate, function))
     return make_leaf_node(leaf)
 
 
@@ -583,15 +573,11 @@ def _build_leaf_from_gate(
 
     leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
     if leaf is None:
-        # A1 Part A — same self-gate attempt as _build_subtree_from_value.
-        self_gate = _build_self_gate_leaf(prov, gate, function)
-        if self_gate is not None:
-            return self_gate
         # Phi / Assignment defining IRs forward bare values; build a
         # truthy/falsy leaf from the original condition. This covers
         # ``require(!flag)`` where flag is a bool state var read
         # directly through a Phi.
-        return _build_truthy_leaf(cond, prov, gate)
+        return _self_gate_or_truthy_leaf(cond, prov, gate, function)
     return leaf
 
 
@@ -2118,6 +2104,29 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
         leaf["authority_role"] = "business"
     leaf["expression"] = f"{callee_name}(...)"
     return leaf
+
+
+def _self_gate_or_truthy_leaf(cond: Any, prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate:
+    """The bare-bool fallback leaf, upgraded to a SELF-GATE descriptor (A1 Part
+    A) only when the fallback carries nothing an authority resolver could use.
+
+    Order matters. ``_build_truthy_leaf``'s operand resolution recovers the
+    underlying state variable for the common shapes — an inlined
+    ``committeeMemberStates[_member].registered`` membership read, a pause flag,
+    a struct member — and that state-var name is what controller enrollment and
+    the pause/reentrancy passes key on. Replacing such a leaf with a probe
+    descriptor would trade a named authority variable for a selector: strictly
+    less. Only when the fallback's operands are ALL opaque (no state variable,
+    no descriptor — the Solady assembly-role case, where the operand is the bare
+    result of a read the lifter could not model) is the self-gate the better
+    answer."""
+    leaf = _build_truthy_leaf(cond, prov, gate)
+    if leaf.get("set_descriptor"):
+        return leaf
+    if any((op or {}).get("source") == "state_variable" for op in leaf.get("operands") or []):
+        return leaf
+    self_gate = _build_self_gate_leaf(prov, gate, operating_fn)
+    return self_gate if self_gate is not None else leaf
 
 
 def _build_self_gate_leaf(prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate | None:

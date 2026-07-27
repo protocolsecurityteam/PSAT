@@ -405,18 +405,25 @@ def test_attach_conditions_preserves_blacklist_quality():
     assert any(c.description == "whenNotPaused" for c in out.conditions)
 
 
-def test_default_cofinite_serializes_identically_to_pre_field():
-    # The P1 no-op guarantee: an exact cofinite's wire dict must NOT gain a
-    # blacklist_quality key, so every stored cofinite is byte-identical to before this
-    # field existed; a lower_bound cofinite DOES carry it for Part 2.
+def test_every_cofinite_states_its_denylist_quality():
+    # INVERTED (was ``test_default_cofinite_serializes_identically_to_pre_field``,
+    # which pinned the emit-when-non-default rule as correct — W2-B item 10a).
+    # That rule made ABSENCE mean ``exact``, so a consumer that had never heard of
+    # the key read every cofinite denylist as a COMPLETE exclusion: the one place
+    # in the sweep where the default was the STRONG claim. Byte-identity with the
+    # pre-field wire shape is no longer a goal; stating the quality is.
     from services.resolution.capability_resolver import capability_to_dict
 
     exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B]))
-    assert "blacklist_quality" not in exact
-    assert set(exact.keys()) == {"kind", "blacklist", "membership_quality", "confidence"}
+    assert exact["blacklist_quality"] == "exact"
+    assert set(exact.keys()) == {"kind", "blacklist", "membership_quality", "confidence", "blacklist_quality"}
 
     lower = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
     assert lower["blacklist_quality"] == "lower_bound"
+
+    # And it is emitted ONLY on a denylist, so absence means "not a denylist"
+    # rather than "a complete denylist".
+    assert "blacklist_quality" not in capability_to_dict(CapabilityExpr.finite_set([ADDR_A]))
 
 
 # ---------------------------------------------------------------------------
