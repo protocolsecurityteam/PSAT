@@ -863,7 +863,31 @@ def build_controller_tracking(
         name for name, roles in authority_roles_by_var.items() if roles & _AUTHORITY_LEAF_ROLES
     }
 
+    # Both inputs to the split must be REAL for either answer to be evidence.
+    # ``caller_gate`` is read out of ``predicate_trees`` alone, so when that
+    # artifact carries no trees every name falls through to the
+    # ``external_contract_vars_from_effects`` arm and a proven authority
+    # registry is stamped ``call_target`` — a proven-absent gate synthesized
+    # from a failure to determine, which downstream demotes its control edge.
+    # That artifact is a real production state, not a hypothetical: ``core.py``
+    # catches any predicate-builder exception and continues with
+    # ``{"schema_version": "semantic", "error": ...}``, then passes exactly
+    # that object here. With no trees NEITHER question was answered, so every
+    # name is not-determined and keeps its control edge.
+    #
+    # Empty ``trees`` is treated the same as absent. A successful build over a
+    # contract with no lowered guard leaf cannot distinguish "nothing gates
+    # anything" from "no gate was lowered", and the safe reading of that
+    # ambiguity is not-determined.
+    predicate_trees_available = (
+        isinstance(predicate_trees, dict)
+        and isinstance(predicate_trees.get("trees"), dict)
+        and bool(predicate_trees["trees"])
+    )
+
     def _provenance_for(name: str) -> ControllerProvenance | None:
+        if not predicate_trees_available:
+            return None
         if name in caller_gate_vars:
             return "caller_gate"
         if name in external_contract_vars_from_effects:

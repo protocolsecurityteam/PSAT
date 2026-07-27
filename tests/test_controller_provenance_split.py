@@ -10,6 +10,9 @@ Positive control: an authority registry the caller is checked against —
 ``authority_provenance == "caller_gate"``.
 Negative control: a token the contract only calls — ``"call_target"``.
 Third state: a slot that is neither — the key is absent, never guessed.
+Fourth state: no predicate trees at all (the builder raised and ``core.py``
+continued) — NEITHER answer is evidence, so the key is absent for every slot
+including the proven gate, and no control edge is demoted.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -74,7 +78,7 @@ SOURCE = """
 """
 
 
-def _targets(tmp_path: Path):
+def _build(tmp_path: Path):
     src = textwrap.dedent(SOURCE).strip() + "\n"
     f = tmp_path / "Vault.sol"
     f.write_text(src)
@@ -82,6 +86,16 @@ def _targets(tmp_path: Path):
     predicate_trees = build_predicate_artifacts(contract)
     effects = build_effects(contract)
     semantic_control = _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
+    return contract, predicate_trees, effects, semantic_control
+
+
+_UNSET: Any = object()
+
+
+def _targets(tmp_path: Path, predicate_trees_override: Any = _UNSET):
+    contract, predicate_trees, effects, semantic_control = _build(tmp_path)
+    if predicate_trees_override is not _UNSET:
+        predicate_trees = predicate_trees_override
     targets = build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
     return {t["source"]: t for t in targets}
 
@@ -108,6 +122,59 @@ def test_neither_gate_nor_callee_stays_not_determined(tmp_path):
     # "caller_gate" would claim an access check that does not exist.
     assert "feeRecipient" in by_source
     assert "authority_provenance" not in by_source["feeRecipient"]
+
+
+# ``core.py`` catches any exception out of the predicate builder and continues
+# with this exact object, then passes it straight to ``build_controller_tracking``.
+# The other two are the degenerate shapes of the same state.
+_TREELESS_ARTIFACTS = {
+    "degraded_from_exception": {"schema_version": "semantic", "error": "boom"},
+    "trees_key_empty": {"schema_version": "semantic", "trees": {}},
+    "absent": None,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
+def test_treeless_artifact_claims_no_provenance_for_anything(tmp_path, shape):
+    """Without trees, ``caller_gate`` is unanswerable — so ``call_target`` must
+    not be emitted either.
+
+    ``caller_gate`` is read out of ``predicate_trees`` alone. If a treeless
+    artifact still let the effects arm answer, every name would fall through to
+    ``call_target``, and the POSITIVE control — a registry the caller is
+    provably checked against — would be published as a proven callee. That is a
+    proven-absent gate synthesized from a failure to determine, and downstream
+    it demotes the control edge to ``external_call_target``, drops the address
+    out of the authority closure and strips its ``controller_*`` labels: the
+    contract is published as having no external authority controller because
+    the analysis crashed.
+    """
+    by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
+
+    # The registry is still a target and still ``external_contract`` kind — the
+    # effects artifact is intact, and "does this slot hold another contract's
+    # address" is answerable without trees.
+    assert by_source["roleRegistry"]["kind"] == "external_contract"
+    assert by_source["eETH"]["kind"] == "external_contract"
+
+    for name in ("roleRegistry", "eETH"):
+        assert "authority_provenance" not in by_source[name], (
+            f"{name} claimed provenance from a treeless artifact ({shape})"
+        )
+
+
+@pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
+def test_treeless_artifact_keeps_the_control_edge_through_the_plan(tmp_path, shape):
+    """End of the chain: no ``call_target`` reaches the resolution stage, so
+    ``resolve_control_graph`` keeps ``relation="controller_value"``."""
+    by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
+    analysis = {
+        "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
+        "controller_tracking": list(by_source.values()),
+    }
+    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    assert plan["tracked_controllers"], "plan lost every controller"
+    assert not any(c.get("authority_provenance") for c in plan["tracked_controllers"])
 
 
 def test_provenance_survives_the_tracking_plan(tmp_path):

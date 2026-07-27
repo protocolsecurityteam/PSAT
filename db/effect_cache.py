@@ -129,6 +129,15 @@ logger = logging.getLogger(__name__)
 # reaches (the v7 precedent), so a v10 row records what a probe queue built
 # from a closure containing non-control edges happened to visit; it is not the
 # row the corrected closure produces.
+# v11 (same version, second correction): the ``external_call_target`` demotion
+# above is driven by ``authority_provenance``, which was emitted from the
+# ABSENCE of predicate-tree evidence — a treeless artifact stamped every
+# external-contract slot ``call_target``, including proven gates, and dropped
+# them out of that same closure. Corrected in ``build_controller_tracking``.
+# No bump for it: v11 is introduced on this branch and has never been written,
+# so there is no pre-fix v11 row to protect. Serving concerns are covered by
+# the bump above; this note only keeps the version's stated reason matching the
+# code it ships with.
 EFFECT_CACHE_SCHEMA_VERSION = 11
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
