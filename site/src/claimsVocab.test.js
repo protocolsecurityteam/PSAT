@@ -28,7 +28,11 @@ import { entityKey } from "./surface/entityKey.js";
 import { ETHERFI_COMPANY_RICH } from "./test/fixtures.js";
 
 const VALID_LANES = new Set(["top", "left", "right", "ops"]);
-const VALID_FAMILIES = new Set(["control_plane", "flow", "exec", "user_plane"]);
+// "fact" is the backend's own family for a claim that carries no semantic
+// weight (services/static/claims/types.py). Its presence here is structural, not
+// cosmetic: it is what makes "contributes nothing to severity" a property of the
+// vocabulary rather than a convention a future entry could quietly break.
+const VALID_FAMILIES = new Set(["control_plane", "flow", "exec", "user_plane", "fact"]);
 const VALID_KINDS = new Set([
   "upgrade", "execution", "admin", "config", "pause", "unpause", "timelock", "asset_out", "asset_in",
 ]);
@@ -61,6 +65,7 @@ const EXPECTED_CLAIM_IDS = [
   "pause.set",
   "pause.unset",
   "proxy.admin_change",
+  "rate_limit.consume",
   "roles.configure",
   "roles.grant",
   "roles.revoke",
@@ -94,6 +99,14 @@ describe("CLAIM_VOCAB shape invariants", () => {
         expect(VALID_KINDS.has(entry.score.kind), `${id} score.kind`).toBe(true);
         expect(entry.score.severity, `${id} severity`).toBeGreaterThan(0);
       }
+    }
+  });
+
+  it("never scores a fact-family claim and never lanes it to control", () => {
+    for (const [id, entry] of Object.entries(CLAIM_VOCAB)) {
+      if (entry.family !== "fact") continue;
+      expect(entry.score, `${id} score`).toBeNull();
+      expect(entry.lane, `${id} lane`).toBe("ops");
     }
   });
 
@@ -1230,5 +1243,47 @@ describe("claimWitnessFacts — destination constraint row", () => {
       },
     }] };
     expect(claimWitnessFacts(fn).find((f) => f.label === "Destination constraint")).toBeUndefined();
+  });
+});
+
+describe("rate_limit.consume — a fact at zero severity weight", () => {
+  const limiterClaim = {
+    claim_id: "rate_limit.consume",
+    tier: "idiom_structural",
+    witness: {
+      kind: "limiter_consume",
+      sink_ids: ["s0"],
+      mandatory: { state: "proven" },
+      capacity: { state: "not_determined", source: "chain_state" },
+      refill_rate: { state: "not_determined", source: "chain_state" },
+      bounds_total_extraction: { state: "not_determined", source: "chain_state" },
+      severity_weight: 0,
+    },
+  };
+
+  it("is rendered rather than dropped — the vocab knows the id", () => {
+    // claimsOf is fail-closed: an id the vocab does not carry is treated as
+    // absent, which would silently discard the fact the producer went out of its
+    // way to publish.
+    expect(claimsOf({ claims: [limiterClaim] })).toHaveLength(1);
+  });
+
+  it("contributes nothing to the score, alone or beside a real outflow", () => {
+    expect(scoreForClaims({ claims: [limiterClaim] })).toBeNull();
+    const withFlow = { claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] };
+    // The flow's own severity is the whole score; the limiter neither raises nor
+    // discounts it. A refilling bucket bounds throughput per window, not total
+    // loss, so a discount here would be an invented ceiling.
+    expect(scoreForClaims(withFlow)).toEqual(scoreForClaims({ claims: [flowOut({ kind: "param", tier: "dispositive_ast" })] }));
+  });
+
+  it("never displaces the lane of the value move it sits beside", () => {
+    expect(laneForClaims({ claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] })).toBe("right");
+    expect(laneForClaims({ claims: [limiterClaim] })).toBe("ops");
+  });
+
+  it("never becomes the primary claim over the move it limits", () => {
+    const fn = { claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] };
+    expect(primaryClaim(fn).claim_id).toBe("flow.out");
   });
 });

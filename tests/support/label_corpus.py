@@ -234,6 +234,17 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/timed_latch.sol",
     },
     {
+        # A5: a bucket rate limiter in front of a value move, with the
+        # limiter-free sibling that must publish a byte-identical flow witness
+        # (the corpus form of "a rate limit does not change how much can leave"),
+        # plus a same-named-different-selector decoy that must earn nothing.
+        "address": "0x0000000000000000000000000000000000000110",
+        "name": "RateLimitedFlow",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/rate_limited_flow.sol",
+    },
+    {
         # The only ``policy_derived`` producer in the corpus. One body call
         # resolves onto CastWrappedPull above and inherits its standard_exact
         # flow.in at the policy tier; the second resolves onto AssetRecovery and

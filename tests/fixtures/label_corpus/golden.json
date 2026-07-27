@@ -4488,6 +4488,442 @@
       ]
     },
     {
+      "address": "0x0000000000000000000000000000000000000110",
+      "chain": "synthetic",
+      "contract": "RateLimitedFlow",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "withdrawDecoy(address,uint256)",
+          "selector": "0x58c067c0",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawDecoy(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "decoyLimiter.consume",
+              "selector": "0x483f31ab",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "decoyLimiter.consume",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawLimited(address,uint256)",
+          "selector": "0xc3e74bc9",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawLimited(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            },
+            {
+              "claim_id": "rate_limit.consume",
+              "tier": "idiom_structural",
+              "witness": {
+                "bounds_total_extraction": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "callee_selectors": [
+                  "0xb87a8ecd"
+                ],
+                "capacity": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "config_reader": {
+                  "get_limit_selector": "0xd200f8c2",
+                  "set_capacity_selector": "0x7c162f98",
+                  "set_refill_rate_selector": "0xadc050a3"
+                },
+                "consume_kinds": [
+                  "consume"
+                ],
+                "interpretation": "refill_rate > 0: throughput cap only (does NOT bound total extraction). refill_rate == 0: one-shot total cap. capacity == 0: a freeze — a pause in disguise. not_determined on either: no severity conclusion may be drawn.",
+                "kind": "limiter_consume",
+                "mandatory": {
+                  "state": "proven"
+                },
+                "refill_rate": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "severity_weight": 0,
+                "sink_ids": [
+                  "withdrawLimited(address,uint256):sink0:external_call:limiter.consume"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "limiter.consume",
+              "selector": "0xb87a8ecd",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "limiter.consume",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawTokenLimited(address,uint256)",
+          "selector": "0x6256a93b",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawTokenLimited(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            },
+            {
+              "claim_id": "rate_limit.consume",
+              "tier": "idiom_structural",
+              "witness": {
+                "bounds_total_extraction": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "callee_selectors": [
+                  "0xc0d5f68a"
+                ],
+                "capacity": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "config_reader": {
+                  "get_limit_selector": "0xd200f8c2",
+                  "set_capacity_selector": "0x7c162f98",
+                  "set_refill_rate_selector": "0xadc050a3"
+                },
+                "consume_kinds": [
+                  "consume_token"
+                ],
+                "interpretation": "refill_rate > 0: throughput cap only (does NOT bound total extraction). refill_rate == 0: one-shot total cap. capacity == 0: a freeze — a pause in disguise. not_determined on either: no severity conclusion may be drawn.",
+                "kind": "limiter_consume",
+                "mandatory": {
+                  "state": "proven"
+                },
+                "refill_rate": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "severity_weight": 0,
+                "sink_ids": [
+                  "withdrawTokenLimited(address,uint256):sink0:external_call:limiter.consumeToken"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "limiter.consumeToken",
+              "selector": "0xc0d5f68a",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "limiter.consumeToken",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawUnlimited(address,uint256)",
+          "selector": "0xe8425023",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
       "address": "0x000000000000000000000000000000000000dead",
       "chain": "synthetic",
       "contract": "WrappedNative",

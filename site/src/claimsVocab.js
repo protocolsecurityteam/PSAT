@@ -373,6 +373,25 @@ const CLAIM_VOCAB = {
     legacy: null,
     score: null,
   },
+
+  // ── facts (present for provenance; contribute nothing to severity) ────────
+  // A bucket rate limiter bounds throughput per window, not total loss — over N
+  // windows the extractable total is unbounded — so it is recorded and scored at
+  // zero rather than credited as a ceiling. It sits in ops, never a flow lane,
+  // so it can never displace the claim that describes the actual value move.
+  // The severity meaning INVERTS on configuration (a zero refill rate is a
+  // one-shot total cap; a zero capacity is a freeze), and both numbers are chain
+  // state the static witness marks not-determined — so no consumer may derive a
+  // grade from this claim as it stands.
+  "rate_limit.consume": {
+    family: "fact",
+    lane: "ops",
+    tone: null,
+    sentence: "passes through a rate limiter",
+    priority: 11,
+    legacy: null,
+    score: null,
+  },
 };
 
 const TIER_LABEL = {

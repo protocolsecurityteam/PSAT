@@ -29,6 +29,7 @@ DELEGATECALL = "0x00000000000000000000000000000000000000c0"
 EXEC_BINDING = "0x00000000000000000000000000000000000000d0"
 TREE_ABSENT = "0x00000000000000000000000000000000000000e0"
 TIMED_LATCH = "0x00000000000000000000000000000000000000f0"
+RATE_LIMITED = "0x0000000000000000000000000000000000000110"
 POLICY_CALLER = "0x0000000000000000000000000000000000000100"
 
 
@@ -387,3 +388,63 @@ def test_a_callee_with_an_interface_typed_parameter_is_unreachable_across_the_jo
     # the evidence.
     recovery = _functions("0x0000000000000000000000000000000000000070")
     assert _claim(recovery["sweepTo(IERC20,address,uint256)"], "flow.out")["tier"] == "standard_exact"
+
+
+# ---------------------------------------------------------------------------
+# A5. the rate limiter is a fact, and it does NOT move the amount lattice
+# ---------------------------------------------------------------------------
+
+
+def test_the_rate_limiter_is_recorded_as_a_zero_weight_fact():
+    """The limiter is detected off its PUBLISHED selectors, and what it publishes
+    is a fact carrying its own zero weight — not a member of the amount
+    lattice."""
+    fns = _functions(RATE_LIMITED)
+    for name in ("withdrawLimited(address,uint256)", "withdrawTokenLimited(address,uint256)"):
+        claim = _claim(fns[name], "rate_limit.consume")
+        assert claim["tier"] == "idiom_structural", name
+        assert claim["witness"]["severity_weight"] == 0, name
+        assert claim["witness"]["mandatory"] == {"state": "proven"}, name
+
+
+def test_the_limiter_does_not_change_a_single_byte_of_the_flow_witness():
+    """THE ASSERTION THAT PINS THE DECISION. ``withdrawLimited`` and
+    ``withdrawUnlimited`` differ by exactly one statement — the limiter call —
+    and their ``flow.out`` witnesses must be byte-identical. A refilling bucket
+    bounds throughput per window, not total loss, so crediting it in
+    ``amount_kind`` would invent a ceiling that does not exist.
+
+    If a later change moves the lattice for a limiter, THIS test goes red, which
+    is the point: the decision is enforced, not merely documented."""
+    fns = _functions(RATE_LIMITED)
+    limited = _claim(fns["withdrawLimited(address,uint256)"], "flow.out")
+    control = _claim(fns["withdrawUnlimited(address,uint256)"], "flow.out")
+    assert limited["witness"]["flows"] == control["witness"]["flows"]
+    assert limited["tier"] == control["tier"]
+    # ...and the limiter-free control carries no limiter fact at all.
+    assert [c["claim_id"] for c in fns["withdrawUnlimited(address,uint256)"]["claims"]] == ["flow.out"]
+
+
+def test_the_configuration_discriminators_are_present_and_explicitly_unread():
+    """G7's generalisation requirement, in the data. ``setRefillRate(id, 0)`` is
+    one governance call away and turns a throughput cap into a one-shot total
+    cap; a zero capacity reverts, which makes it a pause in disguise. So the two
+    numbers are part of the fact — carried as three-state fields that say
+    ``not_determined`` rather than being absent, because a consumer that read an
+    absent field as 0 would read a rate limit as a freeze."""
+    witness = _claim(_functions(RATE_LIMITED)["withdrawLimited(address,uint256)"], "rate_limit.consume")["witness"]
+    for field in ("capacity", "refill_rate", "bounds_total_extraction"):
+        assert witness[field] == {"state": "not_determined", "source": "chain_state"}, field
+    # The witness names the reads that would fill them, so the follow-up is not a
+    # guess about which getter holds the numbers.
+    assert witness["config_reader"]["get_limit_selector"] == "0xd200f8c2"
+    assert "one-shot total cap" in witness["interpretation"]
+    assert "pause in disguise" in witness["interpretation"]
+
+
+def test_a_same_named_different_selector_callee_earns_nothing():
+    """NEGATIVE CONTROL for name-based detection. ``decoyLimiter.consume`` is
+    spelled identically and publishes a different signature, so a different
+    selector. Nothing here keys on the identifier."""
+    fns = _functions(RATE_LIMITED)
+    assert [c["claim_id"] for c in fns["withdrawDecoy(address,uint256)"]["claims"]] == ["flow.out"]
