@@ -491,11 +491,10 @@ def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, An
     ``caller_gate`` is derived from the predicate leaves that were lowered.
     ``call_target`` is then minted for every remaining external-contract slot —
     i.e. from the *absence* of a lowered gate leaf, which is not the same fact as
-    "no gate exists". The builder only ever attempts a subset of the externally
-    reachable surface (``fallback`` / ``receive`` are skipped outright, and a
-    function whose gate could not be lowered yields no tree), so a gate living in
-    one of those functions is invisible and its address is published as a proven
-    pure callee.
+    "no gate exists". The builder attempts the externally reachable surface
+    (since G3 class R that includes ``fallback`` / ``receive``), but a function
+    whose gate could not be lowered yields no tree, so a gate living in such a
+    function is invisible and its address is published as a proven pure callee.
 
     A function is a blind spot when it is externally reachable, has no lowered
     tree, and observes the caller. Every state variable it reads is then a name

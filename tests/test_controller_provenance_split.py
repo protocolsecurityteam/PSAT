@@ -239,8 +239,10 @@ UNLOWERED_GATE_SOURCE = """
             eETH = t;
         }
 
-        // The ONLY caller gate on liquidityPool lives here, and receive() is
-        // never lowered into a predicate tree.
+        // The ONLY caller gate on liquidityPool lives here. Post G3 class R
+        // the builder lowers receive(), so the lowered path is pinned on this
+        // fixture directly and the withholding path is exercised by removing
+        // the tree (a constructed lowering failure) in the test below.
         receive() external payable {
             if (msg.sender != address(liquidityPool)) revert("IncorrectCaller");
             if (liquidityPool.escrowMigrationCompleted()) {
@@ -279,22 +281,44 @@ def _unlowered_targets(tmp_path: Path):
     return predicate_trees, {t["source"]: t for t in targets}
 
 
-def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
-    """POSITIVE control for the round-2 correction.
-
-    ``receive()`` gets no predicate tree, so the gate it carries never reaches
-    ``caller_gate_vars``. Emitting ``call_target`` there would mint a
-    proven-absent gate out of a failure to determine, and downstream that demotes
-    the edge to ``external_call_target``, drops it from the authority closure and
-    strips the address's ``controller_*`` labels.
-    """
+def test_a_lowered_receive_gate_publishes_caller_gate(tmp_path):
+    """The G3 class-R merge pin: ``receive()`` now IS lowered, so its
+    ``msg.sender != liquidityPool`` gate reaches ``caller_gate_vars`` and the
+    address earns the stronger, correct answer instead of the withholding
+    path. This test replaces one that asserted the pre-class-R absence."""
     predicate_trees, by_source = _unlowered_targets(tmp_path)
 
-    # Precondition: the artifact IS available (so the artifact-level guard does
-    # not fire) and receive() genuinely has no tree.
     trees = predicate_trees["trees"]
-    assert trees, "fixture no longer exercises the available-artifact path"
-    assert not any(k.startswith("receive") or k.startswith("fallback") for k in trees)
+    assert any(k.startswith("receive") for k in trees), (
+        "class R stopped lowering receive(); the withholding test below is"
+        " no longer a construction and must be re-derived"
+    )
+    assert by_source["liquidityPool"].get("authority_provenance") == "caller_gate"
+
+
+def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
+    """A gate the builder FAILED to lower must not mint ``call_target``.
+
+    Post class R the builder lowers every plain caller gate we could write —
+    including receive() and assembly if-reverts — so the blind-spot branch's
+    realised population is *lowering failures*, which have no nameable source
+    shape. The failure is therefore constructed directly: the tree the builder
+    produced for ``receive()`` is removed from the artifact, which is exactly
+    the shape a raised or degraded tree stage persists. Reachable by
+    construction, fixture-covered; realised rows are a lower bound, per the
+    R2 convention this suite already uses for the entry-point arm.
+    """
+    predicate_trees, _ = _unlowered_targets(tmp_path)
+    degraded = dict(predicate_trees)
+    degraded["trees"] = {k: v for k, v in predicate_trees["trees"].items() if not k.startswith("receive")}
+    src = textwrap.dedent(UNLOWERED_GATE_SOURCE).strip() + "\n"
+    f = tmp_path / "QueueDegraded.sol"
+    f.write_text(src)
+    contract = next(c for c in Slither(str(f)).contracts if c.name == "Queue")
+    effects = build_effects(contract)
+    semantic_control = _build_semantic_control_summary(contract, tmp_path, degraded, effects)
+    targets = build_controller_tracking(contract, tmp_path, degraded, effects, semantic_control)
+    by_source = {t["source"]: t for t in targets}
 
     assert "authority_provenance" not in by_source["liquidityPool"], (
         "a gate the builder never lowered was published as a proven callee"

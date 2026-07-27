@@ -286,6 +286,13 @@ logger = logging.getLogger(__name__)
 # ``call_target`` and still dropped out of the closure — realised on 427 of the
 # 1,200 demoted edges locally. ``call_target`` is now withheld for any name an
 # unlowered, caller-observing entry point reads. Same no-bump reasoning.
+# (Merge note, Wave 1: the 427/1,200 figure was measured against a tree builder
+# that did not lower ``fallback``/``receive``. G3 class R, merged in the same
+# wave, lowers them, so that subset now reaches ``caller_gate`` and the
+# withholding branch's realised population is lowering FAILURES — smaller than
+# 427, not re-measured here. The sentinel's firing proof is by construction:
+# test_gate_in_an_unlowered_function_is_not_published_as_a_callee removes a
+# lowered tree, the exact shape a degraded tree stage persists.)
 EFFECT_CACHE_SCHEMA_VERSION = 21
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than

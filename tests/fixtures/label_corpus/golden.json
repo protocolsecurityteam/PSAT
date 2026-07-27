@@ -3557,7 +3557,7 @@
         },
         {
           "full_name": "fallback()",
-          "selector": "0x552079dc",
+          "selector": "",
           "effect_labels": [
             "delegatecall_execution"
           ],
@@ -3593,7 +3593,16 @@
           ],
           "effect_targets": [],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
           }
         },
         {
