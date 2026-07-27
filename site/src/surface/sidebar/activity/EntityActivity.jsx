@@ -25,16 +25,19 @@ export function EntityActivity({
 }) {
   const [events, setEvents] = useState([]);
   const [history, setHistory] = useState(null);
-  // Three states for the upgrade history, not two: loaded, proven-absent, and
-  // "this read did not produce an answer". Only the third gets a marker.
+  // The settled outcome of the upgrade-history read, as `{ jobId, state }` with
+  // state in present | absent | not_determined. There is no "pending" member
+  // here on purpose: pending is the ABSENCE of a settled outcome for the
+  // current job, and is derived below rather than stored, so no code path can
+  // forget to re-enter it.
   //
-  // Held as the job_id whose history could not be read, never as a bare
-  // boolean: this component is reused across selections (ActivityPanel renders
-  // it with no key), so a boolean outlives the selection that earned it and
-  // hedges the *next* entity — a history that read fine, or an entity with no
-  // history at all. Tying the marker to the identity it describes makes that
-  // unrenderable.
-  const [unknownForJob, setUnknownForJob] = useState(null);
+  // Carried with the job_id it was earned by, never as a bare flag: this
+  // component is reused across selections (ActivityPanel renders it with no
+  // key), so between a new selection arriving and its effect running, the
+  // previous entity's outcome is still in state. Comparing identity turns that
+  // window into "pending", which is what it is, instead of into the last
+  // entity's answer about a different contract.
+  const [historyOutcome, setHistoryOutcome] = useState(null);
 
   const address = machine?.address;
   const chain = machine?.chain || contract?.chain || "ethereum";
@@ -75,11 +78,15 @@ export function EntityActivity({
     // that happen even when the new address is not a key in the stale payload.
     // Cleared here rather than per-branch so no path can be added that skips it;
     // React batches these with whatever the branches set, so no extra render.
-    setUnknownForJob(null);
+    setHistoryOutcome(null);
     setHistory(null);
     if (!isProxy || !machine?.job_id) { return undefined; }
     const cached = cache && cache[machine.job_id];
-    if (cached?.history) { setHistory(cached.history); return undefined; }
+    if (cached?.history) {
+      setHistory(cached.history);
+      setHistoryOutcome({ jobId: machine.job_id, state: "present" });
+      return undefined;
+    }
     let cancelled = false;
     const jid = encodeURIComponent(machine.job_id);
     api(`/api/analyses/${jid}/artifact/upgrade_history`)
@@ -87,6 +94,11 @@ export function EntityActivity({
         if (cancelled) return;
         const h = body && typeof body === "object" ? body : null;
         setHistory(h);
+        // A 200 whose body is not an object collapses to the same `null` a
+        // failed read produces, and the timeline cannot tell them apart from
+        // the payload alone. It is not an answer about the history, so it is
+        // not written as one.
+        setHistoryOutcome({ jobId: machine.job_id, state: h ? "present" : "not_determined" });
         if (onCache) onCache(machine.job_id, h, {});
       })
       .catch((e) => {
@@ -102,7 +114,10 @@ export function EntityActivity({
         // `status` at all. The hedge is the default so that a non-answer nobody
         // enumerated cannot be drawn as an absence. Never cached — the answer
         // can change without us.
-        setUnknownForJob(e?.status === 404 ? null : machine.job_id);
+        setHistoryOutcome({
+          jobId: machine.job_id,
+          state: e?.status === 404 ? "absent" : "not_determined",
+        });
       });
     return () => { cancelled = true; };
     // cache/onCache omitted deliberately: read once per selection so this
@@ -110,8 +125,25 @@ export function EntityActivity({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine?.job_id, isProxy]);
 
-  // Only ever true for the selection whose read actually failed.
-  const historyUnknown = isProxy && Boolean(machine?.job_id) && unknownForJob === machine.job_id;
+  // Four states, and only ever the one this selection earned.
+  const historyState = useMemo(() => {
+    // No back-fill channel exists for a non-proxy, so the below-the-line set is
+    // empty by construction. Nothing is in flight and nothing failed: that is an
+    // answer, not a gap.
+    if (!isProxy) return "absent";
+    // A proxy with no analysis job to ask about. No read is pending, because
+    // none was ever issued — so nobody knows, which is not the same as nothing
+    // being there.
+    if (!machine?.job_id) return "not_determined";
+    // Outcome belongs to a previous selection (or none yet): this one is still
+    // in flight. `api()` has no timeout, so this window is open until the read
+    // settles — indefinitely if it never does.
+    if (historyOutcome?.jobId !== machine.job_id) return "pending";
+    return historyOutcome.state;
+  }, [isProxy, machine?.job_id, historyOutcome]);
+
+  // Only ever true for the selection whose read did not answer.
+  const historyUnknown = historyState === "not_determined";
 
   const proxy = useMemo(() => {
     if (!history?.proxies) return null;
@@ -151,8 +183,8 @@ export function EntityActivity({
       <div className="ps-activity-sect-title" style={{ marginTop: 2 }}>Timeline</div>
       {historyUnknown ? (
         <div className="ps-activity-unknown" role="status">
-          Upgrade history could not be read — this proxy's pre-enrollment
-          upgrades are unknown, not absent.
+          Upgrade history was not read — this proxy's pre-enrollment upgrades
+          are unknown, not absent.
         </div>
       ) : null}
       <Timeline
@@ -166,7 +198,7 @@ export function EntityActivity({
         // The marker above and the timeline's empty states describe the same
         // period, so they have to be driven by the same fact — otherwise the
         // panel hedges in one line and asserts absence in the next.
-        historyUnknown={historyUnknown}
+        historyState={historyState}
       />
     </section>
   );

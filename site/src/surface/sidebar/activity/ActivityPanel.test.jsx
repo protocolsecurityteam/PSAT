@@ -404,6 +404,63 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
 
+  it("treats a 200 whose body is not an object as unread, not empty", async () => {
+    // The handler is supposed to 404 rather than serve a non-object, but the
+    // client collapses any non-object body to the same `null` a failed read
+    // produces — so from the timeline's side it is indistinguishable from an
+    // unread history and must not be written as an absence.
+    upgradeHistoryFails(() =>
+      new Response(JSON.stringify("not an object"), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
+  });
+
+  // A read that has not come back yet is the fourth state, and the one the
+  // other five tests here cannot see: they all settle. Every proxy selection
+  // passes through it, and `api()` (api/client.js) uses bare `fetch` with no
+  // timeout and no AbortController, so a stalled connection holds it open
+  // indefinitely. Until it settles the panel knows nothing — so it may claim
+  // neither absence (the 404 answer) nor unreadability (the 500 hedge).
+  it("claims nothing at all while the history read is still in flight", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler(
+      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
+      () => new Promise(() => {}),
+    );
+    const { container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    // Wait for the boundary — past that point `below` is empty and one of the
+    // three empty-state arms is on screen, so the assertions below are live.
+    expect(await screen.findByText(/Monitoring started/i)).toBeInTheDocument();
+    const entity = container.querySelector(".ps-activity-entity");
+    expect(entity.textContent).not.toContain(ABSENCE_PROSE);
+    expect(entity.textContent).not.toMatch(/unknown, not absent/i);
+    expect(entity.textContent).not.toMatch(/was not read/i);
+  });
+
+  it("claims nothing in the no-boundary empty state while the read is in flight", async () => {
+    // POSITIVE CONTROL's sibling for the other empty state: the 404 arm below
+    // renders "No activity recorded yet." on this same input shape.
+    const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
+    mockActivity({ contracts: [legacy], monitoredEvents: [] });
+    setFetchHandler(
+      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
+      () => new Promise(() => {}),
+    );
+    const { container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText("Timeline")).toBeInTheDocument();
+    const entity = container.querySelector(".ps-activity-entity");
+    expect(entity.textContent).not.toContain("No activity recorded yet.");
+    expect(entity.textContent).not.toMatch(/unknown, not absent/i);
+    // …and not the hedge either: hedging an unsettled read says the history
+    // could not be obtained, which is a claim nobody has earned yet.
+    expect(entity.textContent).not.toMatch(/was not read/i);
+  });
+
   it("renders the backfilled upgrades and neither line when the history reads", async () => {
     // Confirms the prose is the absence-claim channel rather than chrome: a
     // real history replaces it with rows.
@@ -470,6 +527,14 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     const entity = container.querySelector(".ps-activity-entity");
     expect(/First deployment/i.test(entity.textContent)).toBe(false);
     expect(entity.textContent).not.toContain(I1.slice(0, 8));
+    // Adopted from the tier-2 reviewer's repro, inverted. Not rendering the
+    // previous proxy's rows is only half of it: this fixture's whole point is
+    // that "nothing is known about Pool yet", and the panel used to fill that
+    // silence with a bold positive claim about Pool — byte-identical to what a
+    // resolved 404 renders, with no marker to tell them apart.
+    expect(entity.textContent).not.toContain("No activity before the line.");
+    expect(entity.textContent).not.toMatch(/unknown, not absent/i);
+    expect(entity.textContent).not.toMatch(/was not read/i);
   });
 
   it("does not render the previous contract's events while the new one's are in flight", async () => {
