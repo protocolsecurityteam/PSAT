@@ -341,6 +341,11 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
             "claims": list(getattr(ef, "claims", None) or []),
             "action_summary": ef.action_summary,
             "authority_public": ef.authority_public,
+            # Three-state authority verdict beside the bool it splits. NULL on a
+            # row written before the column existed — passed through as null so
+            # a consumer can tell "this row never carried the distinction" from
+            # the resolver's own 'not_determined'.
+            "authority_openness": getattr(ef, "authority_openness", None),
             "controllers": [{"principals": controller_principals}] if controller_principals else [],
             "authority_roles": ef.authority_roles or [],
             "direct_owner": direct_owner,

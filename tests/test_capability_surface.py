@@ -101,3 +101,39 @@ def test_disjoint_intersection_and_never_reads_resolved_empty():
     )
     surface = project_capability_surface(inherited)
     assert capability_surface_status(inherited, surface) == "resolved_empty"
+
+
+def test_openness_is_total_and_three_valued():
+    """``capability_surface_openness`` must answer for every capability shape,
+    and the three answers must not collapse: 'open' tracks the bool exactly,
+    'restricted' means a restriction was WITNESSED, 'not_determined' is the
+    population the bool merged into 'restricted'."""
+    from services.policy.capability_surface import AUTHORITY_OPENNESS_VALUES, capability_surface_openness
+
+    cases = {
+        "open": {"kind": "conditional_universal", "conditions": [], "membership_quality": "exact"},
+        "open_cofinite": {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"},
+        "restricted_set": {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
+        "restricted_empty": {"kind": "finite_set", "members": [], "membership_quality": "exact"},
+        "nd_unsupported": {"kind": "unsupported", "unsupported_reason": "guard_extraction_uncertain"},
+        "nd_check": {"kind": "external_check_only", "check": {"target_address": ADDR_B}},
+        "nd_lower_bound_empty": {"kind": "finite_set", "members": [], "membership_quality": "lower_bound"},
+        "nd_unknown_kind": {"kind": "something_new"},
+    }
+    got = {}
+    for name, cap in cases.items():
+        surface = project_capability_surface(cap)
+        verdict = capability_surface_openness(cap, surface)
+        assert verdict in AUTHORITY_OPENNESS_VALUES, (name, verdict)
+        assert verdict == "open" or not surface.authority_public, name
+        got[name] = verdict
+    assert got == {
+        "open": "open",
+        "open_cofinite": "open",
+        "restricted_set": "restricted",
+        "restricted_empty": "restricted",
+        "nd_unsupported": "not_determined",
+        "nd_check": "not_determined",
+        "nd_lower_bound_empty": "not_determined",
+        "nd_unknown_kind": "not_determined",
+    }

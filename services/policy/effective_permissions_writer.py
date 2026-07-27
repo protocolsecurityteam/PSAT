@@ -39,7 +39,11 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope
 from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
 from services.effects import claims_bridge
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import (
+    capability_surface_openness,
+    capability_surface_status,
+    project_capability_surface,
+)
 from services.policy.effective_permissions import MUTABILITY_FIELDS
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
@@ -111,6 +115,7 @@ def _column_values_for_capability(
         "conditions": conditions or None,
         "status": capability_surface_status(cap_dict, surface),
         "authority_public": surface.authority_public,
+        "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
 
@@ -262,6 +267,11 @@ def write_effective_function_rows(
                 "conditions": fn.get("conditions"),
                 "status": fn.get("status"),
                 "authority_public": bool(fn.get("authority_public", False)),
+                # ``fn.get`` with no default: a record that never carried the
+                # key leaves the column NULL ("this writer could not say"),
+                # which is a different fact from ``not_determined`` ("the
+                # resolver looked and could not decide").
+                "authority_openness": fn.get("authority_openness"),
             }
         # Per-function explicit override applies when the capability
         # itself didn't pin the column. ``conditional_universal``
@@ -273,6 +283,9 @@ def write_effective_function_rows(
             # Per-function explicit True (e.g. policy_check public capability)
             # ORs in even when the cap shape doesn't say public.
             cap_columns["authority_public"] = True
+            # Keep the three-state column in lockstep with the bool it splits:
+            # an OR-ed-in public path is still an earned public path.
+            cap_columns["authority_openness"] = "open"
         if cap_dict is None:
             if fn.get("status") is not None:
                 cap_columns["status"] = fn["status"]
@@ -300,7 +313,7 @@ def write_effective_function_rows(
             "authority_roles": fn.get("authority_roles"),
         }
         # Optional columns may be absent in older test metadata.
-        for col_name in ("capability_expr", "conditions", "status"):
+        for col_name in ("capability_expr", "conditions", "status", "authority_openness"):
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = cap_columns.get(col_name)
         # State-mutability witness. ``fn.get`` with no default on purpose: a

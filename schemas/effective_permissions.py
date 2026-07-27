@@ -54,6 +54,13 @@ class EffectiveFunctionPermission(TypedDict):
     selector: str | None
     direct_owner: ResolvedPrincipal | None
     authority_public: bool
+    # Three-state counterpart to ``authority_public``, whose ``False`` reports a
+    # WITNESSED caller restriction and "the authority could not be determined"
+    # with the same value: 'open' | 'restricted' | 'not_determined'. Absent on a
+    # record built by a caller that does not carry the distinction — which is a
+    # fourth state ("this producer could not say") and must not be folded into
+    # ``not_determined``.
+    authority_openness: NotRequired[str]
     authority_roles: list[AuthorityRoleGrant]
     controllers: list[ResolvedControllerGrant]
     effect_targets: list[str]

@@ -36,6 +36,40 @@ class CapabilitySurface:
         return _unique_conditions(out)
 
 
+#: Three-state authority verdict persisted alongside ``authority_public``
+#: (``effective_functions.authority_openness``). See
+#: ``capability_surface_openness``.
+AUTHORITY_OPENNESS_VALUES = ("open", "restricted", "not_determined")
+
+
+def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str:
+    """The three-state authority verdict for one capability (R1).
+
+    * ``open`` — a public path was EARNED (a ``conditional_universal`` /
+      cofinite child survived the earned-public projection). Exactly
+      ``authority_public``.
+    * ``restricted`` — a caller restriction was WITNESSED: the surface carries
+      principal rows (the callers), or the capability is a witnessed-empty set
+      (``resolved_empty`` — a complete enumeration that admits nobody).
+    * ``not_determined`` — neither. ``unsupported`` (extraction fail-closed,
+      guard seen but not lowered), ``external_check_only`` (a probe interface,
+      no enumeration), an irreducible AND/OR residual — everything the bool
+      column reported with the same ``False`` a fully resolved gated function
+      gets.
+
+    Total over every capability shape; never raises. A caller must not read
+    ``restricted`` as "these are all the callers" — that is what
+    ``membership_quality`` says — only as "a restriction exists and we saw it".
+    """
+    if surface.authority_public:
+        return "open"
+    if surface.principal_rows:
+        return "restricted"
+    if _is_resolved_empty_capability(cap_dict):
+        return "restricted"
+    return "not_determined"
+
+
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
     if surface.authority_public:
         return "public"

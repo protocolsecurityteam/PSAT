@@ -891,6 +891,11 @@ class EffectiveFunction(Base):
     effect_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)), nullable=True)
     action_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     authority_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Three-state counterpart to ``authority_public`` (whose ``False`` merges a
+    # witnessed caller restriction with "we could not determine the authority"):
+    # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
+    # this row predates the column and cannot be read as any of the three.
+    authority_openness: Mapped[str | None] = mapped_column(String(20), nullable=True)
     authority_roles: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)

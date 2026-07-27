@@ -366,6 +366,9 @@ def _build_company_function_entry(
         "claims": list(getattr(ef, "claims", None) or []),
         "action_summary": ef.action_summary,
         "authority_public": ef.authority_public,
+        # See analysis_detail: the three-state verdict rides alongside the bool,
+        # null when the row predates the column.
+        "authority_openness": getattr(ef, "authority_openness", None),
         "controllers": controllers,
         "authority_roles": authority_roles,
         "direct_owner": direct_owner,

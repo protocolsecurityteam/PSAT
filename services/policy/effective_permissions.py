@@ -26,7 +26,11 @@ from schemas.effective_permissions import (
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import (
+    capability_surface_openness,
+    capability_surface_status,
+    project_capability_surface,
+)
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
     has_no_selector,
@@ -643,6 +647,7 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
         "conditions": conditions or None,
         "status": capability_surface_status(cap_dict, surface),
         "authority_public": surface.authority_public,
+        "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
 
