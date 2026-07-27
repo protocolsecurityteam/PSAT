@@ -368,9 +368,13 @@ def test_inv10_duration_bound_from_source_constant():
         entry_points=[anvil.EntryPoint(key="deposit", calldata="0xd0e30db0")],
         predicted_guard_set=["deposit"],
         max_pause_duration=src_read_duration,
+        duration_bound_source="guard_constant",
     )
     # The bound in the witness is exactly the source-read value — not a constant.
     assert eff.details["duration_bound_seconds"] == src_read_duration
+    # ...and it names the evidence that produced it, so a consumer can tell a read
+    # bound from an unread one (inv. 10 + R1).
+    assert eff.details["duration_bound_source"] == "guard_constant"
     # No hardcoded duration literal lives in the recipe.
     assert "MAX_PAUSE_DURATION =" not in inspect.getsource(anvil)
 

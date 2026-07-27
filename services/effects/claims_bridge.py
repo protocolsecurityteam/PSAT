@@ -199,8 +199,16 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     cross-checked on-fork only as an upper bound. Trust it as a severity-REDUCER
     #     ONLY when ``auto_expiry is True``; ``auto_expiry is False`` means the fork
     #     contradicted the static constant, so the bound is not a mitigation.
-    #   * ``duration_bound_seconds is None`` + ``auto_expiry is None`` = an INDEFINITE
-    #     LATCH = the MOST severe freeze, never zero/short.
+    #   * ``duration_bound_seconds is None`` is TWO different facts and
+    #     ``duration_bound_source`` is the only thing that tells them apart
+    #     (``config.DURATION_BOUND_*``): ``no_time_reference`` = PROVEN indefinite
+    #     latch = the MOST severe freeze, never zero/short; ``not_determined`` (and
+    #     an ABSENT source, which is every row written before A7) = the window was
+    #     not established — score it as a confidence gap, never as indefinite and
+    #     never as bounded. The previous contract read this line as "None + None =
+    #     indefinite", and it was false on all four rows that had it: every proven
+    #     ``freeze_pause`` verdict in the corpus is a ``pauseUntil`` timestamp latch
+    #     whose window lives in storage.
     #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
     #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
     # ``backing`` (§5a) is the fork-observed mint-backing object
@@ -233,6 +241,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "observed_blast_radius",
         "auto_expiry",
         "duration_bound_seconds",
+        "duration_bound_source",
         "backing",
         "input_seeded",
         "contract_balance_seeded",

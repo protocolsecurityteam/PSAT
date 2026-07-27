@@ -299,7 +299,20 @@ logger = logging.getLogger(__name__)
 # the MERGED head is 66 -> 32 mutual directed edges (372 -> 306 distinct
 # directed pairs). Treat 66->32 as canonical; the commit-message figures were
 # measured pre-merge on the un-merged leg.)
-EFFECT_CACHE_SCHEMA_VERSION = 21
+# v22 (Wave 2 Leg D, A7): the freeze witness now says HOW the pause window was
+# established — ``duration_bound_source`` beside ``duration_bound_seconds``
+# (``config.DURATION_BOUND_*``) — and the predicate leaves the reader is fed carry
+# the additive sub-operands a two-slot comparison discarded
+# (``absorbed_operands``). A pre-v22 row publishes ``duration_bound_seconds:
+# null`` with no source, and the documented consumer contract read that pair as
+# "indefinite latch, most severe": false on all four proven ``freeze_pause``
+# verdicts in the local corpus, every one of them a ``pauseUntil`` timestamp latch
+# whose window is a storage value. The reader also now RESOLVES a window it could
+# not see before (measured: 10 of 11 compiled guard shapes went from ``None`` to
+# the declared constant), and the recipe warps the fork by that bound to test
+# auto-expiry — so a pre-v22 row for such a latch records a verdict reached
+# without the expiry probe ever running.
+EFFECT_CACHE_SCHEMA_VERSION = 22
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

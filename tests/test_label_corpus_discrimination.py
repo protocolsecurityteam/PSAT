@@ -362,40 +362,25 @@ def _timed_latch_facts():
     )
 
 
-def test_the_pause_duration_reader_finds_no_bound_in_real_compiler_output():
-    """MEASURED, and it is not the result the fixture was written to produce.
+def test_the_pause_duration_reader_resolves_the_timed_latch_and_only_it():
+    """A7 landed: the asymmetry this fixture was built to gate (timed ⇒ 2592000,
+    indefinite ⇒ no bound) is now what the reader produces from real compiler
+    output. REPLACES ``test_the_pause_duration_reader_finds_no_bound_in_real_
+    compiler_output``, which asserted ``None`` for BOTH latches, per that test's own
+    instruction ("it must be updated to assert the asymmetry rather than deleted").
 
-    ``read_max_pause_duration`` wants ONE guard leaf holding all three of
-    ``block.timestamp``, the latch's own state variable, and a constant. The
-    predicate builder cannot emit that leaf for ANY source shape, and the reason
-    is structural rather than unlucky: a Solidity comparison lowers to a leaf
-    with exactly TWO operands, and when one side is arithmetic the operand
-    recorder keeps one sub-operand and discards the other. Five shapes were
-    compiled and every one lost exactly one of the three facts —
-    ``block.timestamp < pausedUntil + 2592000`` records
-    ``{timestamp, pausedUntil}`` (literal gone),
-    ``block.timestamp - pausedUntil < 2592000`` records
-    ``{pausedUntil, 2592000}`` (clock gone). Three facts do not fit in two
-    slots. So the reader returns ``None`` for the TIMED latch here — a contract
-    that declares ``uint256 public constant MAX_PAUSE = 30 days`` and compares
-    ``block.timestamp`` against it in the guard.
+    Why it used to be ``None``: a Solidity comparison lowers to a leaf with exactly
+    TWO operands and the reader needs three facts (clock, latch, window), so when
+    one side is arithmetic the operand recorder kept one sub-operand and discarded
+    the rest. ``block.timestamp < pausedUntil + MAX_PAUSE`` recorded
+    ``{timestamp, MAX_PAUSE}`` — the latch gone. The predicate builder now also
+    records what the comparison absorbed (``absorbed_operands``), and the reader
+    takes the union.
 
-    CONSEQUENCE FOR THE GATE, stated so a later reader does not overrate it: this
-    fixture does NOT discriminate timed from indefinite, because both publish
-    ``None``. It discriminates a reader that INVENTS a bound (proven: forcing
-    ``read_max_pause_duration`` to fall back on a scraped 2592000 turns this
-    test red). A7 must widen the leaf's operand set before any compiled source
-    can reach the positive branch; adding more latch fixtures cannot.
-
-    ``None`` is published as ``duration_bound_seconds`` and read downstream as
-    "indefinite latch, most severe", so nothing false is being emitted — the
-    conservative answer is the one being given. What is false is the belief that
-    the reader has a reachable positive branch: its only passing positive test
-    builds the leaf by hand.
-
-    This test is the gate for that fix. When the timed latch starts yielding
-    2592000, it fails, and it must be updated to assert the asymmetry (timed ⇒
-    2592000, indefinite ⇒ None) rather than deleted.
+    The three-state answer is the point, not just the number: the indefinite latch
+    is ``no_time_reference`` (PROVEN — a lowered guard reads it and no clock sits
+    beside it), a latch no lowered leaf reads is ``not_determined``, and only the
+    first may ever be rendered as "indefinite latch, no self-recovery".
     """
     facts = _timed_latch_facts()
     assert facts.trees, "the corpus latch produced no predicate trees"
@@ -403,28 +388,47 @@ def test_the_pause_duration_reader_finds_no_bound_in_real_compiler_output():
 
     from services.effects import calldata as cd
 
-    assert cd.read_max_pause_duration(facts, {"pausedUntil"}) is None
-    # The indefinite latch must never inherit a bound, before or after any fix.
-    assert cd.read_max_pause_duration(facts, {"frozen"}) is None
+    assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (2592000, "guard_constant")
+    # The indefinite latch must never inherit the timed one's bound — before or
+    # after the fix — and its ``None`` is the PROVEN kind.
+    assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
+    # A latch name no leaf reads: unknown, never indefinite.
+    assert cd.read_max_pause_duration(facts, {"neitherLatch"}) == (None, "not_determined")
 
 
-def test_the_timed_guard_leaf_is_present_and_it_is_the_operand_set_that_is_short():
-    """Locates the gap precisely, so the test above cannot be read as "the fixture
-    has no timed guard". The guard IS there and IS time-shaped; what is missing is
-    a constant operand beside the latch in the same leaf."""
+def test_the_timed_guard_leaf_carries_all_three_facts_across_operands_and_absorbed():
+    """Locates the fix precisely: ``operands`` is UNCHANGED (still two slots, still
+    ``{timestamp, MAX_PAUSE}``) and the third fact arrives on the sibling
+    ``absorbed_operands`` list. Keeping ``operands`` byte-identical is deliberate —
+    the value-flow lattice folds an operand's source set to ONE origin and degrades
+    to ``indeterminate`` the moment two survive, so widening ``operands`` would have
+    collapsed amount kinds protocol-wide."""
     facts = _timed_latch_facts()
     leaves = list(harness._tree_leaves(facts.trees["transferTimed(address,uint256)"]))
     sources = [{str(o.get("source")) for o in (leaf.get("operands") or [])} for leaf in leaves]
     assert any("block_context" in s for s in sources), "no time-shaped guard leaf at all"
-    assert any(
-        "block_context" in s and any(str(o.get("state_variable_name")) == "pausedUntil" for o in leaf["operands"])
-        for s, leaf in zip(sources, leaves, strict=True)
-    ), "no leaf pairs block.timestamp with the latch"
-    # ...and no leaf pairs all three.
+    # Still two operands per leaf, and still no single leaf whose OPERANDS hold all
+    # three facts: the recorder was not widened, a sibling list was added.
+    assert all(len(leaf.get("operands") or []) <= 2 for leaf in leaves)
     assert not any(
         "block_context" in s and "constant" in s and any(o.get("state_variable_name") == "pausedUntil" for o in ops)
         for s, ops in zip(sources, (leaf.get("operands") or [] for leaf in leaves), strict=True)
     )
+    # The window leaf: clock on ``operands``, latch + resolved constant absorbed.
+    window = [
+        leaf
+        for leaf in leaves
+        if any(o.get("block_context_kind") == "timestamp" for o in (leaf.get("operands") or []))
+        and leaf.get("absorbed_operands")
+    ]
+    assert len(window) == 1, "the pausedUntil + MAX_PAUSE comparison recorded nothing absorbed"
+    absorbed = window[0]["absorbed_operands"]
+    assert any(o.get("state_variable_name") == "pausedUntil" for o in absorbed)
+    assert any(o.get("constant_value") == "2592000" for o in absorbed)
+    # The plain-boolean latch's guard absorbs nothing, so the key stays ABSENT
+    # there — absence means "no additive sub-expression", not "unknown".
+    frozen_leaves = list(harness._tree_leaves(facts.trees["transferFreezable(address,uint256)"]))
+    assert all("absorbed_operands" not in leaf for leaf in frozen_leaves)
 
 
 def test_the_timed_and_indefinite_latches_are_distinguishable_in_the_corpus():

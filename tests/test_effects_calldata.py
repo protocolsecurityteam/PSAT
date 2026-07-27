@@ -50,10 +50,19 @@ CONTRACT = "0x" + "a1" * 20
 # ---------------------------------------------------------------------------
 
 
-def _leaf(*operands: dict[str, Any], authority_role: str | None = None) -> dict[str, Any]:
+def _leaf(
+    *operands: dict[str, Any],
+    authority_role: str | None = None,
+    absorbed: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     leaf: dict[str, Any] = {"operands": list(operands)}
     if authority_role is not None:
         leaf["authority_role"] = authority_role
+    if absorbed is not None:
+        # The sub-operands a two-slot comparison discarded (``absorbed_operands``,
+        # stamped by the predicate builder). Only set where a test exercises them,
+        # so every other leaf here stays byte-identical to a pre-A7 tree.
+        leaf["absorbed_operands"] = absorbed
     return {"op": "LEAF", "leaf": leaf}
 
 
@@ -916,7 +925,42 @@ def test_max_pause_duration_read_from_a_timestamp_guard_constant():
             )
         }
     )
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == 2592000
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+
+
+def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
+    """THE POSITIVE CASE ON REAL COMPILER OUTPUT (A7 / L-16, R4).
+
+    A Solidity comparison lowers to a leaf with two operands, so
+    ``block.timestamp < pausedUntil + MAX_PAUSE`` records ``{timestamp,
+    MAX_PAUSE}`` and the latch is gone. The three facts the reader needs never fit
+    in two slots, which made its positive branch unreachable from ANY compiled
+    source — the hand-built leaf in the test above was the only thing that ever
+    reached it. ``absorbed_operands`` is the sibling list the leaf builder now
+    records, and this is the shape it produces: the latch and the constant arrive
+    there, the clock stays on ``operands``, and the window is readable.
+
+    Measured over 11 compiled guard shapes: 0/11 resolved before, 10/11 after (the
+    11th is ``pausedUntil < block.timestamp``, which carries no window at all and
+    must stay unresolved)."""
+    facts = _token_facts(
+        trees={
+            "transferTimed(address,uint256)": _and(
+                _leaf(
+                    {"source": "block_context", "block_context_kind": "timestamp"},
+                    _state("MAX_PAUSE"),
+                    absorbed=[
+                        _state("TIMED_SLOT", "pausedUntil"),
+                        {"source": "state_variable", "state_variable_name": "MAX_PAUSE", "constant_value": "2592000"},
+                    ],
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+    # NEGATIVE CONTROL: the absorbed operands are still scoped to the latch, so a
+    # different latch in the same contract inherits nothing.
+    assert cd.read_max_pause_duration(facts, {"OTHER_SLOT"}) == (None, "not_determined")
 
 
 def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
@@ -932,7 +976,10 @@ def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
             )
         }
     )
-    assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) is None
+    # ``not_determined``, NOT the proven-indefinite state: this contract's other
+    # latch was never seen in a lowered guard here, and absence of a bound is not
+    # proof that no bound exists.
+    assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) == (None, "not_determined")
 
 
 def test_max_pause_duration_is_never_scraped_from_a_constant_name():
@@ -943,8 +990,10 @@ def test_max_pause_duration_is_never_scraped_from_a_constant_name():
     discount an indefinite freeze."""
     facts = _token_facts(trees={"unpause()": _and(_leaf(_state("TIMED_SLOT", "pausedUntil")))})
     # The guard reads the latch but compares it against nothing time-shaped, so no
-    # constant in the unit is provably this latch's window.
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) is None
+    # constant in the unit is provably this latch's window — and because a lowered
+    # guard DOES read the latch and no clock appears beside it, that is the PROVEN
+    # indefinite state rather than an unmeasured one.
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (None, "no_time_reference")
     # And the reader takes no session at all: there is no source plane to consult.
     assert "session" not in inspect.signature(cd.read_max_pause_duration).parameters
 
@@ -1310,8 +1359,10 @@ def test_acceptance_eeth_pause_matches_the_live_fork_run(db_session):
     assert transfer_data.startswith(cd._selector_of("transfer(address,uint256)") or "")
     assert int(transfer_data[74:], 16) == 1
     assert spec.principal == OPERATING_MULTISIG
-    # The indefinite latch carries NO bound (no auto-expiry probe, no false witness).
+    # The indefinite latch carries NO bound (no auto-expiry probe, no false witness)
+    # — and now says WHY: a lowered guard reads the latch with no clock beside it.
     assert spec.max_pause_duration is None
+    assert spec.duration_bound_source == "no_time_reference"
 
 
 @requires_postgres
@@ -1351,11 +1402,20 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
 
 
 @requires_postgres
-def test_acceptance_timed_latch_publishes_no_bound_it_cannot_prove(db_session):
+def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_session):
     """The same contract's ``*_UNTIL_*`` latch DECLARES a MAX_PAUSE_DURATION in
     source, and that is still not enough: nothing here proves the latch's guard
-    reads it. No bound is the conservative output — an indefinite-looking latch is
-    scored as the most severe freeze, never discounted by a scraped constant."""
+    reads it. No bound is the conservative output — never a scraped constant.
+
+    INVERTED (A7, R4). This test previously asserted only ``is None`` and called
+    that "conservative", but ``None`` was consumed as *proven indefinite latch, the
+    most severe freeze*: ``claimsVocab`` rendered "(indefinite)" and "indefinite
+    latch (no self-recovery bound)" from it. The etherfi shape reaching this
+    assertion is ``pauseUntil`` — a latch that DOES expire, whose window is a
+    storage value — so the severe reading was false on all four proven verdicts in
+    the corpus. The conservative answer is ``not_determined``: the guard compares
+    the latch against ``block.timestamp`` (so time is involved) and the window is
+    not in the code."""
     pausable_until_source = """
         library PausableUntilStorage {
             bytes32 internal constant PAUSABLE_UNTIL_STORAGE_SLOT = keccak256("pausableUntil.storage");
@@ -1367,10 +1427,35 @@ def test_acceptance_timed_latch_publishes_no_bound_it_cannot_prove(db_session):
     # Declared in source, and deliberately unreachable from here.
     assert "MAX_PAUSE_DURATION" in pausable_until_source
     facts = _eeth_facts(PAUSABLE_UNTIL_SLOT)
-    assert cd.read_max_pause_duration(facts, {PAUSABLE_UNTIL_SLOT}) is None
-    # ...and the indefinite latch, whose declaring unit has no duration constant,
-    # still gets nothing.
-    assert cd.read_max_pause_duration(facts, {PAUSABLE_SLOT}) is None
+    # The guard shape is copied from the persisted WeETH artifact verbatim
+    # (``_pausedUntil >= block.timestamp``, operator ``lt`` after the polarity fold,
+    # no third operand and nothing absorbed) — the leaf all four proven
+    # ``freeze_pause`` verdicts in the local corpus are gated by.
+    timed_facts = cd.ContractFacts(
+        address=facts.address,
+        job_id=facts.job_id,
+        effects=facts.effects,
+        trees={
+            **facts.trees,
+            "transfer(address,uint256)": _and(
+                _leaf(
+                    _state(PAUSABLE_UNTIL_SLOT, "pausedUntil"),
+                    {"source": "block_context", "block_context_kind": "timestamp"},
+                )
+            ),
+        },
+        canonical_signatures=facts.canonical_signatures,
+        by_selector=facts.by_selector,
+    )
+    assert cd.read_max_pause_duration(timed_facts, {PAUSABLE_UNTIL_SLOT}) == (None, "not_determined")
+    # A latch NO lowered leaf reads is also ``not_determined`` — not indefinite.
+    # This is the tree-absent case, and it is the governing rule: absence of a
+    # proven bound is not proof that no bound exists.
+    assert cd.read_max_pause_duration(timed_facts, {"NEVER_READ_SLOT"}) == (None, "not_determined")
+    # ...while the plain boolean latch, whose guard reads it beside no clock at all,
+    # gets no bound either — but a DIFFERENT no-bound: that one is PROVEN
+    # indefinite, and the two must never render as the same sentence.
+    assert cd.read_max_pause_duration(_eeth_facts(PAUSABLE_SLOT), {PAUSABLE_SLOT}) == (None, "no_time_reference")
 
 
 def test_acceptance_liquidity_pool_withdraw_value_out():

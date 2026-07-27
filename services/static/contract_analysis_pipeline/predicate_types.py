@@ -257,6 +257,14 @@ class LeafPredicate(TypedDict):
     # NOT a recognized initializer standard. A candidate never changes the
     # badge statically — only a confirmed on-chain latch read does.
     one_shot_candidate: NotRequired[bool]
+    # Operands an ADDITIVE sub-expression fed this comparison and the two-slot
+    # ``operands`` list could not hold (``_stamp_absorbed_operands``). A SIBLING of
+    # ``operands``, never a replacement: consumers of ``operands`` see the same list
+    # they always saw, and a consumer that needs the whole compared expression
+    # (the A7 pause-window reader) takes the union. Absent when the comparison read
+    # no additive sub-expression; an opaque ``computed`` member inside it is a
+    # not-determined marker, not a proof that nothing more was read.
+    absorbed_operands: NotRequired[list[Operand]]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]

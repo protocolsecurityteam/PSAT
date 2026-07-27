@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from services.effects.config import (
+    DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_VALUE_OUT,
     OBSERVATION_EXECUTED,
@@ -159,6 +160,7 @@ def pause_recipe(
     entry_points: Sequence[EntryPoint],
     predicted_guard_set: Sequence[str],
     max_pause_duration: int | None,
+    duration_bound_source: str = DURATION_BOUND_NOT_DETERMINED,
     gate_ref: str = "",
     fixtures: Sequence[ForkFixture] = (),
 ) -> ObservedEffect:
@@ -182,6 +184,7 @@ def pause_recipe(
     tr["contract_address"] = contract_address.lower()
     tr["predicted_guard_set"] = sorted(predicted_guard_set)
     tr["max_pause_duration"] = max_pause_duration
+    tr["duration_bound_source"] = duration_bound_source
 
     snap = transport.snapshot()
     try:
@@ -359,6 +362,13 @@ def pause_recipe(
             "scored_denominator": sorted(predicted),
             "auto_expiry": auto_expiry,
             "duration_bound_seconds": max_pause_duration,
+            # Which of the three states that ``None`` is (see
+            # ``config.DURATION_BOUND_*``). Published on the SAME row as the bound
+            # because the pair is the fact: ``None`` + ``no_time_reference`` is a
+            # proven-indefinite freeze, ``None`` + ``not_determined`` is an
+            # unmeasured window, and while only the bound was published every
+            # unmeasured window rendered as the proven-indefinite one.
+            "duration_bound_source": duration_bound_source,
         },
         transcript=tr,
     )

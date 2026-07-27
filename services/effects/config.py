@@ -89,6 +89,36 @@ OBSERVATION_EXECUTED = "executed"
 OBSERVATION_REVERTED = "reverted"
 OBSERVATION_NOT_RUN = "not_run"
 
+# ``details["duration_bound_source"]`` — how a freeze latch's window was
+# established (A7). Here in the shared vocabulary for the same reason
+# ``observation`` is: the static reader (``calldata.read_max_pause_duration``)
+# produces it and the fork recipe (``anvil.pause_recipe``) publishes it, and while
+# the answer was a bare ``int | None`` the two states ``None`` conflates were
+# published as one — with the SEVERE one asserted by default.
+#
+# CONTRACT for any consumer of ``duration_bound_seconds`` (scorer, inspector):
+#   * ``guard_constant`` — a mandatory guard leaf compares the clock against a
+#     constant offset of THIS latch. ``duration_bound_seconds`` is that window;
+#     trust it as a severity REDUCER only together with ``auto_expiry is True``
+#     (the fork warped past it and the frozen entry points came back).
+#   * ``no_time_reference`` — PROVEN indefinite: the latch IS read by a lowered
+#     guard and no leaf reading it touches a clock, so no passage of time lifts
+#     the freeze. ``duration_bound_seconds`` is ``None`` and that ``None`` is a
+#     fact about the contract. This is the most severe freeze there is.
+#   * ``not_determined`` — the window was NOT established: either the guard
+#     compares the latch against ``block.timestamp`` with the window held in
+#     storage (etherfi ``PausableUntil``: ``$.pauseUntilDuration``), or no lowered
+#     leaf reads the latch at all. ``duration_bound_seconds`` is ``None`` and that
+#     ``None`` means "unknown". It must NOT be scored as indefinite and must not
+#     be scored as bounded — it is a confidence gap (inv. 2).
+# An ABSENT key means the row predates the discriminator: those rows were written
+# under the pre-A7 contract, which read ``None`` as indefinite, and every one of
+# the four proven rows in the local corpus was a ``pauseUntil`` latch that DOES
+# expire — so treat an absent source as ``not_determined``, never as indefinite.
+DURATION_BOUND_GUARD_CONSTANT = "guard_constant"
+DURATION_BOUND_NO_TIME_REFERENCE = "no_time_reference"
+DURATION_BOUND_NOT_DETERMINED = "not_determined"
+
 # Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
 # non-observation and for the inv. 15 fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"

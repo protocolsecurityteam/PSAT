@@ -446,6 +446,7 @@ def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> Prob
             entry_points=spec.entry_points,
             predicted_guard_set=spec.predicted_guard_set,
             max_pause_duration=spec.max_pause_duration,
+            duration_bound_source=spec.duration_bound_source,
             gate_ref=spec.gate_ref,
             fixtures=spec.fixtures,
         )

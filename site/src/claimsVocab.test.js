@@ -690,9 +690,35 @@ describe("qualifierForClaims — pause freeze specifics", () => {
     expect(qualifierForClaims(fn)).toBe("(auto-expires ~8h)");
   });
 
-  it("renders (indefinite) for the null/null latch on a present behavioral witness", () => {
-    const fn = { claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })] };
-    expect(qualifierForClaims(fn)).toBe("(indefinite)");
+  it("renders (indefinite) only when static PROVED the latch reads no clock", () => {
+    // INVERTED (A7). This used to assert "(indefinite)" for null/null alone, which
+    // made the most severe freeze statement the DEFAULT for an unread window. All
+    // four proven freeze_pause verdicts in production are `pauseUntil` — a latch
+    // that expires — and every one of them rendered "(indefinite)".
+    const proven = {
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "no_time_reference",
+      })],
+    };
+    expect(qualifierForClaims(proven)).toBe("(indefinite)");
+  });
+
+  it("suppresses (indefinite) when the freeze window was merely not determined", () => {
+    const notDetermined = {
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "not_determined",
+      })],
+    };
+    expect(qualifierForClaims(notDetermined)).toBeNull();
+    // ...and the same for a pre-A7 verdict, whose witness carries no source at all.
+    const legacy = {
+      claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
+    };
+    expect(qualifierForClaims(legacy)).toBeNull();
   });
 
   it("suppresses when auto_expiry is false (fork contradicted the static bound)", () => {
@@ -861,11 +887,32 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(facts).toContainEqual({ label: "Auto-expiry", value: "self-recovers after ~30d" });
   });
 
-  it("labels an indefinite latch honestly", () => {
+  it("labels a PROVEN indefinite latch honestly", () => {
     const facts = claimWitnessFacts({
-      claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "no_time_reference",
+      })],
     });
     expect(facts).toContainEqual({ label: "Auto-expiry", value: "indefinite latch (no self-recovery bound)" });
+  });
+
+  it("labels an unread freeze window as not determined, not as indefinite", () => {
+    // INVERTED (A7): the sentence above is the most severe statement this inspector
+    // makes and it was being produced from an extraction failure. The etherfi shape
+    // (a timestamp latch whose window is a storage value) is this case.
+    for (const observed of [
+      { auto_expiry: null, duration_bound_seconds: null, duration_bound_source: "not_determined" },
+      { auto_expiry: null, duration_bound_seconds: null }, // pre-A7 verdict: no source key
+    ]) {
+      const facts = claimWitnessFacts({ claims: [observedClaim("pause.set", observed)] });
+      expect(facts).toContainEqual({ label: "Auto-expiry", value: "not determined (no freeze window read)" });
+      expect(facts).not.toContainEqual({
+        label: "Auto-expiry",
+        value: "indefinite latch (no self-recovery bound)",
+      });
+    }
   });
 
   it("emits backing rows for both witnessed directions", () => {

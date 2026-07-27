@@ -50,6 +50,9 @@ from db.models import EffectiveFunction, FunctionPrincipal
 from db.queue import get_artifact
 from services.effects.anvil import EntryPoint, ForkFixture
 from services.effects.config import (
+    DURATION_BOUND_GUARD_CONSTANT,
+    DURATION_BOUND_NO_TIME_REFERENCE,
+    DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
@@ -117,6 +120,7 @@ SEED_AMOUNT = 2**128
 # Upper sanity bound for a pause duration read out of a guard constant: a value
 # above this is not a freeze window (it is a chain-id, an amount, a role hash).
 _MAX_PLAUSIBLE_DURATION_S = 365 * 24 * 3600
+
 
 _AUTHORITY_ROLES = ("caller_authority", "delegated_authority")
 
@@ -280,6 +284,12 @@ class PausePlanInputs:
     max_pause_duration: int | None
     gate_ref: str
     fixtures: tuple[ForkFixture, ...] = ()
+    # Which of the three ``DURATION_BOUND_*`` states produced
+    # ``max_pause_duration``. ``None`` there is two different facts — the latch
+    # cannot expire, or we could not find its window — and only this field tells
+    # them apart. Defaulted to ``not_determined`` so a caller that omits it can
+    # never assert the indefinite reading by accident.
+    duration_bound_source: str = DURATION_BOUND_NOT_DETERMINED
 
 
 @dataclass(frozen=True)
@@ -1821,24 +1831,74 @@ def _principals_by_selector(session: Session, contract_id: int) -> dict[str, str
     return out
 
 
-def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> int | None:
-    """A guard leaf that compares ``block.timestamp`` against a constant AND reads
-    the latch itself IS that latch's freeze window. Scoped to the latch because a
-    contract can carry two latches with different semantics (one indefinite, one
-    timed) and the wrong constant is a wrong witness, not a rounding error."""
+def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A leaf's operands UNION the additive sub-operands it absorbed.
+
+    A Solidity comparison holds two operands, and the pause-window question needs
+    three facts (the clock, the latch, the offset) — so before
+    ``absorbed_operands`` existed this reader's positive branch was unreachable
+    from any compiled source (ledger L-16, measured over 11 guard shapes).
+    ``absorbed_operands`` is the sibling list the leaf builder now records; taking
+    the union here is the whole widening.
+
+    Trees persisted before that field simply have no key, and this reads them
+    exactly as it did: absent ⇒ nothing absorbed ⇒ the old two-operand answer.
+    """
+    absorbed = leaf.get("absorbed_operands")
+    extra = [op for op in absorbed if isinstance(op, dict)] if isinstance(absorbed, list) else []
+    return [*_operands(leaf), *extra]
+
+
+def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tuple[int | None, str]:
+    """The latch's freeze window and HOW it was established.
+
+    A guard leaf that compares ``block.timestamp`` against a constant offset of the
+    latch IS that latch's window (``guard_constant``). Scoped to the latch because
+    a contract can carry two latches with different semantics (one indefinite, one
+    timed) and the wrong constant is a wrong witness, not a rounding error.
+
+    ``no_time_reference`` is the PROOF of an indefinite latch: some guard leaf DOES
+    read the latch (so the gate was lowered and we are looking at it) and no leaf
+    reading it touches a clock, so no passage of time can lift the freeze — a plain
+    ``bool frozen`` gate. A latch no lowered leaf reads at all is
+    ``not_determined``, never indefinite: that is the tree-absent case, and it is
+    the governing rule of this whole effort — absence of a proven bound is not
+    proof that no bound exists. ``not_determined`` is likewise the honest answer
+    for the shape this reader cannot resolve: the guard DOES compare the latch
+    against ``block.timestamp`` (so the latch is timed and the freeze does expire)
+    but the window itself is not in the code — etherfi's ``PausableUntil`` stores
+    it (``$.pauseUntilDuration``, bounded by ``MIN``/``MAX_PAUSE_DURATION`` inside
+    a different function's guard), so only a live read of that state or a
+    cross-function derivation could name it. All 4 proven ``freeze_pause``
+    verdicts in the local corpus are that shape, and every one of them published
+    ``null`` — rendered as "indefinite latch (no self-recovery bound)" on the
+    function inspector, about a latch called ``pauseUntil``.
+
+    When several plausible constants are in scope the MAX is taken: the value is
+    consumed as a severity reducer, so the longest candidate window is the least
+    mitigating reading of ambiguous evidence.
+    """
     best: int | None = None
+    saw_latch_guard = False
+    saw_timed_latch_guard = False
     for tree in trees.values():
         for leaf in _all_leaves(tree):
-            operands = _operands(leaf)
-            if not any(op.get("block_context_kind") == "timestamp" for op in operands):
-                continue
+            operands = _compared_operands(leaf)
             if not any(str(op.get("state_variable_name") or "") in latch_vars for op in operands):
                 continue
+            saw_latch_guard = True
+            if not any(op.get("block_context_kind") == "timestamp" for op in operands):
+                continue
+            saw_timed_latch_guard = True
             for op in operands:
                 value = _parse_int(op.get("constant_value"))
                 if value is not None and 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
                     best = value if best is None else max(best, value)
-    return best
+    if best is not None:
+        return best, DURATION_BOUND_GUARD_CONSTANT
+    if saw_timed_latch_guard or not saw_latch_guard:
+        return None, DURATION_BOUND_NOT_DETERMINED
+    return None, DURATION_BOUND_NO_TIME_REFERENCE
 
 
 def _parse_int(value: Any) -> int | None:
@@ -1855,8 +1915,12 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
-def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int | None:
+def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> tuple[int | None, str]:
     """Inv. 10: the pause bound is READ, never hardcoded — and it is per-LATCH.
+    Returns ``(seconds_or_None, source)`` where ``source`` is one of the three
+    ``DURATION_BOUND_*`` states; the pair is the whole point (R1), because
+    ``None`` alone cannot say whether the latch has no window or whether we
+    failed to find one.
 
     A contract can hold an indefinite latch and a timed one at once; the writer
     function pins which. An indefinite latch legitimately yields ``None`` (the
@@ -1873,8 +1937,24 @@ def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int |
     (``claims_bridge._observed_summary``) reads a bound as a severity REDUCER. A
     cooldown, a minimum, or an unrelated timer picked up by the name pattern would
     therefore have discounted an indefinite freeze. No bound is the correct and
-    conservative output: ``duration_bound_seconds is None`` + ``auto_expiry is
-    None`` already means "indefinite latch, most severe"."""
+    conservative output — but "no bound" and "no bound FOUND" are different facts
+    and the returned ``source`` is what keeps them apart. The old contract
+    ("``duration_bound_seconds is None`` + ``auto_expiry is None`` means indefinite
+    latch, most severe") was false on every row that had it: the corpus's four
+    proven rows are all ``pauseUntil`` — a latch that expires — and they published
+    exactly that pair.
+
+    What is deliberately NOT read here, stated so the gap is not mistaken for an
+    oversight: etherfi's window lives in ``$.pauseUntilDuration``, a storage value
+    with a public getter, bounded by ``MIN_PAUSE_DURATION``/``MAX_PAUSE_DURATION``
+    inside ``setPauseUntilDuration``'s own guard. Reading it means either a live
+    ``eth_call`` (a per-deployment observation — it would belong in the state-plane
+    residue, never in the code-plane ``details`` this value rides) or a
+    cross-function derivation the static plane does not record (the latch write's
+    assigned-expression origins are not in the effects artifact). Selecting the
+    getter by NAME is the identifier matching this docstring already refuses. So
+    the honest published state for that shape is ``not_determined``, and the fork
+    still cross-checks any bound this reader DOES find by warping past it."""
     return _duration_from_trees(facts.trees, latch_vars)
 
 
@@ -2259,13 +2339,15 @@ def synthesize_pause(
     callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
     token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
     fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)
+    duration, duration_source = read_max_pause_duration(facts, latch_vars)
     return PausePlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
         pause_calldata=pause_calldata,
         entry_points=tuple(entry_points),
         predicted_guard_set=tuple(predicted),
-        max_pause_duration=read_max_pause_duration(facts, latch_vars),
+        max_pause_duration=duration,
+        duration_bound_source=duration_source,
         gate_ref=_gate_ref(fn.tree),
         fixtures=fixtures,
     )

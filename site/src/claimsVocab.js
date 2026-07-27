@@ -900,6 +900,15 @@ function formatDuration(seconds) {
   return `${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
+// A7: duration_bound_seconds === null is TWO facts, and duration_bound_source is
+// the only thing that separates them. "no_time_reference" is a PROVEN indefinite
+// latch (no lowered guard reading it touches a clock). "not_determined" — and an
+// ABSENT source, which is every verdict written before A7 — means the window was
+// not established; the four rows in production that carry it are all `pauseUntil`,
+// a latch that DOES expire, so rendering them "(indefinite)" asserted the most
+// severe reading from an extraction failure.
+const PAUSE_BOUND_PROVEN_INDEFINITE = "no_time_reference";
+
 function pauseQualifier(claims) {
   const o = pauseObserved(claims);
   if (!o) return null;
@@ -913,9 +922,14 @@ function pauseQualifier(claims) {
   ) {
     return `(auto-expires ~${formatDuration(o.duration_bound_seconds)})`;
   }
-  // Indefinite latch = most severe: both fields present AND null. Absent keys
-  // (unknown) never reach here — undefined !== null.
-  if (o.auto_expiry === null && o.duration_bound_seconds === null) {
+  // Indefinite latch = most severe, and it is now a PROVEN state rather than the
+  // absence of a bound: both fields present AND null AND static proved the latch
+  // reads no clock. Absent keys (unknown) never reach here — undefined !== null.
+  if (
+    o.auto_expiry === null &&
+    o.duration_bound_seconds === null &&
+    o.duration_bound_source === PAUSE_BOUND_PROVEN_INDEFINITE
+  ) {
     return "(indefinite)";
   }
   return null;
@@ -1228,11 +1242,23 @@ export function claimWitnessFacts(fn) {
       facts.push({ label: "Auto-expiry", value: "does not self-recover" });
     } else if (
       observed.auto_expiry === null &&
-      observed.duration_bound_seconds === null
+      observed.duration_bound_seconds === null &&
+      observed.duration_bound_source === PAUSE_BOUND_PROVEN_INDEFINITE
     ) {
       facts.push({
         label: "Auto-expiry",
         value: "indefinite latch (no self-recovery bound)",
+      });
+    } else if (
+      observed.auto_expiry === null &&
+      observed.duration_bound_seconds === null
+    ) {
+      // not_determined, or an absent source on a pre-A7 verdict. The freeze window
+      // was NOT established — say so, rather than borrowing the proven-indefinite
+      // sentence (which is the most severe statement this inspector makes).
+      facts.push({
+        label: "Auto-expiry",
+        value: "not determined (no freeze window read)",
       });
     }
   }
