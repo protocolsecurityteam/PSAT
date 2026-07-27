@@ -1387,13 +1387,21 @@ def _detect_timelock(
     ``"not_read"`` until a chain is threaded here. ``delay_variables`` names
     WHERE the value lives, which is the part source can prove.
 
-    ``has_timelock`` is three-state: ``None`` when neither detector had usable
-    input (no IR to walk), never ``False``.
+    ``has_timelock`` is three-state, and ``False`` is only published when BOTH
+    determinants had their inputs. Both of them live on the claims plane: the
+    structural half is gated on ``exec.arbitrary`` and the standard half on
+    ``timelock.schedule``/``timelock.execute``, so an effects artifact the
+    claims matcher never wrote to makes both empty for a reason that has
+    nothing to do with the contract. ``None`` therefore covers two cases —
+    no IR to walk, and no claims plane (:func:`_claims_plane_ran`, which
+    ``core`` can degrade independently of the effects plane; ``core.py:225-235``
+    vs ``:243-250``). Publishing ``False`` on either is asserting an absence
+    nothing looked for, and ``_determine_control_model`` would then drop
+    ``governance`` off the back of it.
     """
     functions = list(getattr(contract, "functions", []) or [])
-    claims = _timelock_claim_functions(effects)
 
-    if not functions:
+    if not functions or not _claims_plane_ran(effects):
         return {
             "has_timelock": None,
             "pattern": "unknown",
@@ -1405,6 +1413,7 @@ def _detect_timelock(
             "evidence": [],
         }
 
+    claims = _timelock_claim_functions(effects)
     registries = _timestamp_registry_writes(contract)
     maturity = _maturity_gate_functions(contract, set(registries))
     proven_registries = {name for name in registries if maturity.get(name)}

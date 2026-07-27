@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -212,6 +212,47 @@ def test_has_timelock_is_not_determined_without_ir(tmp_path):
     assert result["has_timelock"] is None
     assert result["pattern"] == "unknown"
     assert result["delay_source"] == "not_read"
+
+
+@pytest.mark.parametrize("degradation", ["claims_stage_raised", "effects_stage_raised", "no_effects_artifact"])
+def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degradation):
+    """R1 on the POSITIVE control — a contract that IS a timelock.
+
+    BOTH determinants of the verdict live on the claims plane: ``structural``
+    requires ``exec.arbitrary`` and ``standard`` requires
+    ``timelock.schedule`` + ``timelock.execute``. So every degradation that
+    costs the claims plane makes both empty for a reason that has nothing to
+    do with the contract, and ``False`` there is a proven absence of a timelock
+    that exists.
+
+    ``claims_stage_raised`` is the arm a no-IR test cannot reach: ``core`` runs
+    ``build_effects`` (``core.py:225-235``) and the claims block (``:243-250``)
+    under separate ``try``/``except``, so the effects map can be complete and
+    claim-free. Downstream, ``_determine_control_model`` reads a ``False`` here
+    as "not governance"."""
+    path = tmp_path / "C.sol"
+    path.write_text(textwrap.dedent(CUSTOM_TIMELOCK).strip() + "\n")
+    contract = next(c for c in Slither(str(path)).contracts if c.name == "C")
+
+    if degradation == "claims_stage_raised":
+        effects: Any = build_effects(contract)
+        assert effects["functions"], "guard: the effects plane succeeded"
+        assert all("claims" not in record for record in effects["functions"].values())
+    elif degradation == "effects_stage_raised":
+        effects = {"schema_version": "semantic", "error": "boom"}
+    else:
+        effects = None
+
+    result = _detect_timelock(contract, tmp_path, [{"role": "ADMIN"}], effects)  # type: ignore[list-item]
+    assert result["has_timelock"] is None, result
+    assert result["pattern"] == "unknown"
+    assert result["delay"] is None
+    assert result["delay_source"] == "not_read"
+    # Nothing is asserted about a contract nothing looked at.
+    assert result["queue_execute_functions"] == []
+    assert result["delay_variables"] == []
+    assert result["authorized_roles"] == []
+    assert result["evidence"] == []
 
 
 def test_control_model_does_not_read_not_determined_as_governance(tmp_path):
