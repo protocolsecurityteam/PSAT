@@ -15,6 +15,7 @@ from typing import Any, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.models import EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_EXTERNAL_CALL_TARGET
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
@@ -1181,15 +1182,29 @@ def resolve_control_graph(
                     node_type=controller_node_type,
                     details=details,
                 )
+                # A slot the contract only CALLS is not a controller of it.
+                # Provenance absent (a pre-split analysis artifact, or a target
+                # for which neither question was answered) stays
+                # ``controller_value``: not-determined must not silently
+                # demote a real authority.
+                provenance = controller_value.get("authority_provenance")
+                relation = (
+                    EDGE_RELATION_EXTERNAL_CALL_TARGET
+                    if provenance == "call_target"
+                    else EDGE_RELATION_CONTROLLER_VALUE
+                )
                 _add_edge(
                     edges,
                     {
                         "from_id": contract_node_id,
                         "to_id": controller_node_id,
-                        "relation": "controller_value",
+                        "relation": relation,
                         "label": controller_label,
                         "source_controller_id": controller_id,
-                        "notes": [f"resolved_type={resolved_type}"],
+                        "notes": [
+                            f"resolved_type={resolved_type}",
+                            f"authority_provenance={provenance or 'not_determined'}",
+                        ],
                     },
                 )
 

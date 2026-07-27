@@ -502,3 +502,48 @@ describe("buildGroupControllers — controls_detail chain keying (R4, inv. 13)",
     expect(group.data.controllers[0].governs[0].functions).toEqual(["pauseLegacy"]);
   });
 });
+
+describe("buildControlGraphIndex — callee edges are not control", () => {
+  it("does not walk external_call_target into the indirect governance path", () => {
+    const TARGET = "0x1111111111111111111111111111111111111111";
+    const CALLEE = "0x2222222222222222222222222222222222222222";
+    const CALLEE_OWNER = "0x3333333333333333333333333333333333333333";
+    const GATE = "0x4444444444444444444444444444444444444444";
+    const GATE_OWNER = "0x5555555555555555555555555555555555555555";
+
+    const companyData = {
+      contracts: [
+        {
+          address: TARGET,
+          control_graph: {
+            nodes: [
+              { address: TARGET, type: "contract", label: "Target" },
+              { address: CALLEE, type: "contract", label: "Token" },
+              { address: CALLEE_OWNER, type: "safe", label: "Token owner Safe", details: {} },
+              { address: GATE, type: "contract", label: "RoleRegistry" },
+              { address: GATE_OWNER, type: "safe", label: "Registry owner Safe", details: {} },
+            ],
+            edges: [
+              { from: TARGET, to: GATE, relation: "controller_value" },
+              { from: GATE, to: GATE_OWNER, relation: "controller_value" },
+              { from: TARGET, to: CALLEE, relation: "external_call_target" },
+              { from: CALLEE, to: CALLEE_OWNER, relation: "controller_value" },
+            ],
+          },
+        },
+      ],
+    };
+
+    const fn = {
+      controllers: [
+        { label: "roleRegistry", principals: [{ address: TARGET, resolved_type: "contract" }] },
+      ],
+    };
+    const { indirect } = collectPrincipals(fn, companyData);
+    const reached = indirect.map((p) => p.address);
+    // POSITIVE: the gate's owner Safe is genuine governance context.
+    expect(reached).toContain(GATE_OWNER);
+    // NEGATIVE: the callee's owner Safe cannot reach this function at all.
+    expect(reached).not.toContain(CALLEE_OWNER);
+  });
+});

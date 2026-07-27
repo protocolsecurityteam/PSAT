@@ -19,6 +19,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_EXTERNAL_CALL_TARGET,
     Artifact,
     Contract,
     ContractBalance,
@@ -100,14 +102,20 @@ def _balance(session: Session, contract_id: int, usd: float | Decimal | str) -> 
     )
 
 
-def _edge(session: Session, contract_id: int, controlled_contract: str, controller: str) -> None:
+def _edge(
+    session: Session,
+    contract_id: int,
+    controlled_contract: str,
+    controller: str,
+    relation: str = EDGE_RELATION_CONTROLLER_VALUE,
+) -> None:
     # Stored edge is contract-controlled-BY-controller: from = contract, to = controller.
     session.add(
         ControlGraphEdge(
             contract_id=contract_id,
             from_node_id=f"address:{controlled_contract.lower()}",
             to_node_id=f"address:{controller.lower()}",
-            relation="controller_value",
+            relation=relation,
         )
     )
 
@@ -457,8 +465,23 @@ def test_authority_graph_closure_is_transitive(db_session):
     assert graph.reachable_value({cc.address}) == Decimal("100.00")
 
 
-def test_authority_graph_handles_cycles(db_session):
-    """A control cycle must not loop forever; each balance counts once."""
+def test_traversal_terminates_on_a_hand_built_cycle(db_session):
+    """DEFENSIVE ONLY: given a mutual control pair, the walk must terminate and
+    count each balance once.
+
+    This test used to be named ``test_authority_graph_handles_cycles`` and was
+    the codebase's only statement about mutual control pairs — which read as
+    "a mutual control pair is a legitimate cycle". It is not. At most one of
+    "A controls B" / "B controls A" can be true, and 66 directed edge pairs
+    asserted both, because ``tracking.py:851`` unioned "gates the caller" with
+    "gets called" (see ``test_callee_edges_move_no_authority`` below, which is
+    the assertion this file was missing).
+
+    The rows here are hand-built, not writer-produced. Cycle-safety is still a
+    property the traversal must have — a genuine cycle is constructible
+    on-chain and a stale graph can hold one — so the guard stays, relabelled so
+    it stops standing in for a correctness claim it never made.
+    """
     p = _protocol(db_session, "cycle-proto")
     a = _contract(db_session, p.id, ADDR(0x0AA1))
     b = _contract(db_session, p.id, ADDR(0x0BB2))
@@ -470,6 +493,45 @@ def test_authority_graph_handles_cycles(db_session):
 
     graph = build_authority_graph(db_session, p.id)
     assert graph.reachable_value({a.address}) == Decimal("12.00")
+
+
+def test_callee_edges_move_no_authority(db_session):
+    """A slot the contract only CALLS must not move value into its reach.
+
+    The positive half of the split (R4): A genuinely controls B, so A's reach
+    includes B's balance. The negative half: B merely calls A (``eETH``,
+    ``lido``, ``liquidityPool`` shape), which is recorded as
+    ``external_call_target`` and must leave B's reach at its own balance. The
+    pre-split writer stored that second edge as ``controller_value`` too, which
+    is exactly how a mutual pair was minted.
+    """
+    p = _protocol(db_session, "callee-proto")
+    a = _contract(db_session, p.id, ADDR(0x0CC1))
+    b = _contract(db_session, p.id, ADDR(0x0DD2))
+    _balance(db_session, a.id, 5.0)
+    _balance(db_session, b.id, 7.0)
+    # A controls B.
+    _edge(db_session, b.id, controlled_contract=b.address, controller=a.address)
+    # B calls A. Not control.
+    _edge(
+        db_session,
+        b.id,
+        controlled_contract=b.address,
+        controller=a.address,
+        relation=EDGE_RELATION_EXTERNAL_CALL_TARGET,
+    )
+    _edge(
+        db_session,
+        a.id,
+        controlled_contract=a.address,
+        controller=b.address,
+        relation=EDGE_RELATION_EXTERNAL_CALL_TARGET,
+    )
+    db_session.commit()
+
+    graph = build_authority_graph(db_session, p.id)
+    assert graph.reachable_value({a.address}) == Decimal("12.00")
+    assert graph.reachable_value({b.address}) == Decimal("7.00")
 
 
 # ---------------------------------------------------------------------------

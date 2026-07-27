@@ -1241,3 +1241,80 @@ def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     assert "forge build failed" in str(by_addr[bad_addr]["details"]["materialize_error"])
     assert by_addr[good_addr]["analyzed"] is True
     assert bad_addr not in nested
+
+
+def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
+    """A controller value whose static provenance is ``call_target`` is wired as
+    ``external_call_target``, not ``controller_value``.
+
+    Positive control (``roleRegistry``, ``caller_gate``) must stay a control
+    edge; negative control (``eETH``, ``call_target``) must not; and a value
+    with NO provenance — a snapshot produced before the split, or a target for
+    which neither question was answered — must stay ``controller_value``,
+    because not-determined may not demote a real authority.
+    """
+    root_address = "0x1111111111111111111111111111111111111111"
+    gate_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    callee_address = "0xcccccccccccccccccccccccccccccccccccccccc"
+    legacy_address = "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    def _cv(source: str, value: str, provenance: str | None) -> dict:
+        entry = {
+            "source": source,
+            "value": value,
+            "block_number": 1,
+            "observed_via": "eth_call",
+            "resolved_type": "unknown",
+            "details": {"address": value},
+        }
+        if provenance is not None:
+            entry["authority_provenance"] = provenance
+        return entry
+
+    root_bundle = _bundle(
+        root_address,
+        "Vault",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "block_number": 1,
+            "controller_values": {
+                "external_contract:roleRegistry": _cv("roleRegistry", gate_address, "caller_gate"),
+                "external_contract:eETH": _cv("eETH", callee_address, "call_target"),
+                "external_contract:legacy": _cv("legacy", legacy_address, None),
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}, True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=1,
+    )
+
+    relations = {(edge["from_id"], edge["to_id"]): edge["relation"] for edge in graph["edges"]}
+    assert relations[(f"address:{root_address}", f"address:{gate_address}")] == "controller_value"
+    assert relations[(f"address:{root_address}", f"address:{callee_address}")] == "external_call_target"
+    assert relations[(f"address:{root_address}", f"address:{legacy_address}")] == "controller_value"
+
+    # The provenance is stated on the row, including the not-determined case,
+    # so a reader of the persisted edge never has to infer it from the relation.
+    notes = {(edge["from_id"], edge["to_id"]): edge["notes"] for edge in graph["edges"]}
+    assert "authority_provenance=caller_gate" in notes[(f"address:{root_address}", f"address:{gate_address}")]
+    assert "authority_provenance=call_target" in notes[(f"address:{root_address}", f"address:{callee_address}")]
+    assert "authority_provenance=not_determined" in notes[(f"address:{root_address}", f"address:{legacy_address}")]
+
+    # The callee is still a NODE — it is a real contract the subject calls.
+    # Demotion removes the control claim, not the address.
+    assert any(node["address"] == callee_address for node in graph["nodes"])

@@ -14,6 +14,9 @@ ResolvedEdgeRelation = Literal[
     "timelock_owner",
     "proxy_admin_owner",
     "mapping_member",
+    # NOT a control relation: the from-node calls the to-node. Kept out of
+    # ``db.models.CONTROL_EDGE_RELATIONS`` so it moves no authority.
+    "external_call_target",
 ]
 
 

@@ -784,6 +784,33 @@ class ControlGraphEdge(Base):
     __table_args__ = (Index("ix_control_graph_edges_contract_id", "contract_id"),)
 
 
+# ``ControlGraphEdge.relation`` vocabulary.
+#
+# ``controller_value`` and the owner/principal relations are *control* claims:
+# reversed, they say the to-node has authority over the from-node.
+# ``external_call_target`` is not — it says the from-node calls the to-node,
+# which is a proven fact about the code and says nothing about who may call
+# whom. Until this split both were written as ``controller_value``, and 66
+# directed edge pairs asserted "A controls B" and "B controls A" at once.
+EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
+EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
+
+# Allowlist, not a denylist: a relation this set does not name contributes no
+# authority. A new relation therefore has to be classified deliberately before
+# it can move value through the authority closure, instead of being folded in
+# by default the way ``external_call_target`` would have been.
+CONTROL_EDGE_RELATIONS = frozenset(
+    {
+        EDGE_RELATION_CONTROLLER_VALUE,
+        "safe_owner",
+        "timelock_owner",
+        "proxy_admin_owner",
+        "role_principal",
+        "mapping_member",
+    }
+)
+
+
 # ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the
 # fourth state ("writer unknown") and belongs to rows written before the column.
 UPGRADE_SOURCE_BACKFILL = "backfill"
