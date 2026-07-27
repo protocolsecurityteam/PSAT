@@ -631,10 +631,34 @@ function memberKinds(kinds) {
   return out.length ? out : [null];
 }
 
+// A "param" destination proves the caller NAMES the destination. Whether they
+// can name it FREELY is a separate, three-state question the producer answers in
+// `target_constraint` — a mandatory revert gate that pins the parameter (a
+// storage equality, an allowlist, a hash commitment) means the caller chooses
+// from a set an authority wrote, which is not the theft-shaped fact this
+// vocabulary's "caller-chosen" wording asserts.
+//
+// Only `unconstrained_proven` licenses that wording. `constrained` and
+// `not_determined` are DIFFERENT facts and get their own bucket — neither reads
+// as caller-chosen and neither reads as fixed. An ABSENT field is
+// `not_determined` (a payload minted before the producer answered the question
+// is not evidence that no gate exists), which is the field-level form of the
+// three-state rule; it is deliberately conservative in the calm direction and
+// never launders a constraint into reassurance.
+//
+// msg_sender / caller_controlled carry no such question: the destination IS the
+// caller, provably, so they stay unconditional.
+function paramDestinationIsFreelyChosen(flow) {
+  const c = flow && flow.target_constraint;
+  return !!(c && c.state === "unconstrained_proven");
+}
+
 function flowOutTargetSummary(claims) {
   let sawCaller = false;
   let sawSetter = false;
   let sawFixed = false;
+  let sawGuardedParam = false; // param + proven mandatory gate on the destination
+  let sawUnknownParam = false; // param + constraint not determined
   let sawOther = false; // indeterminate / self / unclassified → blocks a "fixed" claim
   let total = 0;
   for (const c of claims) {
@@ -658,14 +682,38 @@ function flowOutTargetSummary(claims) {
           ? f.target_kind.kind
           : null;
       for (const k of kind === "several" ? memberKinds(f.target_kinds) : [kind]) {
-        if (OUT_TARGET_CALLER.has(k)) sawCaller = true;
+        if (k === "param") {
+          // A "several" fold carries ONE constraint verdict for the flow, and
+          // the verdict is keyed to the resolved target_param_index — which a
+          // fold only has when one site supplied it. Reading it per member
+          // would attribute one member's proof to another, so a param member
+          // inside a fold is only ever freely-chosen when the flow-level
+          // verdict says so.
+          if (paramDestinationIsFreelyChosen(f)) sawCaller = true;
+          else if (f.target_constraint && f.target_constraint.state === "constrained")
+            sawGuardedParam = true;
+          else sawUnknownParam = true;
+        } else if (OUT_TARGET_CALLER.has(k)) sawCaller = true;
         else if (k === "storage_setter") sawSetter = true;
         else if (OUT_TARGET_FIXED.has(k)) sawFixed = true;
         else sawOther = true;
       }
     }
   }
-  return { sawCaller, sawSetter, sawFixed, sawOther, total };
+  // A param destination that is not proven-free is neither fixed nor caller
+  // chosen, so it must block the "fixed" reading exactly like an indeterminate
+  // one — otherwise a function with one guarded param and one immutable path
+  // would read "(fixed destination)".
+  if (sawGuardedParam || sawUnknownParam) sawOther = true;
+  return {
+    sawCaller,
+    sawSetter,
+    sawFixed,
+    sawGuardedParam,
+    sawUnknownParam,
+    sawOther,
+    total,
+  };
 }
 
 // Worst-case across a multi-flow function: a single caller-chosen path is the
@@ -676,8 +724,39 @@ function flowOutQualifier(claims) {
   if (!s.total) return null;
   if (s.sawCaller) return "(caller-chosen destination)";
   if (s.sawSetter) return "(admin-settable destination)";
+  // Both of these sit BELOW admin-settable in the worst case and above "fixed":
+  // a gate an authority wrote is weaker evidence than an unwritable address, and
+  // an unanswered question is weaker still. Neither is reassurance — the wording
+  // states what was proven and nothing more.
+  if (s.sawGuardedParam) return "(destination gated by a guard)";
+  if (s.sawUnknownParam) return "(destination constraint not determined)";
   if (s.sawFixed && !s.sawOther) return "(fixed destination)";
   return null;
+}
+
+// Worst destination-constraint state across a function's exec.arbitrary claims,
+// or null when none carries the field. The claim's own sentence ("arbitrary
+// external call") asserts an unconstrained target; where a mandatory gate pins
+// it — an allowlist, the timelock's hash commitment — the sentence overstates,
+// and this is the qualifier that says so beside it.
+function execTargetConstraint(claims) {
+  let guarded = null;
+  let unknown = false;
+  for (const c of claims) {
+    if (c.claim_id !== "exec.arbitrary") continue;
+    const k = c.witness && c.witness.destination_constraint;
+    if (!k || typeof k.state !== "string") {
+      // No verdict on the claim at all: the question was not answered for this
+      // row (an older payload, or a destination no parameter determines).
+      unknown = true;
+      continue;
+    }
+    if (k.state === "unconstrained_proven") return null;
+    if (k.state === "constrained") guarded = k;
+    else unknown = true;
+  }
+  if (guarded) return `(target gated by ${guarded.guard || "a guard"})`;
+  return unknown ? "(target constraint not determined)" : null;
 }
 
 // The fork-observed pause summary (only the behavioral tier carries it).
@@ -771,6 +850,8 @@ export function qualifierForClaims(fn) {
     // same qualifier; flowOutTargetSummary already admits only outbound routes.
     case "value_router":
       return flowOutQualifier(claims);
+    case "exec.arbitrary":
+      return execTargetConstraint(claims);
     case "pause.set":
       return pauseQualifier(claims);
     case "supply.mint":
@@ -876,6 +957,61 @@ function formatUsdUpperBound(value) {
   return `up to ~${text}`;
 }
 
+// What a mandatory revert gate proved about a caller-named destination. Reads
+// the flow claims' `target_constraint` and the exec claim's
+// `destination_constraint` — the same three-state verdict on two witnesses.
+// Only a PRESENT verdict produces a row: an absent one is the question being
+// unanswered, and the inspector says nothing rather than implying either proof.
+const GUARD_WORD = {
+  mapping_allowlist: "a storage allowlist the caller did not write",
+  hash_commitment: "a hash commitment in storage",
+  equality_vs_storage: "equality against a storage address",
+  equality_vs_caller: "equality against the caller",
+  numeric_bound: "a numeric bound",
+  merkle_inclusion: "a merkle inclusion proof",
+  signature_witness: "a signature check",
+  denylist: "a denylist (excludes a set; does NOT pin the destination)",
+  external_call_revert: "another contract's revert surface",
+};
+
+function constraintText(verdict) {
+  if (!verdict || typeof verdict.state !== "string") return null;
+  if (verdict.state === "unconstrained_proven")
+    return "no mandatory gate references it (freely chosen)";
+  if (verdict.state === "not_determined") return "not determined";
+  const word = GUARD_WORD[verdict.guard] || verdict.guard || "a guard";
+  const via =
+    verdict.binding === "derived_from"
+      ? " (bound through a computation's argument provenance)"
+      : "";
+  return `gated by ${word}${via}`;
+}
+
+function destinationConstraintText(claims) {
+  const seen = [];
+  for (const c of claims) {
+    let verdict = null;
+    if (c.claim_id === "exec.arbitrary") {
+      verdict = c.witness && c.witness.destination_constraint;
+    } else if (c.claim_id === "flow.out" || c.claim_id === "value_router") {
+      const rows =
+        c.claim_id === "value_router"
+          ? routedOutFlows(c.witness)
+          : c.witness && c.witness.direction === "out" && Array.isArray(c.witness.flows)
+            ? c.witness.flows
+            : [];
+      for (const f of rows) {
+        const t = constraintText(f && f.target_constraint);
+        if (t && !seen.includes(t)) seen.push(t);
+      }
+      continue;
+    }
+    const t = constraintText(verdict);
+    if (t && !seen.includes(t)) seen.push(t);
+  }
+  return seen.length ? seen.join(", ") : null;
+}
+
 // Verbose witness rows for the function inspector: [{label, value}]. Every row is
 // derived from a present, at-the-bar field — absent facts produce no row (the
 // same honesty rule as the chip; an unwitnessed destination shows nothing rather
@@ -924,6 +1060,9 @@ export function claimWitnessFacts(fn) {
   }
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
+  const destConstraint = destinationConstraintText(claims);
+  if (destConstraint)
+    facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
   if (reachIndeterminate) {

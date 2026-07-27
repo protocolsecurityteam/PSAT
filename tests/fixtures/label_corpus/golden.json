@@ -1410,6 +1410,9 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0x42842e0e",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -1710,6 +1713,9 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xd0c407e1",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -1986,6 +1992,9 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2081,6 +2090,9 @@
                     "from_is_self": true,
                     "kind": "low_level_value_call",
                     "selector": null,
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2236,6 +2248,9 @@
                     "from_is_self": true,
                     "kind": "low_level_value_call",
                     "selector": null,
+                    "target_constraint": {
+                      "state": "not_determined"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2736,6 +2751,9 @@
                 "calldata_kind": "param",
                 "calldata_param": "data",
                 "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
                 "destination_kind": "param",
                 "destination_param": "targets",
                 "kind": "param_taint",
@@ -2824,6 +2842,14 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "operand",
+                      "guard": "mapping_allowlist",
+                      "leaf_path": [
+                        0
+                      ],
+                      "state": "constrained"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -2905,6 +2931,9 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -2984,6 +3013,14 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "derived_from",
+                      "guard": "hash_commitment",
+                      "leaf_path": [
+                        0
+                      ],
+                      "state": "constrained"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -3064,6 +3101,14 @@
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
                     "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "operand",
+                      "guard": "equality_vs_storage",
+                      "leaf_path": [
+                        0
+                      ],
+                      "state": "constrained"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -3459,6 +3504,9 @@
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
                 "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
                 "destination_kind": "param",
                 "destination_param": "to",
                 "kind": "param_taint",
@@ -3508,6 +3556,9 @@
                 "calldata_kind": "param",
                 "calldata_param": "data",
                 "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
                 "destination_kind": "param",
                 "destination_param": "target",
                 "kind": "param_taint",
@@ -3564,6 +3615,9 @@
                 "calldata_kind": "param",
                 "calldata_param": "data",
                 "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
                 "destination_kind": "param",
                 "destination_param": "target",
                 "kind": "param_taint",
@@ -3614,6 +3668,9 @@
                 "calldata_kind": "param",
                 "calldata_param": "data",
                 "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
                 "destination_kind": "param",
                 "destination_param": "target",
                 "kind": "param_taint",
@@ -3638,6 +3695,9 @@
                     "from_is_self": true,
                     "kind": "low_level_value_call",
                     "selector": null,
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "target_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -3910,6 +3970,9 @@
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
                 "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
                 "destination_kind": "param",
                 "destination_param": "a",
                 "kind": "param_taint",

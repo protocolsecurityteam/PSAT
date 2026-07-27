@@ -270,9 +270,22 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
 // ── SCORING plan §7: witness qualifiers (the honesty rule) ───────────────────
 
 // A static flow.out claim carrying a target_kind / amount_kind on one flow entry.
-function flowOut(targetKind, { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null } = {}) {
+// `constraint` is the A3/A4 destination verdict the producer attaches to every
+// `param` destination. It defaults to the proven-free state so the existing
+// caller-chosen assertions keep testing what they were written to test — the
+// constrained and not-determined arms get their own cases below.
+const FREE = { state: "unconstrained_proven" };
+
+function flowOut(
+  targetKind,
+  { amountKind = null, tier = "standard_exact", targetKinds = null, amountKinds = null, constraint = FREE } = {},
+) {
   const flow = { kind: "low_level_value_call", selector: null, from_is_self: true };
   if (targetKind) flow.target_kind = targetKind;
+  const paramSomewhere =
+    targetKind?.kind === "param" ||
+    (Array.isArray(targetKinds) && targetKinds.some((k) => k?.kind === "param"));
+  if (paramSomewhere && constraint) flow.target_constraint = constraint;
   if (amountKind) flow.amount_kind = amountKind;
   if (targetKinds) flow.target_kinds = targetKinds;
   if (amountKinds) flow.amount_kinds = amountKinds;
@@ -347,6 +360,98 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
       },
     );
     expect(qualifierForClaims({ claims: [oneOf] })).toBe("(caller-chosen destination)");
+  });
+
+  it("stops calling a GATED param destination caller-chosen, and names the guard", () => {
+    // The A4 narrowing. `param` still means the caller NAMES the destination —
+    // what changed is that a mandatory revert gate pinning that parameter is now
+    // published, and the theft-shaped wording is reserved for the case where no
+    // such gate exists. This is not reassurance: the qualifier says a guard was
+    // proven, never that the destination is safe or fixed.
+    const gated = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "mapping_allowlist" } },
+    );
+    expect(qualifierForClaims({ claims: [gated] })).toBe("(destination gated by a guard)");
+  });
+
+  it("says so when the destination constraint was not determined", () => {
+    const open = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "not_determined" } },
+    );
+    expect(qualifierForClaims({ claims: [open] }))
+      .toBe("(destination constraint not determined)");
+  });
+
+  it("treats an ABSENT constraint field as not-determined, never as caller-chosen", () => {
+    // A payload minted before the producer answered the question is not evidence
+    // that no gate exists (the field-level form of the three-state rule).
+    const legacy = flowOut({ kind: "param", tier: "dispositive_ast" }, { constraint: null });
+    expect(qualifierForClaims({ claims: [legacy] }))
+      .toBe("(destination constraint not determined)");
+  });
+
+  it("keeps msg_sender / caller_controlled unconditional — they ask no such question", () => {
+    // The destination IS the caller, provably. There is no parameter for a gate
+    // to pin, so no verdict is attached and none is required.
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "msg_sender", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+    expect(qualifierForClaims({ claims: [flowOut({ kind: "caller_controlled", tier: "dispositive_ast" })] }))
+      .toBe("(caller-chosen destination)");
+  });
+
+  it("never reads a gated or undetermined param path as (fixed destination)", () => {
+    for (const constraint of [{ state: "constrained", guard: "hash_commitment" }, { state: "not_determined" }]) {
+      const fn = {
+        claims: [{
+          claim_id: "flow.out",
+          tier: "standard_exact",
+          witness: {
+            kind: "value_flow",
+            direction: "out",
+            flows: [
+              { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
+              { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" }, target_constraint: constraint },
+            ],
+            sink_ids: [],
+          },
+        }],
+      };
+      expect(qualifierForClaims(fn)).not.toBe("(fixed destination)");
+    }
+  });
+
+  it("drops the hazard tint for a gated or undetermined param destination", () => {
+    const base = CLAIM_VOCAB["flow.out"].tone;
+    const gated = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "equality_vs_storage" } },
+    );
+    const open = flowOut({ kind: "param", tier: "dispositive_ast" }, { constraint: { state: "not_determined" } });
+    expect(toneForClaims({ claims: [gated] })).toBe(base);
+    expect(toneForClaims({ claims: [open] })).toBe(base);
+    // ...and the calm tint stays off too: neither is proven-fixed.
+    expect(toneForClaims({ claims: [gated] })).not.toBe("#8f947a");
+    expect(toneForClaims({ claims: [open] })).not.toBe("#8f947a");
+  });
+
+  it("does not let a several fold promote a GATED param member to caller-chosen", () => {
+    // Same fold, one verdict: the flow's destination parameter is pinned by a
+    // mandatory gate. The admin-settable member is then the worst thing left,
+    // and it must win — reading the param member as caller-chosen would restate
+    // the exact over-claim the constraint verdict exists to remove.
+    const oneOf = flowOut(
+      { kind: "several", tier: "dispositive_ast" },
+      {
+        targetKinds: [
+          { kind: "param", tier: "dispositive_ast" },
+          { kind: "storage_setter", tier: "dispositive_ast" },
+        ],
+        constraint: { state: "constrained", guard: "mapping_allowlist" },
+      },
+    );
+    expect(qualifierForClaims({ claims: [oneOf] })).toBe("(admin-settable destination)");
   });
 
   it("reads a several of admin-settable and fixed members as admin-settable", () => {
@@ -427,7 +532,11 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
           direction: "out",
           flows: [
             { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
-            { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" } },
+            {
+              kind: "y",
+              target_kind: { kind: "param", tier: "dispositive_ast" },
+              target_constraint: { state: "unconstrained_proven" },
+            },
           ],
           sink_ids: [],
         },
@@ -586,7 +695,7 @@ describe("claimSummaryLine appends the qualifier to the primary phrase", () => {
       witness: {
         kind: "value_flow",
         direction: "out",
-        flows: [{ kind: "low_level_value_call", selector: null, from_is_self: true, target_kind: { kind: "param", tier: "dispositive_ast" } }],
+        flows: [{ kind: "low_level_value_call", selector: null, from_is_self: true, target_kind: { kind: "param", tier: "dispositive_ast" }, target_constraint: { state: "unconstrained_proven" } }],
       },
     };
     const line = claimSummaryLine({ claims: [claim("supply.burn"), flowOut] });
@@ -941,7 +1050,11 @@ describe("toneForClaims — §7.4 hazard/calm tinting (proven positives vs negat
           kind: "value_flow", direction: "out",
           flows: [
             { kind: "x", target_kind: { kind: "immutable", tier: "dispositive_ast" } },
-            { kind: "y", target_kind: { kind: "param", tier: "dispositive_ast" } },
+            {
+              kind: "y",
+              target_kind: { kind: "param", tier: "dispositive_ast" },
+              target_constraint: { state: "unconstrained_proven" },
+            },
           ],
         },
       }],
@@ -1022,5 +1135,100 @@ describe("buildMachines carries claims into lane placement + ordering", () => {
     const view = machine.lanes.right.find((f) => f.name === "deposit");
     expect(view.action).toBe("moves value out");
     expect(view.tone).toBe("#9a8a6e");
+  });
+});
+
+describe("qualifierForClaims — exec.arbitrary target constraint (A3)", () => {
+  const execArb = (destination_constraint) => ({
+    claim_id: "exec.arbitrary",
+    tier: "idiom_structural",
+    witness: {
+      kind: "param_taint",
+      sink_ids: ["s0"],
+      destination_param: "target",
+      destination_kind: "param",
+      ...(destination_constraint ? { destination_constraint } : {}),
+    },
+  });
+
+  it("leaves the sentence alone when the target is provably unconstrained", () => {
+    // The 11 of 20 production rows the audit found genuinely arbitrary: the
+    // claim already says it, and a qualifier would be noise.
+    expect(qualifierForClaims({ claims: [execArb({ state: "unconstrained_proven" })] })).toBeNull();
+  });
+
+  it("names the guard when a mandatory gate pins the target", () => {
+    // EtherFiNodesManager.forwardExternalCall: a three-level allowlist keyed on
+    // (msg.sender, selector, target). The claim still fires — a forwarded call
+    // IS happening — but "arbitrary" overstates it, and this is where the
+    // qualification is visible.
+    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "mapping_allowlist" })] }))
+      .toBe("(target gated by mapping_allowlist)");
+  });
+
+  it("says not-determined for an open question and for an absent verdict", () => {
+    expect(qualifierForClaims({ claims: [execArb({ state: "not_determined" })] }))
+      .toBe("(target constraint not determined)");
+    expect(qualifierForClaims({ claims: [execArb(null)] }))
+      .toBe("(target constraint not determined)");
+  });
+});
+
+describe("claimWitnessFacts — destination constraint row", () => {
+  it("spells out the guard, and marks a flow-insensitive binding as one", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [{
+            kind: "callee_erc20_selector",
+            target_kind: { kind: "param", tier: "dispositive_ast" },
+            target_constraint: { state: "constrained", guard: "hash_commitment", binding: "derived_from" },
+          }],
+          sink_ids: [],
+        },
+      }],
+    };
+    const row = claimWitnessFacts(fn).find((f) => f.label === "Destination constraint");
+    expect(row.value).toContain("a hash commitment in storage");
+    expect(row.value).toContain("argument provenance");
+  });
+
+  it("renders a denylist as one that pins nothing", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [{
+            kind: "x",
+            target_kind: { kind: "param", tier: "dispositive_ast" },
+            target_constraint: { state: "constrained", guard: "denylist", binding: "operand" },
+          }],
+          sink_ids: [],
+        },
+      }],
+    };
+    const row = claimWitnessFacts(fn).find((f) => f.label === "Destination constraint");
+    expect(row.value).toContain("does NOT pin the destination");
+  });
+
+  it("emits NO row when the verdict is absent (says nothing rather than implying a proof)", () => {
+    const fn = { claims: [{
+      claim_id: "flow.out",
+      tier: "standard_exact",
+      witness: {
+        kind: "value_flow",
+        direction: "out",
+        flows: [{ kind: "x", target_kind: { kind: "param", tier: "dispositive_ast" } }],
+        sink_ids: [],
+      },
+    }] };
+    expect(claimWitnessFacts(fn).find((f) => f.label === "Destination constraint")).toBeUndefined();
   });
 });

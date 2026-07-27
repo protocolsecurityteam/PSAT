@@ -118,7 +118,18 @@ logger = logging.getLogger(__name__)
 # Order there is Slither's ``list(set(vars_written))`` over identity-hashed
 # objects, so it tracks allocation addresses; the (kind, target, selector,
 # origin) multiset is identical.
-EFFECT_CACHE_SCHEMA_VERSION = 10
+# v11: the ``flow.out``/``value_router`` and ``exec.arbitrary`` witnesses now
+# carry a three-state destination-constraint verdict (``target_constraint`` /
+# ``destination_constraint``): whether a MANDATORY revert gate between entry and
+# sink references the destination parameter. A ``param`` destination was
+# previously published as one undifferentiated fact and read downstream as
+# "the caller can send this anywhere"; on the local artifacts 4 of 80 param
+# destinations carry a proven gate and 18 more are not determined, and 7 of the
+# 20 ``exec.arbitrary`` sites carry one. The probe selects and shapes its inner
+# call from the destination witness, so a v10 row records a verdict reached
+# without knowing whether the destination it synthesised was reachable at all —
+# a different probe input, not merely a different label.
+EFFECT_CACHE_SCHEMA_VERSION = 11
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

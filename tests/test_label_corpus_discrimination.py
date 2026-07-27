@@ -69,24 +69,48 @@ def test_every_golden_claim_carries_its_witness():
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_param_destinations_are_currently_indistinguishable():
-    """The measured "before". Three of these destinations cannot be freely
-    chosen — a hash commitment, a mapping allowlist, a storage equality — and the
-    fourth genuinely can, yet all four publish the same lattice value.
+def _target_constraint(fn: dict) -> dict:
+    return _claim(fn, "flow.out")["witness"]["flows"][0]["target_constraint"]
 
-    This is what makes an A4 narrowing meaningful here: it must move the first
-    three and leave ``payAnyone`` alone. When that lands, THIS test fails, and it
-    should — replace it with the asymmetry, do not delete it.
+
+def test_the_four_param_destinations_are_told_apart_by_their_guards():
+    """The A4 asymmetry, replacing the "all four are indistinguishable" pin this
+    test carried before the narrowing landed (that test named itself as the
+    measured *before* and asked to be replaced by exactly this).
+
+    The lattice kind is still ``param`` on all four — the caller does name the
+    destination in every one of them, and that fact did not change. What changed
+    is the sentence attached to it: three of the four cannot be freely chosen,
+    and the verdict names WHICH guard proved it, so a consumer can stop rendering
+    them as caller-chosen without inventing a safety claim.
     """
     fns = _functions(CONSTRAINED)
-    constrained = [
-        "payCommitted(IERC20,address,uint256,bytes32)",
-        "payAllowlisted(IERC20,address,uint256)",
-        "payTreasuryOnly(IERC20,address,uint256)",
-    ]
-    unconstrained = "payAnyone(IERC20,address,uint256)"
-    for name in [*constrained, unconstrained]:
+    expected = {
+        "payCommitted(IERC20,address,uint256,bytes32)": ("constrained", "hash_commitment"),
+        "payAllowlisted(IERC20,address,uint256)": ("constrained", "mapping_allowlist"),
+        "payTreasuryOnly(IERC20,address,uint256)": ("constrained", "equality_vs_storage"),
+        # NEGATIVE CONTROL. Same body, same claim, same lattice kind, no guard.
+        # A narrowing that also moves this one is wrong.
+        "payAnyone(IERC20,address,uint256)": ("unconstrained_proven", None),
+    }
+    for name, (state, guard) in expected.items():
         assert _destination(fns[name])["kind"] == "param", name
+        verdict = _target_constraint(fns[name])
+        assert verdict["state"] == state, name
+        assert verdict.get("guard") == guard, name
+
+
+def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
+    """``payCommitted``'s destination is proven through ``derived_from`` — the
+    argument provenance of the ``keccak256(abi.encode(to, salt))`` the guard
+    compares. That provenance is flow-INSENSITIVE (WAVE_0 L-24: it misbinds one
+    origin on a locally reassigned name), so the verdict records the binding it
+    used. A consumer that must not rest on a flow-insensitive proof can see that
+    it did; the two direct-operand shapes say ``operand``."""
+    fns = _functions(CONSTRAINED)
+    assert _target_constraint(fns["payCommitted(IERC20,address,uint256,bytes32)"])["binding"] == "derived_from"
+    for name in ("payAllowlisted(IERC20,address,uint256)", "payTreasuryOnly(IERC20,address,uint256)"):
+        assert _target_constraint(fns[name])["binding"] == "operand", name
 
 
 def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignores_it():
