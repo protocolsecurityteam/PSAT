@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from services.effects import calldata as calldata_mod
 from services.effects import recipes
 from services.effects.config import (
     EFFECT_CLASS_SUPPLY,
@@ -202,14 +203,57 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # The caller_arbitrary PROOF lives in the shape; the sentinel is an address
-    # this prober invented, so it must never be published in the column that
-    # otherwise means "the address value actually left to". The concrete
-    # destination stays the one the BASE probe really observed.
-    assert eff.concrete["destination"] == "0x" + "ab" * 20
+    # INVERTED (G6-3). This used to assert the BASE probe's recipient
+    # ("0xabab…ab") as the concrete destination. That address is the recipient
+    # argument the prober itself supplied — measured on 35 of 35 caller_arbitrary
+    # rows in the local DB — so publishing it in the column that means "where the
+    # money went" presents our own calldata as an observation, and it can only
+    # mislead in the reassuring direction. A caller-arbitrary destination IS the
+    # adverse finding; the shape carries it, the address adds nothing.
+    assert "destination" not in eff.concrete
     assert SENTINEL.lower() not in str(eff.concrete)
     assert eff.discrepancy is None
     assert eff.transcript_ptr is not None
+
+
+def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destination():
+    """G6-3, the second invented identity. ``SENTINEL_ADDRESS`` was already excluded
+    by construction (the destination is read off the BASE probe); ``NEUTRAL_CALLER``
+    was not, and it is BOTH the caller a public/unresolved-principal probe runs as
+    AND the filler substituted into every address argument of the synthesized call
+    — so it comes straight back in the ``Transfer`` log. The one local
+    caller_arbitrary row with no resolved principals stored ``0x1111…1111``
+    verbatim.
+
+    Here the shape stays ``unknown`` (no sentinel), so this exercises the ordinary
+    destination-capture path rather than the caller_arbitrary early return."""
+    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 7)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["value_moved"] is True
+    assert "destination" not in eff.concrete
+    # POSITIVE CONTROL: a real counterparty in the same position is still recorded,
+    # so this is an exclusion of two known-invented addresses and not a blanket
+    # withholding.
+    real = "0x" + "cd" * 20
+    eff2 = recipes.value_out(
+        simulate=ScriptedSimulate(SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, real, 7)]),))),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff2.concrete["destination"] == real
 
 
 def test_sentinel_only_caller_arbitrary_publishes_no_destination():

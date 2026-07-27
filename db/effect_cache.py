@@ -319,7 +319,17 @@ logger = logging.getLogger(__name__)
 # — was a function of the query plan, not of the data, on every multi-principal
 # function (33 principals on one local function, 27 on two more). A pre-v23 row
 # records a verdict reached as whichever holder the heap happened to return first.
-EFFECT_CACHE_SCHEMA_VERSION = 23
+# v24 (Wave 2 Leg D, G6-3): ``concrete_destination`` is withheld on a
+# ``caller_arbitrary`` destination shape, and the two identities this prober INVENTS
+# (``SENTINEL_ADDRESS``, ``NEUTRAL_CALLER``) are excluded from the observed-
+# destination capture everywhere. On 35 of 35 local caller_arbitrary rows the stored
+# value was the probe's own recipient argument read back, and the one row with no
+# resolved principals stored ``0x1111…1111`` — this stage's most concrete
+# "destination" fact was not a fact about the contract at all. The cache row itself
+# holds no destination (inv. 3), but the hit path's residue re-observation reads the
+# shape out of ``details`` to decide whether a re-probe can yield anything, so a
+# pre-v24 row drives that decision under the old rule.
+EFFECT_CACHE_SCHEMA_VERSION = 24
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

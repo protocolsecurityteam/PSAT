@@ -60,6 +60,7 @@ from services.effects import claims_bridge
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
+    SHAPE_CALLER_ARBITRARY,
     TIER_CALL,
     TIER_HISTORICAL,
     VERDICT_PROVEN,
@@ -234,9 +235,18 @@ def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
     cached row can exist for that branch and the arm that used to test for one
     was unreachable. Its Tier-1 branch yields ``impl_before``/``impl_after``,
     which this schema does not store.
+
+    A ``caller_arbitrary`` destination is excluded for the same reason (G6-3): the
+    recipe now WITHHOLDS the address on that shape — whatever a probe observes there
+    is the recipient argument the prober itself supplied — so a re-probe is a
+    guaranteed NULL by construction, and the attempt bound would otherwise be spent
+    twice per deployment chasing a value this stage refuses to store.
     """
     if effect_class == EFFECT_CLASS_VALUE_OUT:
-        return cached.verdict == VERDICT_PROVEN
+        if cached.verdict != VERDICT_PROVEN:
+            return False
+        details = cached.details if isinstance(cached.details, dict) else {}
+        return details.get("destination_shape") != SHAPE_CALLER_ARBITRARY
     return False
 
 

@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.effects.calldata import substitute_address_arg
+from services.effects.calldata import NEUTRAL_CALLER, SENTINEL_ADDRESS, substitute_address_arg
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
@@ -1450,19 +1450,37 @@ def _resolve_destination_shape(
     The caller_arbitrary PROOF loses nothing by that — it lives in
     ``destination_shape``/``shape_proved_by``, which is where a consumer reads
     "the caller chooses this destination"; the sentinel's own address adds no
-    information (it is recomputable, and it is in the transcript)."""
+    information (it is recomputable, and it is in the transcript).
+
+    TWO ADDRESSES THAT GUARANTEE WAS ONE SHORT (G6-3). The sentinel is not the only
+    identity this prober invents: :data:`calldata.NEUTRAL_CALLER` is the caller a
+    public/unresolved-principal probe runs as, it is substituted into every address
+    ARGUMENT of the synthesized call, and it comes straight back out in the
+    ``Transfer`` log. Measured: on 35 of 35 ``caller_arbitrary`` rows in the local DB
+    the stored ``concrete_destination`` is the probe's own recipient argument echoed
+    back, and the one row with no resolved principals carries ``0x1111…1111``
+    verbatim. Both invented identities are excluded here, and — the point of the
+    item — a ``caller_arbitrary`` shape now publishes NO address at all: the shape
+    IS the adverse finding, the address is by construction whatever WE passed, and
+    a stored one can only mislead in the reassuring direction ("the money goes to
+    the timelock, so this is fine").
+    """
     # State-plane residue: the address value actually left to THIS run. Capture it
     # whenever every observed outflow converged on a single destination — a
     # withdrawal that emits several Transfer logs (burn + send, or send + fee to
     # the same address) still has one concrete destination. Divergent destinations
     # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
     # single observation can't prove "always this address").
-    out_destinations = {to for _f, to, _v in base_transfers}
+    out_destinations = {to for _f, to, _v in base_transfers if not _is_invented_identity(to)}
     observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
+            # PROVEN caller-arbitrary: the destination is whatever the caller says,
+            # so this run's recipient is our own calldata read back, never an
+            # observation about the contract. Withheld (the column has no
+            # "probe_supplied" state, and NULL is the honest one of the two it has).
+            return SHAPE_CALLER_ARBITRARY, "simulation", None, None
     # Rule 8.1, evaluated BEFORE the static branch returns. Taint saying the param
     # reaches the sink while the sentinel moved nothing is a matcher/probe
     # soundness problem (§9) whatever static believes — and it is most interesting
@@ -1594,6 +1612,20 @@ def _to_int(hexval: str | None) -> int | None:
         return int(hexval, 16)
     except ValueError:
         return None
+
+
+# The identities this prober INVENTS and substitutes into the calls it synthesizes.
+# Neither is ever a fact about the contract, so neither may be published as an
+# observed destination: ``SENTINEL_ADDRESS`` is the attacker stand-in planted at a
+# taint-identified address parameter, and ``NEUTRAL_CALLER`` is both the caller a
+# public / unresolved-principal probe runs as AND the filler for every address
+# argument of the synthesized call — so it arrives back in the ``Transfer`` log as
+# the "destination" of our own making.
+_INVENTED_IDENTITIES = (SENTINEL_ADDRESS, NEUTRAL_CALLER)
+
+
+def _is_invented_identity(address: str | None) -> bool:
+    return any(_addr_eq(address, invented) for invented in _INVENTED_IDENTITIES)
 
 
 def _addr_eq(a: str | None, b: str | None) -> bool:
