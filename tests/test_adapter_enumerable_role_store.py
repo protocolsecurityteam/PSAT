@@ -739,7 +739,6 @@ def test_registry_controller_context_is_chain_scoped(session, monkeypatch, both_
     # that must NOT leak into this chain's candidate universe (cross-chain twin
     # aliasing inside the caller-set computation).
     from db.models import Contract, ControllerValue
-
     from services.resolution.adapters.enumerable_role_store import _registry_controller_context
 
     twin_owner = "0x" + "77" * 20
