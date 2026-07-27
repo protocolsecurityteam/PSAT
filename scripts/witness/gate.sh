@@ -188,7 +188,13 @@ TESTDEL=$(git diff "$BASE"...HEAD -- 'tests/*' 'site/src/**/*.test.js' 2>/dev/nu
           | grep -cE '^-\s*(def test_|it\(|test\()' || true)
 if [ "${TESTDEL:-0}" -gt 0 ]; then
   MSGS=$(git log "$BASE"..HEAD --format=%B 2>/dev/null || true)
-  if printf '%s' "$MSGS" | grep -qiE 'invert|delete|pins? the defect'; then
+  # Here-string, NOT `printf ... | grep -q`. `grep -q` exits on the first match,
+  # the writer takes SIGPIPE, and `set -o pipefail` turns that into status 141 —
+  # so once the branch's accumulated commit messages outgrow the 64 KiB pipe
+  # buffer the check reports "not declared" no matter how many declarations are
+  # present. It inverted at ~95 KiB of messages with 29 matches in them, and it
+  # inverts EARLIER the more work a branch accumulates.
+  if grep -qiE 'invert|delete|pins? the defect' <<<"$MSGS"; then
     record test-deletions-declared PASS "$TESTDEL removed, declared in a commit message"
   else
     record test-deletions-declared FAIL "$TESTDEL test(s) removed with no commit-message declaration"
