@@ -245,6 +245,18 @@
       ]
     },
     {
+      "path": "claims_upgrade_exec/transaction_guard.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "GuardedExec",
+      "description": "The Safe/Zodiac transaction-guard idiom beside its open control: a mandatory nonview guard call vets the caller-supplied (target, data) before the arbitrary call, so the guarded entry's destination constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that a swallowed guard leaf can never mint the negative proof.",
+      "detection_patterns": [
+        "transaction_guard",
+        "claim_exec_arbitrary",
+        "destination_constraint",
+        "external_call_revert"
+      ]
+    },
+    {
       "path": "claims_upgrade_exec/plain_transfer_call.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "PayableToken",

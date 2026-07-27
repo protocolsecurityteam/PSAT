@@ -3809,7 +3809,7 @@
                 "calldata_param": "data",
                 "destination_basis": "call_destination",
                 "destination_constraint": {
-                  "state": "unconstrained_proven"
+                  "state": "not_determined"
                 },
                 "destination_kind": "param",
                 "destination_param": "target",
@@ -3869,7 +3869,7 @@
                 "calldata_param": "data",
                 "destination_basis": "call_destination",
                 "destination_constraint": {
-                  "state": "unconstrained_proven"
+                  "state": "not_determined"
                 },
                 "destination_kind": "param",
                 "destination_param": "target",

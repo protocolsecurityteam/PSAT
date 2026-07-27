@@ -454,11 +454,18 @@ def test_an_unrecognised_unsupported_reason_still_blocks():
 # ---------------------------------------------------------------------------
 
 
-def test_the_exec_mode_treats_the_arbitrary_call_itself_as_transparent():
-    """``exec.arbitrary``'s effect IS an external call, so ``require(ok)`` on
-    that call is its own failure mode. Under ``value_flow`` mode the same
-    function has no flow to join on and the answer stays open — the two modes
-    answer about different effects and must not share a memo entry."""
+def test_without_ir_no_effectful_callee_is_transparent_in_exec_mode():
+    """INVERTED (round-5 R1): the old arm pinned exec-mode transparency for ANY
+    body call, which is exactly the swallowing that let a mandatory Safe/Zodiac
+    transaction-guard leaf publish ``unconstrained_proven`` on a vetted
+    destination — byte-identical to a function with no guard at all, a proof of
+    absence minted from a leaf the walk chose not to evaluate. Transparency is
+    now earned per call op, from an IR proof that the op's own destination is
+    parameter-rooted; a context with no Slither subject can prove that for no
+    op, so the effectful-callee leaf blocks the negative proof in BOTH modes.
+    The transparent positive is pinned where the proof is reachable — on the
+    compiled corpus (``test_claims_upgrade_exec_matchers.
+    test_the_arbitrary_calls_own_revert_surface_is_still_transparent``)."""
     leaf = _leaf(
         kind="external_bool",
         operator="truthy",
@@ -469,15 +476,15 @@ def test_the_exec_mode_treats_the_arbitrary_call_itself_as_transparent():
         parameter_indices=[0],
     )
     ctx = _ctx(leaf, sinks=[{"kind": "external_call", "target": "t.exec", "selector": "0xbe6002c2", "origin": "body"}])
-    assert (
-        _facts.param_constraint(ctx, "f(address,uint256)", 0, mode="external_call")["state"] == "unconstrained_proven"
-    )
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0, mode="external_call") == {"state": "not_determined"}
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0, mode="value_flow") == {"state": "not_determined"}
 
 
 def test_a_guard_origin_sink_is_never_part_of_the_transparency_set():
-    """The transparency set is body sinks only. A modifier's own authority call
-    is not the effect, so its revert surface stays a real gate."""
+    """A modifier's own authority call is not the effect, so its revert surface
+    stays a real gate. It can never enter the exec-mode transparency set: that
+    set is built from the function's OWN body call ops, proven parameter-
+    destination in IR — a guard-origin call is neither."""
     ctx = _ctx(
         _leaf(
             kind="external_bool",

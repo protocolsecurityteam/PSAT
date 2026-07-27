@@ -377,6 +377,42 @@ def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
     }
 
 
+def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tmp_path):
+    """Round-5 R1, on real compiler output: a mandatory NONVIEW guard call
+    vetting the caller-supplied ``(target, data)`` — the Safe/Zodiac
+    transaction-guard idiom — must leave the destination-constraint answer
+    OPEN, while the guardless control alone earns the negative proof. Before
+    the per-op transparency proof, both published ``unconstrained_proven``:
+    the guard's leaf was swallowed because its callee was a body call, and the
+    consumer could not tell the vetted function from the open one."""
+    records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
+    guarded = _claim_witness(records, "execGuarded", "exec.arbitrary")
+    open_control = _claim_witness(records, "execOpen", "exec.arbitrary")
+    # Same claim, same binding — only the constraint verdict may differ.
+    for witness in (guarded, open_control):
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param")
+    assert guarded["destination_constraint"] == {"state": "not_determined"}
+    assert open_control["destination_constraint"] == {"state": "unconstrained_proven"}
+
+
+def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
+    """R4 — the un-hedged sibling of the guard test above: transparency is
+    earned, not abolished. An op whose destination the IR proves parameter-
+    rooted keeps its own revert surface out of the walk — through a singly
+    assigned local (``t.exec``), through a typed call on the parameter itself
+    (``compose``), and through a resolved library forwarder
+    (``manageViaLibrary``) — so the negative proof stays reachable on compiled
+    source. The two guard-shaped bodies stay open in BOTH statement orders:
+    their ``exec`` leaf belongs to the fixed-destination sibling op — not to
+    the arbitrary ``target.call`` — so its identity is withheld and the leaf
+    blocks."""
+    witnesses = _binding_witnesses(tmp_path)
+    for name in ("singlyAssignedLocal", "compose", "manageViaLibrary"):
+        assert witnesses[name]["destination_constraint"] == {"state": "unconstrained_proven"}, name
+    for name in ("guardThenExec", "execThenGuard"):
+        assert witnesses[name]["destination_constraint"] == {"state": "not_determined"}, name
+
+
 def test_the_suppression_requires_every_op_to_be_state_var(tmp_path):
     """The suppression's quantifier: it may fire only where EVERY candidate op's
     destination is proven storage-held (``twoStateVarSinks``), and an open

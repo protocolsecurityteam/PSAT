@@ -194,7 +194,20 @@ logger = logging.getLogger(__name__)
 # is byte-identical before and after the fact claims are minted, so a cached
 # verdict remains an answer to the same probe; every other row's claim set and
 # probe input are untouched.
-EFFECT_CACHE_SCHEMA_VERSION = 17
+# v18: exec-mode destination-constraint transparency is now EARNED per call op —
+# an identity enters the transparency set only when IR proves that op's own
+# destination parameter-rooted, and is withheld when any fixed- or unresolved-
+# destination op shares it — instead of covering every body external call. A
+# v17 row on a Safe/Zodiac transaction-guard body (a mandatory nonview guard
+# call vetting the caller-supplied target before the arbitrary call) carries
+# ``destination_constraint: unconstrained_proven`` minted from the swallowed
+# guard leaf, byte-identical to a genuinely guardless function; the same walk
+# now answers ``not_determined``. The probe shapes its synthesized call from
+# that verdict, so such a row was reached from a proof of absence the walk can
+# no longer mint. Measured: 0 of the local DB's recomputable exec/delegatecall
+# rows flip (none carries a swallowed nonview guard leaf — a lower bound, not
+# a population claim); the two corpus guard-idiom rows are the realised flips.
+EFFECT_CACHE_SCHEMA_VERSION = 18
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

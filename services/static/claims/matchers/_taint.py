@@ -302,6 +302,62 @@ def _forwarded_operand_indices(callee: Any) -> tuple[int, int] | None:
     return None
 
 
+def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) -> tuple[set[str], set[str]] | None:
+    """``(selectors, bare callee names)`` of the body call ops whose DESTINATION
+    is proven parameter-rooted — the transparency set for ``exec``-mode
+    constraint walks.
+
+    The vacuousness that earns a mandatory revert leaf transparency is a
+    property of the callee call's *destination*, never of being a body call: a
+    call whose receiver the caller picks cannot vet the caller's choice (point
+    it at a contract that always succeeds and the "gate" passes), while a call
+    to a FIXED receiver — a Safe/Zodiac transaction guard — is a genuine
+    precondition whose leaf must stay evaluable. So an identity enters the set
+    only when the op's destination resolves to a parameter through the same IR
+    machinery the binding fragment uses, and it is withheld again the moment any
+    op with a fixed (``state_var``) or unresolved destination shares it: a tree
+    leaf carries the callee identity but not the receiver, so a shared identity
+    cannot say which op the leaf describes, and withholding fails toward a
+    hedge rather than a proof. Low-level calls are skipped — their mandatory
+    check reaches the tree as a bare result equality with no callee identity,
+    so there is nothing to make transparent and nothing to withhold.
+
+    ``None`` when the Slither subject is unavailable: nobody looked, which the
+    caller must keep distinguishable from a looked-and-empty set."""
+    function = _slither_function(ctx, signature)
+    if function is None:
+        return None
+    # Selector/name computed exactly as the effects producer computes them for
+    # the sink records, so this set joins against tree leaves the same way the
+    # sink-derived set did.
+    from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
+
+    from ...contract_analysis_pipeline.effects import _callee_signature, _selector_for
+
+    parameters = list(getattr(function, "parameters", None) or [])
+    definitions = _definitions(function)
+    param_selectors: set[str] = set()
+    param_names: set[str] = set()
+    withheld_selectors: set[str] = set()
+    withheld_names: set[str] = set()
+    for node in getattr(function, "nodes", None) or []:
+        for ir in getattr(node, "irs", None) or []:
+            if isinstance(ir, LowLevelCall) or not isinstance(ir, (HighLevelCall, LibraryCall)):
+                continue
+            destination_operand, destination_state, _payload, _payload_state, _basis = _call_positions(ir, definitions)
+            _name, destination_kind = _classify_destination(
+                destination_operand, destination_state, definitions, parameters
+            )
+            proven = destination_kind == "param"
+            selector = _selector_for(_callee_signature(ir))
+            if selector:
+                (param_selectors if proven else withheld_selectors).add(selector)
+            callee_name = getattr(ir, "function_name", None)
+            if callee_name is not None and str(callee_name):
+                (param_names if proven else withheld_names).add(str(callee_name))
+    return param_selectors - withheld_selectors, param_names - withheld_names
+
+
 def _call_positions(ir: Any, definitions: dict[int, Any]) -> tuple[Any, str, Any, str, str | None]:
     """``(destination_operand, destination_state, payload_operand, payload_state,
     basis)`` for one call op.

@@ -511,12 +511,25 @@ def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tu
     over-exclusion: on a routed function an unrelated effectful precondition
     call can be made transparent too, which under-claims ``constrained``.
 
-    ``mode="external_call"`` names every body external call, which is the right
-    set for a claim whose effect IS an external call (``exec.arbitrary``): the
-    described call is one of them, and the sibling *view* preconditions are
-    separated by mutability rather than by this set."""
+    ``mode="external_call"`` names only the body calls whose destination is
+    PROVEN parameter-rooted in IR (:func:`_taint.proven_param_destination_call_identities`).
+    For a claim whose effect IS an external call (``exec.arbitrary``), the
+    described call's own revert surface is vacuous about the caller's choice —
+    but that vacuousness is a property of the call's destination, not of being
+    a body call. A nonview callee with a fixed or unresolved receiver (a
+    Safe/Zodiac transaction guard vetting ``(target, data)``) stays OUTSIDE
+    this set, so its mandatory leaf blocks the negative proof below instead of
+    being swallowed; without it a guarded function and an open one published
+    the same ``unconstrained_proven``. Without a Slither subject nothing is
+    provable and the set is empty — every effectful-callee leaf then blocks,
+    which under-claims and never proves."""
     if mode == "external_call":
-        return _body_call_identities(ctx, function)
+        from . import _taint
+
+        identities = _taint.proven_param_destination_call_identities(ctx, function)
+        if identities is None:
+            return set(), set()
+        return identities
     selectors: set[str] = set()
     names: set[str] = set()
     routed = False
@@ -649,11 +662,11 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
                     # The described effect's own revert surface: mentioning its
                     # destination argument is vacuous. Fully transparent.
                     continue
-                # An effectful callee that is NOT one of this function's effect
-                # sinks: its revert surface may or may not restrict the
-                # referenced parameters, and nothing here can say which. Same
-                # answer whether the mutability was stamped ``nonview`` or not
-                # stamped at all (an older tree) — neither is evaluable.
+                # An effectful callee that is NOT proven to be the described
+                # effect's own call: its revert surface may or may not restrict
+                # the referenced parameters, and nothing here can say which.
+                # Same answer whether the mutability was stamped ``nonview`` or
+                # not stamped at all (an older tree) — neither is evaluable.
                 blocked |= direct | derived | mentioned
                 if opaque or keyed_read:
                     blocked_all = True
