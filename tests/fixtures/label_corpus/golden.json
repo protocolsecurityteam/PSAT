@@ -3248,12 +3248,81 @@
       "solc_version": "0.8.27",
       "functions": [
         {
+          "full_name": "execFixedSlot(bytes)",
+          "selector": "0xc6e07347",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "storage_slot_variable": "FIXED_IMPL_SLOT",
+                  "target_kind": "storage_no_setter"
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execFixedSlot(bytes):sink0:delegatecall:assembly_delegatecall:TMP_25"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "assembly_delegatecall:TMP_25",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
           "full_name": "execModule(bytes)",
           "selector": "0xdfede0aa",
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": [],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "storage_setter",
+                  "variable": "module",
+                  "writer_signatures": [
+                    "setModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execModule(bytes):sink0:delegatecall:module"
+                ]
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [],
           "delegatecall_sinks": [
@@ -3283,7 +3352,28 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": [],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "storage_setter",
+                  "variable": "module",
+                  "writer_signatures": [
+                    "setModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execModuleViaLibrary(bytes):sink1:delegatecall:target"
+                ]
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [
             {
@@ -3321,7 +3411,25 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
-          "claims": [],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "reason": "mapping_or_array_element",
+                  "target_kind": "indeterminate"
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execUserModule(bytes):sink0:delegatecall:REF_3"
+                ]
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [],
           "delegatecall_sinks": [
@@ -3337,6 +3445,71 @@
             "leaf_count": 1,
             "authority_roles": [
               "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "fallback()",
+          "selector": "0x552079dc",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "storage_slot_variable": "ADMIN_IMPL_SLOT",
+                  "target_kind": "storage_setter",
+                  "writer_signatures": [
+                    "setAdminImpl(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "fallback():sink0:delegatecall:assembly_delegatecall:TMP_10"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "assembly_delegatecall:TMP_10",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": false
+          }
+        },
+        {
+          "full_name": "setAdminImpl(address)",
+          "selector": "0xfc0cfeee",
+          "effect_labels": [],
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "assembly_storage:slot"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
             ],
             "leaf_kinds": [
               "equality"

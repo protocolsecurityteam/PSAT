@@ -54,6 +54,20 @@ const CLAIM_VOCAB = {
     legacy: "arbitrary_external_call",
     score: { kind: "execution", severity: 0.95 },
   },
+  // Foreign code running in THIS contract's storage. Kept out of
+  // upgrade.implementation on purpose: that claim carries the EIP-1967/UUPS
+  // population and its statistics, and a non-standard split proxy admitted into
+  // it would corrupt them to say the same severity-relevant thing. A consumer
+  // that wants "logic can be replaced" reads the union of the two.
+  "delegatecall.execute": {
+    family: "exec",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "runs foreign code in its own storage",
+    priority: 1,
+    legacy: "delegatecall_execution",
+    score: { kind: "execution", severity: 0.95 },
+  },
   contract_deployment: {
     family: "exec",
     lane: "top",
@@ -753,6 +767,30 @@ function flowOutQualifier(claims) {
   return null;
 }
 
+// Where the foreign code a delegatecall runs comes from. The claim itself says
+// only that it happens; who can change the code is the severity question, and
+// the three states are kept distinct — `storage_setter` names a real capability,
+// `indeterminate` is an unanswered question that must not read as either
+// "settable" or "fixed".
+const DELEGATECALL_DESTINATION_WORD = {
+  storage_setter: "target is admin-settable storage",
+  storage_no_setter: "target is storage with no writer",
+  immutable: "target is immutable",
+  constant: "target is a compile-time constant",
+  param: "target is caller-supplied",
+  indeterminate: "target not determined",
+};
+
+function delegatecallDestination(claims) {
+  for (const c of claims) {
+    if (c.claim_id !== "delegatecall.execute") continue;
+    const d = c.witness && c.witness.destination;
+    const word = d && DELEGATECALL_DESTINATION_WORD[d.target_kind];
+    if (word) return `(${word})`;
+  }
+  return null;
+}
+
 // Worst destination-constraint state across a function's exec.arbitrary claims,
 // or null when none carries the field. The claim's own sentence ("arbitrary
 // external call") asserts an unconstrained target; where a mandatory gate pins
@@ -871,6 +909,8 @@ export function qualifierForClaims(fn) {
       return flowOutQualifier(claims);
     case "exec.arbitrary":
       return execTargetConstraint(claims);
+    case "delegatecall.execute":
+      return delegatecallDestination(claims);
     case "pause.set":
       return pauseQualifier(claims);
     case "supply.mint":

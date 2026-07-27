@@ -137,7 +137,13 @@ logger = logging.getLogger(__name__)
 # call around a destination the caller cannot reach. ``not_determined`` still
 # mints (an open question is not a proof of absence), so this covers only the
 # rows where the two contradict.
-EFFECT_CACHE_SCHEMA_VERSION = 12
+# v13: the new ``delegatecall.execute`` claim class. A function whose foreign-code
+# execution was previously carried only by the legacy ``delegatecall_execution``
+# label now publishes a witness naming where that code comes from
+# (``storage_setter`` with its writer, ``indeterminate`` for a caller-keyed
+# mapping element). The probe's candidate selection and its synthesized call both
+# read the claim set, so a v12 row was reached with this class absent from it.
+EFFECT_CACHE_SCHEMA_VERSION = 13
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

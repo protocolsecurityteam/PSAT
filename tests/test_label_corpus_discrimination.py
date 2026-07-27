@@ -141,10 +141,62 @@ def test_the_corpus_has_delegatecall_execution_rows_at_all():
     fns = _functions(DELEGATECALL)
     labelled = [n for n, f in fns.items() if "delegatecall_execution" in f["effect_labels"]]
     assert sorted(labelled) == [
+        "execFixedSlot(bytes)",
         "execModule(bytes)",
         "execModuleViaLibrary(bytes)",
         "execUserModule(bytes)",
+        "fallback()",
     ]
+
+
+def test_the_a8_claim_resolves_all_five_delegatecall_routes():
+    """A8's gate. The delegatecall SINK TARGET is a different string on every
+    route — this contract's storage variable, the LIBRARY's own parameter, an IR
+    reference, an assembly temporary — and only one of the four names something
+    that exists here. A classifier reading that string publishes
+    ``not_determined`` for a destination that is provably a storage setter, and
+    BOTH production rows are assembly routes, so the corpus is the only place
+    this can be caught.
+
+    Each row below is a discriminating pair with the one above or below it:
+    direct vs library (same real destination, different recorded target), and
+    settable-slot vs unwritten-slot (same read, different writer set).
+    """
+    fns = _functions(DELEGATECALL)
+    expected = {
+        "execModule(bytes)": ("storage_setter", "module"),
+        "execModuleViaLibrary(bytes)": ("storage_setter", "module"),
+        "fallback()": ("storage_setter", None),
+        "execFixedSlot(bytes)": ("storage_no_setter", None),
+        # A caller-keyed mapping element. Resolving it to ``userModule`` would
+        # assert ONE destination where there is one per caller — the worst
+        # over-claim available on this field.
+        "execUserModule(bytes)": ("indeterminate", None),
+    }
+    for name, (kind, variable) in expected.items():
+        destination = _claim(fns[name], "delegatecall.execute")["witness"]["destination"]
+        assert destination["target_kind"] == kind, name
+        if variable is not None:
+            assert destination["variable"] == variable, name
+    # The two assembly rows are told apart by the WRITER, not by the read.
+    assert _claim(fns["fallback()"], "delegatecall.execute")["witness"]["destination"]["writer_signatures"] == [
+        "setAdminImpl(address)"
+    ]
+    assert (
+        "writer_signatures" not in _claim(fns["execFixedSlot(bytes)"], "delegatecall.execute")["witness"]["destination"]
+    )
+    assert _claim(fns["execUserModule(bytes)"], "delegatecall.execute")["witness"]["destination"]["reason"] == (
+        "mapping_or_array_element"
+    )
+
+
+def test_the_a8_claim_is_not_upgrade_implementation():
+    """Kept separate on purpose: ``upgrade.implementation`` carries the
+    EIP-1967/UUPS population and its statistics, and a non-standard split proxy
+    admitted into it would corrupt them. No corpus delegatecall row carries it."""
+    fns = _functions(DELEGATECALL)
+    for name in ("execModule(bytes)", "fallback()", "execUserModule(bytes)"):
+        assert [c["claim_id"] for c in fns[name]["claims"]] == ["delegatecall.execute"], name
 
 
 def test_the_library_route_records_a_symbol_that_does_not_exist_in_this_contract():

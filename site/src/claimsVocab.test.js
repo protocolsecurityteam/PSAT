@@ -50,6 +50,7 @@ const EXPECTED_CLAIM_IDS = [
   "authorized_caller.rotate",
   "callee_pointer.rotate",
   "contract_deployment",
+  "delegatecall.execute",
   "erc20.approve",
   "erc20.transfer",
   "erc20.transfer_from",
@@ -1285,5 +1286,36 @@ describe("rate_limit.consume — a fact at zero severity weight", () => {
   it("never becomes the primary claim over the move it limits", () => {
     const fn = { claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] };
     expect(primaryClaim(fn).claim_id).toBe("flow.out");
+  });
+});
+
+describe("delegatecall.execute — where the foreign code comes from", () => {
+  const dc = (destination) => ({
+    claim_id: "delegatecall.execute",
+    tier: "idiom_structural",
+    witness: { kind: "delegatecall_sink", sink_ids: ["s0"], destination },
+  });
+
+  it("names an admin-settable destination as the capability it is", () => {
+    expect(qualifierForClaims({ claims: [dc({ target_kind: "storage_setter", variable: "module" })] }))
+      .toBe("(target is admin-settable storage)");
+  });
+
+  it("does not read a caller-keyed mapping element as settable OR as fixed", () => {
+    const q = qualifierForClaims({ claims: [dc({ target_kind: "indeterminate", reason: "mapping_or_array_element" })] });
+    expect(q).toBe("(target not determined)");
+    expect(q).not.toContain("settable");
+    expect(q).not.toContain("immutable");
+  });
+
+  it("scores at the execution severity and lanes to control", () => {
+    // Foreign code in this contract's storage is the same severity class as an
+    // arbitrary external call; what it must NOT do is join the
+    // upgrade.implementation population and move that claim's statistics.
+    expect(scoreForClaims({ claims: [dc({ target_kind: "storage_setter" })] }))
+      .toEqual({ kind: "execution", severity: 0.95 });
+    expect(laneForClaims({ claims: [dc({ target_kind: "storage_setter" })] })).toBe("top");
+    expect(CLAIM_VOCAB["delegatecall.execute"].legacy).toBe("delegatecall_execution");
+    expect(CLAIM_VOCAB["delegatecall.execute"].legacy).not.toBe(CLAIM_VOCAB["upgrade.implementation"].legacy);
   });
 });
